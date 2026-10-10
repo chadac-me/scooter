@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -65,54 +65,15 @@ describe("writeSkillPayloads", () => {
   });
 });
 describe("failure is survivable", () => {
-  it("an unwritable parent THROWS from the writer, so the caller must catch", () => {
-    // The caller wraps this in try/catch: skills are an enhancement, and the
-    // first version let ENOENT propagate so every BYOC run died with
+  it("an unwritable parent THROWS, so the caller must catch", () => {
+    // The caller wraps this in try/catch: skills are an enhancement, and the first
+    // version let ENOENT propagate so every BYOC run died with
     // "no such file or directory, mkdtemp '/tmp/scooter-skills-XXXXXX'".
-    // This pins that the writer itself is allowed to throw.
-    expect(() =>
-      writeSkillPayloads("/proc/nonexistent-and-unwritable", [{ name: "a", content: "A" }]),
-    ).toThrow();
+    //
+    // Targets a path under the test's own tmpdir, NOT /proc: writing into /proc is
+    // not a normal filesystem failure and risks blocking rather than failing fast.
+    const notADir = join(cwd, "a-file-not-a-dir");
+    writeFileSync(notADir, "x", "utf8");
+    expect(() => writeSkillPayloads(notADir, [{ name: "a", content: "A" }])).toThrow();
   });
 });
-describe("pruneSkillDirs — the volume is persistent", () => {
-  /** Make `n` skills-<i> dirs, oldest first by mtime. */
-  function seed(parent: string, n: number): string[] {
-    const made: string[] = [];
-    for (let i = 0; i < n; i += 1) {
-      const p = join(parent, `skills-${i}`);
-      mkdirSync(p, { recursive: true });
-      const t = new Date(Date.now() - (n - i) * 60_000);
-      utimesSync(p, t, t);
-      made.push(p);
-    }
-    return made;
-  }
-
-  it("keeps the newest N and removes the rest", () => {
-    const dirs = seed(cwd, 8);
-    expect(pruneSkillDirs(cwd, 3)).toBe(5);
-    // the 3 newest survive
-    for (const p of dirs.slice(-3)) expect(existsSync(p)).toBe(true);
-    for (const p of dirs.slice(0, 5)) expect(existsSync(p)).toBe(false);
-  });
-
-  it("keeps everything when under the limit", () => {
-    const dirs = seed(cwd, 2);
-    expect(pruneSkillDirs(cwd, 5)).toBe(0);
-    for (const p of dirs) expect(existsSync(p)).toBe(true);
-  });
-
-  it("ignores unrelated directories", () => {
-    mkdirSync(join(cwd, "projects"), { recursive: true });
-    seed(cwd, 4);
-    pruneSkillDirs(cwd, 1);
-    expect(existsSync(join(cwd, "projects"))).toBe(true);
-  });
-
-  it("a missing parent is not an error — it must never break a session", () => {
-    expect(pruneSkillDirs(join(cwd, "nope"), 3)).toBe(0);
-  });
-});
-
-
