@@ -60,6 +60,16 @@ export function ModelPicker() {
   // (proven: switching one never touches another); this is purely the display.
   const explicitModel = sessions.find((s) => s.id === currentId)?.model;
   const current = explicitModel ?? catalog.default ?? "";
+  /** The <select> value for a stored pick: provider-scoped when the catalog groups by
+   *  provider, so a round-trip selects the option the user actually chose. */
+  const selectValue = (() => {
+    if (!current) return "";
+    if (current.includes(":")) return current; // already provider-scoped
+    const g = groupModelsByProvider(catalog.available, catalog.providers, catalog.default);
+    if (!g) return current;
+    const owner = g.find((x) => x.models.includes(current));
+    return owner ? `${owner.provider}:${current}` : current;
+  })();
   const inherited = explicitModel === undefined;
 
   return (
@@ -79,9 +89,9 @@ export function ModelPicker() {
           (inherited ? "italic text-muted-foreground" : "text-foreground")
         }
         title={inherited ? "Using the host default (not set for this conversation)" : "Model set for this conversation"}
-        value={current}
+        value={selectValue}
         onChange={(e) => {
-          if (e.target.value !== current) setSwitching(true);
+          if (e.target.value !== selectValue) setSwitching(true);
           sessionStore.setModel(currentId, e.target.value);
         }}
       >
@@ -99,9 +109,11 @@ export function ModelPicker() {
           return groups.map((g) => (
             <optgroup key={g.provider} label={g.label} data-testid={`model-group-${g.provider}`}>
               {g.models.map((m) => (
-                // A model two providers offer appears under each group; the value is
-                // still the model id, so keys must be provider-scoped to stay unique.
-                <option key={`${g.provider}:${m}`} value={m}>{label(m)}</option>
+                // PROVIDER-SCOPED VALUE. A model two providers offer appears under each
+                // group, and a bare model id made the two options indistinguishable -- so
+                // picking "claude-code > claude-opus-5" could not move a run off BYOC,
+                // whose provider wins on priority whenever a container is connected.
+                <option key={`${g.provider}:${m}`} value={`${g.provider}:${m}`}>{label(m)}</option>
               ))}
             </optgroup>
           ));

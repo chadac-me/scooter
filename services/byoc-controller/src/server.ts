@@ -94,20 +94,43 @@ export function createServer(config: ByocServerConfig): ByocServer {
   // to the relay feeds them all, so a reconnecting agent-host does not stack listeners.
   const tunnelReaders = new Map<string, Set<(f: WireFrame | null) => void>>();
   const tunnelQueues = new Map<string, WireFrame[]>();
-  // ALWAYS QUEUE, then wake a reader. The previous shape handed a frame directly to the waiting
-  // reader and deleted it — but a reader only re-registers on its NEXT loop iteration, so every
-  // frame arriving in that window (a microtask later) went to the queue while the just-woken
-  // reader was already past its queue check. The container sends open/chunk/end back to back,
-  // so `open` was delivered and `end` was stranded: the agent-host never fired the request and
-  // every BYO tool call timed out. Queue-then-wake has no such window.
+  /** sessionId -> how many frames have been TRIMMED off the front of its queue. A reader's
+   *  cursor is an absolute sequence number, so it must subtract this to index the array;
+   *  without it, trimming would silently skip or replay frames. */
+  const tunnelTrimmed = new Map<string, number>();
+  /** Frames kept per session. Generous for in-flight MCP, small enough to bound memory. */
+  const TUNNEL_QUEUE_MAX = 512;
+  // ALWAYS QUEUE, then wake the readers. The previous shape handed a frame directly to the
+  // waiting reader and deleted it — but a reader only re-registers on its NEXT loop iteration,
+  // so every frame arriving in that window (a microtask later) went to the queue while the
+  // just-woken reader was already past its queue check. The container sends open/chunk/end back
+  // to back, so `open` was delivered and `end` was stranded. Queue-then-wake has no such window.
+  //
+  // WAKE EVERY READER, not just one. ALL of an owner's conversations share ONE container
+  // session, and each conversation's agent-host bridge starts its OWN reader on it. Waking a
+  // single reader (`[...waiting][0]`) handed each frame to whichever reader happened to be
+  // first, and a frame for conversation A delivered to conversation B's reader matches no
+  // stream there and is dropped — so the SDK that sent it waited out its full 30s
+  // CONNECT_TIMEOUT. Observed live: 2 conversations, 1 session, every MCP call timing out.
+  // Each reader now sees every frame and ignores the ones whose stream it does not own.
   relay.onTunnelFrame((sessionId, frame) => {
     const q = tunnelQueues.get(sessionId) ?? [];
     q.push(frame);
+    // BOUNDED. With a per-reader cursor nothing shifts the queue, so a long-lived
+    // session would grow it without limit. MCP frames are small and only useful
+    // for the moments around their request, so keep a recent window: a reader
+    // that falls this far behind has already timed out its stream.
+    if (q.length > TUNNEL_QUEUE_MAX) {
+      const drop = q.length - TUNNEL_QUEUE_MAX;
+      q.splice(0, drop);
+      tunnelTrimmed.set(sessionId, (tunnelTrimmed.get(sessionId) ?? 0) + drop);
+    }
     tunnelQueues.set(sessionId, q);
     const waiting = tunnelReaders.get(sessionId);
-    const waiter = waiting && waiting.size ? [...waiting][0] : undefined;
-    if (waiter) {
-      waiting!.delete(waiter);
+    if (!waiting?.size) return;
+    // Snapshot: a woken reader re-registers, and iterating the live set would re-wake it.
+    for (const waiter of [...waiting]) {
+      waiting.delete(waiter);
       waiter(undefined as never); // wake it; it drains the queue itself
     }
   });
@@ -115,10 +138,20 @@ export function createServer(config: ByocServerConfig): ByocServer {
   /** One session's inbound tunnel frames, as an async iterable the shell serves as SSE. */
   const tunnelStream = (sessionId: string): AsyncIterable<WireFrame> => ({
     async *[Symbol.asyncIterator]() {
+      // PER-READER CURSOR. The queue is shared by every reader on this session, so
+      // `q.shift()` let the first reader to wake consume a frame meant for another
+      // conversation. Each reader instead advances its own position and sees every frame.
+      // An ABSOLUTE sequence number, not an array index: the queue is trimmed from the
+      // front, so an index would drift. `trimmed` converts it to a position.
+      let seq = 0;
       for (;;) {
         const q = tunnelQueues.get(sessionId);
-        if (q && q.length) {
-          yield q.shift()!;
+        const trimmed = tunnelTrimmed.get(sessionId) ?? 0;
+        // Fell behind a trim: skip to the oldest frame still held rather than replay.
+        if (seq < trimmed) seq = trimmed;
+        if (q && seq - trimmed < q.length) {
+          yield q[seq - trimmed]!;
+          seq += 1;
           continue;
         }
         // Wait to be woken, then loop back to drain the queue (never consume the frame here —

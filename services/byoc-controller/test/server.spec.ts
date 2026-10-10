@@ -397,6 +397,80 @@ describe("GET /byoc/:id/tunnel — the agent-host's inbound stream", () => {
     server.close();
   });
 
+  it("THE BUG: TWO readers on ONE session each get EVERY frame", async () => {
+    // All of an owner's conversations share one container session, and each
+    // conversation's bridge starts its own reader on it. Waking a single reader and
+    // draining a shared queue with q.shift() meant a frame for conversation A could
+    // be consumed by B's reader, match no stream there, and vanish — leaving A's SDK
+    // to wait out its full 30s CONNECT_TIMEOUT. Observed live: 2 conversations,
+    // 1 session, every MCP call timing out.
+    const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });
+    const relay = createRunRelay({ registry });
+    const server = createServer({ registry, relay, secret: SECRET });
+    const { sessionId, token } = await registry.mint("alice");
+    registry.attach(sessionId, token, { send: () => {}, close: () => {} });
+
+    const open = async () => {
+      const res = await server.handle({
+        method: "GET", path: `/byoc/${sessionId}/tunnel`, user: { id: "alice" },
+      } as never);
+      expect(res.status).toBe(200);
+      return (res as { stream: AsyncIterable<{ type?: string; id?: string }> }).stream;
+    };
+    const a = await open();
+    const b = await open();
+
+    const collect = (stream: AsyncIterable<{ type?: string; id?: string }>, n: number) => {
+      const got: Array<string | undefined> = [];
+      return {
+        got,
+        done: (async () => {
+          for await (const f of stream) {
+            got.push(f.id);
+            if (got.length >= n) break;
+          }
+        })(),
+      };
+    };
+    const ra = collect(a, 2);
+    const rb = collect(b, 2);
+
+    // Two conversations' MCP streams, interleaved on the one container socket.
+    for (const id of ["convA-s1", "convB-s1"]) {
+      relay.onContainerFrame(sessionId, JSON.stringify({
+        ch: "tunnel", type: "open", id, payload: { target: "scooter-env" },
+      }));
+    }
+    await Promise.all([ra.done, rb.done]);
+
+    // BOTH readers see BOTH frames; each ignores the stream it does not own.
+    expect(ra.got).toEqual(["convA-s1", "convB-s1"]);
+    expect(rb.got).toEqual(["convA-s1", "convB-s1"]);
+    server.close();
+  });
+
+  it("a reader joining LATE does not steal frames from an established one", async () => {
+    const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });
+    const relay = createRunRelay({ registry });
+    const server = createServer({ registry, relay, secret: SECRET });
+    const { sessionId, token } = await registry.mint("alice");
+    registry.attach(sessionId, token, { send: () => {}, close: () => {} });
+
+    const res1 = await server.handle({
+      method: "GET", path: `/byoc/${sessionId}/tunnel`, user: { id: "alice" },
+    } as never);
+    const s1 = (res1 as { stream: AsyncIterable<{ id?: string }> }).stream;
+    const first: Array<string | undefined> = [];
+    const d1 = (async () => {
+      for await (const f of s1) { first.push(f.id); if (first.length >= 1) break; }
+    })();
+
+    relay.onContainerFrame(sessionId, JSON.stringify({ ch: "tunnel", type: "open", id: "early" }));
+    await d1;
+    expect(first).toEqual(["early"]);
+    server.close();
+  });
+
   it("does NOT deliver another session's frames", async () => {
     // Same isolation the run path has: a subscriber for session A must never see B's traffic.
     const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });

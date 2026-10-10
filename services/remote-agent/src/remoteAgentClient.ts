@@ -9,7 +9,7 @@
 
 import { WebSocket } from "ws";
 // The SDK-backed AcpClient — the same package the agent-host imports cloud-side.
-import { writeSkillPayloads } from "./skills.js";
+import { pruneSkillDirs, writeSkillPayloads } from "./skills.js";
 import { createSdkAcpClient } from "@scooter/claude-sdk-provider";
 
 import { REMOTE_PROTOCOL_VERSION, type WireFrame } from "./protocol.js";
@@ -89,7 +89,13 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
     ws = new WebSocket(connectUrl);
     const frameCbs = new Set<(f: WireFrame) => void>();
     const send = (f: WireFrame) => {
-      if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(f));
+      if (ws && ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify(f));
+        return;
+      }
+      // A DROPPED frame, not a no-op. Silence here is how an MCP call turns into
+      // a 30s CONNECT_TIMEOUT with nothing logged on either end.
+      log(`DROPPED ${f.ch}/${f.type} frame — socket ${ws ? "state " + ws.readyState : "absent"}`);
     };
 
     // Permission answers route by unique frame id, so ONE shared waiter map serves every
@@ -127,12 +133,29 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       // in-pod one does -- name + description up front, body on demand.
       let skillCwd: string | undefined;
       if (skills?.length) {
-        const { mkdtempSync } = await import("node:fs");
-        const { tmpdir } = await import("node:os");
-        const { join } = await import("node:path");
-        skillCwd = mkdtempSync(join(tmpdir(), "scooter-skills-"));
-        const written = writeSkillPayloads(skillCwd, skills);
-        log(`skills: wrote ${written} to ${skillCwd}/.claude/skills`);
+        // NON-FATAL. Skills are an enhancement; a write failure must not take the
+        // conversation down. The first version let an ENOENT from mkdtemp
+        // propagate and every BYOC run died with "no such file or directory,
+        // mkdtemp '/tmp/scooter-skills-XXXXXX'".
+        try {
+          const { mkdtempSync, mkdirSync } = await import("node:fs");
+          const { join } = await import("node:path");
+          // NOT os.tmpdir(): this image has no /tmp. Use the mounted config dir,
+          // which exists and is writable, and create the parent rather than
+          // assuming it.
+          const parent = join(process.env.CLAUDE_CONFIG_DIR ?? "/root/.claude", "sessions");
+          mkdirSync(parent, { recursive: true });
+          // The volume is persistent, so without this every session leaves a
+          // copy of the skills behind forever. Keep the most recent few: an
+          // in-flight session's dir must not be removed from under it.
+          pruneSkillDirs(parent, 5);
+          skillCwd = mkdtempSync(join(parent, "skills-"));
+          const written = writeSkillPayloads(skillCwd, skills);
+          log(`skills: wrote ${written} to ${skillCwd}/.claude/skills`);
+        } catch (err) {
+          skillCwd = undefined;
+          log(`skills: NOT available (${err instanceof Error ? err.message : String(err)})`);
+        }
       }
       const offered = (mcpServers ?? []).filter((m): m is { name: string } => typeof m?.name === "string");
       const mcp = offered.length
@@ -143,6 +166,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
               return () => frameCbs.delete(cb);
             },
             sessionId: undefined, // set below once newSession returns (stamp.sid)
+            trace: (m) => log(`mcp ${m}`),
           })
         : undefined;
       if (mcp) log(`MCP: ${mcp.servers.map((s) => s.name).join(", ")} proxied over the tunnel`);

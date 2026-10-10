@@ -30,6 +30,11 @@ export interface McpProxyDeps {
   onFrame(cb: (frame: WireFrame) => void): () => void;
   /** Stamp streams with this session, so the cloud attributes them (see #305). */
   sessionId?: string;
+  /** Optional trace: called for each frame this proxy sends, and on each reply.
+   *  Exists because a dropped tunnel frame is otherwise INVISIBLE -- `send` is a
+   *  no-op when the socket is not OPEN, and the SDK just waits out its 30s
+   *  CONNECT_TIMEOUT with nothing logged on either end. */
+  trace?: (msg: string) => void;
 }
 
 export interface McpProxy {
@@ -76,11 +81,13 @@ export async function startMcpProxy(target: string, deps: McpProxyDeps): Promise
       headers?: Record<string, string>;
     };
     if (frame.type === "chunk") {
+      deps.trace?.(`<- chunk stream=${frame.id.slice(0, 8)} ${payload.data ? payload.data.length + "b64" : "(empty)"}`);
       ensureHead(s, payload);
       if (payload.data) s.res.write(Buffer.from(payload.data, "base64"));
       return;
     }
     if (frame.type === "close") {
+      deps.trace?.(`<- close stream=${frame.id.slice(0, 8)}${payload.error ? " error=" + payload.error : ""}`);
       streams.delete(frame.id);
       if (payload.error) {
         // FAIL LOUD. A dropped tunnel must surface as a tool ERROR the agent can react to,
@@ -109,6 +116,7 @@ export async function startMcpProxy(target: string, deps: McpProxyDeps): Promise
         if (typeof v === "string") headers[k] = v;
       }
       const sid = deps.sessionId;
+      deps.trace?.(`-> open ${target} ${req.method ?? "GET"} ${req.url ?? "/"} stream=${id.slice(0, 8)} sid=${sid ?? "(none)"}`);
       deps.send({
         ch: "tunnel",
         type: "open",
@@ -122,6 +130,7 @@ export async function startMcpProxy(target: string, deps: McpProxyDeps): Promise
       // Signal the REQUEST is complete. Not `close` — that would end the whole stream before
       // the response could come back; the cloud replies with chunks and its own close.
       deps.send({ ch: "tunnel", type: "end", id, payload: {} });
+      deps.trace?.(`-> end stream=${id.slice(0, 8)} (awaiting cloud reply)`);
     })();
   });
 
