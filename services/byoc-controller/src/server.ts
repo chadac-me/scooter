@@ -144,24 +144,38 @@ export function createServer(config: ByocServerConfig): ByocServer {
       // An ABSOLUTE sequence number, not an array index: the queue is trimmed from the
       // front, so an index would drift. `trimmed` converts it to a position.
       let seq = 0;
-      for (;;) {
-        const q = tunnelQueues.get(sessionId);
-        const trimmed = tunnelTrimmed.get(sessionId) ?? 0;
-        // Fell behind a trim: skip to the oldest frame still held rather than replay.
-        if (seq < trimmed) seq = trimmed;
-        if (q && seq - trimmed < q.length) {
-          yield q[seq - trimmed]!;
-          seq += 1;
-          continue;
+      // Set while parked. A consumer that stops iterating (breaks out, or its SSE
+      // response closes) would otherwise leave this resolve in the readers set with
+      // its promise never settled -- a handle that keeps the process alive. Harmless
+      // while one reader was woken and deleted per frame; REACHABLE now that every
+      // reader is woken, so a second reader can sit parked forever. Observed as a
+      // vitest run that passed every test and never exited.
+      let parked: ((f: WireFrame | null | undefined) => void) | undefined;
+      try {
+        for (;;) {
+          const q = tunnelQueues.get(sessionId);
+          const trimmed = tunnelTrimmed.get(sessionId) ?? 0;
+          // Fell behind a trim: skip to the oldest frame still held rather than replay.
+          if (seq < trimmed) seq = trimmed;
+          if (q && seq - trimmed < q.length) {
+            yield q[seq - trimmed]!;
+            seq += 1;
+            continue;
+          }
+          // Wait to be woken, then loop back to drain the queue (never consume the frame
+          // here — that is what created the lost-frame window).
+          const woken = await new Promise<WireFrame | null | undefined>((resolve) => {
+            parked = resolve;
+            const set = tunnelReaders.get(sessionId) ?? new Set();
+            set.add(resolve);
+            tunnelReaders.set(sessionId, set);
+          });
+          parked = undefined;
+          if (woken === null) return;
         }
-        // Wait to be woken, then loop back to drain the queue (never consume the frame here —
-        // that is what created the lost-frame window).
-        const woken = await new Promise<WireFrame | null | undefined>((resolve) => {
-          const set = tunnelReaders.get(sessionId) ?? new Set();
-          set.add(resolve);
-          tunnelReaders.set(sessionId, set);
-        });
-        if (woken === null) return;
+      } finally {
+        // Runs on break, return and throw.
+        if (parked) tunnelReaders.get(sessionId)?.delete(parked);
       }
     },
   });
