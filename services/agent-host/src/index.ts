@@ -2001,6 +2001,9 @@ export async function main(
             mcpHeadersFor: mcpEndpoint ? (conv: string) => mcpEndpoint.headersFor(conv) : undefined,
             // Offer a BYO agent the contrib provider tools too, not just scooter-env.
             brokerMcpUrlFor: brokerMcpProxy ? () => brokerMcpProxy.url() : undefined,
+            // So an explicit pick of a cloud-only model declines here rather than
+            // being silently overridden by BYOC's priority.
+            catalog: config.modelCatalog,
           }),
           floorProvider,
         ]

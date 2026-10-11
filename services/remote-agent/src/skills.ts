@@ -11,7 +11,7 @@
  * machine and must not depend on agent-host.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** A skill as it arrives over the wire. */
@@ -34,4 +34,35 @@ export function writeSkillPayloads(cwd: string, skills: readonly SkillPayload[])
     n += 1;
   }
   return n;
+}
+
+/**
+ * Drop all but the `keep` newest `skills-*` dirs under `parent`.
+ *
+ * The container's config dir is a persistent volume, so one dir per session
+ * accumulates without bound. Best-effort: a failure here must never break a
+ * session, and an in-flight session's own dir is among the newest.
+ */
+export function pruneSkillDirs(parent: string, keep: number): number {
+  let removed = 0;
+  try {
+    const entries = readdirSync(parent, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name.startsWith("skills-"))
+      .map((e) => {
+        const p = join(parent, e.name);
+        return { p, mtime: statSync(p).mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const { p } of entries.slice(keep)) {
+      try {
+        rmSync(p, { recursive: true, force: true });
+        removed += 1;
+      } catch {
+        // A dir we cannot remove is not worth failing a session over.
+      }
+    }
+  } catch {
+    // No parent dir yet, or unreadable: nothing to prune.
+  }
+  return removed;
 }

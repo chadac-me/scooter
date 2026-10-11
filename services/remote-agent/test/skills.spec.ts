@@ -7,11 +7,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { writeSkillPayloads } from "../src/skills.js";
+import { pruneSkillDirs, writeSkillPayloads } from "../src/skills.js";
 
 let cwd: string;
 beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "byoc-skills-")); });
@@ -62,5 +62,18 @@ describe("writeSkillPayloads", () => {
   it("no skills -> 0, and no directory is created", () => {
     expect(writeSkillPayloads(cwd, [])).toBe(0);
     expect(existsSync(join(cwd, ".claude"))).toBe(false);
+  });
+});
+describe("failure is survivable", () => {
+  it("an unwritable parent THROWS, so the caller must catch", () => {
+    // The caller wraps this in try/catch: skills are an enhancement, and the first
+    // version let ENOENT propagate so every BYOC run died with
+    // "no such file or directory, mkdtemp '/tmp/scooter-skills-XXXXXX'".
+    //
+    // Targets a path under the test's own tmpdir, NOT /proc: writing into /proc is
+    // not a normal filesystem failure and risks blocking rather than failing fast.
+    const notADir = join(cwd, "a-file-not-a-dir");
+    writeFileSync(notADir, "x", "utf8");
+    expect(() => writeSkillPayloads(notADir, [{ name: "a", content: "A" }])).toThrow();
   });
 });

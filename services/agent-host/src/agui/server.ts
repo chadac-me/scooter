@@ -442,7 +442,13 @@ export function createAguiServer(): AguiServer {
       // The UI rides the per-conversation model on a header (the assistant-ui
       // runtime drives the AG-UI body, so a header is the clean injection point).
       const hdr = req.headers["x-agent-model"];
-      const model = (Array.isArray(hdr) ? hdr[0] : hdr) || undefined;
+      const rawModel = (Array.isArray(hdr) ? hdr[0] : hdr) || undefined;
+      // The picker sends "<provider>:<model>" when the catalog groups by provider, so an
+      // explicit pick can move a run OFF the highest-priority eligible provider (BYOC wins
+      // on priority whenever a container is connected, so a bare id could never route).
+      // Only the MODEL travels on; provider selection keys on it via modelAllowedFor.
+      const sep = rawModel ? rawModel.indexOf(":") : -1;
+      const model = sep > 0 ? rawModel!.slice(sep + 1) : rawModel;
       // Resolve the conversation OWNER, stamped on first creation so the Mine/All
       // filter attributes a UI-created conversation to the human who made it.
       //   1. PRIVILEGED webhooks path: an explicit `input.owner` (a Scooter user the

@@ -12,6 +12,7 @@ import { createRemoteAcpClient } from "./remoteAcpClient.js";
 import { createByocTransport } from "./byocTransport.js";
 import { offeredTunnelServers } from "./tunnelTargets.js";
 import { startTunnelClient } from "./tunnelClient.js";
+import { modelAllowedFor, type ModelCatalog } from "../agent/models.js";
 import type { RemoteTransport } from "./remoteProtocol.js";
 
 const log = logger("remote-personalized");
@@ -110,6 +111,9 @@ export function createRemotePersonalizedProvider(deps: {
   /** The broker MCP proxy's URL, so a BYO agent is offered the contrib provider
    *  tools (github, gitlab, jira, slack) and not only scooter-env. */
   brokerMcpUrlFor?: () => string;
+  /** The model catalog, so eligibility can honor a cloud-only model pick. Absent =
+   *  no model gate (every catalog model is treated as servable here). */
+  catalog?: ModelCatalog;
   /** The in-process MCP endpoint's URL for a conversation (mcpEndpoint.urlFor). Drives the
    *  tunnel OFFER: absent = no scooter-env is offered and the container starts no proxy,
    *  rather than one that dead-ends on every call. */
@@ -153,6 +157,19 @@ export function createRemotePersonalizedProvider(deps: {
           source: ctx.source,
           has_owner: hasOwner,
           human_trigger: human,
+        });
+        return false;
+      }
+      // MODEL GATE. The catalog tags each model with the providers that serve it, and this
+      // provider is "byoc". Without this a pick of a cloud-only model could never take
+      // effect: BYOC wins on priority whenever a container is connected, so the UI's
+      // provider grouping was decorative. A model this container cannot serve declines
+      // here and the run falls to the next candidate.
+      if (ctx.model && deps.catalog && !modelAllowedFor(deps.catalog, ctx.model, "byoc")) {
+        log.info("SKIP — model not offered on byoc, falling to the cloud floor", {
+          conversation_id: ctx.conversationId,
+          owner: ctx.owner,
+          model: ctx.model,
         });
         return false;
       }
@@ -229,6 +246,11 @@ export function createRemotePersonalizedProvider(deps: {
             // a container-supplied frame.
             conversationId: ctx.conversationId ?? "",
             mcpUrlFor: deps.mcpUrlFor,
+            // WITHOUT THIS the inbound stream cannot resolve scooter-broker, so a
+            // container that was OFFERED it (offeredTunnelServers) calls a target
+            // the server refuses -- and the SDK eats a 30s CONNECT_TIMEOUT on every
+            // turn. The offer and the resolver must be fed from the same place.
+            brokerMcpUrlFor: deps.brokerMcpUrlFor,
             fetchImpl: deps.fetchImpl,
           })
         : undefined;
