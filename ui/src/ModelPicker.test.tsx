@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 
@@ -89,4 +90,3 @@ describe("the (default) label is PER PROVIDER", () => {
     expect(label("claude-opus-5", "claude-code")).toBe("claude-opus-5 (default)");
   });
 });
-

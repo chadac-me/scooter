@@ -319,7 +319,7 @@ export interface SessionManager {
    *  webhook-resolved Scooter user) — ignored for an already-existing conversation.
    *  `images` are attached uploads (resolved to ACP image blocks by the bridge).
    *  `files` are binary attachments (Slack) the bridge writes to /workspace/uploads. */
-  promptByThread(threadId: ThreadId, text: string, model?: string, priority?: number, owner?: string, images?: PromptImage[], files?: PromptFile[], source?: string): Promise<void>;
+  promptByThread(threadId: ThreadId, text: string, model?: string, priority?: number, owner?: string, images?: PromptImage[], files?: PromptFile[], source?: string, provider?: string): Promise<void>;
   /** Switch a RUNNING conversation's model IMMEDIATELY and continue its work on
    *  the new model. Unlike a model passed to prompt() (which applies on the next
    *  turn), this is for the switch_model MCP tool the agent calls MID-TURN: it
@@ -400,6 +400,8 @@ export type BridgeFactory = (args: {
   sandbox: SandboxRef;
   /** Per-conversation model override (undefined = host default). */
   model?: string;
+  /** The explicitly picked provider, for the per-run resolver. */
+  pickedProvider?: string;
   /** The conversation OWNER — passed to the bridge's per-run ACP provider resolver so an
    *  owner-bound provider (the BYO remote agent) can route this conversation to that user's
    *  agent. Undefined for an unowned/anonymous conversation. */
@@ -450,6 +452,8 @@ interface Entry {
   createdAt: number;
   lastActivityAt: number;
   model?: string;
+  /** The explicitly picked provider, persisted so a resume keeps the swap. */
+  pickedProvider?: string;
   owner?: string;
   parentId?: SessionId;
   userTitled?: boolean;
@@ -731,9 +735,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
    *  the new GOOSE_MODEL; the old one dies in the background. They briefly share the
    *  per-conversation cwd (goose sessions DB), which is safe — the new bridge does a
    *  fresh newSession (distinct session row) and SQLite tolerates the overlap. */
-  const applyModelSwitch = async (e: Entry, model?: string): Promise<void> => {
-    if (model === undefined || model === e.model) return;
-    e.model = model;
+  const applyModelSwitch = async (e: Entry, model?: string, provider?: string): Promise<void> => {
+    // A provider-only switch must rebuild too: `model` has not moved.
+    const providerMoved = provider !== undefined && provider !== e.pickedProvider;
+    if ((model === undefined || model === e.model) && !providerMoved) return;
+    if (model !== undefined) e.model = model;
+    if (provider !== undefined) e.pickedProvider = provider;
     if (e.bridge) {
       const old = e.bridge;
       e.bridge = undefined; // prompt()/promptByThread revive -> rebuild with e.model
@@ -875,7 +882,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         });
         throw new Error(`conversation was ended: ${id}`);
       }
-      entry.bridge = bridgeFactory?.({ conversationId: id, sandbox: entry.sandbox, model: entry.model, owner: entry.owner }) ?? entry.bridge;
+      entry.bridge = bridgeFactory?.({ conversationId: id, sandbox: entry.sandbox, model: entry.model, pickedProvider: entry.pickedProvider, owner: entry.owner }) ?? entry.bridge;
       entry.status = "running";
       // RE-REGISTER the CR on revive. register() is only called on start()/spawnChild(), so a
       // conversation revived after a restart/rollout (or hydrated on a lazy prompt) whose CR was
@@ -1160,7 +1167,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       await entry.bridge?.prompt({ threadId: entry.threadId, text, images, files, source }, opts);
     },
 
-    async promptByThread(threadId, text, model, priority, owner, images, files, source) {
+    async promptByThread(threadId, text, model, priority, owner, images, files, source, provider) {
       // Find the conversation for this thread. Three cases:
       //  1. in the in-memory map -> use it (revive if no live bridge).
       //  2. NOT in the map but PERSISTED (store has it) -> hydrate it on demand and
@@ -1179,7 +1186,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // explicitly (POST /conversations on the router) and prompt the id returned.
         throw new UnknownConversationError(threadId);
       } else {
-        await applyModelSwitch(entry, model);
+        await applyModelSwitch(entry, model, provider);
         if (!entry.bridge) {
           // No live bridge -> revive (start goose). Covers suspended, hydrated-but-
           // "running" (pod up, no goose in this process), AND just-hydrated-on-demand

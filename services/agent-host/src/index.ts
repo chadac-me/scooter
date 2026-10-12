@@ -832,10 +832,10 @@ export async function main(
     // the controller assigned to THIS pod instead of replaying the ephemeral local store. Unset
     // single-replica, where there are no CRs. See docs/CONVERSATION_STATE_MODEL.md.
     selfPod: podName,
-    bridgeFactory: ({ conversationId, sandbox, model, owner }) => {
+    bridgeFactory: ({ conversationId, sandbox, model, pickedProvider, owner }) => {
       // Exec + ACP client are connected lazily/asynchronously; the bridge is
       // created synchronously and starts the connection in start().
-      const bridge = makeBridge(conversationId, sandbox, config, model, metrics, owner);
+      const bridge = makeBridge(conversationId, sandbox, config, model, metrics, owner, pickedProvider);
       // The agent titles the conversation by emitting <title>…</title> as its
       // first action; the bridge extracts it -> set it on the conversation.
       bridge.onTitle((title) => sessions.setTitle(conversationId, title));
@@ -1328,7 +1328,7 @@ export async function main(
       promptFiles.push({ name: f.name, data: f.data, mimeType: f.mimeType });
     }
     try {
-      await sessions.promptByThread(sessionId, input.text, model, input.priority, input.owner, promptImages, promptFiles, input.source);
+      await sessions.promptByThread(sessionId, input.text, model, input.priority, input.owner, promptImages, promptFiles, input.source, input.provider);
     } catch (err) {
       // The run couldn't even START (provision/revive failed — e.g. 409 on a wrong
       // hydrate map, goose/ACP error). PERSIST a RUN_ERROR to the durable log so a
@@ -1800,6 +1800,7 @@ export async function main(
     model: string | undefined,
     metrics: MetricsSink,
     owner?: string,
+    pickedProvider?: string,
   ) {
     // In fake mode there is no pod, so the agent's tool calls run as local
     // subprocesses; in cluster mode they exec into the sandbox pod via the K8s
@@ -2044,6 +2045,7 @@ export async function main(
       // Per-provider model resolution (see BridgeDeps): the conversation's choice when the
       // run's provider offers it, else that provider's own default from the catalog.
       model,
+      pickedProvider,
       modelCatalog: cfg.modelCatalog,
       onRunComplete: ({ acpSessionId, durationMs, outcome }) => {
         // Attribute cost to the conversation OWNER (id + email). Resolve async

@@ -96,3 +96,37 @@ export function groupModelsByProvider(
     models: byProvider.get(provider)!,
   }));
 }
+
+
+/** The option label. Exactly one option is "(default)". */
+export function modelOptionLabel(
+  id: string,
+  provider: string | undefined,
+  opts: {
+    defaultFor?: Record<string, string[]>;
+    globalDefault?: string | null;
+    /** The group that carries the label; the provider that would serve the run. */
+    defaultProvider?: string;
+  },
+): string {
+  if (id !== opts.globalDefault) return `${id}`;
+  // The default model appears under each group; only one carries the label.
+  if (provider && opts.defaultProvider && provider !== opts.defaultProvider) return id;
+  return `${id} (default)`;
+}
+
+/** Provider-qualified value, so a pick identifies both. */
+export function modelOptionValue(id: string, provider: string | undefined): string {
+  return provider ? `${provider}:${id}` : id;
+}
+
+/** Resolution order for an unqualified pick: BYOC outranks the cloud. */
+const PROVIDER_PRIORITY = ["byoc", "claude-code"] as const;
+
+export function defaultServingProvider(catalog: {
+  default?: string | null;
+  defaultFor?: Record<string, string[]>;
+}): string | undefined {
+  const forDefault = catalog.default ? (catalog.defaultFor?.[catalog.default] ?? []) : [];
+  return PROVIDER_PRIORITY.find((p) => forDefault.includes(p)) ?? forDefault[0];
+}

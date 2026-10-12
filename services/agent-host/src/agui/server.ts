@@ -105,6 +105,8 @@ export interface RunAgentInput {
   /** Per-conversation model pick/switch (from the X-Agent-Model header on the
    *  /agui POST). Undefined = keep the conversation's current model. */
   model?: string;
+  /** The provider the user explicitly picked, from "<provider>:<model>". */
+  provider?: string;
   /** Priority tier (PRIORITY_INTERRUPT) for a force-interrupting message — a
    *  webhooks `@scooter` mention to an ACTIVE conversation sets this so it can
    *  preempt a stuck turn after the bridge's priority timeout. The UI (a human
@@ -449,6 +451,7 @@ export function createAguiServer(): AguiServer {
       // Only the MODEL travels on; provider selection keys on it via modelAllowedFor.
       const sep = rawModel ? rawModel.indexOf(":") : -1;
       const model = sep > 0 ? rawModel!.slice(sep + 1) : rawModel;
+      const pickedProvider = sep > 0 ? rawModel!.slice(0, sep) : undefined;
       // Resolve the conversation OWNER, stamped on first creation so the Mine/All
       // filter attributes a UI-created conversation to the human who made it.
       //   1. PRIVILEGED webhooks path: an explicit `input.owner` (a Scooter user the
@@ -474,7 +477,7 @@ export function createAguiServer(): AguiServer {
       // with NO error (the hydrate-silent-drop bug). Emit a proper RUN_ERROR event on
       // THIS stream + close it, so the UI has something to render as a failed send.
       try {
-        await promptHandler?.(sessionId, { threadId: sessionId, text, model, priority: input.priority, owner, images, files, source: input.source });
+        await promptHandler?.(sessionId, { threadId: sessionId, text, model, provider: pickedProvider, priority: input.priority, owner, images, files, source: input.source });
         // promptHandler drives the run; RUN_FINISHED/RUN_ERROR close the stream.
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

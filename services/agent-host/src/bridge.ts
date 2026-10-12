@@ -436,6 +436,8 @@ export interface BridgeDeps {
    *  RUN actually gets: the choice when the run's provider offers it, else that provider's
    *  default — never a model id from the wrong provider's namespace. */
   model?: string;
+  /** The conversation's explicitly picked provider; outranks priority. */
+  pickedProvider?: string;
   /** The deployment's model catalog (GET /models). Needed for the per-provider resolution
    *  above; absent = every provider gets the conversation model as-is (legacy). */
   modelCatalog?: ModelCatalog;
@@ -1543,11 +1545,15 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   const defaultRunContext = (): RunContext => ({
     conversationId: sessionId,
     owner: deps.owner,
+    model: deps.model,
+    provider: deps.pickedProvider,
   });
   const runContextFor = (input: PromptInput): RunContext => ({
     conversationId: sessionId,
     owner: deps.owner,
     source: input.source,
+    model: deps.model,
+    provider: deps.pickedProvider,
   });
 
   // Lazily ready ONE client per provider: initialize → newSession → wire the update/terminal/
