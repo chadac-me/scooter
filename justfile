@@ -181,14 +181,18 @@ cluster-platform: cluster-up
       "broker-image=agent-broker:latest" \
       "webhooks-image=agent-webhooks:latest" \
       "db-migrator-image=agent-db-migrator:latest" \
+      "byoc-controller-image=byoc-controller:latest" \
       "ui-image=agent-sandbox-ui:latest"; do
-      attr="${img%%=*}"; name="${img#*=}"; name="${name%%:*}"
+      attr="${img%%=*}"; name="${img#*=}"
       echo "==> $name"
+      # The TAG must survive: skopeo rejects a bare name ("reference agent-host
+      # has neither a tag nor a digest"), so do not strip ":latest" here.
       nix run ".#${attr}.copyTo" -- "docker-daemon:${name}"
     done
     k3d image import agent-host:latest agent-sandbox-os:latest \
       conversation-controller:latest conversation-router:latest agent-broker:latest \
-      agent-webhooks:latest agent-db-migrator:latest agent-sandbox-ui:latest -c {{_K3D_CLUSTER}}
+      agent-webhooks:latest agent-db-migrator:latest agent-sandbox-ui:latest \
+      byoc-controller:latest -c {{_K3D_CLUSTER}}
     kubectl apply -f "$(nix build .#platform-manifests --no-link --print-out-paths)"
     # Match CI: podCap=1 + 3 replicas so conversations spread across pods and
     # per-pod-view bugs are visible.

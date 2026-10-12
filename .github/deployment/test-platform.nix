@@ -22,6 +22,13 @@ prefix:
   };
   # testWebhook comes from modules/testing.nix.
   webhooks.enable = true;
+  # BYOC, so the cluster tier can exercise the tunnel and provider routing.
+  # No ingress: it defaults its TLS host to scooter.ingress.host, which is empty
+  # here, and the tests reach the controller in-cluster anyway.
+  byoc = {
+    enable = true;
+    ingress.enable = false;
+  };
   # e2e configures no credentials; drop contribs needing one.
   contribs = testContribs;
 }

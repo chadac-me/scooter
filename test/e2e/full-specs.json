@@ -1,5 +1,6 @@
 [
   "aws-interrupt.spec.ts",
+  "byoc-mcp.spec.ts",
   "chat-search-filter.spec.ts",
   "client-server-identity.spec.ts",
   "cluster-stories.spec.ts",
@@ -15,6 +16,7 @@
   "multi-turn-integrity.spec.ts",
   "multi-user.spec.ts",
   "ownership.spec.ts",
+  "provider-routing.spec.ts",
   "queue-durability.spec.ts",
   "refresh-history.spec.ts",
   "revive.spec.ts",
