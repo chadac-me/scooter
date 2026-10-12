@@ -193,7 +193,21 @@ cluster-platform: cluster-up
       conversation-controller:latest conversation-router:latest agent-broker:latest \
       agent-webhooks:latest agent-db-migrator:latest agent-sandbox-ui:latest \
       byoc-controller:latest -c {{_K3D_CLUSTER}}
+    # Secrets the manifests MOUNT but do not create: a deployment supplies them
+    # out of band, so a fresh cluster cannot start without them. Idempotent.
+    kubectl create ns agent-sandbox --dry-run=client -o yaml | kubectl apply -f -
+    for s in agent-remote-join-secret agent-conv-token-secret; do
+      kubectl -n agent-sandbox create secret generic "$s" \
+        --from-literal=secret="local-k3d-$s" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    done
     kubectl apply -f "$(nix build .#platform-manifests --no-link --print-out-paths)"
+    # A PV left Released by an earlier namespace delete never rebinds; clear the
+    # stale claimRef so the agent-host PVCs bind instead of hanging Pending.
+    for pv in agent-host-assets agent-host-history; do
+      [ "$(kubectl get pv "$pv" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Released" ] \
+        && kubectl patch pv "$pv" -p '{"spec":{"claimRef":null}}' >/dev/null || true
+    done
     # Match CI: podCap=1 + 3 replicas so conversations spread across pods and
     # per-pod-view bugs are visible.
     kubectl -n agent-sandbox set env deployment/conversation-controller CONVERSATION_POD_CAP=1
