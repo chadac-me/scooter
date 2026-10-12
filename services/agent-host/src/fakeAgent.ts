@@ -39,8 +39,7 @@ class FakeAgent implements Agent {
   // Each tool call gets a fresh id, as real ACP agents mint one per call.
   private toolCallSeq = 0;
   /** The scooter-env MCP endpoint newSession offers per session, with the headers carrying the bearer conversation token it needs. */
-  /** The model newSession named, per session: the per-RUN pick, which
-   *  process.env.GOOSE_MODEL (fixed at pod launch) cannot show. */
+  /** The per-session model from newSession. */
   private sessionModel = new Map<string, string>();
   /** Every offered MCP target, "<sessionId>:<name>" -> {url, headers}. */
   private mcpAll = new Map<string, { url: string; headers: Record<string, string> }>();
@@ -61,8 +60,7 @@ class FakeAgent implements Agent {
       ).mcpServers ?? [];
     const reqModel = (p as { model?: string }).model;
     if (typeof reqModel === "string" && reqModel) this.sessionModel.set(sessionId, reqModel);
-    // EVERY offered target, keyed by name. Capturing only scooter-env meant ~tools
-    // never asked the broker -- the target that actually failed in production.
+    // Every offered target, so none goes unqueried.
     for (const srv of offered) {
       if (typeof srv.url !== "string" || !srv.name) continue;
       this.mcpAll.set(`${sessionId}:${srv.name}`, {
@@ -187,11 +185,9 @@ class FakeAgent implements Agent {
       return { stopReason: "end_turn" };
     }
 
-    // "~tools" reports the MCP tools actually reachable: the offer is a config string,
-    // so only a real tools/list proves the agent can USE them.
+    // Reports the tools actually reachable, not merely offered.
     if (userText.startsWith("~tools")) {
-      // PER TARGET, so a broker that lists nothing is visible instead of being
-      // masked by a healthy scooter-env.
+      // Per target: a healthy one must not mask a dead one.
       const parts: string[] = [];
       for (const [key, t] of this.mcpAll) {
         if (!key.startsWith(`${sessionId}:`)) continue;
@@ -204,8 +200,7 @@ class FakeAgent implements Agent {
 
     // A "~model" message is a test directive: report the GOOSE_MODEL this process was launched with.
     if (userText.startsWith("~model")) {
-      // The SESSION's model, not the pod's: GOOSE_MODEL is fixed at launch, so
-      // reporting it made a per-conversation switch unobservable.
+      // The session's model; GOOSE_MODEL is fixed at launch.
       const reply = `model=${this.sessionModel.get(sessionId) ?? process.env.GOOSE_MODEL ?? "(default)"}`;
       for (const word of reply.split(" ")) {
         await u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: word + " " } });

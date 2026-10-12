@@ -201,7 +201,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
         for (const cb of frameCbs) cb(frame);
         return;
       }
-      // MCP replies: without this every tunnelled call hangs to CONNECT_TIMEOUT.
+      // MCP replies; without this every call hangs.
       if (frame.ch === "tunnel") {
         for (const cb of frameCbs) cb(frame);
         return;

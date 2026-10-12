@@ -1,14 +1,4 @@
-/**
- * Picking a provider must change WHICH PROVIDER SERVES THE TURN.
- *
- * Outcome, not wire state: the fake agent answers "~model" with the GOOSE_MODEL it was
- * launched with (fakeAgent.ts:142), so the reply names the model that actually ran. An
- * earlier version asserted the X-Agent-Model header instead — which production proved
- * worthless, since the header was correct while BYOC still took every run.
- *
- * No test.skip: a catalog that stops grouping, or a provider that cannot serve, must FAIL
- * here rather than quietly report green.
- */
+// Picking a provider must change which provider serves the turn.
 import { test, expect } from "./fixtures.js";
 
 /** Option values, per provider group. */
@@ -28,7 +18,7 @@ test.describe("provider routing", () => {
     await expect(picker).toBeVisible();
 
     const groups = await optionsByGroup(page);
-    // FAIL, not skip: without grouping the rest of this suite proves nothing.
+    // Fail, not skip: ungrouped makes the suite vacuous.
     expect(groups.length, "the catalog is not provider-grouped").toBeGreaterThan(1);
     for (const g of groups) {
       for (const v of g.values) expect(v, `"${v}" is not provider-qualified`).toMatch(/^[a-z-]+:.+/);
@@ -47,8 +37,7 @@ test.describe("provider routing", () => {
     const picker = page.getByTestId("model-picker");
     await expect(picker).toBeVisible();
 
-    // A model EXCLUSIVE to one provider: the only pick whose outcome is unambiguous,
-    // since a shared model cannot distinguish which provider served it.
+    // Exclusive to one provider, so the outcome is unambiguous.
     const groups = await optionsByGroup(page);
     const counts = new Map<string, number>();
     for (const g of groups) {
@@ -67,8 +56,6 @@ test.describe("provider routing", () => {
     await picker.selectOption(picked);
 
     // THE OUTCOME. The fake agent reports the model it was launched with, so this
-    // asserts the run was actually served with the picked model — not that a header
-    // was sent, which is the mistake that let the production bug through.
     await chat.sendTurn("~model");
     await expect(chat.assistantMessages().last()).toContainText(`model=${expectedModel}`, {
       timeout: 120_000,

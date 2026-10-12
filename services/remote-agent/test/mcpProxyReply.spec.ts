@@ -1,9 +1,4 @@
 // A tunnel reply must complete the proxied request.
-//
-// The container's socket dispatcher handled ch=exec and ch=acp but had NO case for
-// ch=tunnel, so every MCP reply was dropped and each call hung to the SDK's 30s
-// CONNECT_TIMEOUT. Drives the real proxy: an HTTP request in, frames out, reply in,
-// response back.
 import { describe, it, expect } from "vitest";
 import { startMcpProxies } from "../src/mcpProxy.js";
 import type { WireFrame } from "../src/protocol.js";
@@ -30,13 +25,13 @@ describe("mcpProxy reply path", () => {
       body,
     });
 
-    // The proxy emits open/chunk/end; take the stream id it chose.
+    // Take the stream id the proxy chose.
     await new Promise<void>((r) => setTimeout(r, 120));
     const open = sent.find((f) => f.type === "open");
     expect(open, `no open frame was emitted: ${JSON.stringify(sent)}`).toBeTruthy();
     const id = open!.id!;
 
-    // Reply as the cloud does. Dropping these is the bug.
+    // Reply as the cloud does.
     const payload = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [{ name: "t" }] } });
     for (const cb of cbs) {
       cb({ ch: "tunnel", type: "chunk", id, payload: { data: Buffer.from(payload).toString("base64") } } as WireFrame);

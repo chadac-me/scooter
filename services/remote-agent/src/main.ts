@@ -72,8 +72,7 @@ async function main() {
     process.exit(2);
   }
 
-  // Only a Claude backend needs the subscription token; `--backend echo` attaches
-  // without one, which is what makes the tunnel testable in CI and locally.
+  // Only a Claude backend needs the subscription token.
   const backend = selectBackend(args.backend);
   const oauthToken = backend.needsClaudeAuth ? await ensureLogin() : undefined;
 
