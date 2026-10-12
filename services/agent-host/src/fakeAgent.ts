@@ -39,6 +39,11 @@ class FakeAgent implements Agent {
   // Each tool call gets a fresh id, as real ACP agents mint one per call.
   private toolCallSeq = 0;
   /** The scooter-env MCP endpoint newSession offers per session, with the headers carrying the bearer conversation token it needs. */
+  /** The model newSession named, per session: the per-RUN pick, which
+   *  process.env.GOOSE_MODEL (fixed at pod launch) cannot show. */
+  private sessionModel = new Map<string, string>();
+  /** Every offered MCP target, "<sessionId>:<name>" -> {url, headers}. */
+  private mcpAll = new Map<string, { url: string; headers: Record<string, string> }>();
   private mcpUrl = new Map<string, string>();
   private mcpHeaders = new Map<string, Record<string, string>>();
 
@@ -54,6 +59,17 @@ class FakeAgent implements Agent {
           mcpServers?: Array<{ name?: string; url?: string; headers?: Array<{ name: string; value: string }> }>;
         }
       ).mcpServers ?? [];
+    const reqModel = (p as { model?: string }).model;
+    if (typeof reqModel === "string" && reqModel) this.sessionModel.set(sessionId, reqModel);
+    // EVERY offered target, keyed by name. Capturing only scooter-env meant ~tools
+    // never asked the broker -- the target that actually failed in production.
+    for (const srv of offered) {
+      if (typeof srv.url !== "string" || !srv.name) continue;
+      this.mcpAll.set(`${sessionId}:${srv.name}`, {
+        url: srv.url,
+        headers: Object.fromEntries((srv.headers ?? []).map((h) => [h.name, h.value])),
+      });
+    }
     const env = offered.find((s) => s.name === "scooter-env" && typeof s.url === "string");
     if (env?.url) {
       this.mcpUrl.set(sessionId, env.url);
@@ -64,6 +80,39 @@ class FakeAgent implements Agent {
       );
     }
     return { sessionId };
+  }
+
+  /** Every tool name the offered MCP endpoint lists, or why it could not be reached. */
+  private async listTools(sessionId: string): Promise<string> {
+    const url = this.mcpUrl.get(sessionId);
+    if (!url) return "(no MCP endpoint offered)";
+    return this.listToolsAt({ url, headers: this.mcpHeaders.get(sessionId) ?? {} });
+  }
+
+  /** Tool names at one offered target, or why it could not be reached. */
+  private async listToolsAt(t: { url: string; headers: Record<string, string> }): Promise<string> {
+    const url = t.url;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...t.headers,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      const body = await res.text();
+      if (!res.ok) return `(tools/list ${res.status}: ${body.slice(0, 120)})`;
+      const frame = body.includes("data:")
+        ? (body.split("\n").filter((l) => l.startsWith("data:")).pop() ?? "").slice(5).trim()
+        : body;
+      const tools = (JSON.parse(frame || "{}") as { result?: { tools?: Array<{ name?: string }> } })
+        .result?.tools ?? [];
+      return tools.map((t) => t.name ?? "?").join(",") || "(none)";
+    } catch (err) {
+      return `(tools/list threw: ${err instanceof Error ? err.message : String(err)})`;
+    }
   }
 
   /** Call one scooter-env MCP tool with a standalone tools/call (the endpoint is stateless); the reply may be an SSE frame. */
@@ -138,9 +187,26 @@ class FakeAgent implements Agent {
       return { stopReason: "end_turn" };
     }
 
+    // "~tools" reports the MCP tools actually reachable: the offer is a config string,
+    // so only a real tools/list proves the agent can USE them.
+    if (userText.startsWith("~tools")) {
+      // PER TARGET, so a broker that lists nothing is visible instead of being
+      // masked by a healthy scooter-env.
+      const parts: string[] = [];
+      for (const [key, t] of this.mcpAll) {
+        if (!key.startsWith(`${sessionId}:`)) continue;
+        parts.push(`${key.slice(sessionId.length + 1)}=${await this.listToolsAt(t)}`);
+      }
+      const text = parts.length ? parts.join(" | ") : "(no MCP endpoint offered)";
+      await u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `tools ${text}` } });
+      return { stopReason: "end_turn" };
+    }
+
     // A "~model" message is a test directive: report the GOOSE_MODEL this process was launched with.
     if (userText.startsWith("~model")) {
-      const reply = `model=${process.env.GOOSE_MODEL ?? "(default)"}`;
+      // The SESSION's model, not the pod's: GOOSE_MODEL is fixed at launch, so
+      // reporting it made a per-conversation switch unobservable.
+      const reply = `model=${this.sessionModel.get(sessionId) ?? process.env.GOOSE_MODEL ?? "(default)"}`;
       for (const word of reply.split(" ")) {
         await u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: word + " " } });
         await sleep(10);
