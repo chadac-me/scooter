@@ -202,13 +202,6 @@ cluster-platform: cluster-up
         --dry-run=client -o yaml | kubectl apply -f -
     done
     kubectl apply -f "$(nix build .#platform-manifests --no-link --print-out-paths)"
-    # postgres-init CREATES the agent-pg-* secrets; pods that start first wedge.
-    kubectl -n agent-sandbox wait --for=condition=complete job \
-      -l app.kubernetes.io/name=agent-postgres-init --timeout=240s || true
-    kubectl -n agent-sandbox wait --for=condition=complete job \
-      -l app.kubernetes.io/name=agent-db-migrate --timeout=240s || true
-    kubectl -n agent-sandbox delete pod \
-      --field-selector=status.phase!=Running,status.phase!=Succeeded 2>/dev/null || true
     # A PV left Released by an earlier namespace delete never rebinds; clear the
     # stale claimRef so the agent-host PVCs bind instead of hanging Pending.
     for pv in agent-host-assets agent-host-history; do
