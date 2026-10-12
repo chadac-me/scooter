@@ -1,14 +1,4 @@
-/**
- * A backend with no model and no credential.
- *
- * It exists so a container can attach and exercise the real tunnel: startMcpProxies,
- * the websocket, frame routing and the broker hop all run unchanged, since none of
- * them need a model. `~tools` does a REAL tools/list through the local proxies, so a
- * tunnel that cannot reach its MCP targets fails loudly instead of looking healthy.
- *
- * Shipped, not test-only: `--backend echo` lets a user verify their container's
- * connectivity without spending subscription tokens.
- */
+/** A backend with no model and no credential, so the real tunnel is testable. */
 import { registerBackend, type AgentBackend, type AgentBackendDeps } from "./agentBackend.js";
 
 type Update = { sessionUpdate: string; content?: { type: string; text: string } };
@@ -59,7 +49,7 @@ const echoBackend: AgentBackend = {
       async prompt(params: { sessionId: string; prompt?: Array<{ text?: string }> }) {
         const text = (params.prompt ?? []).map((b) => b.text ?? "").join(" ").trim();
         if (text.startsWith("~tools")) {
-          // PER TARGET: a reachable scooter-env must not mask an unreachable broker.
+          // Per target: a reachable one must not mask an unreachable one.
           const parts = await Promise.all(
             offered.map(async (s) => `${s.name}=${await listToolsAt(s.url)}`),
           );

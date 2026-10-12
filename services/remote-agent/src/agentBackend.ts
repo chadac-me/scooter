@@ -1,16 +1,7 @@
-/**
- * The agent a container drives, chosen by name.
- *
- * `createSdkAcpClient` was called at one site with a hardcoded Claude SDK, so the
- * container could not run without a Claude subscription token — which left the
- * TUNNELLED MCP path (container -> controller -> agent-host -> broker) with no test
- * coverage, in either the VM tier or the cluster tier. Every backend returns the same
- * AcpClient the cloud already speaks, so another provider is a new entry here rather
- * than a fork of remoteAgentClient.
- */
+/** The agent a container drives, chosen by name; every backend returns an AcpClient. */
 import type { AcpClient } from "@scooter/claude-sdk-provider";
 
-/** What a backend needs; `oauthToken` is Claude-specific and absent for others. */
+/** Backend inputs; oauthToken is Claude-specific. */
 export interface AgentBackendDeps {
   model?: string;
   mcpServers?: Array<{ name: string; url: string }>;
@@ -26,7 +17,7 @@ export interface AgentBackendDeps {
 
 export interface AgentBackend {
   readonly id: string;
-  /** True when this backend needs a Claude subscription token, so login is skipped otherwise. */
+  /** Needs a Claude subscription token; login is skipped when false. */
   readonly needsClaudeAuth: boolean;
   create(deps: AgentBackendDeps): Promise<AcpClient>;
 }
@@ -36,7 +27,7 @@ const claudeBackend: AgentBackend = {
   id: "claude",
   needsClaudeAuth: true,
   async create(deps) {
-    // Lazy, so selecting another backend does not load the SDK.
+    // Lazy: another backend loads no SDK.
     const { createSdkAcpClient } = await import("@scooter/claude-sdk-provider");
     return createSdkAcpClient({
       oauthToken: deps.oauthToken ?? "",
@@ -54,12 +45,12 @@ const claudeBackend: AgentBackend = {
 
 export const BACKENDS: Record<string, AgentBackend> = { claude: claudeBackend };
 
-/** Register a backend; `echo` adds itself so this module needs no test-only import. */
+/** Register a backend; echo self-registers. */
 export function registerBackend(b: AgentBackend): void {
   BACKENDS[b.id] = b;
 }
 
-/** The backend named by `--backend`/SCOOTER_AGENT_BACKEND, defaulting to claude. */
+/** The backend from --backend/SCOOTER_AGENT_BACKEND; default claude. */
 export function selectBackend(name?: string): AgentBackend {
   const id = (name ?? process.env.SCOOTER_AGENT_BACKEND ?? "claude").trim();
   const b = BACKENDS[id];
