@@ -22,11 +22,10 @@ test.describe("model selection", () => {
     await chat.open();
     const picker = page.getByTestId("model-picker");
     await expect(picker).toBeVisible();
-    // FOUR, not three: the catalog tags providers, so model-default (offered by
-    // both) appears under each group. This asserted 3 from the untagged era.
+    // One option per (model, provider) pair: model-default under both groups.
     await expect(picker.locator("option")).toHaveCount(4);
-    // model-default is defaultFor BOTH providers, so it is labelled in both groups.
-    await expect(picker.locator("option", { hasText: "(default)" })).toHaveCount(2);
+    // Exactly ONE option is (default), even when the model is offered by both.
+    await expect(picker.locator("option", { hasText: "(default)" })).toHaveCount(1);
   });
 
   test("default model is used when nothing is picked", async ({ chat }) => {
@@ -105,19 +104,17 @@ test.describe("model selection — provider grouping", () => {
     expect(values).toContain("claude-code:model-default");
   });
 
-  test("REPRO 2: (default) is marked per PROVIDER, not against one global default", async ({ chat, page }) => {
+  test("REPRO 2: exactly ONE option is marked (default)", async ({ chat, page }) => {
     await chat.open();
     const picker = page.getByTestId("model-picker");
     await expect(picker).toBeVisible();
 
-    // model-smart is byoc-only and NOT a default anywhere, so it must never carry
-    // the marker. model-default is defaultFor BOTH, so it carries it twice — that
-    // is correct, and the test pins it so a future change cannot silently drop it.
+    // The default model renders under each group; only one copy carries the label.
     const labelled = await picker.locator("option").evaluateAll((os) =>
       os.filter((o) => o.textContent?.includes("(default)")).map((o) => o.textContent ?? ""),
     );
-    expect(labelled.length).toBe(2);
-    for (const t of labelled) expect(t).toContain("model-default");
+    expect(labelled.length).toBe(1);
+    expect(labelled[0]).toContain("model-default");
   });
 
   test("REPRO 3: picking a provider-only model routes to THAT provider", async ({ chat, page }) => {
