@@ -1,32 +1,9 @@
-# The shared-database SPEC: which databases exist, which tables live in each, and
-# who may write/read them — declared in the module system, by the module that owns
-# the service.
-#
-# TOPOLOGY ONLY. This option does not model columns; DDL stays DDL in
-# lib/sql/<db>/schema.sql. Nix owns the facts that have to agree across the
-# deployment (which database, who writes, who reads) and nothing else.
-#
-# Everything downstream is a RENDERING of this option, not a second copy:
-#   - lib/sql/owners.toml        generated (`just db-generate`), CI fails on drift
-#   - lib/sql/atlas.hcl          generated; one Atlas env per database
-#   - the migrator's database list  modules/db-migrate.nix, derived
-#   - the postgres GRANTs        modules/platform.nix, derived
-#
-# There is deliberately NO separate database-list artifact: owners.toml's top-level
-# `[<database>]` sections ARE that list, and the justfile + scripts/db-generate.sh
-# read it back from there (both need it at shell/parse time, where `nix eval` is too
-# expensive to run on every invocation).
-#
-# The direction used to run the other way: platform.nix read owners.toml with
-# `builtins.fromTOML` to derive the conversation-router's grants, "so the grant
-# can't drift". This inverts that — the option is the source and the manifest is
-# the rendering. Why: issue #606.
-#
-# Declarations are UNCONDITIONAL (outside each module's `mkIf cfg.enable`): a table
-# exists in lib/sql whether or not this deployment runs the service that owns it, and
-# db-migrate.nix gates on `postgres.consumers ? key` for what to actually migrate. A
-# CONTRIB declaring tables inside `mkIf cfg.enable` is stage 2 of #606 — that is the
-# point at which the generated artifacts become deployment-shaped.
+# The shared-database spec: which databases exist, which tables live in each, and
+# who may write or read them, declared by the module that owns each service. It
+# models topology only (DDL stays in lib/sql/<db>/schema.sql), and owners.toml,
+# atlas.hcl, the migrator's database list and the postgres grants are all
+# rendered from it. Declarations sit outside each module's `mkIf cfg.enable`
+# because a table exists in lib/sql whether or not this deployment runs its owner.
 
 { config, lib, ... }:
 
@@ -35,9 +12,7 @@ let
   cfg = config.scooter;
 
   # --- owners.toml rendering -------------------------------------------------
-  # Hand-rolled rather than pkgs.formats.toml because the manifest's inline-table
-  # layout and its per-table comments are the reason anyone reads the file; a
-  # generic TOML writer drops both.
+  # Hand-rolled so the inline-table layout and per-table comments survive.
   quoteList = xs: "[" + lib.concatMapStringsSep ", " (x: ''"${x}"'') xs + "]";
   pad = width: s: s + lib.fixedWidthString (lib.max 0 (width - lib.stringLength s)) " " "";
 
@@ -59,12 +34,7 @@ let
     '' + lib.concatMapStrings (n: renderTable width n db.tables.${n}) names;
 
   # --- eval-time validation --------------------------------------------------
-  # A `throw` rather than an `assertions` block because kubenix's module system has no
-  # NixOS `assertions` option — an assertions block there evaluates as a plain attribute
-  # and silently checks nothing (the repo's convention; see platform.nix). Forced by the
-  # `dbSpec.*` outputs below, so it fires wherever the spec is actually consumed — the
-  # migrator's database list (db-migrate.nix) and `just db-generate` — rather than only
-  # in a test that someone has to remember to run.
+  # A `throw` forced by the `dbSpec.*` outputs, since kubenix's module system has no `assertions` option.
   problems = lib.concatLists (lib.mapAttrsToList
     (dbName: db: lib.concatLists (lib.mapAttrsToList
       (tName: t:
@@ -105,8 +75,7 @@ let
   '' + lib.concatMapStrings (n: "\n" + renderDb n cfg.db.${n}) (lib.attrNames cfg.db);
 
   # --- atlas.hcl rendering ---------------------------------------------------
-  # One env per database, all five identical apart from the name. Generated for the
-  # same reason as the rest: it was a fifth place that had to list the databases.
+  # One env per database, identical apart from the name.
   atlasEnv = db: ''
 
     env "${db}" {

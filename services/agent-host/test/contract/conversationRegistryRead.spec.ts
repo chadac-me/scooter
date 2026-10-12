@@ -1,20 +1,8 @@
 /**
- * Tier 1 contract — the ConversationRegistry READ side (list/get).
- *
- * WHY THIS EXISTS. The `Conversation` CR is the source of truth for a conversation's existence,
- * ownership and liveness — but the registry was WRITE-ONLY, so nothing ever read it back. A source
- * of truth nothing reads is not one: `hydrate()` asked the ephemeral LOCAL_STATE_PATH store "which
- * conversations exist?" instead, an emptyDir answers "none" after every restart, and so the idle
- * sweep iterated an empty map and reclaimed nothing — 21 sandboxes holding 42 requested cores on a
- * 24-core node. See docs/CONVERSATION_STATE_MODEL.md.
- *
- * Two behaviours here are deliberate INVERSIONS of the write side and matter more than the mapping:
- *
- *  - list() THROWS. register()/setPhase() swallow errors so a conversation still starts, which is
- *    right for a write. For the read it is fatal: a caller that receives [] because the apiserver
- *    blipped concludes it owns nothing and serves blind. Boot must retry and then fail readiness
- *    (decision Q4), which it cannot do if the error is hidden.
- *  - get() maps 404 to `undefined`, NOT an exception — the caller is asking whether it exists.
+ * The ConversationRegistry read side. The `Conversation` CR is the source of truth for a
+ * conversation's existence, ownership and liveness, so unlike the write side list()
+ * throws on a k8s failure (an empty list would make the caller serve blind) while
+ * get() maps a 404 to `undefined`.
  */
 
 import { describe, it, expect } from "vitest";
@@ -67,9 +55,7 @@ describe("ConversationRegistry.list", () => {
   });
 
   it("handles a CR the controller has NOT reconciled yet (status absent)", async () => {
-    // A freshly-registered CR has `status: null` until the controller's first pass. It still
-    // EXISTS, so it must appear in the list — dropping it would make a just-created conversation
-    // invisible to the pod that just created it.
+    // A freshly-registered CR has `status: null` until the controller's first pass.
     const { kc } = fakeKc({ items: [cr("conv-new", { owner: "bob" })] });
     const [rec] = await createK8sConversationRegistry("ns", kc).list();
     expect(rec.id).toBe("conv-new");
@@ -78,8 +64,6 @@ describe("ConversationRegistry.list", () => {
   });
 
   it("THROWS on a k8s failure — never a silent empty list", async () => {
-    // The whole point. Swallowing this (as the write methods do) would tell the caller "you own
-    // no conversations", which is indistinguishable from the truth and causes it to serve blind.
     const { kc } = fakeKc({ listError: { code: 503 } });
     await expect(createK8sConversationRegistry("ns", kc).list()).rejects.toThrow();
   });
@@ -90,7 +74,6 @@ describe("ConversationRegistry.list", () => {
   });
 
   it("skips a malformed object with no name rather than failing the whole list", async () => {
-    // One bad object must not blind the pod to every other conversation.
     const { kc } = fakeKc({ items: [{ spec: {} }, cr("conv-ok")] });
     const out = await createK8sConversationRegistry("ns", kc).list();
     expect(out.map((r) => r.id)).toEqual(["conv-ok"]);

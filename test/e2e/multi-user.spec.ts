@@ -1,23 +1,10 @@
 /**
- * e2e — TRUE multi-user ownership: two distinct identities in the same
- * deployment, each seeing their own conversations under "Mine".
- *
- * Unlike ownership.spec.ts (which runs the browser as anonymous, so "Mine" shows
- * everything and the my-vs-others distinction is never exercised), this drives
- * two browser CONTEXTS with different `x-auth-user` headers — the ingress
- * identity the real deployment injects. So /whoami returns a real user and the
- * "Mine" filter actually distinguishes.
- *
- * Asserts the STRICT policy: for a KNOWN user, "Mine" = strictly owner==me —
- * another user's chats AND unowned chats are hidden under Mine, shown under All.
- * Anonymous still sees all (dev-friendly), covered by ownership.spec.ts.
- *
- * RUNS ON BOTH TARGETS. On full, seeding goes through the conversation-router
- * (CR create + request-driven adoption) and the router forwards identity headers
- * on both the per-conversation proxy and the fleet fan-out (aggregate.go
- * copyIdentityHeaders), so the Mine/All semantics are the same end to end.
- * Sidebar rows are located by `data-conversation-id` (the server-minted id) —
- * titles do not survive the router create path, ids always do.
+ * e2e for true multi-user ownership: two browser contexts with different `x-auth-user`
+ * headers (the ingress identity the real deployment injects), each seeing their own
+ * conversations under "Mine". For a known user, "Mine" is strictly owner==me, so another
+ * user's chats and unowned chats are hidden under Mine and shown under All; anonymous
+ * still sees all, covered by ownership.spec.ts. Runs on both targets, with sidebar rows
+ * located by `data-conversation-id` because titles do not survive the router create path.
  */
 
 import { test, expect, seedConversation } from "./fixtures.js";
@@ -30,7 +17,7 @@ const sel = {
   userBadge: '[data-testid="user-badge"]',
 };
 
-/** The sidebar row for ONE conversation, by the server's id. */
+/** The sidebar row for one conversation, by the server's id. */
 const row = (page: Page, id: string) =>
   page.locator(`[data-testid="session-item"][data-conversation-id="${id}"]`);
 
@@ -57,11 +44,8 @@ test.describe("multi-user ownership (Mine strictly distinguishes)", () => {
     request,
     baseURL,
   }) => {
-    // CLUSTER-HONEST BUDGET: three seeds, each bounded by seedConversation's 45s
-    // adoption ceiling (full target: CR create → request-driven pod adoption →
-    // fleet-list convergence), then sidebar assertions at 30s each. The 60s
-    // default only fits the fake stack's ~1s seeds: 3×45 + 2×30 worst-case needs
-    // the ceiling raised. Ceilings, not costs — a warm run passes in seconds.
+    // Three seeds, each bounded by seedConversation's 45s adoption ceiling, then the
+    // sidebar assertions.
     test.setTimeout(240_000);
     const base = (baseURL ?? "http://localhost:5173").replace(/\/$/, "");
 
@@ -75,7 +59,7 @@ test.describe("multi-user ownership (Mine strictly distinguishes)", () => {
       await alice.goto("/");
       await openFilters(alice);
 
-      // Mine (the default) for a KNOWN user = strictly her own.
+      // Mine (the default) for a known user is strictly her own.
       await expect(alice.locator(sel.toggleMine)).toHaveAttribute("data-active", "true");
       await expect(row(alice, aliceId)).toHaveCount(1, { timeout: 30_000 });
       await expect(row(alice, bobId)).toHaveCount(0);
@@ -96,7 +80,7 @@ test.describe("multi-user ownership (Mine strictly distinguishes)", () => {
     request,
     baseURL,
   }) => {
-    // Two seeds × 45s ceiling + one 30s sidebar assertion (same arithmetic as above).
+    // Two seeds plus one sidebar assertion.
     test.setTimeout(180_000);
     const base = (baseURL ?? "http://localhost:5173").replace(/\/$/, "");
     const aliceId = await seedConversation(request, base, "alice", "Alice symmetric");

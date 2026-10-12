@@ -1,23 +1,10 @@
 /**
- * k8sConversationRegistry — the CR-writing ConversationRegistry for multi-replica mode.
- *
- * On register() it creates a `Conversation` CR (scooter.chadac.dev/v1alpha1) named by the
- * conversation id, with the spec fields the controller/router key on. Idempotent (409
- * AlreadyExists => no-op) and swallowing: any other k8s error is logged, not thrown, so a
- * conversation still starts locally. Only constructed when POD_NAME is set; single-replica
- * agent-host uses noopRegistry.
- *
- * We create the CR without status — the controller owns status (it patches hostPod /
- * generation via the status subresource). We do NOT set status.hostPod to self here: the
- * controller is the single assigner, and self-assigning would race its load accounting.
- *
- * THROTTLING. The apiserver answers 429 under priority-and-fairness, and a 429 that is
- * treated as a plain failure is a LOST write — the phase never lands, the CR goes stale,
- * and the ownership fence reads a view that disagrees with reality. So every call here
- * retries a 429 (honouring `Retry-After`, else exponential backoff with jitter), and
- * setPhase additionally coalesces: it skips a phase already published and folds a burst
- * into the write in flight plus one final write. Nothing else is retried — a 404/409/500
- * means something other than "later".
+ * The CR-writing ConversationRegistry for multi-replica mode. register() creates a
+ * `Conversation` CR named by the conversation id without status, which the controller
+ * owns; it is idempotent and swallows k8s errors so a conversation still starts locally.
+ * Every call retries a 429 (honouring `Retry-After`, else exponential backoff with
+ * jitter), and setPhase coalesces a burst into the write in flight plus one final write;
+ * nothing else is retried.
  */
 
 import { KubeConfig, CustomObjectsApi, setHeaderOptions, PatchStrategy } from "@kubernetes/client-node";
@@ -39,14 +26,12 @@ const PLURAL = "conversations";
 
 /** How the apiserver's priority-and-fairness layer says "slow down". */
 const TOO_MANY_REQUESTS = 429;
-/** Total tries per call (the first plus 4 retries) — ~4s of backoff at worst, well inside
- *  the caller's tolerance, and every write here is already fire-and-forget. */
+/** Total tries per call, the first plus 4 retries. */
 const DEFAULT_MAX_ATTEMPTS = 5;
 const BASE_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 8000;
 
-/** Test seam: how the registry waits and how hard it retries. Production uses the
- *  defaults; a test injects an instant `sleep` so backoff is asserted, not endured. */
+/** Test seam: how the registry waits and how hard it retries. */
 export interface RegistryRetryOptions {
   maxAttempts?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -60,12 +45,8 @@ const realSleep = (ms: number): Promise<void> =>
   });
 
 /**
- * The server's own `Retry-After`, in ms, when it sent one.
- *
- * Honouring it is the difference between backing off and guessing: under
- * priority-and-fairness the apiserver knows when the queue will have room, and a client
- * that retries on its own schedule is what turns a throttle into a storm. Both wire forms
- * are accepted (delta-seconds and an HTTP-date).
+ * The server's own `Retry-After` in ms, when it sent one, accepting both delta-seconds and
+ * an HTTP-date.
  */
 export function retryAfterMs(e: unknown, now: number = Date.now()): number | undefined {
   const headers = (e as { headers?: Record<string, string | string[] | undefined> })?.headers;
@@ -80,16 +61,15 @@ export function retryAfterMs(e: unknown, now: number = Date.now()): number | und
   return Number.isNaN(at) ? undefined : Math.max(0, at - now);
 }
 
-/** Exponential backoff with full jitter — without jitter every conversation in the fleet
- *  retries in lockstep and re-creates the burst that caused the 429. */
+/** Exponential backoff with full jitter, so the fleet does not retry in lockstep. */
 function backoffMs(attempt: number): number {
   const ceiling = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** attempt);
   return Math.round(ceiling * (0.5 + Math.random() / 2));
 }
 
 /**
- * Build a registry that creates Conversation CRs in `namespace`. `kc` defaults to the
- * in-cluster config. The CR name is the conversation id (a DNS-safe UUID/threadId).
+ * Build a registry that creates Conversation CRs in `namespace`; `kc` defaults to the
+ * in-cluster config, and the CR name is the conversation id.
  */
 export function createK8sConversationRegistry(
   namespace: string,
@@ -102,12 +82,7 @@ export function createK8sConversationRegistry(
   const sleep = retry.sleep ?? realSleep;
 
   /**
-   * Run a k8s call, retrying ONLY on 429.
-   *
-   * A 429 is the apiserver saying "later", not "no" — retrying it is the difference
-   * between a write that lands a moment late and one that is lost. Every other error
-   * (404, 409, 500) is returned to the caller unchanged, so the existing handling of
-   * those is untouched.
+   * Run a k8s call, retrying only on 429; every other error is returned unchanged.
    */
   async function throttled<T>(op: string, id: string, call: () => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -130,11 +105,10 @@ export function createK8sConversationRegistry(
     }
   }
 
-  /** The phase last SUCCESSFULLY published, per conversation. Re-publishing a phase the CR
-   *  already carries is a write that can only fail or be throttled. */
+  /** The phase last successfully published per conversation, so a phase the CR already carries is
+   *  not re-written. */
   const published = new Map<string, ConversationPhase>();
-  /** The in-flight status write per conversation, with at most one phase queued behind it.
-   *  A burst collapses to the write in flight plus ONE write of the final value. */
+  /** The in-flight status write per conversation, with at most one phase queued behind it. */
   const phaseWrites = new Map<string, { inflight: Promise<void>; queued?: ConversationPhase }>();
 
   async function patchPhase(id: string, phase: ConversationPhase): Promise<void> {
@@ -148,17 +122,15 @@ export function createK8sConversationRegistry(
         published.set(id, phase);
       })
       .catch((e: { code?: number }) => {
-        // Not recording `published` on failure is deliberate: the next setPhase must retry
-        // rather than believe a phase that never landed.
-        if (e?.code === 404) return; // CR not there (yet) — nothing to update.
+        // `published` is not recorded on failure, so the next setPhase retries.
+        if (e?.code === 404) return; // no CR to update
         log.errorWith("failed to set phase", e, { conversation_id: id, phase });
       });
   }
 
   return {
     async register(id: string, spec: ConversationSpec): Promise<void> {
-      // Drop undefined fields — the CRD schema tolerates a partial spec, and an explicit
-      // `undefined` value serializes to nothing useful.
+      // Drop undefined fields, since an explicit `undefined` serializes to nothing useful.
       const cleanSpec: Record<string, string> = {};
       if (spec.model) cleanSpec.model = spec.model;
       if (spec.owner) cleanSpec.owner = spec.owner;
@@ -166,7 +138,7 @@ export function createK8sConversationRegistry(
       if (spec.sandboxRef) cleanSpec.sandboxRef = spec.sandboxRef;
       if (spec.creatorPod) cleanSpec.creatorPod = spec.creatorPod;
 
-      // PATCH first: create-first was a guaranteed 409 (PR #726).
+      // PATCH first, creating only on a 404.
       await throttled("register.patchSpec", id, () =>
         custom.patchNamespacedCustomObject(
           { group: GROUP, version: VERSION, namespace, plural: PLURAL, name: id, body: { spec: cleanSpec } },
@@ -201,16 +173,11 @@ export function createK8sConversationRegistry(
     },
 
     async setPhase(id: string, phase: ConversationPhase): Promise<void> {
-      // Publish the liveness transition to status.phase (the status SUBRESOURCE — same as the
-      // controller patches). A merge patch of just {phase} leaves hostPod/hostIP/generation
-      // untouched. Never throws: a 404 (CR gone / not created yet) or any error is logged and
-      // swallowed — a failed publish only means the kubectl view lags, never blocks suspend.
-      //
-      // COALESCED, because this is the call that storms: a phase already published is not
-      // written at all, and while a write is in flight only the LAST phase asked for is
-      // written after it. Liveness is a level, not an edge, so dropping the intermediate
-      // values of a burst loses nothing — and a burst of N writes for one conversation is
-      // exactly what the apiserver answers with 429.
+      // A merge patch of just {phase} on the status subresource leaves hostPod/hostIP/generation
+      // untouched, and a failure only lags the kubectl view.
+
+      // Coalesced: a phase already published is not written, and while a write is in flight only
+      // the last phase asked for is written after it.
       if (published.get(id) === phase) return;
       const inflight = phaseWrites.get(id);
       if (inflight) {
@@ -225,9 +192,8 @@ export function createK8sConversationRegistry(
       entry.inflight = (async () => {
         for (;;) {
           const next = entry.queued;
-          // Unregister SYNCHRONOUSLY at the moment we decide to stop — deferring it (to a
-          // .finally) leaves a window where a caller queues onto an entry nobody will drain
-          // and the write is silently lost.
+          // Unregister synchronously at the moment we stop, so no caller queues onto an entry
+          // nobody will drain.
           if (next === undefined) {
             phaseWrites.delete(id);
             return;
@@ -241,16 +207,10 @@ export function createK8sConversationRegistry(
     },
 
     async remove(id: string): Promise<void> {
-      // DELETE the CR. Without this the conversation comes BACK: end() clears local state
-      // and the store record, but hydrate() re-adopts any surviving CR, so a deleted
-      // conversation reappears in GET /conversations forever (observed on a real cluster,
-      // with DELETE answering 204 the whole time).
-      //
-      // Never throws, matching the other write methods — a k8s failure must not turn a
-      // successful local delete into a 500. A 404 means someone else already removed it,
-      // which is the desired end state, so it is not an error.
-      // Forget the coalescer's memory of this conversation: a CR that is recreated under the
-      // same id must be published to afresh, and the maps must not outlive the conversations.
+      // Never throws: a k8s failure must not turn a successful local delete into a 500, and a 404
+      // is the desired end state.
+
+      // Forget the coalescer's memory so a CR recreated under the same id is published to afresh.
       published.delete(id);
       phaseWrites.delete(id);
       await throttled("remove", id, () =>
@@ -263,7 +223,7 @@ export function createK8sConversationRegistry(
         }),
       )
         .catch((e: { code?: number }) => {
-          if (e?.code === 404) return; // already gone — that is the outcome we wanted
+          if (e?.code === 404) return; // already gone
           log.errorWith("failed to delete the Conversation CR (it will be re-adopted)", e, {
             conversation_id: id,
           });
@@ -271,10 +231,8 @@ export function createK8sConversationRegistry(
     },
 
     async list(): Promise<ConversationRecord[]> {
-      // THROWS on failure, unlike the write methods. The CR list is the source of truth for
-      // "which conversations exist?"; a caller that gets [] because the apiserver was briefly
-      // unreachable would conclude this pod owns nothing and serve blind. Boot retries with
-      // backoff and fails readiness instead (decision Q4, docs/CONVERSATION_STATE_MODEL.md).
+      // Throws on failure, unlike the write methods: a caller that got [] from a blip would
+      // conclude it owns nothing and serve blind.
       const resp = await throttled("list", "*", () =>
         custom.listNamespacedCustomObject({
           group: GROUP,
@@ -300,7 +258,7 @@ export function createK8sConversationRegistry(
         );
         return toRecord(obj);
       } catch (e) {
-        // Absent is `undefined`, not an error — the caller asked whether it exists.
+        // Absent is `undefined`, not an error.
         if ((e as { code?: number })?.code === 404) return undefined;
         throw e;
       }
@@ -308,7 +266,7 @@ export function createK8sConversationRegistry(
   };
 }
 
-/** Map a raw CR to the host's view. Returns undefined for an object with no usable name. */
+/** Map a raw CR to the host's view, or undefined for an object with no usable name. */
 function toRecord(o: unknown): ConversationRecord | undefined {
   const cr = o as {
     metadata?: { name?: string };

@@ -1,9 +1,4 @@
-"""Auto-linking MECHANISM: the transport posts a link on a 2xx create.
-
-Which calls a given provider auto-links is that provider's knowledge and lives in
-its contrib (gitlab PR #580, github PR #XXX); what stays here is the transport
-behaviour, driven by a stand-in rule rather than any provider's real ones.
-"""
+"""The auto-linking mechanism: the transport posts a link on a 2xx create, driven by a stand-in rule rather than any provider's real ones."""
 
 from __future__ import annotations
 
@@ -22,7 +17,7 @@ _CREATE_RULES = [
 ]
 
 
-# ---- the transport posts a link on a 2xx create, and NOT otherwise ----
+# ---- the transport posts a link on a 2xx create, and not otherwise ----
 
 
 @pytest.mark.asyncio
@@ -55,7 +50,7 @@ async def test_maybe_autolink_ignores_non_matching_path(monkeypatch):
     import scooter_broker_lib.transports.http_proxy as hp
     monkeypatch.setattr(hp, "post_link", lambda *a: posted.append(a))
     proxy = HttpProxy(upstream="x", link_rules=_CREATE_RULES, agent_host_url="http://h")
-    # A comment POST — not a create rule.
+    # A comment POST matches no create rule.
     resp = httpx.Response(201, json={"html_url": "https://example.com/a/b/issues/1#c"})
     await proxy._maybe_autolink("POST", "repos/a/b/issues/1/comments", resp, "conv-1")
     assert posted == []
@@ -63,7 +58,7 @@ async def test_maybe_autolink_ignores_non_matching_path(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_maybe_autolink_swallows_bad_response(monkeypatch):
-    # A non-JSON / unexpected body must not raise (best-effort).
+    # A non-JSON body must not raise.
     import scooter_broker_lib.transports.http_proxy as hp
     monkeypatch.setattr(hp, "post_link", lambda *a: None)
     proxy = HttpProxy(upstream="x", link_rules=_CREATE_RULES, agent_host_url="http://h")

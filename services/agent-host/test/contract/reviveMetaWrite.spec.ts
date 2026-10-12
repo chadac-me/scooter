@@ -1,16 +1,7 @@
 /**
- * Regression — revive() must not leave an orphaned meta write behind it.
- *
- * revive() persists the conversation once, awaited, so a persist failure reaches
- * the caller. Marking the resume as activity via touch() would add a SECOND,
- * fire-and-forget saveMeta (`void saveMeta(e)`) racing the awaited one: it can
- * still be running when revive() resolves, and when it rejects there is no
- * caller left to catch it — an unhandled rejection that takes the host down.
- * Why: PR #519.
- *
- * Invisible to every other spec: on the happy path both writes just succeed.
- * What changes is the write COUNT and who owns the FAILURE, so that is what
- * these assert.
+ * revive() persists the conversation exactly once, awaited, so a persist failure
+ * reaches the caller and no fire-and-forget write can outlive the call and surface
+ * as an unhandled rejection.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -51,10 +42,7 @@ function makeFakeBridge() {
   };
 }
 
-/** Real manager + real file store, with saveMeta wrapped so the test can observe
- *  how many writes revive() issues, whether any is still running when it
- *  resolves, and what happens when one fails. The delay widens the window that
- *  CI's parallel load produces anyway. */
+/** A real manager and file store with saveMeta wrapped to count writes, track in-flight ones and fail on demand. */
 function harness(root: string) {
   const base = createFileConversationStore(root);
   const state = { calls: 0, inFlight: 0, fail: false };
@@ -90,8 +78,7 @@ describe("revive() meta persistence", () => {
 
       await sessions.revive(conv.id);
 
-      // A write still running here outlives revive(); when it rejects (a removed
-      // dir, an unmounted PVC) nothing is left to catch it.
+      // A write still running here outlives revive(), with nothing left to catch its rejection.
       expect(state.inFlight, "no durable write may outlive revive()").toBe(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -108,8 +95,7 @@ describe("revive() meta persistence", () => {
       state.calls = 0;
       await sessions.revive(conv.id);
 
-      // Two writes means touch()'s `void saveMeta(e)` is back: an unawaited write
-      // racing the awaited one two lines below it.
+      // Two writes means an unawaited write is racing the awaited one.
       expect(state.calls, "revive must issue a single, awaited meta write").toBe(1);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -127,8 +113,7 @@ describe("revive() meta persistence", () => {
 
       await sessions.revive(conv.id);
 
-      // Dropping touch() must NOT drop the timestamp bump it existed for: a stale
-      // lastActivityAt lets sweepIdle re-suspend the pod revive() just started.
+      // A stale lastActivityAt lets sweepIdle re-suspend the pod revive() just started.
       expect(
         sessions.get(conv.id)!.lastActivityAt,
         "revive must count as activity or the idle sweep reclaims the fresh pod",

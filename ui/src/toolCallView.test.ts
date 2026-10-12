@@ -1,12 +1,10 @@
 /**
- * UI unit test — the tool-call → provider-visual matcher.
+ * The tool-call to provider-visual matcher.
  *
- * Keys off goose's title string (what arrives as toolName) + the provider's arg
- * key; disambiguates the "comment" tools (which share a `body`). Anything else
- * returns null (→ generic ToolFallback).
- *
- * Scope is the app's OWN tools; a contrib's card arrives in the runtime manifest
- * and is covered in contribManifest.test.ts. Why: PR #601.
+ * Keys off goose's title string (what arrives as toolName) plus the provider's arg
+ * key, and disambiguates the "comment" tools that share a `body`. Anything else
+ * returns null, which falls through to the generic ToolFallback. A contrib's card
+ * arrives in the runtime manifest and is covered in contribManifest.test.ts.
  */
 
 import { describe, it, expect } from "vitest";
@@ -15,7 +13,7 @@ import { matchToolCall, normalizeToolName, resultStatusText } from "./toolCallVi
 
 describe("resultStatusText", () => {
   it("unwraps the ACP content-array result (what slack_respond returns)", () => {
-    // The ugly blob the user saw: [{content:{text:"Posted to the Slack thread."}}]
+    // The raw ACP content-array shape as it arrives.
     const r = [{ content: { text: "Posted to the Slack thread.", type: "text" }, type: "content" }];
     expect(resultStatusText(r)).toBe("Posted to the Slack thread.");
   });
@@ -35,8 +33,7 @@ describe("resultStatusText", () => {
 
 describe("matchToolCall", () => {
   it("matches the REAL goose form 'Scooter-env: Slack Respond' (server-prefixed, title-cased)", () => {
-    // This is what actually arrives — the MCP server name + the title-cased tool
-    // name — NOT the registerTool `title`. The regression the card was missing on.
+    // The stream carries the MCP server name plus the title-cased tool name, not the registerTool `title`.
     const v = matchToolCall("Scooter-env: Slack Respond", { text: "on it" });
     expect(v).toMatchObject({ provider: "slack", body: "on it" });
   });
@@ -92,13 +89,11 @@ describe("matchToolCall", () => {
     expect(matchToolCall("run ls", { command: "ls" })).toMatchObject({ provider: "shell", body: "ls" });
     expect(matchToolCall("Scooter-env: Shell", { command: "echo hi" })).toMatchObject({ provider: "shell" });
     expect(matchToolCall("Shell", {})?.body).toBe(""); // missing command → empty, not a crash
-    // goose titles the shell tool "run: <cmd>" — normalizeToolName strips at the
-    // colon (dropping "run"), so we must match the RAW name too. The command still
-    // comes from args (TOOL_CALL_ARGS), not the title. This exact case broke e2e.
+    // goose titles the shell tool "run: <cmd>" and normalizeToolName strips at the colon, so the raw name must match too while the command still comes from args.
     expect(matchToolCall("run: echo zxcvbnm-marker", { command: "echo zxcvbnm-marker" })).toMatchObject({
       provider: "shell", body: "echo zxcvbnm-marker",
     });
-    // Even with NO name signal, a `command` arg alone marks it a shell/command tool.
+    // Even with no name signal, a `command` arg alone marks it a shell tool.
     expect(matchToolCall("Some Tool", { command: "ls" })).toMatchObject({ provider: "shell", body: "ls" });
   });
 

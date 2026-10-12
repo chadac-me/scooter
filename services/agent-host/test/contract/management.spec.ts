@@ -1,9 +1,7 @@
 /**
- * Tier 1 contract test — the management REST API.
- *
- * Drives createManagementApi over a fake SessionManager + store + a stub server,
- * via the router's handle(), with mock req/res. Proves the routes map to the
- * right SessionManager calls and shape the responses correctly.
+ * Contract test for the management REST API: createManagementApi is driven over a
+ * fake SessionManager, store and stub server through the router's handle() with
+ * mock req/res, asserting the routes map to the right calls and response shapes.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -27,8 +25,7 @@ const conv = (over: Partial<Conversation> = {}): Conversation => ({
   ...over,
 });
 
-/** The SAME short DNS-safe hash the manager uses (session/manager.ts shortId) —
- *  the broker sends this, extracted from the sandbox SA name `sandbox-{shortId}`. */
+/** The same short DNS-safe hash the manager's shortId computes, which the broker sends. */
 function shortIdOf(threadId: string): string {
   let h = 0;
   for (let i = 0; i < threadId.length; i++) h = (h * 31 + threadId.charCodeAt(i)) | 0;
@@ -48,8 +45,7 @@ function fakeSessions(): SessionManager {
       store.set(id, c);
       return c;
     }),
-    // Read-only hydrate: true iff the conversation exists (in the fake store). Faithful to
-    // the real ensureReadable — the read routes call it before deciding to 404.
+    // Read-only hydrate: true iff the conversation exists in the fake store.
     ensureReadable: vi.fn(async (id) => store.has(id)),
     reviveFromMirror: vi.fn(async () => {}),
     prompt: vi.fn(async () => {}),
@@ -61,14 +57,14 @@ function fakeSessions(): SessionManager {
       store.set(id, conv({ id, status: "ended" }));
     }),
     get: (id) => store.get(id),
-    // Resolve by the short DNS-safe hash of the threadId (what the broker sends).
+    // Resolve by the short DNS-safe hash of the threadId the broker sends.
     getByShortId: vi.fn(async (shortHash) =>
       [...store.values()].find((c) => shortHash === shortIdOf(c.threadId)),
     ),
     list: () => [...store.values()],
     setTitle: vi.fn((id, title) => {
       const c = store.get(id);
-      // Mirror the real no-op-once-user-titled behavior so route tests are faithful.
+      // Mirror the real no-op-once-user-titled behavior.
       if (c && !c.userTitled) store.set(id, conv({ ...c, title }));
       return Promise.resolve();
     }),
@@ -106,7 +102,7 @@ function fakeStore(events: AguiEvent[]): ConversationStore {
 
 const stubServer = { subscribeSSE: vi.fn(async () => {}) } as unknown as AguiServer;
 
-/** Drive a route through the router with a mock req/res; return {status, json}. */
+/** Drive a route through the router with a mock req/res and return {status, json}. */
 async function call(
   api: ReturnType<typeof createManagementApi>,
   method: string,
@@ -140,8 +136,7 @@ async function call(
   return { status, json: chunks ? JSON.parse(chunks) : null };
 }
 
-/** Drive a route capturing the RAW response (status + headers + Buffer body) —
- *  for the binary assets route. */
+/** Drive a route capturing the raw response (status, headers and Buffer body) for the binary assets route. */
 async function callRaw(
   api: ReturnType<typeof createManagementApi>,
   method: string,
@@ -166,10 +161,7 @@ async function callRaw(
 }
 
 describe("management API", () => {
-  // POST /conversations exists here for SINGLE-REPLICA (and e2e, which runs the agent-host
-  // with no router in front). In multi-replica the conversation-router serves this path
-  // itself — a control-plane CR write that consults no agent-host capacity — and never
-  // proxies it here. What both share is that the SERVER mints the id.
+  // POST /conversations exists here for single-replica and e2e; in multi-replica the conversation-router serves it itself.
   it("POST /conversations mints the id SERVER-side and returns 201", async () => {
     const sessions = fakeSessions();
     const api = createManagementApi({
@@ -186,9 +178,7 @@ describe("management API", () => {
   });
 
   it("POST /conversations IGNORES a caller-supplied threadId", async () => {
-    // The regression that matters. The old route honored body.threadId, which made an
-    // unvalidated, caller-chosen string into a conversation id, an event-log key, and a
-    // k8s resource name.
+    // A caller-chosen threadId must never become a conversation id, event-log key or k8s resource name.
     const sessions = fakeSessions();
     const api = createManagementApi({
       sessions,
@@ -203,10 +193,7 @@ describe("management API", () => {
     expect((res.json as { id?: string }).id).not.toBe("attacker-chosen-id");
   });
 
-  // GET /conversations, its ?scope filter, sources enrichment, and the
-  // /conversations/events snapshot+upsert stream MOVED to the conversation-router
-  // (served from Postgres). Their coverage now lives there:
-  // conversation-router/list_test.go (scope + sources) and events_test.go (stream).
+  // GET /conversations and the /conversations/events stream are served by the conversation-router and covered in its tests.
 
   // --- user rename + starring ------------------------------------------------
 
@@ -264,9 +251,7 @@ describe("management API", () => {
   });
 
   it("PATCH /conversations/:id/starred hydrates an idle conversation absent from memory instead of 404ing", async () => {
-    // Starring an IDLE conversation (no owner pod) lands on an arbitrary ready pod via the
-    // router fallback, which doesn't hold it in memory. Pre-fix that 404'd (mutableFor only
-    // checked sessions.get); it must hydrate-if-absent like GET/DELETE. Why: PR #475.
+    // Starring an idle conversation lands on an arbitrary ready pod that does not hold it in memory, so it must hydrate-if-absent like GET/DELETE.
     const s = fakeSessions();
     const map = new Map<string, Conversation>();
     const sessions = {
@@ -410,8 +395,7 @@ describe("management API", () => {
     expect(json).toEqual({
       default: "opus", available: ["opus", "sonnet"], hints: { sonnet: "fast/cheap" },
       providers: {}, // id -> provider tags offering it; {} when the deployment doesn't tag
-      // id -> the providers it is the DEFAULT for, so a UI marks "(default)" per
-      // group rather than against one global default.
+      // id -> the providers it is the default for, so a UI marks "(default)" per group.
       defaultFor: {},
     });
   });
@@ -428,10 +412,7 @@ describe("management API", () => {
   });
 
   it("GET /models carries defaultFor, so a UI can mark the default PER PROVIDER", async () => {
-    // Without this the UI only has the single global `default` to compare against,
-    // and a model that is the default on ONE provider gets labelled "(default)"
-    // under every group. Observed as claude-opus-5 reading as default on both byoc
-    // and claude-code.
+    // A model that is the default on one provider must not be labelled "(default)" under every group.
     const api = createManagementApi({
       sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {},
       models: {
@@ -524,8 +505,7 @@ describe("management API", () => {
     const { json } = await call(api, "GET", "/conversations/c1/tail?runs=1");
     const body = json as any;
     expect(body.runs).toBe(1);
-    // Only the last run's events, starting at its RUN_STARTED (the store here has
-    // no readEventsTail, so this exercises the read-all + tailByRuns fallback).
+    // Only the last run's events, via the read-all + tailByRuns fallback since this store has no readEventsTail.
     expect(body.events[0]).toMatchObject({ type: "RUN_STARTED", runId: "r3" });
     expect(body.events.filter((e: any) => e.type === "RUN_STARTED")).toHaveLength(1);
   });
@@ -567,9 +547,7 @@ describe("management API", () => {
     expect(status).toBe(404);
   });
 
-  // The ?scope=mine|all view-filter and list-level sources enrichment MOVED to the
-  // conversation-router (list.go visible()/sourcesOf); see conversation-router/list_test.go.
-  // The per-conversation /conversations/:id/links routes below still live here.
+  // The ?scope filter and list-level sources enrichment live in the conversation-router; the per-conversation links routes live here.
 
   it("POST then GET /conversations/:id/links round-trips an external link", async () => {
     const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
@@ -592,10 +570,7 @@ describe("management API", () => {
   });
 
   it("links routes resolve the broker's SHORT id to the full conversation", async () => {
-    // The broker (auto-link injector + /link) identifies the conversation by the
-    // short DNS hash from the SA token, NOT the full threadId. A link posted under
-    // the short id must land on — and read back under — the full conversation, or
-    // it's the same silent shortId mismatch that broke the approvals route.
+    // The broker identifies the conversation by the short DNS hash from the SA token, so a link posted under it must land on the full conversation.
     const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
     const short = shortIdOf("c1");
     const post = await call(api, "POST", `/conversations/${short}/links`, {
@@ -604,7 +579,7 @@ describe("management API", () => {
       url: "https://github.com/example-org/example-app/pull/7",
     });
     expect(post.status).toBe(201);
-    // Readable back under BOTH the short id and the full threadId.
+    // Readable back under both the short id and the full threadId.
     const viaShort = await call(api, "GET", `/conversations/${short}/links`);
     const viaFull = await call(api, "GET", "/conversations/c1/links");
     expect((viaShort.json as any).links).toHaveLength(1);
@@ -613,12 +588,7 @@ describe("management API", () => {
   });
 
   it("accepts a link for a NOT-YET-EXISTENT conversation (the Slack on_created pre-run flow)", async () => {
-    // REGRESSION (broker-autolink #118 gated POST /links behind resolveConvId and
-    // 404'd when the conversation didn't exist yet). The Slack webhook registers
-    // the thread link in its on_created hook — BEFORE /agui creates the session —
-    // to anchor the first reply to the thread. That POST must be accepted and
-    // written under the (full threadId) raw id, so it's readable once the
-    // conversation materializes. A 404 here silently dropped every Slack link.
+    // The Slack webhook registers the thread link before /agui creates the session, so the POST must be written under the raw id.
     const store = fakeStore([]);
     const api = createManagementApi({ sessions: fakeSessions(), store, server: stubServer, answerPermission: async () => {} });
     const threadId = "brand-new-thread-uuid";
@@ -629,7 +599,7 @@ describe("management API", () => {
       ref: { channel: "C1", threadTs: "1700.5" },
     });
     expect(post.status).toBe(201);
-    // Readable back under that same id (what the conversation will be keyed by).
+    // Readable back under the id the conversation will be keyed by.
     const { json } = await call(api, "GET", `/conversations/${threadId}/links`);
     expect((json as any).links).toHaveLength(1);
     expect((json as any).links[0]).toMatchObject({ source: "slack", resourceType: "thread" });
@@ -666,8 +636,7 @@ describe("management API", () => {
   });
 
   it("GET web-services?refresh=1 forces a manifest re-read", async () => {
-    // The Rescan button: the agent declared a service with `scooter-rebuild` and
-    // nothing in the pod told the host, so the user needs a way to say "look again".
+    // The Rescan button re-reads services the agent declared with `scooter-rebuild`.
     const seen: Array<boolean | undefined> = [];
     const api = createManagementApi({
       sessions: fakeSessions(), store: fakeStore([]), server: stubServer,
@@ -804,14 +773,13 @@ describe("management API", () => {
   });
 
   it("GET /conversations/:id hydrates a conversation absent from memory (moved by a rollout) instead of 404ing", async () => {
-    // Simulate a reconnect landing on a pod that doesn't have the conversation in memory but
-    // CAN make it readable (ensureReadable pulls it from the mirror). Must NOT 404.
+    // A reconnect landing on a pod that can make the conversation readable from the mirror must not 404.
     const s = fakeSessions();
     const map = new Map<string, Conversation>();
     const sessions = {
       ...s,
       get: (id: string) => map.get(id),
-      // Not in memory yet, but hydratable → register it and report readable.
+      // Not in memory yet, but hydratable.
       ensureReadable: vi.fn(async (id: string) => { map.set(id, conv({ id, threadId: id, status: "suspended" })); return true; }),
     } as unknown as SessionManager;
     const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
@@ -821,8 +789,7 @@ describe("management API", () => {
   });
 
   describe("POST /conversations/:id/approvals/:contrib (approval interrupt)", () => {
-    // A full-UUID conversation with a live bridge — so its short hash != its id,
-    // reproducing the broker keying that used to 404.
+    // A full-UUID conversation with a live bridge, so its short hash differs from its id.
     const UUID = "aee8b191-a4ca-4cb5-81f0-ffd058a89663";
     const SHORT = shortIdOf(UUID);
 
@@ -847,15 +814,13 @@ describe("management API", () => {
       return { sessions, raiseInterrupt };
     };
 
-    // The generic payload: an id and the prose the CONTRIB rendered. The platform no
-    // longer receives target_account/risk_level — it could not describe a second
-    // integration with them. Why: PR #651.
+    // The generic payload: an id and the prose the contrib rendered.
     const awsBody = { request_id: "req-1", message: "Scooter is requesting AWS access to dev (risk: low)." };
 
     it("resolves by the SHORT id the broker sends (not just the full threadId) and raises the interrupt", async () => {
       const { sessions, raiseInterrupt } = sessionsWithBridge();
       const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-      // The broker POSTs the SHORT hash — the pre-fix route did get(SHORT) -> 404.
+      // The broker POSTs the short hash.
       const { status } = await call(api, "POST", `/conversations/${SHORT}/approvals/aws`, awsBody);
       expect(status).toBe(202);
       expect(raiseInterrupt).toHaveBeenCalledOnce();
@@ -915,8 +880,7 @@ describe("management API", () => {
 
       const arg = raiseInterrupt.mock.calls[0][0] as Raised;
       expect(arg.id).toBe("req-9");
-      // A NAME, not `aws: true` — the UI looks the gating copy up per contrib, so a
-      // new integration needs no UI change.
+      // The UI looks the gating copy up per contrib name, so a new integration needs no UI change.
       expect(arg.metadata).toMatchObject({ contrib: "aws", requestId: "req-9" });
       expect(arg.options.map((o) => o.optionId)).toEqual(["approve", "deny"]);
       // The contrib's prose is shown verbatim; the platform composes nothing.
@@ -924,13 +888,12 @@ describe("management API", () => {
 
       arg.onAnswer("approve", { id: "u@x" });
       await Promise.resolve();
-      // The VERB is the optionId, not a boolean: the platform never decides what a
-      // choice means, so a contrib with other options keeps working.
+      // The verb is the optionId, so the platform never decides what a choice means.
       expect(resolveApproval).toHaveBeenCalledWith("conv-1", "aws", "req-9", "approve", { id: "u@x" });
     });
 
     it("works for ANY contrib, with its own verbs", async () => {
-      // The seam's whole claim. Nothing here is aws-shaped.
+      // Nothing here is aws-shaped.
       const { raiseInterrupt, resolveApproval, bridge } = build();
       raiseApprovalInterrupt(
         bridge, "conv-1", "echo",
@@ -946,9 +909,7 @@ describe("management API", () => {
     });
 
     it("relays NOTHING when the user dismisses (null) — a dismiss is not a denial", async () => {
-      // The boolean form collapsed a dismiss to `optionId === "approve"` === false and
-      // sent DENY, recording a decision the user never made. The request stays pending
-      // in the broker and the revive re-raise brings the window back. Why: PR #651.
+      // The request stays pending in the broker and the revive re-raise brings the window back.
       const { raiseInterrupt, resolveApproval, bridge } = build();
       raiseApprovalInterrupt(bridge, "conv-1", "aws", { request_id: "req-9" }, resolveApproval);
       const arg = raiseInterrupt.mock.calls[0][0] as Raised;
@@ -958,9 +919,7 @@ describe("management API", () => {
     });
 
     it("falls back to the conversation id ONLY when no human identity is present", async () => {
-      // Anonymous / no-ingress-identity deployments have no human to name. Everywhere
-      // else this fallback is the bug PR #649 fixed, so it must not be reachable when
-      // an approver IS supplied.
+      // Anonymous deployments have no human to name, but the fallback must not be reachable when an approver is supplied.
       const { raiseInterrupt, resolveApproval, bridge } = build();
       raiseApprovalInterrupt(bridge, "conv-1", "aws", { request_id: "req-9" }, resolveApproval);
       const arg = raiseInterrupt.mock.calls[0][0] as Raised;
@@ -978,9 +937,7 @@ describe("management API", () => {
   });
 
   describe("fetchPendingApprovals (revive re-raise query — the short-id id-space)", () => {
-    // Regression for scooter-bug-reraise-pending-uses-threadid-not-shortid: the re-raise path queried
-    // the broker with the thread UUID, but the broker keys requests by the sandbox SHORT-id, so it
-    // got [] and the Approve window never reappeared after a rollout/resume/revive.
+    // The broker keys requests by the sandbox short-id, not the thread UUID.
     const UUID = "5e1949ce-c98c-4c52-bb43-afe923b040ce";
     const SHORT = shortId(UUID); // what the broker actually keys on
     const PATH = "/aws/aws/pending";
@@ -996,16 +953,16 @@ describe("management API", () => {
       });
 
     it("queries the broker by the SHORT-id (not the thread UUID) so pending requests are found", async () => {
-      // The broker holds the request under the short-id ONLY (as it does in production).
+      // The broker holds the request under the short-id only.
       const fetchFn = mockFetch({ [SHORT]: [{ request_id: "req-pending-1" }] });
       vi.stubGlobal("fetch", fetchFn);
       try {
-        // The caller (index.ts) resolves shortId(id) before calling — assert that's what hits the wire.
+        // The caller resolves shortId(id) before calling, and that is what must hit the wire.
         const pending = await fetchPendingApprovals("http://broker:8080", PATH, shortId(UUID), {});
         expect(fetchFn).toHaveBeenCalledOnce();
         const calledUrl = new URL(fetchFn.mock.calls[0][0] as string);
         expect(calledUrl.searchParams.get("conversation_id")).toBe(SHORT);
-        expect(calledUrl.searchParams.get("conversation_id")).not.toBe(UUID); // the bug
+        expect(calledUrl.searchParams.get("conversation_id")).not.toBe(UUID);
         expect(pending).toEqual([{ request_id: "req-pending-1" }]);
       } finally {
         vi.unstubAllGlobals();
@@ -1024,7 +981,7 @@ describe("management API", () => {
     });
 
     it("returns [] without calling the broker when the contrib declares no pendingPath", async () => {
-      // `pendingPath: null` means "my requests don't survive a rollout" — not "query /".
+      // `pendingPath: null` means the contrib's requests do not survive a rollout.
       const fetchFn = vi.fn();
       vi.stubGlobal("fetch", fetchFn);
       try {
@@ -1091,17 +1048,14 @@ describe("management API", () => {
   });
 
   // --- Scheduled-tasks proxy (UI settings page) --------------------------------
-  // The /scheduled-tasks routes forward to the scheduler client scoped to the CALLER
-  // (x-auth-user), so a user only manages their own tasks. Absent client -> 501;
-  // anonymous -> 401.
+  // The /scheduled-tasks routes forward to the scheduler client scoped to the caller's x-auth-user.
   describe("scheduled-tasks proxy", () => {
     const task = (over: Record<string, unknown> = {}) => ({
       id: "t1", title: "Daily", prompt: "check", cron: "0 9 * * *", timezone: "UTC",
       owner: "alice", enabled: true, next_run_at: null, last_run_at: null, ...over,
     });
 
-    /** A fake SchedulerClient recording the owner it was called for. A null owner and
-     *  "" are the same unowned bucket (the caller sends null for anonymous). */
+    /** A fake SchedulerClient recording the owner it was called for, where null and "" are the same unowned bucket. */
     function fakeScheduler(seed: Array<ReturnType<typeof task>> = []) {
       const calls: Array<{ method: string; owner: string | null }> = [];
       const owns = (t: { owner: string }, owner: string | null) => t.owner === (owner ?? "");
@@ -1174,20 +1128,16 @@ describe("management API", () => {
   });
 
   describe("DELETE / suspend cross-replica + starred guard", () => {
-    // A DELETE routed to a pod that doesn't hold the conversation in memory must HYDRATE it
-    // (ensureReadable) before deciding — else it 404s and leaks the sandbox (the multi-replica
-    // DELETE-404 leak). And a STARRED conversation must be protected from deletion.
+    // A DELETE routed to a pod that does not hold the conversation in memory must hydrate it before deciding, and a starred conversation is protected from deletion.
     const mkApi = (over: Partial<Conversation>, opts: { inMemory?: boolean } = {}) => {
       const c = conv({ id: "cx", threadId: "cx", ...over });
       const durable = new Map<string, Conversation>([["cx", c]]); // "exists" (hydratable)
-      const memory = new Map<string, Conversation>();             // in THIS pod's memory
+      const memory = new Map<string, Conversation>();             // in this pod's memory
       if (opts.inMemory) memory.set("cx", c);
       const sessions = {
         ...fakeSessions(),
         get: (id: string) => memory.get(id),
-        // Faithful ensureReadable: hydrates a durable conversation INTO memory so the
-        // subsequent get() succeeds (the real behavior the routes rely on). Returns whether
-        // it now exists in memory.
+        // Hydrates a durable conversation into memory so the subsequent get() succeeds.
         ensureReadable: vi.fn(async (id: string) => {
           if (durable.has(id)) memory.set(id, durable.get(id)!);
           return memory.has(id);

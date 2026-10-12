@@ -1,13 +1,9 @@
-# Example platform configuration — a reference for deploying kubenix-agent-manager.
+# Example platform configuration: a kubenix module that imports
+# modules/platform.nix and sets the `scooter.*` options with every feature on.
 #
-# This is a kubenix module that imports modules/platform.nix and sets the
-# `scooter.*` options with EVERY feature turned on (agent-host, broker,
-# webhooks, UI, ingress, skills). Use it as a starting point for your own
-# deployment, and read modules/platform.nix for the full option set.
-#
-# It's also what `just check-manifests` renders (see examples/check.nix) — so it
-# doubles as a render check: if a change drops a resource or breaks eval, the
-# example stops rendering and CI fails.
+# Use it as a starting point for a deployment, and read modules/platform.nix for
+# the full option set. It is also what `just check-manifests` renders through
+# examples/check.nix, so a change that breaks eval or drops a resource fails CI.
 { ... }:
 {
   # No platform.nix import: evalPlatform supplies it.
@@ -18,28 +14,19 @@
   scooter = {
     namespace = "agent-sandbox";
 
-    # The HS256 key for CONVERSATION TOKENS — the credential naming which conversation
-    # an MCP caller acts for. Signed by the agent-host, verified by both it and the
-    # broker. Create it out-of-band:
-    #   kubectl create secret generic agent-conv-token-secret \
-    #     --from-literal=secret=$(openssl rand -hex 32)
-    # Wired unconditionally with no `optional`, so a missing Secret stops the pod
-    # starting rather than leaving the MCP endpoint accepting any conversation. See #700.
+    # The HS256 key for conversation tokens, created out-of-band with
+    # `kubectl create secret generic agent-conv-token-secret --from-literal=secret=$(openssl rand -hex 32)`.
     convTokenSecret = "agent-conv-token-secret";
 
-    # Images. registryPrefix expands to <prefix>agent-host:latest etc.; empty =
-    # bare local names for kind/k3s. Per-image options override it.
+    # An empty registryPrefix means bare local image names for kind/k3s.
     registryPrefix = "";
     pullPolicy = "IfNotPresent";
 
-    # Real `goose acp` would need IRSA + a model; fakeAgent runs the dummy agent
-    # so this example renders without cloud config.
+    # The dummy agent lets this example render without cloud config.
     fakeAgent = true;
 
-    # Per-sandbox pod sizing. Omit (null) for the same Guaranteed default shown
-    # here — the scheduler RESERVES the full request per sandbox, so on small
-    # clusters (CI runners) size this down or a second concurrent sandbox never
-    # schedules (Insufficient cpu). An idle sandbox measures ~0 CPU / ~40Mi.
+    # The scheduler reserves the full request per sandbox, so size this down on
+    # small clusters.
     sandboxResources = {
       requests = { cpu = "2"; memory = "4Gi"; };
       limits = { cpu = "2"; memory = "4Gi"; };
@@ -48,10 +35,8 @@
     agent = {
       name = "Scooter"; # the agent's user-facing identity
       provider = "aws_bedrock";
-      # The model catalog, PROVIDER-FIRST: provider -> model id -> options. Model ids are
-      # provider-specific namespaces (Bedrock ids under "goose"; API ids under "claude-code" /
-      # "byoc"), so the provider is the outer key and each group marks its own `default`.
-      # `hint` guides the agent's own model choice (surfaced by the list_models MCP tool).
+      # The model catalog keyed provider -> model id, each group marking its own
+      # `default`, with `hint` guiding the agent's own model choice.
       availableModels = {
         goose = {
           "us.anthropic.claude-sonnet-4-6" = {
@@ -68,7 +53,6 @@
       region = "us-east-1";
 
       # Skills injected into the agent as .goosehints (filename -> markdown).
-      # Edit the ConfigMap to add/change a skill — no image rebuild.
       skills = {
         "example-repo.md" = ''
           ---
@@ -84,23 +68,16 @@
       enable = true;
       testProvider = true; # whoami + test git-credential transports
 
-      # The agent-facing MCP endpoint: contrib-contributed agent tools, scoped per
-      # conversation by a conversation token (see #700). On by default; stated here
-      # because the manifest coverage check requires the example to exercise every
-      # option namespace. It serves whatever tools the SHIPPED contribs contribute.
+      # The agent-facing MCP endpoint, on by default and stated here because the
+      # coverage check requires the example to exercise every option namespace.
       mcp.enable = true;
 
-      # Static shares: agents publish static bundles the broker serves at
-      # /s/<uuid>/ and the UI embeds. Persists to the shared Postgres `broker` DB.
-      # publicBaseUrl/frameAncestors default to https://<ingress.host>.
+      # Static shares: agents publish static bundles the broker serves at /s/<uuid>/,
+      # persisted in the shared Postgres `broker` DB.
       shares.enable = true;
     };
 
-    # Deployment-supplied sandbox extras (generic — the platform doesn't know what
-    # they're for). `configFiles` mounts config FILES as a flat dir at
-    # /etc/agent-sandbox/config; use it (not `env`) for multi-line config a tool
-    # reads as a file — ConfigMap data is mounted byte-for-byte, sidestepping the
-    # CRD controller's env-var newline corruption.
+    # Config files mounted byte-for-byte as a flat dir at /etc/agent-sandbox/config.
     deployTools.configFiles = {
       "nix.conf" = ''
         extra-substituters = http://atticd.nix-cache.svc.cluster.local:8080/itops
@@ -116,26 +93,20 @@
     # Conversation UI (nginx serving assistant-ui + proxying the agent-host API).
     ui.enable = true;
 
-    # Bring-your-own-Claude: ONE knob. This deploys the BYOC controller, exposes /byoc on the
-    # UI's ingress host (a separate, deliberately UNAUTHENTICATED Ingress object — the container
-    # has no browser session; the join token, then its device key, is the gate), enables the
-    # agent-host's remote-agent routes + Settings UI, and derives the public URL the container
-    # dials. Override byoc.ingress.host for a dedicated hostname.
+    # Bring-your-own-Claude: deploys the controller, the unauthenticated /byoc
+    # Ingress and the agent-host's remote-agent routes.
     byoc.enable = true;
 
-    # Public ingress — a generic networking.k8s.io/v1 Ingress; bring your own
-    # controller via className + annotations. The agent-host trusts an identity
-    # header the ingress sets, so your AUTH + header-setting config goes in
-    # `annotations` (here: an nginx external-auth + a forwarded header — adapt to
-    # your controller, e.g. ALB cert-arn/scheme, an OIDC proxy, etc.).
+    # The agent-host trusts an identity header the ingress sets, so auth config
+    # goes in `annotations`.
     ingress = {
       enable = true;
       host = "chat.example.com";
       className = "nginx";
       annotations = {
         "cert-manager.io/cluster-issuer" = "letsencrypt";
-        # Example: gate the UI/API behind an external auth service that injects
-        # x-auth-user (the header the agent-host trusts). Replace for your setup.
+        # An external auth service that injects x-auth-user, the header the
+        # agent-host trusts.
         "nginx.ingress.kubernetes.io/auth-url" = "https://auth.example.com/verify";
         "nginx.ingress.kubernetes.io/auth-response-headers" = "x-auth-user,x-auth-email";
       };
@@ -143,71 +114,47 @@
       tlsSecretName = "chat-tls";
     };
 
-    # Warm /nix/store PVC pool controller: pre-warms overlay-upper PVCs so a fresh
-    # conversation finds common tools already built. Off in prod by default (the pool
-    # is a hit-rate optimization, not a correctness dependency); enabled here so the
-    # render check exercises its Deployment + RBAC.
+    # Pre-warms overlay-upper PVCs so a fresh conversation finds common tools built.
     warmStore = {
       enable = true;
       goldenExpr = "nixpkgs#awscli2 nixpkgs#nodejs";
     };
 
-    # The sandbox size menu. Each preset renders requests == limits (Guaranteed QoS),
-    # so a sandbox is hard-capped at what it reserved and one runaway pod can't starve
-    # its neighbours. This map is the ONLY set of sizes the UI dropdown offers and the
-    # only set the agent's set_sandbox_resources will accept — a deployment therefore
-    # can't be asked for a shape its nodes can't schedule. `hint` is shown to the agent
-    # so it picks by workload rather than by guessing at numbers. The built-in table is
-    # just tiny + medium; this overrides it to show a deployment opting into bigger and
-    # GPU sizes, which also makes the render check exercise the wiring.
+    # The sandbox size menu: the only shapes the UI offers and the agent may
+    # request, each rendered with requests == limits.
     sandboxSizes = {
       small = { cpu = "1"; memory = "2Gi"; hint = "A single service, small repos."; };
-      # Exactly one preset carries `default = true` — the size a new sandbox comes up
-      # with. Marking none, or more than one, fails the render with a named error.
+      # Exactly one preset carries `default = true`.
       medium = { cpu = "2"; memory = "4Gi"; hint = "Builds and test suites."; default = true; };
       large = { cpu = "4"; memory = "16Gi"; hint = "Parallel builds, large test runs."; };
-      # A GPU preset renders nvidia.com/gpu on BOTH sides (k8s requires request == limit
-      # for extended resources). Drop it on a cluster with no GPU nodes.
+      # Drop the GPU preset on a cluster with no GPU nodes.
       gpu-small = { cpu = "4"; memory = "16Gi"; gpu = 1; hint = "Local model inference."; };
     };
 
-    # Fleet sizing + lifecycle. `replicas` is the agent-host floor (the conversation
-    # controller autoscales above it to fit live demand); `statelessReplicas` sizes the
-    # stateless services (router/UI). An idle conversation suspends after idleSuspendMs —
-    # its sandbox pod goes away, the Sandbox object and volumes remain, and the next prompt
-    # revives it with its transcript. retentionMaxAgeMs = 0 disables destructive auto-reaping
-    # (starred conversations are exempt from it regardless).
+    # `replicas` is the agent-host floor the controller scales above, and
+    # retentionMaxAgeMs = 0 disables auto-reaping.
     replicas = 2;
     statelessReplicas = 2;
     idleSuspendMs = 30 * 60 * 1000;
     retentionMaxAgeMs = 0;
 
-    # Scheduled runs: cron-style tasks that prompt a conversation on a timer. The relay key
-    # authenticates the scheduler's calls into the agent-host (create it out-of-band; empty
-    # here would disable the relay). Scheduled runs deliberately never consume a user's
-    # personal BYO subscription — they take the platform's floor model.
+    # Cron-style tasks that prompt a conversation; the relay key authenticates
+    # the scheduler's calls into the agent-host.
     scheduler = {
       enable = true;
       tickSeconds = 30;
       relayKey = "change-me-or-provide-via-secret";
     };
 
-    # Shared-database migrations: on deploy, a Job applies the Atlas migrations under
-    # lib/sql to each per-service database (adopting the existing tables via
-    # --baseline). On by default; shown explicitly so the render check exercises it.
+    # On by default; shown so the render check exercises it.
     dbMigrate.enable = true;
 
-    # One-shot event-log backfill: a Job that loads conversation history off the mirror PVC
-    # into Postgres during the PVC→DB cutover. EPHEMERAL — a real deploy turns this ON only for
-    # the migration, verifies the report, then turns it OFF (see modules/event-backfill.nix).
-    # Enabled here (with the PVC retained, which the assert requires) so the render check
-    # exercises the Job + its DB wiring; the historyMirror is on by default.
+    # The one-shot backfill Job (see modules/event-backfill.nix) is enabled here,
+    # with the PVC retained as it requires, so the render check exercises it.
     eventBackfill.enable = true;
     conversationController.historyMirror.retainForMigration = true;
 
-    # OpenTelemetry metrics + per-model cost attribution. OFF by default (an OTLP endpoint is
-    # a deployment choice); enabled here so the render check exercises the env wiring. Prices
-    # are per MILLION tokens and feed the cost metric — keep them in sync with your provider.
+    # OpenTelemetry metrics with per-model prices per million tokens.
     observability.otel = {
       enable = true;
       environment = "example";
@@ -220,8 +167,8 @@
       };
     };
 
-    # Webhooks receiver (GitHub/Slack/…): its own host + NO auth (providers sign
-    # their requests). Generic ingress under scooter.webhooks.ingress.
+    # The webhooks receiver gets its own host with no auth, since providers sign
+    # their requests.
     webhooks.ingress = {
       enable = true;
       host = "scooter.example.com";
@@ -246,9 +193,8 @@
     kagi.enable = true;
     slack.enable = true;
 
-    # Datadog provider: proxies /datadog/* -> https://api.<site> with the two
-    # keys injected, so the agent can query metrics/logs/monitors without
-    # seeing them. Point the secrets at a Secret in the broker namespace.
+    # Datadog provider: proxies /datadog/* -> https://api.<site> with the two keys
+    # injected from a Secret in the broker namespace.
     datadog = {
       site = "datadoghq.com";
       apiKeySecret = { name = "datadog-keys"; key = "DATADOG_API_KEY"; };
@@ -256,13 +202,11 @@
     };
 
     # Airtable provider: proxies /airtable/* -> https://api.airtable.com with a
-    # personal access token injected, so the agent can read/write bases without
-    # seeing it. The PAT's own scopes + base grants bound what it can reach.
+    # personal access token injected, bounded by the PAT's own scopes.
     airtable.tokenSecret = { name = "airtable-token"; key = "AIRTABLE_TOKEN"; };
 
-    # AWS permissions broker: dynamic, approval-gated STS access per account. The
-    # account registry is rendered into a ConfigMap; the broker pod carries a
-    # checksum/aws-accounts annotation so editing an account auto-rolls the pod.
+    # AWS permissions broker: approval-gated STS access per account, with the
+    # registry rendered into a ConfigMap whose checksum annotation rolls the pod.
     aws.accounts.readonly-sandbox = {
       account_id = "123456789012";
       broker_role_arn = "arn:aws:iam::123456789012:role/agent-token-broker-base";
@@ -274,8 +218,7 @@
     # Both search providers: not exclusive, one tool each.
     brave.apiKeySecret = { name = "brave-search-key"; key = "BRAVE_SEARCH_API_KEY"; };
     kagi.apiKeySecret = { name = "kagi-search-key"; key = "KAGI_API_KEY"; };
-    # The keyless one: no secret to configure, so shipping it is the whole config.
-    # Keyless but least reliable; prefer brave when paying.
+    # duckduckgo is keyless, so shipping it is the whole config.
 
     # siteUrl only builds the human /browse/{KEY} link.
     jira.siteUrl = "https://example.atlassian.net";

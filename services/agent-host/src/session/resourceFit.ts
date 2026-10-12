@@ -1,25 +1,14 @@
 /**
- * Does a declared workload fit the sandbox it's about to run in?
- *
- * A web service declares what it needs (webServices.<name>.resources in the
- * sandbox-os config). That number is ADVISORY — it never sizes the pod and never
- * blocks a start. Its only job is to turn the worst failure mode in this system,
- * "my notebook died and I don't know why", into "marimo wants 8Gi, this sandbox is
- * 4Gi". An OOM kill leaves no message in the service's own logs, so without this
- * comparison the gap is close to undiagnosable from inside the pod.
- *
- * Compared against the sandbox's LIMITS, not its requests: limits are the hard cap
- * the kernel enforces, so that's what a workload actually gets killed against.
- *
- * Every function here is total — an unparseable or absent quantity yields "can't
- * judge" (no shortfall) rather than a guess, because a false "won't fit" warning
- * trains the reader to ignore a true one.
+ * Does a declared workload fit the sandbox it is about to run in? A web service's
+ * declared resources are advisory: they never size the pod or block a start, and only
+ * turn "my notebook died" into "marimo wants 8Gi, this sandbox is 4Gi". Needs are compared
+ * against the sandbox's limits, the hard cap a workload is killed against. Every function
+ * is total: an unparseable or absent quantity yields no shortfall rather than a guess.
  */
 
 import type { SandboxResources } from "./resources.js";
 
-/** What a workload says it needs. Every dimension optional — an omitted one means
- *  "no opinion", which is different from zero. */
+/** What a workload says it needs; an omitted dimension means "no opinion", not zero. */
 export interface ResourceNeed {
   cpu?: string;
   memory?: string;
@@ -32,7 +21,7 @@ const MEMORY_UNITS: Record<string, number> = {
   K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18,
 };
 
-/** A k8s cpu quantity → millicores. "2" → 2000, "500m" → 500. undefined if unparseable. */
+/** A k8s cpu quantity in millicores ("2" is 2000, "500m" is 500), or undefined if unparseable. */
 export function cpuToMillicores(q: string | undefined): number | undefined {
   if (typeof q !== "string") return undefined;
   const m = /^(\d+(?:\.\d+)?)(m?)$/.exec(q.trim());
@@ -42,7 +31,7 @@ export function cpuToMillicores(q: string | undefined): number | undefined {
   return m[2] === "m" ? n : n * 1000;
 }
 
-/** A k8s memory quantity → bytes. "1Gi" → 1073741824, "512Mi", "2G", bare "1024". */
+/** A k8s memory quantity in bytes ("1Gi", "512Mi", "2G", bare "1024"), or undefined if unparseable. */
 export function memoryToBytes(q: string | undefined): number | undefined {
   if (typeof q !== "string") return undefined;
   const m = /^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$/.exec(q.trim());
@@ -62,9 +51,8 @@ export interface Shortfall {
 }
 
 /**
- * The dimensions where `need` exceeds the sandbox's limits. Empty = fits, or we
- * couldn't tell. A dimension the sandbox doesn't cap is unbounded, so it never
- * produces a shortfall.
+ * The dimensions where `need` exceeds the sandbox's limits; empty means it fits or we could
+ * not tell, and an uncapped dimension never produces a shortfall.
  */
 export function shortfalls(need: ResourceNeed, have: SandboxResources | undefined): Shortfall[] {
   const limits = have?.limits;
@@ -83,9 +71,7 @@ export function shortfalls(need: ResourceNeed, have: SandboxResources | undefine
     out.push({ dimension: "memory", need: need.memory!, have: limits.memory! });
   }
 
-  // An absent gpu limit means zero GPUs, not "unbounded" — a sandbox without the
-  // extended resource cannot run a GPU workload at all, so any positive need is a
-  // shortfall. This is the one dimension where absence is a hard no.
+  // An absent gpu limit means zero GPUs, not unbounded, so any positive need is a shortfall.
   if (typeof need.gpu === "number" && need.gpu > 0) {
     const haveGpu = limits.gpu ?? 0;
     if (need.gpu > haveGpu) {
@@ -96,18 +82,16 @@ export function shortfalls(need: ResourceNeed, have: SandboxResources | undefine
   return out;
 }
 
-/** Human one-liner for a set of shortfalls, or undefined when it fits. The same
- *  sentence is shown to the agent and in the UI, so they never disagree. */
-/** The same gap in a few words, for the Sandbox tab's service card — ~120px wide at
- *  the panel's size, where fitAdvice()'s full sentence would wrap to nine lines. The
- *  card pairs this with fitAdvice() as its tooltip, so the terse form never has to
- *  carry the whole explanation. */
+/** The same gap in a few words for the Sandbox tab's service card, which pairs it with fitAdvice()
+ *  as its tooltip. */
 export function fitSummary(need: ResourceNeed, have: SandboxResources | undefined): string | undefined {
   const gaps = shortfalls(need, have);
   if (gaps.length === 0) return undefined;
   return `Needs ${gaps.map((g) => (g.dimension === "gpu" ? `${g.need} GPU` : `${g.need} ${g.dimension}`)).join(" + ")}`;
 }
 
+/** Human one-liner for a set of shortfalls, or undefined when it fits; the same sentence is shown
+ *  to the agent and in the UI. */
 export function fitAdvice(
   serviceName: string,
   need: ResourceNeed,

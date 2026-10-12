@@ -20,7 +20,7 @@ describe("summarizeConversation", () => {
     };
     const out = await summarizeConversation(turns, { model: "m", oauthToken: "t", queryImpl });
     expect(out).toBe("Recap: deployed to odin.");
-    // No tools / MCP servers — a pure completion.
+    // A pure completion: no tools or MCP servers.
     expect(calls[0].options.allowedTools).toEqual([]);
     expect(calls[0].options.mcpServers).toBeUndefined();
     expect(calls[0].prompt).toContain("set up the deploy");

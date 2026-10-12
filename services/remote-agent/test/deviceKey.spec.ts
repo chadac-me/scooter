@@ -1,10 +1,7 @@
 /**
- * Tier 1 contract — the container's device identity (§P).
- *
- * The behaviours that decide whether a laptop reconnects after sleeping: the key must PERSIST
- * across restarts (it lives in the volume), a corrupt file must degrade to re-registration rather
- * than crash-loop the container, and the signature must verify against the public half the cloud
- * stored.
+ * Tier 1 contract for the container's device identity: the key persists across restarts,
+ * a corrupt file degrades to re-registration rather than a crash-loop, and the signature
+ * verifies against the public half the cloud stored.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -37,7 +34,7 @@ describe("container device key", () => {
     const key = generateDeviceKey();
     const nonce = "server-issued-nonce";
     const sig = signChallenge(key.privateKeyPem, nonce);
-    // Exactly what the controller does on the other end.
+    // What the controller does on the other end.
     const ok = cryptoVerify(null, Buffer.from(nonce), createPublicKey(key.publicKeyPem), Buffer.from(sig, "base64"));
     expect(ok).toBe(true);
   });
@@ -61,11 +58,11 @@ describe("container device key", () => {
   it("PERSISTS across a restart — the whole point of storing it in the volume", async () => {
     const key = generateDeviceKey();
     await saveDeviceIdentity({ deviceId: "dev-1", ...key });
-    // "Restart": a fresh read of the same path.
+    // A restart is a fresh read of the same path.
     const loaded = await loadDeviceIdentity();
     expect(loaded?.deviceId).toBe("dev-1");
     expect(loaded?.privateKeyPem).toBe(key.privateKeyPem);
-    // And the reloaded key still signs verifiably — not just string-equal, actually usable.
+    // The reloaded key must still sign verifiably.
     const sig = signChallenge(loaded!.privateKeyPem, "n");
     expect(cryptoVerify(null, Buffer.from("n"), createPublicKey(loaded!.publicKeyPem), Buffer.from(sig, "base64"))).toBe(true);
   });
@@ -80,8 +77,7 @@ describe("container device key", () => {
   });
 
   it("a CORRUPT key file degrades to re-registration, never a crash-loop", async () => {
-    // `--restart always` means a throw here would spin forever. Returning undefined lets the
-    // container fall back to the join-token path and re-register.
+    // A throw here would spin the restarting container forever.
     writeFileSync(deviceKeyPath(), "{ this is not json");
     expect(await loadDeviceIdentity()).toBeUndefined();
   });
@@ -92,7 +88,7 @@ describe("container device key", () => {
   });
 
   it("a file whose private key is unparseable degrades to re-registration", async () => {
-    // Truncated/rewritten by a bad write. Must not throw on load.
+    // A truncated key must not throw on load.
     writeFileSync(
       deviceKeyPath(),
       JSON.stringify({ deviceId: "dev-1", privateKeyPem: "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----", publicKeyPem: "x" }),

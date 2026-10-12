@@ -1,17 +1,11 @@
-# Composition test for registry-modules.nix — the SHARED-registry module fetch.
-#
-# Pure EVAL (no VM): a file:// tarball fixture of <id>/module.nix + an ids-list file,
-# evaluate registry-modules with the test-only overrides, and assert it imports the
-# attached ids' module.nix. Fail-safe: no ids file -> imports nothing.
-#
-# The full in-pod fetch+switch is Tier-2 (real broker); this proves the read-ids +
-# fetch + import LOGIC fast.
+# Pure eval (no VM) for registry-modules.nix, the shared-registry module fetch:
+# with a file:// tarball of <id>/module.nix and an ids-list file it imports the
+# attached ids' modules, and with no ids file it imports nothing.
 
 { pkgs, lib, sandboxModule ? null }:
 
 let
-  # A fixture tarball laid out as the broker's /modules.tar.gz?ids= returns:
-  # <id>/module.nix per attached module.
+  # A fixture tarball laid out as the broker's /modules.tar.gz?ids= returns it.
   fixture = pkgs.runCommand "registry-modules-fixture.tar.gz" { } ''
     mkdir -p m/alpha m/beta
     printf '%s' '{ ... }: { environment.etc."scooter-reg-alpha".text = "a"; }' > m/alpha/module.nix
@@ -19,7 +13,7 @@ let
     tar czf $out -C m .
   '';
 
-  # The attached-ids file (a JSON list) — both alpha + beta attached.
+  # The attached-ids file.
   idsFile = pkgs.writeText "registry-ids.json" (builtins.toJSON [ "alpha" "beta" ]);
 in
 pkgs.runCommand "dev-env-registry-modules"
@@ -30,7 +24,7 @@ pkgs.runCommand "dev-env-registry-modules"
   export NIX_STORE_DIR=$TMPDIR/store
   export NIX_STATE_DIR=$TMPDIR/state
 
-  # (1) ids file + tarball override -> imports both attached modules.
+  # (1) With the ids file and tarball override, both attached modules are imported.
   imported=$(SCOOTER_REGISTRY_IDS_FILE="${idsFile}" SCOOTER_REGISTRY_URL="file://${fixture}" \
     nix eval --impure --offline --extra-experimental-features 'nix-command flakes' --json --expr '
       let
@@ -42,7 +36,7 @@ pkgs.runCommand "dev-env-registry-modules"
   echo "$imported" | grep -q alpha || { echo "FAIL: alpha not imported"; exit 1; }
   echo "$imported" | grep -q beta  || { echo "FAIL: beta not imported"; exit 1; }
 
-  # (2) Fail-safe: no ids file -> imports NOTHING.
+  # (2) With no ids file, nothing is imported.
   empty=$(SCOOTER_REGISTRY_IDS_FILE="$TMPDIR/none.json" SCOOTER_REGISTRY_URL="file://${fixture}" \
     nix eval --impure --offline --extra-experimental-features 'nix-command flakes' --json --expr '
       let

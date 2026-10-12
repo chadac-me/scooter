@@ -1,22 +1,20 @@
 /**
- * Tier 1 — goose approve-mode back-pressure: auto-answer a permission request
- * (allow normally; reject when a priority item is waiting) WITHOUT a UI prompt.
- * See todo/docs/SUBAGENT_BACKPRESSURE.md.
+ * goose approve-mode back-pressure: a tool-gate permission request is auto-answered
+ * without a UI prompt, allowed normally and rejected when a priority item is waiting.
  */
 
 import { describe, it, expect } from "vitest";
 
 import { autoAnswerPermission, isToolGate } from "../../src/acp/client.js";
 
-// A goose approve-mode TOOL GATE: allow + reject options for running a tool.
+// A goose approve-mode tool gate: allow and reject options for running a tool.
 const OPTS = [
   { optionId: "allow", kind: "allow_once" },
   { optionId: "allow-always", kind: "allow_always" },
   { optionId: "reject", kind: "reject_once" },
 ];
 
-// An AGENT-PRESENTED CHOICE the user must answer (the "?pick a color" flow / a
-// real approval): distinct semantic options, NO reject-kind — NOT a tool gate.
+// An agent-presented choice the user must answer: distinct options with no reject kind.
 const USER_CHOICE = [
   { optionId: "red", kind: "allow_once" },
   { optionId: "green", kind: "allow_once" },
@@ -26,8 +24,8 @@ const USER_CHOICE = [
 describe("isToolGate", () => {
   it("is TRUE only when both an allow-kind AND a reject-kind option are present", () => {
     expect(isToolGate(OPTS)).toBe(true);
-    expect(isToolGate(USER_CHOICE)).toBe(false); // no reject → a user choice
-    expect(isToolGate([{ kind: "reject_once" }])).toBe(false); // no allow
+    expect(isToolGate(USER_CHOICE)).toBe(false);
+    expect(isToolGate([{ kind: "reject_once" }])).toBe(false);
     expect(isToolGate([])).toBe(false);
   });
 });
@@ -44,8 +42,6 @@ describe("autoAnswerPermission (goose approve-mode)", () => {
   });
 
   it("does NOT auto-answer an agent-presented CHOICE — returns undefined so it reaches the UI", () => {
-    // The regression this guards: back-pressure silently auto-picked an option for
-    // the "?pick a color" interrupt, so the user never saw the approval.
     expect(autoAnswerPermission(USER_CHOICE, false)).toBeUndefined();
     expect(autoAnswerPermission(USER_CHOICE, true)).toBeUndefined();
   });

@@ -1,11 +1,7 @@
 /**
- * UI client — the reusable "general library" wrapping assistant-ui's native
- * AG-UI runtime, pointed at the agent-host (NOT at an LLM provider).
- *
- * The agent-host exposes the standard AG-UI HttpAgent protocol at POST /agui:
- * a RunAgentInput in, an SSE stream of AG-UI events out. So we just construct
- * an @ag-ui/client HttpAgent against it; assistant-ui's useAgUiRuntime renders
- * the events (messages, tool calls, reasoning) with no custom transport code.
+ * The agent-host HTTP client: an @ag-ui/client HttpAgent against POST /agui plus
+ * typed fetch helpers for the management API (conversations, models, links, web
+ * services, sandbox sizing, scheduled tasks, shares, remote agents).
  */
 
 import { HttpAgent } from "@ag-ui/client";
@@ -30,20 +26,15 @@ export interface ConversationView {
   id: string;
   threadId: string;
   title: string;
-  /** Sandbox lifecycle state. "failed" = the sandbox was force-deleted after the
-   *  controller's zombie-repair escalation gave up (terminal, no pod) — the router
-   *  maps CR phase=Failed to it so a dead conversation isn't shown as "running". */
+  /** Sandbox lifecycle state, where "failed" is terminal with no pod. */
   status: "running" | "suspended" | "failed" | "ended";
   createdAt: number;
   lastActivityAt: number;
   /** The conversation's model (undefined = host default). */
   model?: string;
-  /** Distinct providers this conversation links to ("github"|"slack"|…), for a
-   *  per-row icon in the sidebar. [] when it has no linked resources. */
+  /** Distinct providers this conversation links to, for the sidebar icons. */
   sources?: string[];
-  /** Compact summary of the conversation's linked resources (source/type/title/url),
-   *  so the sidebar can show the linked PR/MR/thread NAME instead of the title, search
-   *  by it, and filter by provider — without a per-row /links fetch. [] when none. */
+  /** Compact summary of the conversation's linked resources, so the sidebar needs no per-row /links fetch. */
   links?: ConversationLink[];
 }
 
@@ -51,18 +42,13 @@ export interface ConversationView {
 export interface ModelCatalog {
   default: string | null;
   available: string[];
-  /** Model id -> the provider tags that offer it ("byoc"|"goose"|"claude-code"|…).
-   *  [] / absent = offered on every provider (legacy, hint-less catalogs). Lets the
-   *  picker group each model under its source provider. */
+  /** Model id -> the provider tags that offer it; empty or absent means every provider. */
   providers?: Record<string, string[]>;
-  /** model id -> the provider tags it is the DEFAULT for. Lets the picker mark
-   *  "(default)" PER GROUP; comparing against the single global `default` labelled
-   *  a model that is default on two providers under both. */
+  /** Model id -> the provider tags it is the default for, so the picker can mark "(default)" per group. */
   defaultFor?: Record<string, string[]>;
 }
 
-/** Fetch the offered models. Returns an empty catalog if the server is
- *  unreachable or has none configured (the picker then hides itself). */
+/** Fetch the offered models, returning an empty catalog when unreachable or unconfigured. */
 export async function loadModels(config: AgentHostConfig): Promise<ModelCatalog> {
   try {
     const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/models`, {
@@ -83,8 +69,7 @@ export interface ConversationLink {
   title?: string;
 }
 
-/** Load a conversation's external resource links (the PR/issue/thread it came
- *  from) for the linked-resources panel. */
+/** Load a conversation's external resource links for the linked-resources panel. */
 export async function loadLinks(
   config: AgentHostConfig,
   conversationId: string,
@@ -95,9 +80,7 @@ export async function loadLinks(
       { headers: config.token ? { Authorization: `Bearer ${config.token}` } : undefined },
     );
     if (!res.ok) {
-      // Finding #24: a non-OK response is a real failure, not "no links" — log it
-      // so an empty links panel that's actually an error is diagnosable (the UI
-      // still degrades to [] rather than breaking).
+      // A non-OK response is logged so an empty links panel that is really an error stays diagnosable.
       console.warn(`[client] loadLinks ${conversationId}: HTTP ${res.status}`);
       return [];
     }
@@ -108,25 +91,20 @@ export async function loadLinks(
   }
 }
 
-/** A web service running in the conversation's sandbox, reverse-proxied at
- *  /c/<id>/<name>/ (GET /conversations/:id/web-services). */
+/** A web service running in the conversation's sandbox, reverse-proxied at /c/<id>/<name>/. */
 export interface WebService {
   name: string;
   displayName: string;
   /** Path to open the service in the browser (under the full threadId). */
   url: string;
   running: boolean;
-  /** One sentence naming the gap when this service declares more cpu/memory/gpu than
-   *  the sandbox caps at. Advisory — the service still starts. Absent when it fits, or
-   *  when we can't judge (nothing declared / the size is unknown). */
+  /** Advisory sentence naming the gap when this service declares more resources than the sandbox caps at. */
   fit?: string;
-  /** The same gap in a few words ("Needs 8Gi memory"), for the service card, which is
-   *  ~120px wide. Present exactly when `fit` is. */
+  /** The same gap in a few words for the service card, present exactly when `fit` is. */
   fitShort?: string;
 }
 
-/** List the conversation's declared web services (marimo/xterm/…) with liveness.
- *  Empty when none declared or the server/pod is unreachable. */
+/** List the conversation's declared web services with liveness, empty when unreachable. */
 export async function loadWebServices(
   config: AgentHostConfig,
   conversationId: string,
@@ -160,15 +138,13 @@ export interface RegistryModule {
   attached?: boolean;
 }
 
-/** Result of a module-registry fetch — `configured` distinguishes "no module
- *  registry (fake/local, or pod asleep)" from "configured but nothing found". */
+/** Result of a module-registry fetch, where `configured` distinguishes no registry from nothing found. */
 export interface ModuleSearchResult {
   configured: boolean;
   modules: RegistryModule[];
 }
 
-/** Search the broker module catalog (caller's own + all public) for a conversation.
- *  Empty query = all. 501 → { configured:false }. Needs a running pod. */
+/** Search the broker module catalog for a conversation (empty query = all, 501 = not configured). */
 export async function searchModules(
   config: AgentHostConfig,
   conversationId: string,
@@ -191,9 +167,7 @@ export async function searchModules(
   }
 }
 
-/** Manually compact a conversation (summarize older turns → continue on
- *  summary + recent). Resolves { compacted } — false when too short to compact.
- *  Throws with the server's message on failure (leaves the conversation unchanged). */
+/** Manually compact a conversation, resolving { compacted: false } when it is too short and throwing with the server's message on failure. */
 export async function compactConversation(
   config: AgentHostConfig,
   conversationId: string,
@@ -209,8 +183,7 @@ export async function compactConversation(
   return (await res.json()) as { compacted: boolean; summarizedTurns?: number; keptRuns?: number };
 }
 
-/** Install (attach) a registry module by name-or-id + re-converge. Throws with the
- *  server's error message on failure (unknown module, pod asleep, switch error). */
+/** Install a registry module by name or id and re-converge, throwing with the server's message on failure. */
 export async function installModule(
   config: AgentHostConfig,
   conversationId: string,
@@ -227,8 +200,7 @@ export async function installModule(
   return ((await res.json()) as { message?: string }).message ?? `attached ${ref}`;
 }
 
-/** Start a web service (systemctl start via the agent-host). Resolves true once
- *  the start is issued (not once healthy — the caller polls/opens after). */
+/** Start a web service, resolving true once the start is issued rather than once healthy. */
 export async function startWebService(
   config: AgentHostConfig,
   conversationId: string,
@@ -247,8 +219,7 @@ export async function startWebService(
   }
 }
 
-/** Stop a web service (systemctl stop via the agent-host). Resolves true once the
- *  stop is issued. */
+/** Stop a web service, resolving true once the stop is issued. */
 export async function stopWebService(
   config: AgentHostConfig,
   conversationId: string,
@@ -267,13 +238,7 @@ export async function stopWebService(
   }
 }
 
-/** Resume (start) a suspended sandbox pod — POST /conversations/:id/resume, which
- *  revives the pod (mounts the PVCs). Returns the conversation's new status, or null
- *  on failure. Lets the user bring the pod up to reach services without prompting. */
-/** Create a conversation (POST /conversations) and return the id the SERVER assigned.
- *  The server owns conversation ids: a client-chosen id would become an event-log key and
- *  a k8s resource name. Returns null on failure so the caller can surface it rather than
- *  prompting an id that does not exist. */
+/** Create a conversation and return the id the server assigned, or null on failure. */
 export async function createConversation(
   config: AgentHostConfig,
   title?: string,
@@ -299,6 +264,7 @@ export async function createConversation(
   }
 }
 
+/** Resume a suspended sandbox pod, returning the conversation's new status or null on failure. */
 export async function resumeConversation(
   config: AgentHostConfig,
   conversationId: string,
@@ -319,8 +285,7 @@ export async function resumeConversation(
   }
 }
 
-/** Rename a conversation (PATCH /conversations/:id/title). Sets a USER title that the
- *  agent's <title> can no longer override. Returns the updated view, or null on error. */
+/** Rename a conversation with a user title the agent can no longer override, returning the updated view or null. */
 export async function renameConversation(
   config: AgentHostConfig,
   conversationId: string,
@@ -342,8 +307,7 @@ export async function renameConversation(
   }
 }
 
-/** Star / unstar a conversation (PATCH /conversations/:id/starred). Returns the
- *  updated view, or null on error. */
+/** Star or unstar a conversation, returning the updated view or null on error. */
 export async function setConversationStarred(
   config: AgentHostConfig,
   conversationId: string,
@@ -365,8 +329,7 @@ export async function setConversationStarred(
   }
 }
 
-/** One published static share (broker /shares), as the right-panel Shares tab shows it.
- *  The agent-host relays the broker's snake_case summary; loadShares maps it to camelCase. */
+/** One published static share as the Shares tab shows it, mapped to camelCase by loadShares. */
 export interface ShareView {
   uuid: string;
   url: string;
@@ -377,14 +340,12 @@ export interface ShareView {
 }
 
 export interface SharesResult {
-  /** false when the broker path isn't wired (local/fake) — the UI hides the tab then. */
+  /** False when the broker path is not wired, which hides the tab. */
   configured: boolean;
   shares: ShareView[];
 }
 
-/** List the static pages this conversation has published (GET /conversations/:id/shares).
- *  Read-only + best-effort: never throws, returns an empty (configured) result on error so
- *  the polling tab degrades quietly. 501 / configured:false => the feature isn't wired. */
+/** List the static pages this conversation has published, never throwing (501 = not configured). */
 export async function loadShares(
   config: AgentHostConfig,
   conversationId: string,
@@ -427,8 +388,7 @@ export async function loadShares(
   }
 }
 
-/** End + delete a conversation (DELETE /conversations/:id) — destroys the sandbox +
- *  PVCs and purges the record. Returns true on success (204/404 both mean "gone"). */
+/** End and delete a conversation, returning true when it is gone (204 or 404). */
 export async function deleteConversation(
   config: AgentHostConfig,
   conversationId: string,
@@ -445,8 +405,7 @@ export async function deleteConversation(
   }
 }
 
-/** Fetch the current status of one conversation (GET /conversations/:id) — a light
- *  poll used to track a resume through to "running". */
+/** Fetch one conversation's current status, used to poll a resume through to "running". */
 export async function loadConversationStatus(
   config: AgentHostConfig,
   conversationId: string,
@@ -463,10 +422,7 @@ export async function loadConversationStatus(
   }
 }
 
-/** Fetch the conversation's status AND actual pod readiness (GET /:id/ready). The
- *  status can be "running" while the pod is still ContainerCreating; `ready` is true
- *  only once the pod is actually up (exec succeeds) — so the UI can show "Starting…"
- *  in between instead of a premature "Running". */
+/** Fetch the conversation's status and actual pod readiness, since the status can be "running" while the pod is still starting. */
 export async function loadSandboxReady(
   config: AgentHostConfig,
   conversationId: string,
@@ -483,24 +439,20 @@ export async function loadSandboxReady(
   }
 }
 
-/** A resource quantity side (requests or limits): cpu/memory as k8s quantity
- *  strings ("500m", "1Gi"), gpu as a count. Any field may be absent. */
+/** One side of a resource allotment (requests or limits), with cpu/memory as k8s quantity strings and gpu as a count. */
 export interface ResourceQuantity {
   cpu?: string;
   memory?: string;
   gpu?: number;
 }
 
-/** The sandbox's resource allotment (GET /:id/resources). null = not available
- *  (no broker / fake mode) — the UI then omits the resources row. */
+/** The sandbox's resource allotment. */
 export interface SandboxResources {
   requests?: ResourceQuantity;
   limits?: ResourceQuantity;
 }
 
-/** Fetch the conversation's sandbox resource allotment (cpu/memory/gpu requests +
- *  limits), so the Sandbox tab can show the user what the pod is sized for. Returns
- *  null on any error / when the deployment doesn't expose it. */
+/** Fetch the conversation's sandbox resource allotment, or null when unavailable. */
 export async function loadSandboxResources(
   config: AgentHostConfig,
   conversationId: string,
@@ -518,28 +470,22 @@ export async function loadSandboxResources(
   }
 }
 
-/** One named size preset from the deployment's kubenix table. `gpu` is absent on
- *  CPU-only presets. */
+/** One named size preset from the deployment's kubenix table. */
 export interface SandboxSizePreset {
   cpu: string;
   memory: string;
   gpu?: number;
-  /** Deployment guidance for when to pick this size (kubenix
-   *  scooter.sandboxSizes.<name>.hint). Absent when the deploy set none. */
+  /** Deployment guidance for when to pick this size. */
   hint?: string;
 }
 
-/** The deployment's size presets (GET /sandbox-sizes) and which one is the default.
- *  An empty map = the deployment configured no presets, and the Sandbox tab hides
- *  the picker rather than offering an empty dropdown. */
+/** The deployment's size presets and which one is the default; an empty map hides the picker. */
 export interface SandboxSizes {
   sizes: Record<string, SandboxSizePreset>;
   default: string | null;
 }
 
-/** Fetch the deployment's named sandbox size presets so the Sandbox tab can offer a
- *  dropdown. Returns an empty map on any error / when the deployment doesn't expose
- *  them — the caller then omits the picker. */
+/** Fetch the deployment's named sandbox size presets, empty on error. */
 export async function loadSandboxSizes(config: AgentHostConfig): Promise<SandboxSizes> {
   const empty: SandboxSizes = { sizes: {}, default: null };
   try {
@@ -554,10 +500,7 @@ export async function loadSandboxSizes(config: AgentHostConfig): Promise<Sandbox
   }
 }
 
-/** Record a size preset for this conversation. Resolves to null on success, or the
- *  server's error message — the caller SHOWS it rather than silently reverting, so a
- *  rejected preset doesn't look like the click did nothing. Takes effect on the next
- *  sandbox restart, not immediately. */
+/** Record a size preset for this conversation (effective on the next sandbox restart), resolving to null or the server's error message. */
 export async function setSandboxSize(
   config: AgentHostConfig,
   conversationId: string,
@@ -583,19 +526,14 @@ export async function setSandboxSize(
   }
 }
 
-/**
- * Load ALL conversations from the agent-host so the sidebar survives a page
- * refresh and every conversation is listed/searchable (not just the ones this
- * browser tab created in memory).
- */
-/** The caller's identity (GET /whoami) — from the trusted ingress header. */
+/** The caller's identity from the trusted ingress header. */
 export interface Whoami {
   id: string;
   email: string | null;
   anonymous: boolean;
 }
 
-/** Fetch the caller's identity. Falls back to anonymous if unreachable. */
+/** Fetch the caller's identity, falling back to anonymous if unreachable. */
 export async function loadWhoami(config: AgentHostConfig): Promise<Whoami> {
   try {
     const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/whoami`, {
@@ -640,9 +578,7 @@ export interface ScheduledTaskInput {
   enabled?: boolean;
 }
 
-/** Result of a scheduled-tasks fetch — `configured` distinguishes "the scheduler
- *  isn't deployed" (501) from "you have no tasks" (200, []), so the settings page
- *  can show the right empty state. */
+/** Result of a scheduled-tasks fetch, where `configured` distinguishes a missing scheduler (501) from no tasks. */
 export interface ScheduledTasksResult {
   configured: boolean;
   tasks: ScheduledTaskView[];
@@ -651,7 +587,7 @@ export interface ScheduledTasksResult {
 const authHeaders = (config: AgentHostConfig): Record<string, string> =>
   config.token ? { Authorization: `Bearer ${config.token}` } : {};
 
-/** List the caller's scheduled tasks. 501 → { configured:false } (scheduler off). */
+/** List the caller's scheduled tasks (501 = scheduler not configured). */
 export async function loadScheduledTasks(config: AgentHostConfig): Promise<ScheduledTasksResult> {
   try {
     const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/scheduled-tasks`, {
@@ -677,15 +613,13 @@ export interface UserView {
   updatedAt?: string;
 }
 
-/** Result of a /users fetch — `configured` distinguishes "no identity store" (501)
- *  from "configured but nobody seen yet" (200, []), so the page shows the right
- *  empty state (mirrors ScheduledTasksResult). */
+/** Result of a /users fetch, where `configured` distinguishes a missing identity store (501) from no users. */
 export interface UsersResult {
   configured: boolean;
   users: UserView[];
 }
 
-/** List the learned Scooter users. 501 → { configured:false } (no identity store). */
+/** List the learned Scooter users (501 = no identity store). */
 export async function loadUsers(config: AgentHostConfig): Promise<UsersResult> {
   try {
     const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/users`, {
@@ -703,7 +637,7 @@ export async function loadUsers(config: AgentHostConfig): Promise<UsersResult> {
   }
 }
 
-/** Fetch one scheduled task with its recent run history. Null if not found. */
+/** Fetch one scheduled task with its recent run history, or null if not found. */
 export async function loadScheduledTask(
   config: AgentHostConfig,
   id: string,
@@ -715,7 +649,7 @@ export async function loadScheduledTask(
   return (await res.json()) as { task: ScheduledTaskView; runs: ScheduledTaskRun[] };
 }
 
-/** Create a scheduled task. Throws with the server's error message on failure. */
+/** Create a scheduled task, throwing with the server's error message on failure. */
 export async function createScheduledTask(
   config: AgentHostConfig,
   input: ScheduledTaskInput,
@@ -729,7 +663,7 @@ export async function createScheduledTask(
   return (await res.json()) as ScheduledTaskView;
 }
 
-/** Patch a scheduled task (any subset of fields). Throws on failure. */
+/** Patch any subset of a scheduled task's fields, throwing on failure. */
 export async function updateScheduledTask(
   config: AgentHostConfig,
   id: string,
@@ -744,7 +678,7 @@ export async function updateScheduledTask(
   return (await res.json()) as ScheduledTaskView;
 }
 
-/** Delete a scheduled task. Resolves true on success (204), false if not found. */
+/** Delete a scheduled task, resolving true on 204 and false if not found. */
 export async function deleteScheduledTask(config: AgentHostConfig, id: string): Promise<boolean> {
   const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/scheduled-tasks/${encodeURIComponent(id)}`, {
     method: "DELETE",
@@ -756,6 +690,7 @@ export async function deleteScheduledTask(config: AgentHostConfig, id: string): 
 /** Which conversations to list: the caller's own ("mine", default) or all. */
 export type ConversationScope = "mine" | "all";
 
+/** Load the conversations the sidebar lists. */
 export async function loadConversations(
   config: AgentHostConfig,
   scope: ConversationScope = "mine",
@@ -763,12 +698,7 @@ export async function loadConversations(
   return (await loadConversationsResult(config, scope)).conversations;
 }
 
-/**
- * Like loadConversations, but reports whether the server was REACHABLE — so a
- * caller can distinguish "the agent-host is down/restarting" (ok=false) from
- * "the server is up and genuinely has no conversations" (ok=true, []). The
- * initial-load retry uses this to keep retrying only while the server is down.
- */
+/** Like loadConversations, but also reports whether the server was reachable so a caller can retry only while it is down. */
 export async function loadConversationsResult(
   config: AgentHostConfig,
   scope: ConversationScope = "mine",
@@ -784,8 +714,7 @@ export async function loadConversationsResult(
   }
 }
 
-/** An image attached to a replayed message (from a MESSAGE_IMAGES event). The UI
- *  renders each via its `url` (GET /conversations/:id/assets/:assetId). */
+/** An image attached to a replayed message, rendered via its `url`. */
 export interface MessageImage {
   assetId: string;
   mimeType: string;
@@ -801,12 +730,7 @@ export interface AguiMessage {
   images?: MessageImage[];
 }
 
-/**
- * Load a conversation's history as AG-UI messages, so switching to (or reviving)
- * it shows its prior turns. The agent-host stores the conversation as a stream
- * of AG-UI events; fold the TEXT_MESSAGE_* events back into one message per
- * messageId (tool/reasoning events are rendered live, not replayed as text).
- */
+/** Load a conversation's history as AG-UI messages by folding its TEXT_MESSAGE_* events into one message per messageId. */
 export async function loadHistory(
   config: AgentHostConfig,
   conversationId: string,
@@ -820,10 +744,7 @@ export async function loadHistory(
       headers: config.token ? { Authorization: `Bearer ${config.token}` } : undefined,
     });
     if (!res.ok) {
-      // Finding #15: a non-OK history fetch is a real failure — reviving a real
-      // conversation would show a BLANK thread, indistinguishable from empty.
-      // Log it (the UI still degrades to [] so it doesn't break; a refresh
-      // retries) so the blank-thread case is diagnosable instead of silent.
+      // A non-OK history fetch is logged so a blank thread that is really an error stays diagnosable.
       console.warn(`[client] loadHistory ${conversationId}: HTTP ${res.status}`);
       return [];
     }
@@ -855,8 +776,7 @@ export async function loadHistory(
         if (m) m.content += (e.delta as string) ?? "";
         break;
       }
-      // Attached images: fold onto the matching user message (it was emitted right
-      // after the message's TEXT_MESSAGE_END, so byId already has it).
+      // Attached images fold onto the matching message, which byId already has.
       case "MESSAGE_IMAGES": {
         if (!id) break;
         const m = byId.get(id);
@@ -864,29 +784,26 @@ export async function loadHistory(
         if (m && imgs.length) m.images = [...(m.images ?? []), ...imgs];
         break;
       }
-      // TEXT_MESSAGE_END / tool / reasoning events need no folding here.
       default:
         break;
     }
   }
-  // Keep a message if it has text OR images (an image-only message has empty text).
+  // An image-only message has empty text and is kept.
   return order.map((id) => byId.get(id)!).filter((m) => m.content.trim() !== "" || (m.images?.length ?? 0) > 0);
 }
 
 // --- Bring-your-own-Claude: connect a personal Claude agent (Settings) ----------------------
 
 export interface RemoteAgentStatus {
-  /** BYO enabled on this deployment? false when the /remote-agent routes 404 (feature off). */
+  /** False when the /remote-agent routes 404 (feature off). */
   enabled: boolean;
-  /** Is the caller's Claude agent connected right now? */
+  /** Whether the caller's Claude agent is connected right now. */
   connected: boolean;
-  /** The owner's most recent REJECTED connection attempt, if any — what lets the page say WHY
-   *  a container is not connected instead of a silent "Not connected" indistinguishable from
-   *  never having started one. */
+  /** The owner's most recent rejected connection attempt, so the page can say why a container is not connected. */
   lastAuthFailure: { reason: string; at: string } | null;
 }
 
-/** Poll whether the caller has a connected Claude agent. 404 → BYO not enabled (hide the section). */
+/** Poll whether the caller has a connected Claude agent (404 = feature not enabled). */
 export async function loadRemoteAgentStatus(config: AgentHostConfig): Promise<RemoteAgentStatus> {
   try {
     const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/remote-agent/status`, {
@@ -911,8 +828,7 @@ export interface JoinTokenResult {
   wsUrl: string;
 }
 
-/** Mint a fresh join token + the copyable docker one-liner for the caller. Throws on 401 (sign in)
- *  / 404 (not enabled) so the caller can message accordingly. */
+/** Mint a fresh join token and the copyable docker one-liner, throwing on 401 or 404 so the caller can message accordingly. */
 export async function requestRemoteAgentJoinToken(config: AgentHostConfig): Promise<JoinTokenResult> {
   const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/remote-agent/join-token`, {
     method: "POST",

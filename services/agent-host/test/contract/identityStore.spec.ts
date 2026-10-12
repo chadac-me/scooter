@@ -1,9 +1,7 @@
 /**
- * Tier 1 contract — the generic sub->email identity store decorator.
- *
- * withIdentityStore wraps ANY resolver: it write-throughs learned (id,email)
- * pairs and fills in a missing email from the static map, then the store. Best-
- * effort: a store error never breaks resolution. Provider-agnostic.
+ * The sub-to-email identity store decorator. withIdentityStore wraps any resolver,
+ * writing through learned (id, email) pairs and filling a missing email from the static
+ * map and then the store; a store error never breaks resolution.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -29,8 +27,7 @@ function fakeStore(seed: Record<string, { email?: string; name?: string }> = {})
     puts,
     get: vi.fn(async (id: string) => data.get(id)),
     put: vi.fn(async (id: string, rec: { email?: string; name?: string }) => {
-      // Mirror the real Pg store: normalize the email on write so the fake stays a
-      // faithful stand-in (else it diverges from prod on +tag/case matching).
+      // The real Pg store normalizes the email on write.
       const stored = rec.email ? { ...rec, email: normalizeEmail(rec.email) || undefined } : rec;
       puts.push({ id, email: stored.email });
       data.set(id, stored);
@@ -60,7 +57,7 @@ describe("withIdentityStore", () => {
     const r = withIdentityStore(fixedResolver({ id: "sub-1", email: "a@x.io", anonymous: false }), { store });
     const u = await r.resolve(req);
     expect(u.email).toBe("a@x.io");
-    // fire-and-forget put — let the microtask run.
+    // The put is fire-and-forget.
     await Promise.resolve();
     expect(store.puts).toContainEqual({ id: "sub-1", email: "a@x.io" });
   });
@@ -72,7 +69,7 @@ describe("withIdentityStore", () => {
       staticMap: { "sub-2": "mapped@x.io" },
     });
     const u = await r.resolve(req);
-    expect(u.email).toBe("mapped@x.io"); // static map wins over the store
+    expect(u.email).toBe("mapped@x.io");
   });
 
   it("FILLS IN a missing email from the store when not in the map", async () => {
@@ -95,7 +92,7 @@ describe("withIdentityStore", () => {
     const store = fakeStore();
     store.get = vi.fn(async () => { throw new Error("db down"); });
     const r = withIdentityStore(fixedResolver({ id: "sub-5", anonymous: false }), { store });
-    const u = await r.resolve(req); // must NOT throw
+    const u = await r.resolve(req);
     expect(u).toMatchObject({ id: "sub-5", anonymous: false });
     expect(u.email).toBeUndefined();
   });
@@ -109,13 +106,12 @@ describe("IdentityStore.getByEmail (external-user reverse lookup)", () => {
   });
 
   it("matches regardless of a +tag / case (the same mailbox → one user)", async () => {
-    // Stored one way; a webhook resolves the invoking user's email a DIFFERENT
-    // cosmetic way — they must still map to the same Scooter user.
+    // A webhook may resolve the invoking user's email in a different cosmetic form.
     const store = fakeStore({ "sub-1": { email: "alice@example.com" } });
     expect(await store.getByEmail("Alice+slack@Example.com")).toEqual({ id: "sub-1" });
     expect(await store.getByEmail("alice+github@example.com")).toEqual({ id: "sub-1" });
 
-    // And the reverse: stored WITH a tag, looked up plain.
+    // The reverse: stored with a tag, looked up plain.
     const store2 = fakeStore({ "sub-2": { email: "Bob+work@Corp.com" } });
     expect(await store2.getByEmail("bob@corp.com")).toEqual({ id: "sub-2" });
   });

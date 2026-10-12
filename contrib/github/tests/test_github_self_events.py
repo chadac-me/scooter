@@ -1,18 +1,9 @@
 """The agent must not be fed the comments and reviews it posts itself.
 
-It comments through the platform's GitHub App, so every `github_comment` it
-makes returns as an issue_comment / pull_request_review_comment /
-pull_request_review webhook authored by `<app-slug>[bot]`. Nothing filtered
-that: `_is_own_comment` matched only the literal "Scooter is on it"
-acknowledgment, and `ignore_usernames` was opt-in config no deployment set.
-Reviews are forwarded with priority=True, so an unfiltered one INTERRUPTS the
-run that wrote it.
-
-The same App backs this service, so it recognizes that login via `GET /app`
-(`get_app_login`). Without those credentials it falls back to dropping
-Bot-authored comments that don't mention the agent.
-
-Moved here with the handler (PR #591).
+It comments through the platform's GitHub App, so its own comments return as
+webhooks authored by `<app-slug>[bot]`; the handler recognizes that login via
+`get_app_login`, and without App credentials falls back to dropping Bot-authored
+comments that do not mention the agent.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -65,7 +56,7 @@ def review(author, body="looks good", state="approved"):
 
 @pytest.fixture
 def forwarded():
-    """Capture what reaches the conversation, with NO App credentials."""
+    """Capture what reaches the conversation, with no App credentials."""
     with patch.object(gh, "send_message", new=AsyncMock(return_value=True)) as send, \
          patch.object(gh, "get_app_login", new=AsyncMock(return_value=None)), \
          patch.object(gh.db, "lookup_conversation", new=AsyncMock(return_value="conv-1")), \
@@ -76,7 +67,7 @@ def forwarded():
 
 @pytest.fixture
 def identified(forwarded):
-    """As above, but the App identity resolved — the deployed configuration."""
+    """As above, but with the App identity resolved."""
     with patch.object(gh, "get_app_login", new=AsyncMock(return_value=OWN_LOGIN)):
         yield forwarded
 
@@ -94,14 +85,13 @@ class TestOwnEventsAreDropped:
 
     @pytest.mark.asyncio
     async def test_its_own_review_does_not_INTERRUPT_the_run_that_wrote_it(self, identified):
-        # _forward_or_ignore sends priority=True -> agent-host interrupt:"thinking".
+        # _forward_or_ignore sends priority=True, which interrupts the run.
         await gh._handle_review(review(_bot()))
         assert not identified.called
 
     @pytest.mark.asyncio
     async def test_its_own_comment_QUOTING_a_mention_is_still_dropped(self, identified):
-        # The identity check must beat the mention carve-out: the agent quotes
-        # the request it is answering, which would otherwise re-trigger it.
+        # The agent quotes the request it is answering, which would otherwise re-trigger it.
         await gh._handle_review_comment(review_comment(_bot(), body="> @agent fix this\n\nDone."))
         assert not identified.called
 
@@ -124,7 +114,6 @@ class TestHumansStillGetThrough:
 
     @pytest.mark.asyncio
     async def test_another_bot_that_MENTIONS_the_agent_is_the_opt_in(self, identified):
-        # A mention is a deliberate address, so an automation can still hand work over.
         await gh._handle_review_comment(review_comment(_bot("ci-bot[bot]"), body="@agent please fix"))
         assert identified.called
 
@@ -132,7 +121,6 @@ class TestHumansStillGetThrough:
 class TestFallbackWithoutAppCredentials:
     @pytest.mark.asyncio
     async def test_bot_authorship_alone_drops_it(self, forwarded):
-        # get_app_login -> None: the identity is unknown, so the heuristic runs.
         await gh._handle_review_comment(review_comment(_bot()))
         assert not forwarded.called
 

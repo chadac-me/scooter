@@ -1,19 +1,9 @@
 /**
- * Tier 2 — the NixOS dev-environment sandbox image boots systemd as PID 1 in a
- * REAL Kubernetes pod, and is exec-able.
+ * Tier 2: the NixOS sandbox image boots systemd as PID 1 in a real Kubernetes pod.
  *
- * This covers exactly what the nixosTests CANNOT: the OCI packaging + the k8s
- * privilege/cgroup boot. nixosTest proves the NixOS *config* (units, stubs,
- * services) in a VM; here we prove the *image* actually starts systemd PID 1
- * under containerd with a privileged securityContext, `kubectl exec` works, and
- * `systemctl is-system-running` reports a healthy system.
- *
- * Privileged on dev is accepted (see docs/DEV_ENVIRONMENT.md): systemd PID 1
- * needs a writable cgroup + CAP_SYS_ADMIN; we run the pod privileged to remove
- * the cgroup-delegation unknown.
- *
- * Gated: RUN_CLUSTER_TESTS=1. Image: SANDBOX_OS_IMAGE (built + imported by
- * cluster-up). Skipped if that image isn't available.
+ * This covers the OCI packaging and the k8s privileged boot the nixosTests cannot: the image
+ * starts systemd PID 1 under containerd, exec works, and `systemctl is-system-running`
+ * reports a healthy system. Gated on RUN_CLUSTER_TESTS=1; SANDBOX_OS_IMAGE selects the image.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -32,31 +22,24 @@ maybe("NixOS sandbox image boots systemd PID 1 in a pod", () => {
   beforeAll(async () => {
     cluster = await withCluster({ installController: false, namespace: NS });
 
-    // Self-sufficient: ensure the namespace exists (no controller/platform is
-    // installed for this image-boot test, so nothing else creates it). Tolerate
-    // already-exists (a prior run / the broader suite may have created it).
+    // Nothing else creates the namespace for this image-boot test.
     await cluster
       .apply({ apiVersion: "v1", kind: "Namespace", metadata: { name: NS } })
       .catch(() => {});
 
-    // A bare privileged pod running the OS image — isolates the image-boot
-    // concern from the agent-sandbox controller (the controller path is covered
-    // by provision.spec). The container is named "sandbox" so cluster.exec()
-    // (which targets that container) works.
+    // A bare privileged pod running the OS image, with the container named "sandbox" for cluster.exec().
     await cluster.apply({
       apiVersion: "v1",
       kind: "Pod",
       metadata: { name: POD, namespace: NS, labels: { app: "sandbox-os-boot" } },
       spec: {
-        // systemd PID 1 wants a writable cgroup + CAP_SYS_ADMIN; privileged on
-        // dev removes the delegation unknown.
         containers: [
           {
             name: "sandbox",
             image: IMAGE,
-            imagePullPolicy: "Never", // imported into the node, never pulled
+            imagePullPolicy: "Never",
             securityContext: { privileged: true },
-            // tmpfs where systemd needs to write (CONTAINER_INTERFACE).
+            // tmpfs where systemd needs to write.
             volumeMounts: [
               { name: "run", mountPath: "/run" },
               { name: "tmp", mountPath: "/tmp" },
@@ -91,17 +74,12 @@ maybe("NixOS sandbox image boots systemd PID 1 in a pod", () => {
     expect(pid1.exitCode).toBe(0);
     expect(pid1.stdout.trim()).toBe("systemd");
 
-    // The pod reports Running before systemd finishes booting, so is-system-running
-    // can transiently read `initializing`/`starting`. Poll until it settles to a
-    // terminal state. `running` exits 0; `degraded` is acceptable (a unit may be
-    // inactive in a bare pod). Reject offline. This settle also gates the
-    // later daemon/service assertions (it blocks subsequent sequential `it`s).
+    // The pod reports Running before systemd finishes booting, so poll until it settles; `degraded` is acceptable in a bare pod.
     const state = await waitForSystem(120_000);
     expect(["running", "degraded"]).toContain(state);
   });
 
-  // Re-exec `systemctl is-system-running` until it leaves the transient boot
-  // states, returning the terminal word.
+  // Re-exec `systemctl is-system-running` until it leaves the transient boot states.
   async function waitForSystem(timeoutMs: number): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -119,7 +97,7 @@ maybe("NixOS sandbox image boots systemd PID 1 in a pod", () => {
   });
 
   it("a systemd service is controllable via systemctl (start/stop)", async () => {
-    // The sample service is enabled in the base config; prove it's manageable.
+    // The sample service is enabled in the base config.
     const status = await cluster.exec(SELECTOR, ["systemctl", "is-active", "sample-dev-service.service"], NS);
     expect(status.stdout.trim()).toBe("active");
 

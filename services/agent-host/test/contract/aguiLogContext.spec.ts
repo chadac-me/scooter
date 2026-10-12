@@ -1,13 +1,7 @@
 /**
- * Tier 1 contract — a REAL POST /agui makes the conversation id ambient.
- *
- * The unit tests in log.spec.ts prove AsyncLocalStorage carries a context across awaits.
- * This proves the wiring: that an actual request through the server binds it, so a log
- * site deep inside the prompt handler gets the id without being handed one.
- *
- * That distinction matters. The whole design rests on entry points binding the context —
- * a logger that works perfectly in isolation and is never bound is worth nothing, and the
- * failure mode is silent (lines simply lack the field).
+ * A real POST /agui and the management router bind the conversation id into the log
+ * context, so a log site deep inside a handler carries it without being handed one.
+ * log.spec.ts covers the context mechanism itself; this covers the wiring.
  */
 
 import { PassThrough } from "node:stream";
@@ -26,10 +20,8 @@ describe("POST /agui binds the log context", () => {
     let seenAfterAwait: string | undefined;
 
     server.onPrompt(async () => {
-      // What a log site inside the handler would pick up — no id parameter in sight.
       seen = currentContext().conversation_id;
-      // ...and it must still be there after an await, since the real handler provisions a
-      // sandbox and spawns a bridge before most of its logging happens.
+      // The id must still be there after an await.
       await new Promise((r) => setTimeout(r, 5));
       seenAfterAwait = currentContext().conversation_id;
     });
@@ -91,8 +83,6 @@ describe("POST /agui binds the log context", () => {
   });
 
   it("a line logged from inside the handler CARRIES the id", async () => {
-    // The end-to-end claim, stated as the operator would ask it: a log written during a
-    // prompt is attributable to its conversation without anyone plumbing the id there.
     process.env.LOG_FORMAT = "json";
     reconfigureLogging();
     const lines: Record<string, unknown>[] = [];
@@ -107,7 +97,6 @@ describe("POST /agui binds the log context", () => {
 
     const server = createAguiServer();
     server.onPrompt(async () => {
-      // Pretend to be the bridge, five frames down, logging something interesting.
       logger("bridge").info("prompt queued");
     });
     await server.listen(0);
@@ -141,10 +130,7 @@ describe("POST /agui binds the log context", () => {
 
 describe("the management router binds the log context", () => {
   it("makes the path :id ambient for EVERY /conversations/:id route", async () => {
-    // 27 management routes (suspend, resume, cancel, compact, rename, links, …) carry a
-    // conversation id in their path. Binding at the dispatch point covers all of them
-    // without editing any — and without this, the entire management surface logs failures
-    // with no way to tell WHICH conversation they belonged to.
+    // Binding at the dispatch point covers every route carrying a conversation id in its path.
     const router = createRouter();
     let seen: string | undefined;
     router.post("/conversations/:id/suspend", async () => {

@@ -1,17 +1,12 @@
 /**
- * Tier 1 contract — the BYOC session registry (increment 1 of todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §M).
+ * Tier 1 contract for the BYOC session registry, which agent-hosts resolve a container by
+ * owner through:
  *
- * The registry is the whole point of the §L redesign: agent-hosts resolve a container by OWNER, not
- * by "which pod happens to hold the socket". So the contract under test is:
+ *   mint(owner)            -> a session id and an owner-bound join token
+ *   attach(id, socket)     -> only with a valid token for that session's owner
+ *   resolveByOwner(owner)  -> the live session, from any caller
  *
- *   mint(owner)            -> a session id + an owner-bound join token
- *   attach(id, socket)     -> only with a VALID token for that session's owner
- *   resolveByOwner(owner)  -> the live session, from ANY caller (this is what makes agent-hosts
- *                             stateless — the #284 lesson: ask the component that owns the answer)
- *
- * Two lifetimes, deliberately split (§L Q4): the SOCKET is in-memory (a TCP connection cannot
- * outlive the process) while the owner->session MAPPING is durable, so a controller restart shows
- * "reconnecting" rather than stranding every conversation until the user re-mints.
+ * The socket is in-memory while the owner->session mapping is durable.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -21,8 +16,7 @@ import { mintJoinToken } from "../src/joinToken.js";
 
 const SECRET = "test-secret";
 
-/** In-memory stand-in for the Postgres-backed store (the real one adds `session_id` to
- *  `remote_agents`). Mirrors the durable half only — sockets never live here. */
+/** In-memory stand-in for the Postgres-backed store, the durable half only. */
 function fakeStore(): SessionStore & { rows: Map<string, { sessionId: string; status: string }> } {
   const rows = new Map<string, { sessionId: string; status: string }>();
   return {
@@ -42,7 +36,7 @@ function fakeStore(): SessionStore & { rows: Map<string, { sessionId: string; st
   };
 }
 
-/** A stand-in for the container's WebSocket — only what the registry touches. */
+/** A stand-in for the container's WebSocket with only what the registry touches. */
 function fakeSocket() {
   return { sent: [] as string[], closed: false, send(s: string) { this.sent.push(s); }, close() { this.closed = true; } };
 }
@@ -59,9 +53,8 @@ describe("BYOC session registry", () => {
   it("mint returns a session id + a token that carries the OWNER", async () => {
     const { sessionId, token } = await reg.mint("alice");
     expect(sessionId).toMatch(/\S/);
-    expect(token.split(".")).toHaveLength(3); // a real JWT shape
-    // The durable mapping exists immediately — before any socket connects — so the UI can render
-    // "waiting for your container" and a restart mid-setup does not lose the session.
+    expect(token.split(".")).toHaveLength(3); // a JWT shape
+    // The durable mapping exists before any socket connects.
     expect((await store.getByOwner("alice"))?.sessionId).toBe(sessionId);
   });
 
@@ -82,9 +75,7 @@ describe("BYOC session registry", () => {
 
   it("attach REJECTS a token whose owner does not own the session (cross-owner hijack)", async () => {
     const { sessionId } = await reg.mint("alice");
-    // A perfectly valid token — for someone else. The unauthenticated ingress (§L Q3) makes this
-    // the attack that matters: anyone can reach /byoc/ws/:id, so the token's owner MUST be checked
-    // against the session's owner, not merely verified as well-formed.
+    // A valid token for someone else: the token's owner must be checked against the session's owner.
     const mallory = mintJoinToken("mallory", SECRET);
     const res = reg.attach(sessionId, mallory, fakeSocket());
     expect(res.ok).toBe(false);
@@ -99,12 +90,11 @@ describe("BYOC session registry", () => {
 
   it("resolveByOwner reports ONLINE only while a socket is actually attached", async () => {
     const { sessionId, token } = await reg.mint("alice");
-    expect(reg.resolveByOwner("alice")?.online).toBe(false); // minted, container not up yet
+    expect(reg.resolveByOwner("alice")?.online).toBe(false); // minted, no container yet
     reg.attach(sessionId, token, fakeSocket());
     expect(reg.resolveByOwner("alice")?.online).toBe(true);
     reg.detach(sessionId);
-    // Durable row survives; liveness does not. A stale "online" would MISROUTE a prompt to a dead
-    // socket, so liveness must come from the in-memory socket, never from the DB.
+    // The durable row survives but liveness comes from the in-memory socket, never the DB.
     expect(reg.resolveByOwner("alice")?.online).toBe(false);
     expect((await store.getByOwner("alice"))?.sessionId).toBe(sessionId);
   });
@@ -119,14 +109,13 @@ describe("BYOC session registry", () => {
   });
 
   it("a SUPERSEDED socket closing does not knock the freshly-reconnected one offline", async () => {
-    // The guard the existing remoteAgentStore already got right, easy to lose in a rewrite: a late
-    // close from the OLD connection must not flip an owner that has already reconnected.
+    // A late close from the old connection must not flip an owner that has already reconnected.
     const { sessionId, token } = await reg.mint("alice");
     const first = fakeSocket();
     reg.attach(sessionId, token, first);
     const second = fakeSocket();
     reg.attach(sessionId, token, second); // reconnect supersedes `first`
-    reg.detachIfCurrent(sessionId, first); // the old socket's close arrives LATE
+    reg.detachIfCurrent(sessionId, first); // the old socket's close arrives late
     expect(reg.resolveByOwner("alice")?.online).toBe(true);
     expect(reg.resolveByOwner("alice")?.socket).toBe(second);
   });
@@ -139,9 +128,7 @@ describe("BYOC session registry", () => {
   });
 
   it("attachAuthenticated NEVER attaches to another owner's session (cross-owner)", async () => {
-    // mallory's device signature proves mallory — dialing alice's session URL must not put
-    // mallory's container where alice's prompts go. Under attach-by-owner semantics mallory
-    // lands on MALLORY's session (created for them); alice's stays socketless.
+    // Under attach-by-owner semantics mallory lands on mallory's own session and alice's stays socketless.
     const { sessionId } = await reg.mint("alice");
     const r = reg.attachAuthenticated(sessionId, "mallory", fakeSocket());
     expect(r.ok).toBe(true);
@@ -150,13 +137,9 @@ describe("BYOC session registry", () => {
   });
 
   it("a STALE session URL re-attaches to the owner's CURRENT session (the 1005-loop fix)", async () => {
-    // THE BUG, observed live: the laptop container reconnects with the session id baked into
-    // its --url. A re-mint (or controller restart) invalidates that id, attachAuthenticated
-    // said "unknown session", index.ts ws.close()d with NO code, and the container looped
-    // `disconnected (code 1005)` -> reconnect FOREVER — the §N retry-forever failure that
-    // device keys exist to end. The signature proves the OWNER; the URL id is a stale hint.
+    // The signature proves the owner; the URL id baked into --url is a stale hint after a re-mint.
     const old = await reg.mint("alice");
-    const current = await reg.mint("alice"); // supersedes: old.sessionId is now unknown
+    const current = await reg.mint("alice"); // supersedes old.sessionId
     const sock = fakeSocket();
     const r = reg.attachAuthenticated(old.sessionId, "alice", sock);
     expect(r.ok).toBe(true);
@@ -165,15 +148,14 @@ describe("BYOC session registry", () => {
   });
 
   it("an owner with NO session at all gets one CREATED on device attach (restart recovery)", async () => {
-    // Sessions are in-memory; a controller restart empties them. A registered laptop dialing
-    // in afterwards must not need a human to re-mint — that is the entire point of §P.
+    // A controller restart empties the in-memory sessions, and a registered device dialing in afterwards must not need a re-mint.
     const sock = fakeSocket();
     const r = reg.attachAuthenticated("long-dead-session", "alice", sock);
     expect(r.ok).toBe(true);
     const resolved = reg.resolveByOwner("alice");
     expect(resolved?.socket).toBe(sock);
     expect(resolved?.online).toBe(true);
-    // ...and the mapping is DURABLE, so /byoc/status (what agent-hosts resolve by) agrees.
+    // The mapping is durable, so /byoc/status agrees.
     expect(store.rows.get("alice")?.sessionId).toBe(r.ok ? r.sessionId : "?");
   });
 

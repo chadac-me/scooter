@@ -1,7 +1,4 @@
-/**
- * UI unit test — ServiceRows (the web-services list used by the Sandbox tab): a running
- * service shows Open + Stop, a stopped one shows Start.
- */
+/** ServiceRows (the web-services list used by the Sandbox tab): a running service shows Open and Stop, a stopped one shows Start. */
 
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
@@ -52,7 +49,7 @@ describe("ServiceRows", () => {
     expect(html).toContain("Needs 8Gi memory");
     // The full sentence rides along as the tooltip; the card is too narrow for it.
     expect(html).toContain("may be throttled or OOM-killed");
-    // Advisory only — it must not gate the control.
+    // Advisory only; it must not gate the control.
     expect(html).toContain("service-start");
     expect(html).not.toMatch(/data-testid="service-start"[^>]*disabled/);
   });

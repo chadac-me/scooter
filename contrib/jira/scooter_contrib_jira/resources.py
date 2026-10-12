@@ -1,9 +1,4 @@
-"""Jira's resource shapes: a browse URL and a bare issue key name the same issue.
-
-Registered into `scooter_webhooks_lib.resources` (#576). A key cannot be widened
-into a URL — the site is not in `ENG-42`, and guessing one would point at another
-tenant's issue — so a bare key stays itself. Why: PR #582.
-"""
+"""Jira's resource shapes, registered into `scooter_webhooks_lib.resources`: a browse URL and a bare issue key name the same issue, and a bare key is never widened because the site is not in it."""
 
 from __future__ import annotations
 

@@ -1,14 +1,8 @@
 /**
- * The show_sandbox_resources / set_sandbox_resources MCP tools — let the agent see
- * its sandbox's current cpu/memory/gpu and RIGHT-SIZE its own sandbox (e.g. "this
- * build needs more memory → set 8Gi"). Customers ship an intro skill telling the
- * agent when to scale up/down.
- *
- * Pure handlers (no MCP/HTTP plumbing) for unit testing; mcpServer.ts registers
- * them. Validation lives HERE (set_sandbox_resources rejects a bad quantity via
- * validateResources); the wiring's setResources WRITES THE BROKER SIZE SPEC, which
- * the broker applies on the NEXT sandbox restart (sizing is broker-owned now — the
- * agent-host no longer suspends/resumes or persists on ConversationMeta).
+ * The show_sandbox_resources / set_sandbox_resources MCP tools, which let the agent
+ * see and right-size its own sandbox. These are pure handlers registered by
+ * mcpServer.ts; validation lives here, and the wiring's setResources writes the
+ * broker size spec, which the broker applies on the next sandbox restart.
  */
 
 import type { ToolResult } from "./mcpServer.js";
@@ -20,24 +14,15 @@ const log = logger("resourceTools");
 
 /** What the resource tools need from the agent-host. */
 export interface SandboxResourceToolsWiring {
-  /** This conversation's stored size spec (the broker GET /size result; `{}` when
-   *  nothing is stored — the agent sees "default"), for show_sandbox_resources.
-   *  May be async (it reads the broker). */
+  /** This conversation's stored size spec from the broker, `{}` when nothing is stored. */
   currentResources(conversationId: string): SandboxResources | Promise<SandboxResources>;
-  /** Write the size spec to the broker (PUT /size). The broker applies it on the
-   *  NEXT sandbox restart — this does NOT restart the pod. Accepts either a preset
-   *  name (via {size: "large"}) OR raw resources. Resolves to true when the spec was
-   *  recorded. Rejects if the broker write fails. */
+  /** Write a preset name or raw resources to the broker, which applies it on the next sandbox restart; rejects if the write fails. */
   setResources(conversationId: string, resources: SandboxResources | { size: string }): Promise<boolean>;
-  /** Get the available named sandbox size presets (name → {cpu, memory}) and the
-   *  default preset name, from GET /sandbox-sizes. Used to validate preset names and
-   *  show the agent what's available. May be async (reads the broker). */
+  /** The named sandbox size presets and the default preset name, from the broker. */
   availableSizes?(): Promise<{ sizes: Record<string, SandboxSizePreset>; default: string | null }>;
 }
 
-/** The set_sandbox_resources tool input (friendly shape; all optional — an omitted
- *  dimension keeps its current value). Accepts EITHER a preset name (size) OR raw
- *  resources (the cpu/memory/gpu fields). Mirrors SandboxResources; flat for the LLM. */
+/** The set_sandbox_resources tool input, either a preset name (size) or flat raw resources where an omitted dimension keeps its current value. */
 export interface SetSandboxResourcesArgs {
   size?: string;
   requestCpu?: string;
@@ -48,8 +33,7 @@ export interface SetSandboxResourcesArgs {
   limitGpu?: number;
 }
 
-/** Render one side of a resources block as "cpu=…, memory=…, gpu=…" (only the set
- *  dimensions), or "(default)" when nothing is set on that side. */
+/** Render one side of a resources block as "cpu=…, memory=…, gpu=…", or "(default)" when nothing is set. */
 function sideLine(q: { cpu?: string; memory?: string; gpu?: number } | undefined): string {
   const parts = [
     q?.cpu !== undefined ? `cpu=${q.cpu}` : null,
@@ -59,8 +43,7 @@ function sideLine(q: { cpu?: string; memory?: string; gpu?: number } | undefined
   return parts.length ? parts.join(", ") : "(default)";
 }
 
-/** Fold the flat tool args into the nested SandboxResources shape, dropping sides
- *  with nothing set (so an omitted dimension stays omitted, not zeroed). */
+/** Fold the flat tool args into the nested SandboxResources shape, dropping sides with nothing set. */
 function argsToResources(args: SetSandboxResourcesArgs): SandboxResources {
   const requests: { cpu?: string; memory?: string; gpu?: number } = {};
   const limits: { cpu?: string; memory?: string; gpu?: number } = {};
@@ -76,17 +59,13 @@ function argsToResources(args: SetSandboxResourcesArgs): SandboxResources {
   return r;
 }
 
-/** show_sandbox_resources: render the conversation's current cpu/memory/gpu (the
- *  stored broker size spec). Async — it reads the broker. */
+/** show_sandbox_resources: render the conversation's stored broker size spec. */
 export async function handleShowSandboxResources(
   deps: SandboxResourceToolsWiring,
   conversationId: string,
 ): Promise<ToolResult> {
   const r = await deps.currentResources(conversationId);
-  // The preset table is per-deployment, so the agent cannot know the valid names
-  // from its skill doc alone — listing them here is what stops it guessing a name
-  // and eating a rejection. A failure to read them is non-fatal: the current size
-  // is still worth reporting.
+  // The preset table is per-deployment, so list the valid names; a failure to read them is non-fatal.
   let presetLines = "";
   if (deps.availableSizes) {
     try {
@@ -100,8 +79,7 @@ export async function handleShowSandboxResources(
               const p = sizes[n];
               const gpu = p.gpu ? `, ${p.gpu} GPU` : "";
               const isDefault = n === defaultName ? "  (default)" : "";
-              // The deployment's hint is the steer that makes the choice workload-based
-              // rather than a guess at numbers — carry it through verbatim.
+              // The deployment's hint is carried through verbatim.
               const hint = p.hint ? ` — ${p.hint}` : "";
               return `- ${n}: ${p.cpu} CPU, ${p.memory}${gpu}${isDefault}${hint}`;
             })
@@ -126,19 +104,14 @@ export async function handleShowSandboxResources(
   };
 }
 
-/** set_sandbox_resources: validate the requested resources, then WRITE the broker
- *  size spec. The broker applies it on the NEXT sandbox restart — this does not
- *  restart the pod now. Accepts EITHER a preset name (size) OR raw resources. On a
- *  bad quantity or unknown preset returns isError with the exact field/issue to fix. */
+/** set_sandbox_resources: validate a preset name or raw resources, then write the broker size spec, returning isError with the exact issue on a bad input. */
 export async function handleSetSandboxResources(
   deps: SandboxResourceToolsWiring,
   conversationId: string,
   args: SetSandboxResourcesArgs,
 ): Promise<ToolResult> {
-  // Preset-name path: pass {size: "..."} straight to the broker (it resolves the preset).
-  // Raw-resources path: validate + fold the flat args into the nested shape.
   if (args.size) {
-    // Preset name provided — validate it exists if we can query available sizes.
+    // Validate the preset exists when available sizes can be queried.
     if (deps.availableSizes) {
       try {
         const { sizes } = await deps.availableSizes();
@@ -150,11 +123,10 @@ export async function handleSetSandboxResources(
           };
         }
       } catch (e) {
-        // Sizes query failed — let the broker reject it (don't block the write).
+        // Let the broker reject it rather than block the write.
         log.warn("could not query available sizes; skipping preset validation", { error: formatError(e) });
       }
     }
-    // Pass the preset name to the broker as {size: "..."}.
     try {
       await deps.setResources(conversationId, { size: args.size });
     } catch (e) {
@@ -171,7 +143,7 @@ export async function handleSetSandboxResources(
       ],
     };
   } else {
-    // Raw-resources path: validate + fold the flat args into the nested shape.
+    // Raw-resources path: validate, then fold the flat args into the nested shape.
     const requested = argsToResources(args);
     try {
       validateResources(requested);
@@ -184,8 +156,7 @@ export async function handleSetSandboxResources(
     try {
       await deps.setResources(conversationId, requested);
     } catch (e) {
-      // A rejection is a real failure (the broker write failed) — surface it so the
-      // agent knows the resize did NOT take, never hide it.
+      // Surface a failed broker write so the agent knows the resize did not take.
       return { isError: true, content: [{ type: "text", text: `Could not set the sandbox size: ${(e as Error).message}` }] };
     }
     return {

@@ -1,9 +1,4 @@
-/**
- * createSubagentManager — the SubagentManager impl, extracted from index.ts so the
- * spawn/list/check/cancel/send/monitor/search logic is unit-testable against a
- * controllable sessions + store (no real pod/bridge). See
- * todo/docs/SUBAGENT_INTERACTION.md.
- */
+/** The SubagentManager implementation: spawn/list/check/cancel/send/monitor/search over injectable sessions and store. */
 
 import { randomUUID } from "node:crypto";
 
@@ -14,8 +9,8 @@ import { foldTurnsWithTools } from "../agent/subagentTranscript.js";
 import { PRIORITY_INTERRUPT } from "../bridge.js";
 import type { SubagentCreator } from "./routerSubagents.js";
 
-/** The (minimal) child conversation shape the manager reasons about — a subset of
- *  SessionManager's Conversation. A running child has a bridge with a live run. */
+/** The minimal child conversation shape the manager reasons about, a subset of SessionManager's
+ *  Conversation. */
 export interface SubagentConversation {
   id: string;
   title?: string;
@@ -41,8 +36,7 @@ export interface SubagentStore {
   readEventsTail?(id: SessionId, runs: number): Promise<AguiEvent[]>;
 }
 
-/** A subagent's status as its parent sees it: ended (gone), else running (its
- *  bridge has a live run) or idle (spawned / finished a run, waiting). */
+/** A subagent's status as its parent sees it: ended, running (its bridge has a live run), or idle. */
 export function subagentStatusOf(c: SubagentConversation): SubagentStatus["status"] {
   if (c.status === "ended") return "ended";
   return c.bridge?.queueState().running ? "running" : "idle";
@@ -53,7 +47,7 @@ async function collect(it: AsyncIterable<AguiEvent>): Promise<AguiEvent[]> {
   try {
     for await (const e of it) out.push(e);
   } catch {
-    /* a read failure yields what we have (best-effort transcript) */
+    /* a read failure yields what we have */
   }
   return out;
 }
@@ -71,7 +65,7 @@ export function createSubagentManager(
 
   return {
     async spawn(parentId, args) {
-      // The ROUTER mints the id, before any event.
+      // The router mints the id, before any event.
       const childThreadId = createChild
         ? (await createChild(parentId, { title: args.title, model: args.model })).id
         : randomUUID();
@@ -99,12 +93,10 @@ export function createSubagentManager(
     async send(parentId, subagentId, message) {
       const c = ownChild(parentId, subagentId);
       if (!c) return { outcome: "unknown" };
-      // Only interrupt a RUNNING child — a course correction has nothing to land on
-      // if it's idle/ended (its result already returned to the parent).
+      // Only a running child has a turn for a course correction to land on.
       if (subagentStatusOf(c) !== "running") return { outcome: "not-running" };
-      // Priority-interrupt "thinking": preempt the child's current turn with the
-      // clarification (same path the parent-nudge uses). A SYSTEM message from the
-      // parent, not a human turn — sourced so the UI renders it as such.
+      // Preempt the child's current turn with the clarification, sourced as a system message from
+      // the parent.
       await sessions.prompt(
         subagentId as SessionId,
         `[Clarification from your parent agent — factor this into your current work]\n\n${message}`,

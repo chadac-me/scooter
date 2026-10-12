@@ -1,10 +1,4 @@
-"""Unit test for the whoami transport + registry, with a MOCKED token.
-
-Proves: the test provider mounts /test/whoami, the route runs the auth
-dependency, records the call, and returns the validated Identity. Real
-TokenReview/IRSA is exercised in the cluster e2e; here auth is overridden with a
-fake identity (per the decision: mocked token for unit tests).
-"""
+"""The whoami transport and registry via the test provider, with auth mocked."""
 
 from __future__ import annotations
 
@@ -58,10 +52,7 @@ def test_whoami_records_the_call():
 
 
 def test_test_provider_mounts_whoami():
-    # Assert the route is MOUNTED by hitting it (not by introspecting app.routes —
-    # newer Starlette wraps include_router'd routers in an opaque `_IncludedRouter`
-    # with no readable path, so scanning app.routes can't see the route). A mounted
-    # route returns anything but 404; an unmounted one 404s.
+    # Asserted by hitting the route, since app.routes keeps an included router opaque.
     app = create_app()
     resp = TestClient(app).get("/test/whoami")
     assert resp.status_code != 404

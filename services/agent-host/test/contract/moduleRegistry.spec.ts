@@ -1,8 +1,7 @@
 /**
- * Tier 1 contract — the module registry (search/attached/install via in-pod CLIs).
- * Drives createModuleRegistry over a FAKE exec (agent-broker / scooter-rebuild /
- * the registry-modules.json download), asserting it parses the broker catalog,
- * reads attached names, and drives `scooter-rebuild module add`.
+ * The module registry over a fake exec: it parses the broker catalog from
+ * `agent-broker`, reads attached names from registry-modules.json, and installs via
+ * `scooter-rebuild module add`.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -51,7 +50,7 @@ describe("parseModuleList", () => {
     expect(parseModuleList(CATALOG)).toHaveLength(2);
     expect(parseModuleList(CATALOG)[0]).toMatchObject({ id: 1, name: "gpu-tools", visibility: "public" });
     expect(parseModuleList("not json")).toEqual([]);
-    expect(parseModuleList(JSON.stringify({ modules: [{ name: "x" }] }))).toEqual([]); // no id
+    expect(parseModuleList(JSON.stringify({ modules: [{ name: "x" }] }))).toEqual([]);
   });
 });
 

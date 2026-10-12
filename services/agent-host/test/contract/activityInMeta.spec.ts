@@ -1,13 +1,7 @@
 /**
- * Tier 1 contract — `lastActivityAt` has exactly ONE home.
- *
- * It is a field of the conversation record, written by the same saveMeta as every other
- * meta change. Nothing else may persist a competing copy, and a stray copy left on a PVC
- * must never override the record: two sources of truth for one value means the wrong one
- * eventually wins.
- *
- * Deliberately asserted through the STORE API, not the filesystem — where the record
- * itself lives is not this contract's business.
+ * `lastActivityAt` has exactly one home: the conversation record, written by saveMeta.
+ * Nothing else persists a competing copy, and a stray copy on a PVC never overrides the
+ * record. Asserted through the store API, not the filesystem.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -42,15 +36,13 @@ describe("lastActivityAt has one home", () => {
   });
 
   it("exposes no second write seam for activity", () => {
-    // No recordActivity: a caller cannot write a competing copy of lastActivityAt even
-    // by accident.
+    // Without recordActivity a caller cannot write a competing copy even by accident.
     const store = createFileConversationStore(root);
     expect((store as { recordActivity?: unknown }).recordActivity).toBeUndefined();
   });
 
   it("a stray activity marker is IGNORED, not obeyed", async () => {
-    // Production PVCs still carry ~93 of these. They are inert: the conversation record
-    // decides, and the strays are reaped by ordinary conversation removal.
+    // Strays are inert and reaped by ordinary conversation removal.
     const store = createFileConversationStore(root);
     await store.saveMeta!(meta({ lastActivityAt: 2_000 }));
     await writeFile(

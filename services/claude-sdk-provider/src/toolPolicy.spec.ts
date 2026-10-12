@@ -1,10 +1,4 @@
-/**
- * The policy that keeps an unwired tool from hanging the turn.
- *
- * Regression guard for: a built-in in neither the alias nor allow list was callable
- * but unwired, so it raised a permission prompt in a headless subprocess nobody could
- * answer — the turn stalled and readMessages threw `stop_reason=tool_use`.
- */
+/** The policy that keeps an unwired tool from hanging the turn on a headless permission prompt. */
 import { describe, it, expect } from "vitest";
 
 import { decideTool, TOOL_REDIRECTS } from "./toolPolicy.js";
@@ -13,8 +7,7 @@ const ALIASES = ["mcp__sandbox__bash", "mcp__sandbox__glob"];
 
 describe("decideTool", () => {
   it("DENIES an unknown tool rather than letting it prompt", () => {
-    // THE bug: a built-in shipped by a newer CLI lands here. Denying cleanly is the
-    // whole point — allowing it to prompt is what hung the turn.
+    // A built-in shipped by a newer CLI lands here and must be denied rather than prompt.
     const d = decideTool("SomeToolFromANewerCLI", ALIASES);
     expect(d.allow).toBe(false);
     expect(d.allow === false && d.reason).toMatch(/not available/i);
@@ -43,8 +36,7 @@ describe("decideTool", () => {
   });
 
   it("allows ToolSearch — the scooter-env tools are deferred and need discovery @proves", () => {
-    // Denying it leaves the model holding an allowlist entry for a toolset it cannot
-    // enumerate, so it falls back on built-ins that are themselves denied.
+    // Denying it leaves the model unable to enumerate the deferred toolset.
     expect(decideTool("ToolSearch", ALIASES).allow).toBe(true);
   });
 
@@ -63,9 +55,7 @@ describe("decideTool", () => {
   });
 
   it("tells a LOCAL built-in to use its sandbox alias", () => {
-    // Bash/Glob/etc. are disallowed at the SDK layer, but if one reaches the hook the
-    // reason should say why rather than give the generic refusal: running it here would
-    // execute in the agent-host pod, not the conversation's workspace.
+    // If a disallowed built-in reaches the hook, the reason names the sandbox alias rather than the generic refusal.
     const d = decideTool("Bash", ALIASES);
     expect(d.allow).toBe(false);
     expect(d.allow === false && d.reason).toMatch(/sandbox/i);
@@ -74,15 +64,12 @@ describe("decideTool", () => {
   it("denies NotebookEdit without inventing a replacement", () => {
     const d = decideTool("NotebookEdit", ALIASES);
     expect(d.allow).toBe(false);
-    // marimo notebooks are .py — the sandbox edit tool already covers them.
+    // marimo notebooks are .py, which the sandbox edit tool covers.
     expect(d.allow === false && d.reason).toMatch(/edit/i);
   });
 });
 it("THE BUG: Skill is allowed — deny-by-default made every skill unreachable", () => {
-  // Observed live in the raw API bodies: the skill was discovered, listed with a
-  // good description, and the Skill tool was in the request's tool list -- but
-  // decideTool denied the call with "Skill is not available in this
-  // environment", so the model fell back to `gh pr create`.
+  // A discovered skill is unreachable unless the Skill tool itself is allowed.
   expect(decideTool("Skill").allow).toBe(true);
 });
 

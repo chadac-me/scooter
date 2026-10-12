@@ -1,12 +1,7 @@
 /**
- * Tier 2 — generic warm-pool fast path.
- *
- * Warm pools serve GENERIC capacity (no per-conversation SA/PVCs). Proves a
- * claim from a warm pool is materially faster than a cold start.
- *
- * POST-PoC: warm pools aren't implemented yet (the SandboxWarmPool/Claim
- * manifests are placeholders), so this is additionally gated on
- * RUN_WARMPOOL_TESTS=1 to keep the suite honest until then.
+ * Tier 2: the generic warm-pool fast path, proving a claim from a warm pool is materially
+ * faster than a cold start. Warm pools are not implemented yet, so this is additionally
+ * gated on RUN_WARMPOOL_TESTS=1.
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -21,7 +16,6 @@ maybe("warm-pool fast path", () => {
   beforeAll(async () => {
     cluster = await withCluster({ installController: true, namespace: "agent-sandbox-test" });
     await cluster.apply({ __warmPool: { name: "generic", replicas: 2 } });
-    // wait for pool to be warm
     await cluster.waitFor("SandboxWarmPool", "generic", (p: any) => (p.status?.availableReplicas ?? 0) >= 1, 180_000);
   });
 
@@ -31,7 +25,7 @@ maybe("warm-pool fast path", () => {
     await cluster.waitFor("SandboxClaim", "claim-1", (c: any) => !!c.status?.assignedSandboxName, 60_000);
     const elapsed = Date.now() - t0;
 
-    // Warm claim should beat a cold start comfortably. Budget tuned at impl.
+    // A warm claim must beat a cold start comfortably.
     expect(elapsed).toBeLessThan(15_000);
   });
 });

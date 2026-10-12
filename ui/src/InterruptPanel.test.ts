@@ -1,15 +1,10 @@
 /**
- * UI unit test — approval-interrupt classification for the greyed option.
+ * Approval-interrupt classification for the greyed option.
  *
- * Only interrupts the host tagged with a contrib name (`metadata.contrib`) get a
- * per-viewer can-approve check, and thus a possibly-greyed option. A plain
- * tool-permission interrupt must NOT — there is nothing to authorize, so its buttons
- * stay live. `approvalOf` is that gate; the full render path (fetch + greying) needs a
- * DOM env this project's `node` test runner doesn't provide.
- *
- * The tag used to be `aws: true`, a boolean that could describe exactly one
- * integration. The name is what lets the UI look up per-contrib gating copy instead of
- * hardcoding aws's. Why: PR #651.
+ * Only interrupts tagged with a contrib name (`metadata.contrib`) get a per-viewer
+ * can-approve check and a possibly-greyed option; a plain tool-permission interrupt
+ * keeps live buttons. `approvalOf` is that gate; the full render path needs a DOM
+ * environment this test runner does not provide.
  */
 
 import { describe, it, expect } from "vitest";
@@ -36,8 +31,7 @@ describe("approvalOf", () => {
   });
 
   it("reads ANY contrib name, not a known list", () => {
-    // The point of the seam: a contrib the UI has never heard of still classifies,
-    // and its gating copy comes from the manifest at runtime.
+    // A contrib the UI has never heard of still classifies; its gating copy comes from the manifest at runtime.
     expect(approvalOf(intr({ contrib: "echo", requestId: "r1" }))?.contrib).toBe("echo");
   });
 
@@ -47,16 +41,14 @@ describe("approvalOf", () => {
   });
 
   it("ignores a malformed contrib tag rather than greying on garbage", () => {
-    // An empty or non-string name cannot index the manifest, so treat it as "not an
-    // approval" — the option stays live and the broker still enforces.
+    // An empty or non-string name cannot index the manifest, so the option stays live and the broker still enforces.
     expect(approvalOf(intr({ contrib: "" }))).toBeUndefined();
     expect(approvalOf(intr({ contrib: true }))).toBeUndefined();
     expect(approvalOf(intr({ contrib: 42 }))).toBeUndefined();
   });
 
   it("does NOT classify the retired aws:true boolean", () => {
-    // A stale interrupt persisted before the rename renders as an ordinary interrupt
-    // with live buttons, rather than as an approval whose gating can never resolve.
+    // A stale persisted interrupt carrying the boolean tag renders as an ordinary interrupt with live buttons.
     expect(approvalOf(intr({ aws: true, requestId: "req-42" }))).toBeUndefined();
   });
 });

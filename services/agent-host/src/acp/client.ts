@@ -1,14 +1,11 @@
 /**
- * ACP client — drives a `goose acp` subprocess over JSON-RPC 2.0 / stdio,
- * built on the official @zed-industries/agent-client-protocol SDK.
- *
- * The agent-host is the ACP *client*; Goose is the ACP *agent*. We call agent
- * methods (initialize, session/new, session/prompt, session/cancel). Goose calls
- * our client methods (fs/*, terminal/*, session/request_permission), which we
- * service via the ExecBackend / permission handler.
- *
- * This module exposes a small `AcpClient` facade over the SDK so the bridge
- * stays decoupled from SDK types (and so tests can inject an in-process fake).
+ * ACP client: drives a `goose acp` subprocess over JSON-RPC 2.0 / stdio on the
+ * @zed-industries/agent-client-protocol SDK. The agent-host is the ACP client and
+ * Goose the ACP agent: we call agent methods (initialize, session/new, session/prompt,
+ * session/cancel) and service Goose's client methods (fs/*, terminal/*,
+ * session/request_permission) via the ExecBackend and permission handler. The
+ * `AcpClient` facade keeps the bridge decoupled from SDK types so tests can inject
+ * an in-process fake.
  */
 
 import { spawn } from "node:child_process";
@@ -47,14 +44,10 @@ export interface ClientCapabilities {
 export interface NewSessionParams {
   cwd: string;
   mcpServers?: unknown[];
-  /** The model this session should run — resolved per PROVIDER by the bridge (a Bedrock id is
-   *  nonsense to a subscription-backed provider and vice versa; see agent/models.ts
-   *  modelAllowedFor/defaultFor). Providers that fix their model elsewhere may ignore it; the
-   *  BYO container honors it per session. */
+  /** The model this session should run, resolved per provider by the bridge (agent/models.ts); providers that fix their model elsewhere may ignore it. */
   model?: string;
-  /** Skills as DATA, for a provider that cannot read this pod's filesystem (the
-   *  BYO container). It writes them as .claude/skills and its own SDK discovers
-   *  them. In-pod providers read the directory directly and ignore this. */
+  /** Skills as data for a provider that cannot read this pod's filesystem (the BYO container,
+   *  which writes them as .claude/skills); in-pod providers ignore this. */
   skills?: ReadonlyArray<{ name: string; content: string }>;
 }
 
@@ -66,7 +59,7 @@ export interface PromptParams {
 export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "resource_link"; uri: string }
-  // A base64 image the model can SEE (ACP native image block: {data, mimeType}).
+  // A base64 image the model can see (the ACP native image block).
   | { type: "image"; data: string; mimeType: string };
 
 /** Normalized session/update variants the bridge consumes. */
@@ -74,20 +67,17 @@ export type SessionUpdate =
   | { sessionUpdate: "agent_message_chunk"; content: ContentBlock }
   | { sessionUpdate: "agent_thought_chunk"; content: ContentBlock }
   | { sessionUpdate: "tool_call"; toolCallId: string; title: string; rawInput?: unknown }
-  // rawInput/rawOutput ride the UPDATE too: goose typically sends the initial
-  // tool_call with no rawInput and fills it in on a subsequent tool_call_update
-  // (the command a Shell runs / the text slack_respond posts). Dropping them here
-  // is why the UI showed an empty tool card. rawOutput carries the structured
-  // result (e.g. the shell's stdout) when the provider supplies it.
+  // rawInput/rawOutput ride the update too, since goose typically sends the initial
+  // tool_call without rawInput and fills it in on a later tool_call_update.
   | { sessionUpdate: "tool_call_update"; toolCallId: string; status: string; content?: unknown; rawInput?: unknown; rawOutput?: unknown }
   | { sessionUpdate: "plan"; entries: unknown[] }
-  // Context-window fill after a turn (used / total tokens) — drives the UI fill bar.
+  // Context-window fill after a turn, which drives the UI fill bar.
   | { sessionUpdate: "context_usage"; usedTokens: number; contextWindow: number };
 
 export interface PermissionRequest {
   sessionId: string;
   toolCallId: string;
-  /** Human-readable summary of what's being requested (from the tool call). */
+  /** Human-readable summary of what is being requested, from the tool call. */
   title: string;
   options: Array<{ optionId: string; name: string; kind: string }>;
 }
@@ -100,27 +90,17 @@ export interface AcpClient {
   newSession(params: NewSessionParams): Promise<{ sessionId: string }>;
   prompt(params: PromptParams): Promise<{ stopReason: string }>;
   cancel(sessionId: string): Promise<void>;
-  /** Kill every live sandbox terminal for this client (a user cancel / force-
-   *  interrupt) — stops a running command, not just future ones. Best-effort. */
+  /** Best-effort kill of every live sandbox terminal for this client, stopping a running command rather than only future ones. */
   killActiveTerminals(graceForPendingSpawn?: boolean): Promise<void>;
 
-  /** Liveness of the underlying agent process (goose/claude subprocess). `false`
-   *  once it has exited — a DEFINITIVE health signal the bridge's stall watchdog
-   *  probes: a run silent because its agent process DIED is unambiguously wedged
-   *  (terminate); a run silent because a long tool is running is healthy (the
-   *  process is alive). An in-process fake reports alive until close(). */
+  /** Liveness of the underlying agent process, false once it has exited; the bridge's stall watchdog uses it to tell a dead agent from a long-running tool. */
   isAlive(): boolean;
 
-  /** The agent's most recent diagnostic lines (oldest first) — a subprocess client's
-   *  stderr tail, or an in-process provider's captured errors. The ONLY place a
-   *  dead-on-arrival run's cause exists: ACP reports nothing for a run that never
-   *  spoke. Optional: a fake has none. Why: PR #565. */
+  /** The agent's most recent diagnostic lines (oldest first), the only record of why a run that never spoke died. */
   recentDiagnostics?(): string[];
 
   onSessionUpdate(cb: (sessionId: string, update: SessionUpdate) => void): () => void;
-  /** Notified when goose creates a terminal to run a shell command. The command
-   *  text lives ONLY here (terminal/create), not in the tool_call's rawInput — the
-   *  bridge correlates it to the tool call by terminalId so the UI can show it. */
+  /** Notified when goose creates a terminal to run a shell command, the only place the command text is available. */
   onTerminalCreated(cb: (terminalId: string, command: string, args: string[]) => void): () => void;
   onPermissionRequest(
     handler: (req: PermissionRequest) => Promise<PermissionAnswer>,
@@ -135,46 +115,26 @@ export interface AcpClientDeps {
   env: Record<string, string>;
   /** Services Goose's fs/* and terminal/* client-method calls. */
   exec: ExecBackend;
-  /** BACK-PRESSURE (goose approve-mode). When set, goose runs with
-   *  GOOSE_MODE=approve so it requests permission before EVERY tool. This callback
-   *  AUTO-answers each request WITHOUT raising a UI prompt: normally ALLOW (silent,
-   *  preserving auto-run); but when it returns true a higher-priority item is
-   *  waiting (a finished subagent's result) so we REJECT the next tool — goose ends
-   *  the turn, the parent idles, and the queued item injects. Omit to keep goose in
-   *  auto mode (no per-tool gate; no back-pressure). See
-   *  todo/docs/SUBAGENT_BACKPRESSURE.md. */
+  /** Back-pressure: when set, goose runs with GOOSE_MODE=approve and each per-tool permission request is auto-answered, allowed normally but rejected when this returns true so goose ends the turn and the queued item injects. */
   shouldYield?: () => boolean;
-  /** TRANSCRIPT RECORDER (test-harness): when set, called with each RAW ACP
-   *  session/update frame goose sends — the ground truth for the fake ACP agent.
-   *  Omit to disable (zero overhead). See todo/docs/AGENT_TRANSCRIPT_HARNESS.md. */
+  /** Transcript recorder for the test harness, called with each normalized ACP session/update goose sends. */
   recordRaw?: (update: SessionUpdate) => void;
 }
 
-/** A request is an auto-answerable TOOL GATE — goose's GOOSE_MODE=approve
- *  per-tool permission prompt — only when it offers BOTH an allow-kind AND a
- *  reject-kind option (allow / reject the tool). An AGENT-PRESENTED CHOICE (the
- *  agent asking the USER to pick, e.g. Red/Green/Blue — all allow_once, no reject;
- *  or a real approval with no reject option) is NOT a tool gate and must reach the
- *  UI, never be silently auto-answered. Keyed on option kinds, not count. */
+/** A request is an auto-answerable tool gate only when it offers both an allow-kind and a reject-kind option; an agent-presented choice must reach the UI. */
 export function isToolGate(options: ReadonlyArray<{ kind: string }>): boolean {
   const hasAllow = options.some((o) => o.kind === "allow_once" || o.kind === "allow_always");
   const hasReject = options.some((o) => o.kind === "reject_once" || o.kind === "reject_always");
   return hasAllow && hasReject;
 }
 
-/** Auto-answer a goose approve-mode permission request (no UI). `yield_` true =
- *  a higher-priority item is waiting → REJECT (pick a reject option) so goose ends
- *  the turn; false = ALLOW (pick an allow option), preserving auto-run. Returns
- *  undefined when this is NOT a tool gate (no allow+reject pair — an agent-presented
- *  choice the USER must answer) OR there are no options at all; the caller then
- *  falls through to the UI handler. Exported for unit testing without spawning goose. */
+/** Auto-answer a goose approve-mode permission request, rejecting when `yield_` is true and allowing otherwise, or undefined when this is not a tool gate so the caller falls through to the UI. */
 export function autoAnswerPermission(
   options: ReadonlyArray<{ optionId: string; kind: string }>,
   yield_: boolean,
 ): schema.RequestPermissionResponse | undefined {
   if (options.length === 0) return undefined;
-  // Only auto-answer a genuine tool gate. Anything the agent presents for the USER
-  // to choose (no allow+reject pair) falls through so the interrupt reaches the UI.
+  // Anything the agent presents for the user to choose falls through so the interrupt reaches the UI.
   if (!isToolGate(options)) return undefined;
   const pick = (kinds: string[]) => options.find((o) => kinds.includes(o.kind))?.optionId;
   if (yield_) {
@@ -185,18 +145,7 @@ export function autoAnswerPermission(
   return { outcome: { outcome: "selected", optionId: allow } };
 }
 
-/**
- * What to do with a session/update the SDK could not parse (see sessionUpdateFilter).
- *
- * `usage_update` is SALVAGED rather than dropped: it is the ACP-native context fill, and
- * the bridge already renders `context_usage` for the claude-sdk provider — the SDK
- * rejecting the notification is the only reason a goose session never had a fill bar.
- *
- * Everything else is logged ONCE PER VARIANT, not once per notification. Re-logging every
- * occurrence is the behaviour this whole change exists to remove; logging the first makes
- * a newly-appearing variant discoverable. Returns a stateful handler (it remembers which
- * variants it has reported), so each client gets its own. Exported for unit testing.
- */
+/** Handle a session/update the SDK could not parse: `usage_update` is salvaged as `context_usage`, and every other variant is logged once per variant by the returned stateful handler. */
 export function handleDroppedSessionUpdate(deps: {
   emit: (sessionId: string, update: SessionUpdate) => void;
   log: (message: string) => void;
@@ -216,19 +165,14 @@ export function handleDroppedSessionUpdate(deps: {
 
 /** Spawns `goose acp` and returns a connected ACP client. */
 export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
-  // stdout is the ACP ndjson channel (piped). stderr is where goose writes its
-  // own diagnostics AND (for the claude-code provider) where a spawned `claude`
-  // CLI's failure surfaces — "Claude CLI terminating unexpectedly" originates
-  // here. Pipe it so we can log it rather than lose it to the void; under DEBUG
-  // stream every line, and ALWAYS keep a small ring buffer to attach to a
-  // non-zero exit so the crash is diagnosable even without the flag.
+  // stdout is the ACP ndjson channel; stderr carries goose's own diagnostics and a spawned
+  // `claude` CLI's failures, so it is piped rather than lost.
   const child = spawn(deps.command, deps.args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, ...deps.env },
   });
 
-  // Ring buffer of the last stderr lines — attached to the exit log so a crash
-  // ("claude terminated") shows its cause even with DEBUG off.
+  // Ring buffer of the last stderr lines, attached to the exit log so a crash shows its cause.
   const stderrTail: string[] = [];
   const STDERR_TAIL_MAX = 50;
   child.stderr?.setEncoding("utf8");
@@ -237,15 +181,13 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
       if (!line) continue;
       stderrTail.push(line);
       if (stderrTail.length > STDERR_TAIL_MAX) stderrTail.shift();
-      // Under DEBUG, stream goose/claude stderr live, prefixed for grep-ability.
+      // Under DEBUG, stream stderr live.
       debug(`[goose:stderr] ${line}`);
     }
   });
 
-  // Log the child's lifecycle. A spawn `error` (ENOENT — goose/claude not on
-  // PATH) or a non-zero/ signalled exit is almost always the real cause behind a
-  // UI "agent terminated unexpectedly", so surface it ALWAYS (debugError), with
-  // the captured stderr tail so the reason travels with it.
+  // A spawn error or a non-zero exit is almost always the real cause behind an "agent
+  // terminated unexpectedly", so always surface it with the stderr tail.
   child.on("error", (err) => {
     debugError(`[acp] goose spawn error (command="${deps.command}"):`, err);
   });
@@ -271,23 +213,18 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
     | ((req: PermissionRequest) => Promise<PermissionAnswer>)
     | undefined;
 
-  // fs/* + terminal/* handlers live in a standalone, testable factory (each call
-  // gets a fresh handler set with its own unique-id-keyed terminal maps). Forward
-  // terminal-create (the only place goose's shell command text is available) to
-  // subscribers so the bridge can surface it as the tool call's args.
+  // fs/* and terminal/* handlers come from a standalone factory; terminal-create is
+  // forwarded to subscribers so the bridge can surface the command as the tool call's args.
   const sandbox = createSandboxClientHandlers(deps.exec, (terminalId, command, args) => {
     for (const cb of terminalCreatedCbs) cb(terminalId, command, args);
   });
 
-  // Our Client implementation: what Goose calls back into. sessionUpdate +
-  // requestPermission need the bridge's callbacks (closures below); everything
-  // else is the sandbox handlers.
+  // The Client implementation Goose calls back into.
   const makeClient = (_agent: Agent): Client => ({
     async sessionUpdate(params: schema.SessionNotification): Promise<void> {
       const norm = normalizeUpdate(params);
       if (norm) {
-        // TRANSCRIPT: record the (normalized) ACP update — the shape the fake ACP
-        // agent must reproduce (no-op when unset).
+        // Record the normalized update for the transcript harness.
         deps.recordRaw?.(norm);
         for (const cb of updateCbs) cb(params.sessionId, norm);
       }
@@ -296,25 +233,15 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
     async requestPermission(
       params: schema.RequestPermissionRequest,
     ): Promise<schema.RequestPermissionResponse> {
-      // BACK-PRESSURE (approve-mode auto-answer): when shouldYield is wired, goose
-      // runs GOOSE_MODE=approve and asks before every TOOL. We answer those tool
-      // gates AUTOMATICALLY here — WITHOUT a UI prompt: normally allow (silent,
-      // preserving auto-run); when a priority item is waiting, REJECT so goose ends
-      // the turn -> parent idles -> the queued result injects. ACP has no free-text
-      // on a reject, so a `.goosehints` line pre-explains the reject option name.
-      // CRUCIALLY, autoAnswerPermission returns undefined for a NON-tool-gate — an
-      // agent-presented CHOICE the user must make (e.g. Red/Green/Blue, or a real
-      // approval) — so it falls through to the UI handler below, never swallowed.
+      // Back-pressure: with shouldYield wired, goose's per-tool gates are auto-answered
+      // here, and a non-tool-gate (an agent-presented choice) falls through to the UI handler.
       if (deps.shouldYield) {
         const auto = autoAnswerPermission(params.options, deps.shouldYield());
         if (auto) return auto;
       }
       if (!permissionHandler) {
-        // Finding #25: a permission request arrived but no handler is registered —
-        // that's a HOST WIRING BUG, not a user cancel. Returning "cancelled"
-        // silently makes the agent (and any UI) think the user declined. We still
-        // return cancelled so the agent run doesn't hang, but log loudly so the
-        // missing wiring is diagnosable instead of masquerading as a user choice.
+        // No handler is a host wiring bug, not a user cancel; still answer cancelled so
+        // the run does not hang, but log loudly.
         debugError(
           "[acp] requestPermission with NO handler registered (host wiring bug) — " +
             "returning cancelled for toolCall",
@@ -343,10 +270,8 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
     killTerminal: sandbox.killTerminal,
   });
 
-  // Strip session/update variants the pinned SDK's closed zod union would reject. Without
-  // this the SDK answers each one with -32602 and logs it, so a variant we simply don't
-  // consume (the agent's usage_update / session_info_update) is an error line rather than
-  // a no-op. Salvage the ones we CAN use on the way past. Why: PR #536.
+  // Strip session/update variants the pinned SDK's closed zod union would reject with
+  // -32602, salvaging the ones we can use on the way past.
   const stream = filterUnsupportedSessionUpdates(
     rawStream,
     handleDroppedSessionUpdate({
@@ -375,8 +300,7 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
     async newSession(params) {
       const res = await conn.newSession({
         cwd: params.cwd,
-        // MCP servers the agent (goose) may call — e.g. the agent-host's
-        // modify_environment tool. Empty when none configured.
+        // MCP servers the agent may call; empty when none are configured.
         mcpServers: (params.mcpServers ?? []) as never,
       });
       return { sessionId: res.sessionId };
@@ -395,8 +319,7 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
       await sandbox.killAllTerminals(graceForPendingSpawn);
     },
     isAlive() {
-      // A ChildProcess reports exitCode/signalCode === null while running; either
-      // becomes non-null once it exits. So alive === both null.
+      // A ChildProcess reports exitCode/signalCode === null while running.
       return child.exitCode === null && child.signalCode === null;
     },
     recentDiagnostics() {
@@ -427,16 +350,7 @@ export interface KillableChild {
   once(event: "exit", cb: () => void): void;
 }
 
-/**
- * Gracefully terminate the goose child and AWAIT its actual exit — not just
- * fire-and-forget kill(). A mid-conversation model switch does bridge.stop() ->
- * close() -> revive() -> spawn a NEW goose with the new GOOSE_MODEL. If close()
- * returned before the OLD goose died, the two would briefly coexist and share the
- * per-conversation cwd (goose sessions DB + .goosehints), so under slow timing the
- * reply could come from the old process (old model) — the model-switch race.
- * SIGTERM, wait for exit; SIGKILL after `graceMs` so a hung goose can't block the
- * switch forever; resolve once it's truly gone.
- */
+/** Terminate the goose child with SIGTERM (SIGKILL after `graceMs`) and resolve only once it has actually exited, so a model switch never has two goose processes sharing the conversation cwd. */
 export function closeChild(child: KillableChild, graceMs = 10_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(); // already dead
   return new Promise<void>((resolve) => {

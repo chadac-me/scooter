@@ -1,10 +1,4 @@
-"""Kagi broker provider — tools only, no proxy route (see contrib/brave for the why).
-
-``enabled`` is gated on the key, so a deployment without one simply has no
-``web_search``. Enabling this contrib AND brave is a startup failure, by design: both
-own a tool of the same name, and a silent winner would make the agent's search quality
-and its bill depend on mount order.
-"""
+"""Kagi broker provider: tools only, no proxy route, gated on the key."""
 
 from __future__ import annotations
 
@@ -25,9 +19,7 @@ def kagi() -> Provider:
     key = (settings.kagi_api_key or "").strip()
     return Provider(
         name=PROVIDER_NAME,
-        # Kagi's scheme is `Authorization: Bot <token>` — a bearer-SHAPED header with a
-        # different scheme word, so the prefix is part of the value rather than
-        # kind="bearer" (which would send "Bearer <token>" and get a 401).
+        # Kagi's scheme is `Authorization: Bot <token>`, so the prefix is part of the value.
         credential=StaticTokenSource(
             token=f"Bot {key}" if key else "",
             kind="header",

@@ -1,13 +1,8 @@
 /**
- * Tier 3 E2E — WIDE component coverage.
- *
- * The first coverage pass touched 13 of the app's ~113 testids: the thread, the queue and the
- * interrupt panel. Everything else — the sidebar rows and their controls, the right panel's tabs,
- * the sandbox panel, the model picker, the context-fill bar, settings — was never rendered under
- * assertion, so a component could break silently and no test would notice.
- *
- * This spec exercises those surfaces and, at every step, ALSO asserts the whole-UI invariants
- * (assertConsistent) — so touching one component can't quietly corrupt another.
+ * Tier 3 E2E for wide component coverage: the sidebar rows and their controls, the right
+ * panel's tabs, the sandbox panel, the model picker and the context-fill bar. At every step
+ * it also asserts the whole-UI invariants (assertConsistent), so touching one component
+ * cannot quietly corrupt another.
  */
 
 import { test, expect, snapshot, assertConsistent, fillStable } from "./fixtures.js";
@@ -45,24 +40,18 @@ test.describe("sidebar / session components", () => {
   });
 
   test("STARRING a conversation persists across a reload and disturbs nothing else", async ({ chat, page, request, baseURL }) => {
-    // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). Every fake-agent turn runs a real
-    // exec, and on the full target the FIRST exec of a conversation waits for its sandbox
-    // pod (5-25s measured). Worst case here: open 5s + first turn ~30s + waitForIdle +
-    // reload + the 30s re-fold poll + two star round-trips ≈ 75s — past the 60s default
-    // on arithmetic alone, with every step behaving.
+    // On the full target the first exec of a conversation waits for its sandbox pod, so the
+    // default budget is too short.
     test.setTimeout(120_000);
     await chat.open();
     await chat.sendTurn("star me");
     await chat.waitForIdle();
-    // Assert the row EXISTS rather than an absolute list length: the e2e backend is shared and
-    // serial, so a prior test's conversation can still be settling and inflate the count.
+    // Assert the row exists rather than an absolute list length, since the backend is shared.
     await expect(page.locator(sb.item).first()).toBeVisible({ timeout: 30_000 });
     const before = await snapshot(page);
 
-    // Address the row by its SERVER id. This test used to click `.first()` and assert only
-    // that the row still existed after the reload, so it passed for months while every star
-    // write 404'd: the UI's optimistic flag survives the reload via localStorage, which is
-    // indistinguishable from a persisted star unless you ask the server. Why: PR #501.
+    // Address the row by its server id, since the UI's optimistic star survives a reload via
+    // localStorage whether or not the write landed.
     let convId: string | null = null;
     await expect
       .poll(
@@ -81,8 +70,7 @@ test.describe("sidebar / session components", () => {
 
     await row.locator(sb.star).click();
 
-    // THE ASSERTION THIS TEST WAS NAMED FOR: the star reached the durable row. Asked of the
-    // server, not the UI — the UI can show a star it never managed to write.
+    // The star must reach the durable row, asked of the server rather than the UI.
     const starredOnServer = async () => {
       const res = await request.get(`${baseURL ?? "http://localhost:5173"}/conversations/${convId}`);
       if (!res.ok()) return `HTTP ${res.status()}`;
@@ -92,56 +80,38 @@ test.describe("sidebar / session components", () => {
 
     await page.reload();
     await expect(page.locator(sb.item).first()).toBeVisible({ timeout: 30_000 });
-    // …and the reloaded sidebar renders it starred (the row survives the server merge that
-    // follows the reload, which is what overwrites a merely-local star).
+    // The reloaded sidebar renders it starred after the server merge that follows the reload.
     await expect(row).toHaveAttribute("data-starred", "true", { timeout: 30_000 });
-    // Wait for the transcript to finish re-folding before snapshotting — a snapshot taken mid-render
-    // reads 0 messages and would wrongly look like data loss.
+    // Wait for the transcript to finish re-folding before snapshotting.
     await expect.poll(async () => (await snapshot(page)).userMessages, { timeout: 30_000 })
       .toBe(before.userMessages);
     const after = await snapshot(page);
     assertConsistent(after, "after starring + reload");
     expect(after.sessions, "the conversation is still listed after the reload").toBeGreaterThanOrEqual(1);
-    // Starring is a sidebar-only concern — the thread must be untouched.
+    // Starring is a sidebar-only concern, so the thread must be untouched.
     expect(after.userMessages, "starring must not change the transcript").toBe(before.userMessages);
     expect(after.assistantMessages, "starring must not change the transcript").toBe(before.assistantMessages);
 
-    // UNSTAR before leaving. A STARRED conversation is protected from deletion (the
-    // agent-host DELETE returns 409), so the cleanState fixture — which polls
-    // delete-until-empty — can NEVER remove it. It then survives into every later spec
-    // on this shard and breaks their absolute-count assertions. This is shard-order
-    // dependent, so it only bites when the sharder happens to place a count-sensitive
-    // spec (e.g. sessions.spec.ts, "Expected 1, Received 2") after this one — which is
-    // exactly how it surfaced: green for several runs, then red when CI reweighted.
+    // Unstar before leaving: a starred conversation cannot be deleted (DELETE 409), so
+    // cleanState could never remove it.
     await row.locator(sb.star).click();
     await expect(row).not.toHaveAttribute("data-starred", "true", { timeout: 10_000 });
-    // Confirm the UNSTAR landed server-side too: a local-only unstar leaves the row starred
-    // in the database, and cleanState can never delete it (DELETE 409s on a starred row).
+    // Confirm the unstar landed server-side, since a local-only unstar leaves the row undeletable.
     await expect.poll(starredOnServer, { timeout: 20_000 }).not.toBe(true);
   });
 
   test("SEARCH narrows the sidebar and restores the full list when cleared", async ({ chat, page }) => {
-    // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). TWO conversations, each with its
-    // own first-exec sandbox wait (5-25s each on the full target): 2 × ~30s + waits ≈ 70s
-    // worst — over the 60s default before the search assertions even start.
+    // Two conversations, each with its own first-exec sandbox wait on the full target.
     test.setTimeout(180_000);
     await chat.open();
-    // 90s each, not sendTurn's 45s: BOTH of these are first turns of their own conversation,
-    // so each waits for its own cold sandbox pod (5-25s, longer under CI CPU pressure) before
-    // its exec starts — and CI forces CONVERSATION_POD_CAP=1, so the second gets no warm
-    // reuse. The 180s ceiling above is set for exactly this.
+    // Both are first turns of their own conversation, so each waits for its own cold sandbox pod.
     await chat.sendTurn("alpha searchable", 90_000);
     await chat.waitForIdle();
     await page.locator(sb.newSession).click();
     await chat.sendTurn("beta searchable", 90_000);
     await chat.waitForIdle();
-    // Baseline from the ACTUAL list (the shared serial backend may carry a settling row from a
-    // prior test); the property under test is "search narrows, clearing restores".
-    //
-    // WAIT for both rows rather than sampling the count once. The sidebar is fed by the
-    // router's aggregated list, which degrades to a partial — sometimes empty — list while
-    // pods churn, so a single sample can read 0 immediately after two successful turns
-    // ("Expected: > 0, Received: 0" with both conversations healthy).
+    // Wait for both rows rather than sampling once, since the router's aggregated list can
+    // be transiently partial.
     await expect
       .poll(async () => page.locator(sb.item).count(), { timeout: 60_000 })
       .toBeGreaterThanOrEqual(2);
@@ -151,35 +121,20 @@ test.describe("sidebar / session components", () => {
     await fillStable(page.locator(sb.search), "alpha");
     await expect.poll(async () => page.locator(sb.item).count(), { timeout: 20_000 }).toBeLessThan(total);
     await fillStable(page.locator(sb.search), "");
-    // Restoring means "the narrowing is undone", not "the list is byte-identical to a sample
-    // taken 20s ago". `total` came from the AGGREGATED list of a shared fleet, which other
-    // specs are concurrently adding to and deleting from, and which can also serve a degraded
-    // read — so an exact toBe() asserts that nothing else in the fleet changed during this
-    // test, which is not a property this test owns. Observed on CI: expected 2, received 1,
-    // with the search feature working correctly.
-    //
-    // >= 2 keeps the real claim: after clearing, BOTH of this test's conversations are listed
-    // again, which is exactly what the narrow removed.
+    // Restoring means the narrowing is undone, not that the shared fleet's list is
+    // byte-identical to the earlier sample.
     await expect.poll(async () => page.locator(sb.item).count(), { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
     assertConsistent(await snapshot(page), "after clearing the search");
   });
 
   test("switching between conversations swaps the transcript AND keeps the UI consistent", async ({ chat, page }) => {
-    // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). Two conversations = two cold
-    // sandboxes on the full target (5-25s before each first exec): 2 × ~30s + the 30s
-    // switch-back poll ≈ 90s worst against a 60s default. 180s, not 120: the id lookup and
-    // the switch-back poll below now allow the aggregated sidebar list time to settle.
+    // Two conversations are two cold sandboxes on the full target, plus time for the
+    // aggregated list to settle.
     test.setTimeout(180_000);
     await chat.open();
     await chat.sendTurn("first conversation body");
-    // Remember WHICH conversation this is. The switch-back below used `.last()`, but the
-    // sidebar lists the whole fleet ordered by recency on the full target, so the first
-    // conversation is not reliably the last row — the click landed on an unrelated
-    // conversation and the poll then read ITS transcript (lastUserText
-    // stayed "" for the full 30s while the transcript was intact in the conversation the
-    // test never opened). data-conversation-id is the server id and cannot drift.
-    // Poll: the row carries data-conversation-id only once the SERVER id has landed,
-    // which is asynchronous after the first send.
+    // Remember which conversation this is by server id, since the sidebar lists the whole
+    // fleet by recency; the id lands asynchronously after the first send, so poll.
     let firstId: string | null = null;
     await expect
       .poll(
@@ -201,7 +156,7 @@ test.describe("sidebar / session components", () => {
     assertConsistent(onSecond, "on the second conversation");
     expect(onSecond.userMessages, "a new conversation starts with just its own turn").toBe(1);
 
-    // Switch back — the other transcript loads, and no state from the previous one leaks.
+    // Switch back: the other transcript loads, and no state from the previous one leaks.
     await page.locator(`${sb.item}[data-conversation-id="${firstId}"]`).click();
     await expect
       .poll(async () => (await snapshot(page)).lastUserText, { timeout: 60_000 })
@@ -227,7 +182,7 @@ test.describe("right panel: tabs + sandbox surface", () => {
     await expect(page.locator(panel.sandboxPanel)).toBeVisible({ timeout: 20_000 });
     assertConsistent(await snapshot(page), "sandbox tab selected");
 
-    // Queue tab — empty, and it says so rather than rendering a blank list.
+    // Queue tab: empty, and it says so rather than rendering a blank list.
     await page.locator(panel.queueTab).click();
     await expect(page.locator(panel.queueTab)).toHaveAttribute("aria-selected", "true");
     await expect(page.locator(panel.queueEmpty)).toBeVisible({ timeout: 20_000 });
@@ -267,9 +222,7 @@ test.describe("thread rendering details", () => {
   });
 
   test("tool cards + transcript SURVIVE a reload with identical counts", async ({ chat, page }) => {
-    // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). First turn waits for the sandbox
-    // (~30s worst), the second is warm (~5s), then a reload re-folds the transcript under
-    // a 45s re-mount budget: ~30 + 5 + 45 ≈ 80s worst against the 60s default.
+    // The first turn waits for the sandbox on the full target, then a reload re-folds the transcript.
     test.setTimeout(120_000);
     await chat.open();
     await chat.sendTurn("!echo persist one");

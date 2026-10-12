@@ -1,4 +1,4 @@
-"""Tier 1 — the PURE placement core (no cluster)."""
+"""Tier 1: the pure placement core, no cluster."""
 
 
 from warm_store_controller.allocate import (
@@ -21,8 +21,7 @@ def hostname_terms(*hosts):
 
 
 def zone_terms(*zones):
-    """An EBS PV's topology: pinned to AZs. Same SHAPE as local-path — the point of the
-    generic predicate."""
+    """An EBS PV's topology: pinned to AZs, the same shape as local-path."""
     return [{"matchExpressions": [{"key": "topology.ebs.csi.aws.com/zone", "operator": "In", "values": list(zones)}]}]
 
 
@@ -54,7 +53,7 @@ def test_hostname_in_matches_that_node_only():
 
 
 def test_ebs_zone_uses_the_same_rule():
-    # One predicate, both drivers — no per-driver special case.
+    # One predicate serves both drivers.
     terms = zone_terms("us-east-1a")
     n_a = Node(name="i-1", labels={"topology.ebs.csi.aws.com/zone": "us-east-1a"})
     n_b = Node(name="i-2", labels={"topology.ebs.csi.aws.com/zone": "us-east-1b"})
@@ -69,7 +68,7 @@ def test_terms_are_ORed_expressions_are_ANDed():
         {"key": "kubernetes.io/hostname", "operator": "In", "values": ["odin"]},
         {"key": "disk", "operator": "In", "values": ["ssd"]},
     ]}]
-    assert node_matches(anded, node("odin")) is False           # missing disk=ssd
+    assert node_matches(anded, node("odin")) is False
     assert node_matches(anded, node("odin", disk="ssd")) is True
 
 
@@ -82,7 +81,7 @@ def test_exists_and_notin():
 
 
 def test_UNKNOWN_operator_does_not_match():
-    # "satisfied" for an unreadable constraint = a pod bound to an unreachable volume.
+    # Treating an unreadable constraint as satisfied would bind a pod to an unreachable volume.
     weird = [{"matchExpressions": [{"key": "k", "operator": "Gt", "values": ["1"]}]}]
     assert node_matches(weird, node("odin", k="5")) is False
 
@@ -102,7 +101,7 @@ def test_usable_excludes_wrong_tag_nonavailable_terminating_and_reserved():
 
 
 def test_usable_excludes_a_pv_no_LIVE_node_can_reach():
-    # THE node-local case: the PV is fine, its node is gone/cordoned.
+    # The PV is fine but its node is gone or cordoned.
     pool = [pv("on-thor", node_selector_terms=hostname_terms("thor"))]
     assert usable_pvs(pool, [node("odin")], TAG) == []
     assert usable_pvs(pool, [Node(name="thor", labels={"kubernetes.io/hostname": "thor"}, schedulable=False)], TAG) == []
@@ -117,7 +116,7 @@ def test_a_volume_this_sandbox_warmed_wins_even_when_least_recently_used():
 
 
 def test_otherwise_MOST_recently_used_first():
-    # MRU: a hot set gets genuinely warm and the cold tail ages out reapably.
+    # MRU ordering keeps a hot set genuinely warm while the cold tail ages out.
     pool = [
         pv("recent", last_used="2026-08-27T10:00:00Z"),
         pv("old", last_used="2026-01-01T00:00:00Z"),
@@ -126,13 +125,13 @@ def test_otherwise_MOST_recently_used_first():
 
 
 def test_an_UNKNOWN_age_pv_sorts_last():
-    # Least attractive to reuse, most attractive to reap.
+    # An undated PV is the least attractive to reuse.
     pool = [pv("nostamp"), pv("dated", last_used="2026-01-01T00:00:00Z")]
     assert names(WANT_X, pool) == ["dated", "nostamp"]
 
 
 def test_TWO_sandboxes_can_prefer_the_SAME_volume():
-    # Separate keys — an annotation ON the PV records only the last user.
+    # Affinity is keyed per sandbox, unlike the PV annotation that records only the last user.
     aff = {"conv-x": "A", "conv-y": "A"}
     pool = [pv("A", last_used="2026-01-01T00:00:00Z"), pv("B", last_used="2026-08-27T10:00:00Z")]
     assert first(WANT_X, pool, aff) == "A"
@@ -144,7 +143,7 @@ def test_affinity_outranks_recency():
     assert first(WANT_A, pool, {"conv-a": "mine"}) == "mine"
 
 
-# --- candidate selection: ranking only. Freeness is decided by claim(), not here.
+# --- candidate selection: ranking only, since claim() decides freeness ------
 
 def test_the_sandboxs_OWN_pv_is_the_first_candidate():
     want = PendingSandbox(sandbox="conv-a", image_tag=TAG, pvc_name="scooter-rw-conv-a")
@@ -154,20 +153,20 @@ def test_the_sandboxs_OWN_pv_is_the_first_candidate():
 
 
 def test_a_COLD_pool_offers_NO_candidates():
-    # The shell reads this as "fall back to the vct" — a cold pool never blocks.
+    # The shell reads no candidates as "fall back to the vct".
     want = PendingSandbox(sandbox="conv-a", image_tag=TAG, pvc_name="scooter-rw-conv-a")
     assert names(want, []) == []
 
 
 def test_an_UNREACHABLE_pool_offers_NO_candidates():
-    # Non-empty but topologically useless: every PV is pinned to a node we cannot use.
+    # Every PV is pinned to a node that cannot be used.
     want = PendingSandbox(sandbox="conv-a", image_tag=TAG, pvc_name="scooter-rw-conv-a")
     pool = [pv("on-thor", node_selector_terms=hostname_terms("thor"))]
     assert names(want, pool) == []
 
 
 def test_candidates_are_offered_in_FALLBACK_order():
-    # The shell takes the first it wins, so a lost race costs the next-best volume.
+    # The shell takes the first candidate it wins, so a lost race costs the next-best volume.
     want = PendingSandbox(sandbox="conv-a", image_tag=TAG, pvc_name="scooter-rw-conv-a")
     aff = {"conv-a": "mine"}
     pool = [

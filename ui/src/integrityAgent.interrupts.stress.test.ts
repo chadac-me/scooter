@@ -1,18 +1,10 @@
 /**
- * Tier 1 (ui) — STRESS TEST for the approval-interrupt state machine (IntegrityAgent.trackInterrupt).
- *
- * The recurring "approval request doesn't appear in the panel" bug. We drive the agent through many
- * sequences of raise / RUN_STARTED / RUN_FINISHED / PERMISSION_RESOLVED and compare its
- * getPendingInterrupts() against a REFERENCE MODEL of what SHOULD be pending. Divergence = a drop.
- *
- * The intended contract (what the model encodes):
- *   - A raised interrupt is pending until it is explicitly resolved (PERMISSION_RESOLVED for its id).
- *   - Run boundaries (RUN_STARTED / a normal RUN_FINISHED) must NOT clear an UNANSWERED interrupt —
- *     approval is a human decision that outlives the agent's runs.
- *   - This must hold for goose (run-scoped) AND broker (ext-) interrupts, and any interleaving.
- *
- * If a scenario fails, its name + the diff (expected vs actual pending ids) pinpoints the sequence
- * that drops the approval.
+ * Stress test for the approval-interrupt state machine (IntegrityAgent.trackInterrupt).
+ * Many sequences of raise / RUN_STARTED / RUN_FINISHED / PERMISSION_RESOLVED are driven
+ * through the agent and its getPendingInterrupts() is compared against a reference
+ * model of what should be pending. The contract: a raised interrupt stays pending until
+ * a PERMISSION_RESOLVED for its id, and run boundaries never clear an unanswered one,
+ * for goose (run-scoped) and broker (ext-) interrupts in any interleaving.
  */
 
 import { describe, it, expect } from "vitest";
@@ -49,8 +41,7 @@ async function foldTo(agent: ReturnType<typeof createIntegrityAgent>): Promise<v
 }
 
 // --- The scenario DSL --------------------------------------------------------
-// A step is one thing that happens on the wire. `interruptGoose`/`interruptExt` RAISE an approval;
-// `startRun`/`finishRun` are run boundaries; `resolve` settles an approval by id.
+// A step is one thing that happens on the wire.
 type Step =
   | { op: "interruptGoose"; runId: string; id: string } // a run-scoped (goose) permission request
   | { op: "interruptExt"; id: string } // a broker (ext-) approval
@@ -85,9 +76,7 @@ function framesFor(steps: Step[]): unknown[] {
   return frames;
 }
 
-/** The REFERENCE MODEL: what SHOULD be pending after these steps. A raise adds the id; a resolve
- *  removes it; run boundaries change NOTHING. This is the contract the UI must honor for approvals
- *  to reliably appear + persist. */
+/** The reference model: a raise adds the id, a resolve removes it, run boundaries change nothing. */
 function expectedPending(steps: Step[]): Set<string> {
   const pending = new Set<string>();
   for (const s of steps) {

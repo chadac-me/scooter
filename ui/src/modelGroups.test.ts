@@ -1,6 +1,4 @@
-/**
- * Unit tests for the provider grouping that drives the two-level model picker.
- */
+/** The provider grouping that drives the two-level model picker. */
 
 import { describe, it, expect } from "vitest";
 import { groupModelsByProvider, providerLabel, UNTAGGED_GROUP } from "./modelGroups.js";
@@ -18,7 +16,7 @@ describe("groupModelsByProvider", () => {
       "claude-sonnet-4-5",
     );
     expect(groups).not.toBeNull();
-    // byoc holds the default -> it leads; byoc spells out, goose stays verbatim.
+    // byoc holds the default so it leads; byoc spells out, goose stays verbatim.
     expect(groups!.map((g) => g.provider)).toEqual(["byoc", "goose"]);
     expect(groups!.map((g) => g.label)).toEqual(["bring-your-own-claude", "goose"]);
     expect(groups!.find((g) => g.provider === "byoc")!.models).toEqual(["claude-sonnet-4-5"]);

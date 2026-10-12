@@ -1,8 +1,7 @@
 /**
- * Tier 1 — the recent-tail event window (fast first-paint for long conversations).
- *
- * Slices on RUN boundaries so every message/tool call in the window is complete
- * and folds identically to a full replay of those runs.
+ * The recent-tail event window for fast first paint of long conversations. It slices on
+ * run boundaries so every message and tool call in the window is complete and folds
+ * identically to a full replay of those runs.
  */
 
 import { describe, it, expect } from "vitest";
@@ -10,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { tailByRuns, orderByTime } from "../../src/session/eventWindow.js";
 import type { AguiEvent } from "../../src/bridge.js";
 
-// A run = RUN_STARTED, a user+assistant message, RUN_FINISHED (marker `n` tags it).
+// A run tagged by `n`: RUN_STARTED, a user message, RUN_FINISHED.
 const run = (n: number): AguiEvent[] => [
   { type: "RUN_STARTED", threadId: "c", runId: `r${n}` },
   { type: "TEXT_MESSAGE_START", messageId: `u${n}`, role: "user" },
@@ -24,11 +23,10 @@ describe("tailByRuns", () => {
 
   it("keeps the last N runs, whole", () => {
     const tail = tailByRuns(log, 2);
-    // Starts at the 3rd RUN_STARTED; contains runs 3 and 4 in full.
     expect(tail[0]).toMatchObject({ type: "RUN_STARTED", runId: "r3" });
     const runsSeen = tail.filter((e) => e.type === "RUN_STARTED").map((e) => (e as { runId: string }).runId);
     expect(runsSeen).toEqual(["r3", "r4"]);
-    // Every kept run is complete (START…END present for its message).
+    // Every kept run is complete.
     expect(tail.filter((e) => e.type === "TEXT_MESSAGE_START")).toHaveLength(2);
     expect(tail.filter((e) => e.type === "TEXT_MESSAGE_END")).toHaveLength(2);
   });
@@ -53,8 +51,7 @@ describe("tailByRuns", () => {
 });
 
 describe("orderByTime + restart-scrambled logs", () => {
-  // A run whose events carry an explicit `ts` (epoch ms). `base` is the run's
-  // start time; each event is +1ms so intra-run order is preserved by ts alone.
+  // A run whose events carry an explicit `ts` from `base`, each +1ms so ts alone preserves intra-run order.
   const tsRun = (n: number, base: number): AguiEvent[] => [
     { type: "RUN_STARTED", threadId: "c", runId: `r${n}`, ts: base },
     { type: "TEXT_MESSAGE_START", messageId: `u${n}`, role: "user", ts: base + 1 },
@@ -64,19 +61,17 @@ describe("orderByTime + restart-scrambled logs", () => {
   ];
 
   it("orders a restart-scrambled log by ts (real chronology, not append order)", () => {
-    // Append order puts run 2 (t=2000) BEFORE run 1 (t=1000) — as if the log
-    // concatenated a second process's runs ahead of the first's on disk.
+    // Append order puts run 2 before run 1, as if a second process's runs were concatenated ahead of the first's.
     const scrambled = [...tsRun(2, 2000), ...tsRun(1, 1000), ...tsRun(3, 3000)];
     const ordered = orderByTime(scrambled);
     const runs = ordered.filter((e) => e.type === "RUN_STARTED").map((e) => (e as { runId: string }).runId);
-    expect(runs).toEqual(["r1", "r2", "r3"]); // sorted by ts, not by file position
+    expect(runs).toEqual(["r1", "r2", "r3"]);
   });
 
   it("tailByRuns windows the last N runs BY TIME even when append order is scrambled", () => {
     const scrambled = [...tsRun(2, 2000), ...tsRun(1, 1000), ...tsRun(3, 3000)];
     const tail = tailByRuns(scrambled, 1);
-    // The chronologically-last run is r3 (t=3000), NOT the last-appended (r3 here,
-    // but the point is it's chosen by ts) — and it's whole.
+    // The chronologically last run is r3, and it is whole.
     expect(tail[0]).toMatchObject({ type: "RUN_STARTED", runId: "r3" });
     expect(tail.filter((e) => e.type === "TEXT_MESSAGE_END")).toHaveLength(1);
   });
@@ -89,6 +84,6 @@ describe("orderByTime + restart-scrambled logs", () => {
 
   it("leaves an UNSTAMPED log untouched (legacy behavior preserved exactly)", () => {
     const legacy = [...run(1), ...run(2)];
-    expect(orderByTime(legacy)).toBe(legacy); // same reference — no reorder
+    expect(orderByTime(legacy)).toBe(legacy);
   });
 });

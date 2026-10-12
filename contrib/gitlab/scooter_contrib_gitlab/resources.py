@@ -1,9 +1,7 @@
-"""GitLab's resource shapes: which ids and type spellings name the same MR/issue.
+"""GitLab's resource shapes, registered into `scooter_webhooks_lib.resources`.
 
-Registered into `scooter_webhooks_lib.resources` (#576). A web_url also identifies
-`path!iid` (MR) / `path#iid` (issue); the reverse is NOT derivable, because the
-instance host is not in the short form — so a short id stays itself rather than
-becoming a guessed gitlab.com URL. Why: PR #580.
+A web_url also identifies `path!iid` (MR) or `path#iid` (issue), but the reverse
+is not derivable because the instance host is not in the short form.
 """
 
 from __future__ import annotations

@@ -1,9 +1,9 @@
 /**
- * UI unit test — the ToolCallView tool-fallback override.
+ * The ToolCallView tool-fallback override.
  *
- * A provider "post" tool renders as a message card (icon + body + result); a
+ * A provider "post" tool renders as a message card (icon, body, result); a
  * non-provider tool delegates to the stock generic ToolFallback. Rendering the
- * card actually invokes SourceBadge, so a dropped provider icon throws here.
+ * card invokes SourceBadge, so a dropped provider icon throws here.
  */
 
 import { describe, it, expect } from "vitest";
@@ -13,8 +13,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ToolCallView } from "./ToolCallView.js";
 import { InterruptContext, type InterruptContextValue } from "./RuntimeProvider.js";
 
-/** Render a tool card inside an InterruptContext with the given run state, so we
- *  can exercise the "still running" spinner (which reads useConversationInterrupts). */
+/** Render a tool card inside an InterruptContext with the given run state, to exercise the "still running" spinner. */
 function renderWithRun(el: React.ReactElement, isRunning: boolean): string {
   const value = {
     interrupts: [],
@@ -48,10 +47,10 @@ describe("ToolCallView", () => {
   it("renders a Slack message card with the icon, body, and result", () => {
     const html = renderToStaticMarkup(
       createElement(ToolCallView, part({
-        // The REAL form the stream carries (server-prefixed, title-cased).
+        // The server-prefixed, title-cased form the stream carries.
         toolName: "Scooter-env: Slack Respond",
         args: { text: "on it" },
-        // The REAL result shape — the ACP content-array blob, NOT a plain string.
+        // The ACP content-array result shape, not a plain string.
         result: [{ content: { text: "Posted to the Slack thread.", type: "text" }, type: "content" }],
       })),
     );
@@ -59,7 +58,7 @@ describe("ToolCallView", () => {
     expect(html).toContain('data-provider="slack"');
     expect(html).toContain("on it");                       // the POSTED text (body)
     expect(html).toContain("Posted to the Slack thread.");  // the result — unwrapped, clean
-    expect(html).not.toContain('"type":"content"');         // NOT the raw JSON blob
+    expect(html).not.toContain('"type":"content"');         // not the raw JSON blob
     expect(html).toContain("<svg");                         // the Slack icon rendered
   });
 
@@ -76,8 +75,7 @@ describe("ToolCallView", () => {
       createElement(ToolCallView, part({
         toolName: "Shell",
         args: { command: "ls -la" },
-        // The real shell result: a terminal HANDLE, no stdout (that streams into
-        // the assistant text). Must NOT be dumped as raw JSON.
+        // The shell result is a terminal handle with no stdout, which must not be dumped as raw JSON.
         result: [{ terminalId: "term-1", type: "terminal" }],
       })),
     );
@@ -92,13 +90,12 @@ describe("ToolCallView", () => {
     const html = renderToStaticMarkup(
       createElement(ToolCallView, part({ toolName: "Search the web (DuckDuckGo)", argsText: '{"query":"x"}' })),
     );
-    // NOT a provider/shell card; the stock fallback renders its own markup instead.
+    // Not a provider/shell card; the stock fallback renders its own markup.
     expect(html).not.toContain("provider-tool-card");
   });
 
   it("shows a running spinner on a shell card while the turn is in flight and no result yet", () => {
-    // result === undefined => not finished; isRunning => the live turn. The single-
-    // source model FORCES status to complete, so the spinner comes from OUR run state.
+    // Status is always complete, so the spinner comes from our run state (result undefined plus isRunning).
     const html = renderWithRun(
       createElement(ToolCallView, part({ toolName: "Shell", args: { command: "sleep 20" }, result: undefined })),
       true,

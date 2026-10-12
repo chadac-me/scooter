@@ -203,9 +203,8 @@ func TestMetadataPatchHandler(t *testing.T) {
 	})
 
 	t.Run("404 when the row is deleted between the auth read and the write", func(t *testing.T) {
-		// Row present for the auth read, but the write returns (nil,nil) (raced delete).
+		// The row is present for the auth read, but the write returns (nil,nil).
 		f := &fakeMeta{rows: map[string]*ConversationRow{"c1": rowFixture("c1", nil)}}
-		// Make the write see no row by clearing it inside a wrapper.
 		fw := &raceWriter{fakeMeta: f}
 		r := httptest.NewRequest(http.MethodPatch, "/conversations/c1/starred", strings.NewReader(`{"starred":true}`))
 		w := httptest.NewRecorder()

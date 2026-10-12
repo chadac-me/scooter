@@ -1,32 +1,24 @@
-# What a PR must satisfy to merge — the declarative half of the CI verdict.
-#
-# One required check (`ci-summary`) reads this file, collects what every
-# reporting job wrote into the shared PR comment, and passes only if each gate
-# below is satisfied. Adding an opt-in suite therefore does NOT mean editing
-# branch protection: declare it here and it is enforced.
+# What a PR must satisfy to merge, read by the one required check
+# (`ci-summary`), which collects what every reporting job wrote into the shared
+# PR comment and passes only if each gate below is satisfied; an opt-in suite is
+# enforced by declaring it here, not by editing branch protection.
 #
 # `require`:
 #   always              — must report, and must pass
 #   when_labelled: <l>  — only in play when the PR carries that label
 #   never               — reports, never gates (advisory)
 #
-# `advisory: true` keeps a gate visible in the table but never blocks, even when
-# it reports a failure. `block_while_pending: false` lets a PR merge before this
-# gate has answered.
-#
-# ORDER IS THE RENDER ORDER of the comment's sections, so the thing most likely
-# to be wrong sits at the top.
+# `advisory: true` keeps a gate visible in the table but never blocks, and
+# `block_while_pending: false` lets a PR merge before the gate has answered.
+# The order here is the render order of the comment's sections.
 
 gates:
   - id: flake-full
     name: flake focus full (k3d, targeted ×5)
     require: when_labelled
     label: e2e-full-flake-check
-    # Reproducing a flake is INFORMATION, not a veto: on this suite it usually
-    # means the test is under-budgeted (a 30s run-status-bar assertion against a
-    # 1-2 min pod boot), not that the PR is wrong. But the answer must arrive
-    # before merge — a label that asks a question and then lets the PR merge
-    # before the answer lands is worse than not asking. See PR #628.
+    # A reproduction is information, not a veto, but the answer must arrive before
+    # merge.
     advisory: true
     block_while_pending: true
 
@@ -34,10 +26,8 @@ gates:
     name: e2e full (k3d)
     require: when_labelled
     label: e2e-full
-    # ADVISORY. Three runs of one unchanged CI-only diff reported 4, 3 and 2 new
-    # failures, and a spec that read "fixed" in the first read "broken" in the
-    # third. A suite that disagrees with itself run to run cannot gate a merge on
-    # a raw count. The attributable part is in the comment; a human reads it.
+    # Advisory: the suite's night-to-night swing is larger than most regressions, so
+    # a human reads the attributable part in the comment.
     advisory: true
     block_while_pending: false
 
@@ -64,10 +54,6 @@ gates:
   - id: size
     name: image size benchmark
     require: always
-    # ADVISORY, and deliberately so: this report has always been a signal, not a
-    # gate — image-sizes-diff.sh never exits non-zero, and the job's own comment
-    # says "report-only, never fails the PR". Declaring it `required` here would
-    # have silently promoted a 5% closure growth into a merge blocker, which is a
-    # policy change nobody asked for. It still must REPORT before merge: a
-    # closure that balloons should be seen, even if it does not veto.
+    # Advisory: image-sizes-diff.sh never exits non-zero, and a closure that
+    # balloons should be seen before merge without vetoing it.
     advisory: true

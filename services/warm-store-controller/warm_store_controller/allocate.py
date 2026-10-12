@@ -1,8 +1,7 @@
-"""PV placement — the pure decision core for handing a sandbox a warm overlay upper.
+"""PV placement: the pure decision core for handing a sandbox a warm overlay upper.
 
-The controller pre-creates the PVC the sandbox's vct will adopt, pre-bound via `claimRef`.
-Placing nothing is valid: the vct then provisions a fresh upper. See PR #403 and
-todo/draft/WARM_STORE_PV_OWNERSHIP.md.
+The controller pre-creates the PVC the sandbox's vct will adopt, pre-bound via `claimRef`,
+and placing nothing is valid because the vct then provisions a fresh upper.
 """
 
 from __future__ import annotations
@@ -10,11 +9,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-# Ownership marker: ownerReferences cannot own a cluster-scoped PV. PR #403.
+# Ownership marker, since ownerReferences cannot own a cluster-scoped PV.
 PV_FINALIZER = "scooter.io/warm-store"
 
-# Keyed by image tag: the upper is an overlay whose LOWER is that image.
-LBL_WARM_STORE = "scooter.io/warm-store"      # image content tag — the version key
+LBL_WARM_STORE = "scooter.io/warm-store"      # image content tag, the version key
 ANN_LAST_USED = "scooter.io/last-used"        # rfc3339, for LRU
 
 
@@ -25,8 +23,7 @@ class PoolPv:
     name: str
     image_tag: str
     phase: str                       # Available | Bound | Released | Failed
-    # spec.nodeAffinity's required nodeSelectorTerms, verbatim — identical across drivers.
-    node_selector_terms: list[dict] = field(default_factory=list)
+    node_selector_terms: list[dict] = field(default_factory=list)  # spec.nodeAffinity's required terms, verbatim
     last_used: str | None = None
     claim_ref: str | None = None     # spec.claimRef.name when reserved/bound
     terminating: bool = False
@@ -43,26 +40,23 @@ class Node:
 
 @dataclass(frozen=True)
 class PendingSandbox:
-    """A Sandbox awaiting an upper. `pvc_name` is what its vct WILL generate — the PVC must
-    be created under exactly that name for adoption to happen."""
+    """A Sandbox awaiting an upper, where `pvc_name` is exactly what its vct will generate."""
 
     sandbox: str
     image_tag: str
     pvc_name: str
 
 
-# --- actions ---------------------------------------------------------------
-
 # --- the placement predicate ----------------------------------------------
 
 def node_matches(terms: list[dict], node: Node) -> bool:
-    """Does `node` satisfy a PV's nodeSelectorTerms? Terms OR'd, expressions AND'd."""
+    """Whether `node` satisfies a PV's nodeSelectorTerms, with terms OR'd and expressions AND'd."""
     if not terms:
         return True
     for term in terms:
         exprs = term.get("matchExpressions") or []
         fields = term.get("matchFields") or []
-        # matchFields keys on node metadata, not labels; unevaluatable -> skip the term.
+        # matchFields keys on node metadata, not labels, so the term cannot be evaluated.
         if fields:
             continue
         if all(_expr_matches(e, node) for e in exprs):
@@ -82,13 +76,11 @@ def _expr_matches(expr: dict, node: Node) -> bool:
         return key in node.labels
     if op == "DoesNotExist":
         return key not in node.labels
-    return False  # unknown operator: fail closed (do not place) rather than mis-place
+    return False  # an unknown operator fails closed
 
 
 def usable_pvs(pvs: list[PoolPv], nodes: list[Node], image_tag: str) -> list[PoolPv]:
-    """Pool PVs that could actually serve a sandbox of `image_tag` right now: matching
-    tag, Available, not terminating, unreserved, and reachable from at least one
-    schedulable node."""
+    """Pool PVs that could serve a sandbox of `image_tag` right now: matching tag, Available, not terminating, unreserved and reachable from a schedulable node."""
     live = [n for n in nodes if n.schedulable]
     return [
         pv
@@ -107,14 +99,14 @@ def candidates_for(
     nodes: list[Node],
     affinity: dict[str, str] | None = None,
 ) -> Iterator[PoolPv]:
-    """PVs this sandbox could use, best-first. Ranking only — claim() decides freeness."""
+    """PVs this sandbox could use, best-first; claim() decides freeness."""
     usable = usable_pvs(pvs, nodes, want.image_tag)
     mine = (affinity or {}).get(want.sandbox)
     for pv in usable:
         if pv.name == mine:
             yield pv
             break
-    # `or ""` puts an undated PV at the end; name breaks ties for a stable order.
+    # An undated PV sorts last, and name breaks ties for a stable order.
     for pv in sorted(usable, key=lambda p: (p.last_used or "", p.name), reverse=True):
         if pv.name != mine:
             yield pv

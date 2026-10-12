@@ -1,11 +1,7 @@
 /**
- * Tier 1 contract — the model a session gets is resolved PER PROVIDER.
- *
- * Model ids are provider-specific namespaces: Bedrock ids (us.anthropic.…) via goose, API ids
- * (claude-sonnet-4-5) via the subscription SDK / the BYO container. The catalog was flat, so a
- * conversation's choice was handed to every provider verbatim — the BYO container received (and
- * silently ignored) Bedrock ids. Each run's session now gets: the conversation's choice when
- * that provider OFFERS it, else that provider's own default — never cross-namespace nonsense.
+ * The model a session gets is resolved per provider. Model ids are provider-specific
+ * namespaces, so each run's session gets the conversation's choice when that provider
+ * offers it and the provider's own default otherwise.
  */
 
 import { describe, it, expect } from "vitest";
@@ -77,7 +73,7 @@ describe("per-provider model resolution", () => {
 
     containerOnline = true;
     await bridge.prompt({ threadId: "t1", text: "second", source: "ui" });
-    // THE POINT: the container must never receive a Bedrock id. It gets its own default.
+    // The container never receives a Bedrock id.
     expect(byoc.newSessions[0]?.model).toBe("claude-sonnet-4-5");
   });
 

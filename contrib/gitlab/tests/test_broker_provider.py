@@ -1,11 +1,4 @@
-"""GitLab proxy — bare-host upstream (the /api/v4 double-prefix fix) + the
-upstream-URL-on-error diagnostic header.
-
-Regression: the gitlab upstream used to be https://gitlab.com/api/v4, so an agent
-calling /gitlab/api/v4/user got forwarded to gitlab.com/api/v4/api/v4/user -> 404.
-The upstream is now the bare host (transparent proxy, like GitHub): the path after
-/gitlab/ is the full API path.
-"""
+"""GitLab proxy: the bare-host upstream and the upstream-URL-on-error diagnostic header."""
 
 from __future__ import annotations
 
@@ -25,11 +18,8 @@ def _identity() -> Identity:
 
 
 def test_gitlab_upstream_is_bare_host(monkeypatch):
-    # The contrib owns GITLAB_TOKEN now, so the env is what arms the provider —
-    # the broker app has no gitlab field to patch. Why: PR #580.
     monkeypatch.setenv("GITLAB_TOKEN", "glpat-xxx")
     proxy = next(t for t in gitlab().transports if isinstance(t, HttpProxy))
-    # Bare host — NOT .../api/v4 (that was the double-prefix bug).
     assert proxy.upstream == "https://gitlab.com"
     assert not proxy.upstream.endswith("/api/v4")
 
@@ -39,15 +29,13 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 @pytest.fixture(autouse=True)
 def _restore_async_client():
-    """Undo the AsyncClient patch each test does, so the module is left pristine."""
+    """Undo the AsyncClient patch each test does."""
     yield
     http_proxy_mod.httpx.AsyncClient = _REAL_ASYNC_CLIENT  # type: ignore[assignment]
 
 
 def _app_with_proxy(proxy: HttpProxy, captured: dict) -> FastAPI:
-    """Mount just the proxy, with a fake auth dep and a mocked upstream that records
-    the outbound URL and returns a chosen status. Patches the proxy's
-    `httpx.AsyncClient(...)` to use a MockTransport (no network)."""
+    """Mount just the proxy over a MockTransport that records the outbound URL and returns a chosen status."""
     async def fake_authed() -> Identity:
         return _identity()
 
@@ -76,7 +64,6 @@ def test_gitlab_api_path_is_not_double_prefixed():
 
     resp = client.get("/gitlab/api/v4/user")
     assert resp.status_code == 200
-    # The outbound URL is gitlab.com/api/v4/user — NOT .../api/v4/api/v4/user.
     assert captured["url"] == "https://gitlab.com/api/v4/user"
 
 
@@ -88,8 +75,6 @@ def test_failure_surfaces_the_upstream_url_header():
 
     resp = client.get("/gitlab/api/v4/nope")
     assert resp.status_code == 404
-    # The URL the proxy actually requested is echoed back so a mis-prefixed path
-    # is self-diagnosing (query stripped).
     assert resp.headers.get("x-broker-upstream-url") == "https://gitlab.com/api/v4/nope"
 
 

@@ -1,8 +1,7 @@
 /**
- * Tier 1 — SDK client SESSION RESUME. Every prompt must resume the SDK's session so
- * the conversation keeps its history; without it the agent "loses total context"
- * (most visibly after a cancel). We inject a fake query() (deps.queryImpl) that
- * records the options it was called with and streams a message carrying a session_id.
+ * Tier 1: the SDK client against a fake query() (deps.queryImpl) that records the
+ * options it was called with and streams canned messages. Every prompt must resume
+ * the SDK's session so the conversation keeps its history.
  */
 
 import { describe, it, expect } from "vitest";
@@ -10,15 +9,13 @@ import { describe, it, expect } from "vitest";
 import { createSdkAcpClient } from "./sdkClient.js";
 import type { ExecBackend } from "./types.js";
 
-// Minimal ExecBackend stub — the client only wires it into the sandbox MCP server,
-// which isn't exercised by prompt() here.
+// Minimal ExecBackend stub; the sandbox MCP server is not exercised by prompt() here.
 const fakeExec: ExecBackend = {
   exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
   createTerminal: async () => ({ id: "t", write: async () => {}, kill: async () => {}, output: async () => "" }),
 } as unknown as ExecBackend;
 
-/** A fake query() that records each call's options and yields one message with a
- *  session_id + a result, then ends. `interrupt` flips a flag. */
+/** A fake query() that records each call's options and yields one message with a session_id plus a result. */
 function fakeQuery() {
   const calls: Array<{ prompt: string; options: Record<string, unknown> }> = [];
   let interrupted = false;
@@ -73,15 +70,14 @@ describe("SDK client session resume", () => {
     await client.newSession({ threadId: "c1" } as never);
 
     await client.prompt({ prompt: [{ type: "text", text: "hello" }] } as never);
-    expect(fq.calls[0].options.resume).toBeUndefined(); // new session
+    expect(fq.calls[0].options.resume).toBeUndefined();
 
     await client.prompt({ prompt: [{ type: "text", text: "again" }] } as never);
-    expect(fq.calls[1].options.resume).toBe("sess-abc"); // resumed the same session
+    expect(fq.calls[1].options.resume).toBe("sess-abc");
   });
 
   it("resumes even after a cancel (context survives interrupt)", async () => {
-    // A query whose stream BLOCKS mid-turn so cancel() has an in-flight query to
-    // interrupt (the realistic case: the user cancels while the agent is working).
+    // A query whose stream blocks mid-turn so cancel() has an in-flight query to interrupt.
     const calls: Array<{ options: Record<string, unknown> }> = [];
     let interrupted = false;
     let release: () => void = () => {};
@@ -105,8 +101,7 @@ describe("SDK client session resume", () => {
     expect(interrupted).toBe(true);
 
     await client.prompt({ prompt: [{ type: "text", text: "continue" }] } as never);
-    // The post-cancel turn still RESUMES the session — it does NOT dead-start fresh
-    // (the bug: a cancelled turn lost the session, so the next turn had no context).
+    // The post-cancel turn still resumes the session.
     expect(calls[calls.length - 1].options.resume).toBe("sess-abc");
   });
 
@@ -116,7 +111,7 @@ describe("SDK client session resume", () => {
     await client.newSession({ threadId: "c1" } as never);
     await client.prompt({ prompt: [{ type: "text", text: "a" }] } as never); // captures sess-abc
 
-    await client.newSession({ threadId: "c2" } as never); // NEW conversation
+    await client.newSession({ threadId: "c2" } as never);
     await client.prompt({ prompt: [{ type: "text", text: "b" }] } as never);
     expect(fq.calls[fq.calls.length - 1].options.resume).toBeUndefined();
   });
@@ -134,17 +129,16 @@ describe("SDK client platform MCP tools (scooter-env)", () => {
     await client.prompt({ prompt: [{ type: "text", text: "schedule something" }] } as never);
 
     const mcp = fq.calls[0].options.mcpServers as Record<string, { type?: string; url?: string }>;
-    // The sandbox server stays; scooter-env is added as an HTTP server pointed at the
-    // per-conversation MCP endpoint (this is what carries the scheduler/slack/github tools).
+    // The sandbox server stays and scooter-env is added as an HTTP server at the per-conversation endpoint.
     expect(mcp.sandbox).toBeDefined();
     expect(mcp["scooter-env"]).toEqual({ type: "http", url: "http://127.0.0.1:8080/mcp?conv=c1" });
-    // Its tools are auto-allowed (no permission prompt) via the server prefix.
+    // Its tools are auto-allowed via the server prefix.
     expect(fq.calls[0].options.allowedTools as string[]).toContain("mcp__scooter-env");
   });
 
   it("omits scooter-env when no mcpEndpointUrl is given (sandbox tools only)", async () => {
     const fq = fakeQuery();
-    const client = await mkClient(fq.queryImpl); // no mcpEndpointUrl
+    const client = await mkClient(fq.queryImpl);
     await client.newSession({ threadId: "c1" } as never);
     await client.prompt({ prompt: [{ type: "text", text: "hi" }] } as never);
 
@@ -194,37 +188,24 @@ describe("SDK client back-pressure (canUseTool yields to a queued priority item)
 
 });
 
-// The deployed bug: an agent stuck polling `check_subagent` never yielded to a
-// queued priority item (18 calls, no deny, no "Pausing" log). Verified in prod that
-// the SDK does NOT invoke canUseTool for allowedTools-covered tools (our sandbox
-// aliases + the mcp__scooter-env prefix), so the canUseTool deny is dead. The REAL
-// gate is in prompt()'s stream loop: when the agent ISSUES a tool call (a `tool_use`
-// block), if shouldYield() is true, interrupt the query so the turn ends.
-//
-// NOTE the message SHAPES here match a RECORDED real transcript (see
-// sdkClient.replay.spec.ts): the tool CALL is a `tool_use` block in an `assistant`
-// message; the RESULT is a `tool_result` block in a `user` message — which the
-// adapter DROPS, so the hook must key on the CALL, not the result. An earlier fake
-// put the result in an `assistant` message and the hook keyed on it — green on a
-// fiction, broken in prod. Don't regress to that.
+// The SDK does not invoke canUseTool for allowedTools-covered tools, so the yield gate in prompt()'s stream loop keys on the tool call, whose message shapes here match a recorded real transcript (see sdkClient.replay.spec.ts).
 describe("SDK client back-pressure (stream-loop interrupt at tool-call boundaries)", () => {
-  // A fake query mirroring the REAL shapes: a tool_use (the call) then a user-type
-  // tool_result (the completion, which the adapter ignores). Records interrupt().
+  // A fake query mirroring the real shapes: a tool_use call, then a user-message tool_result.
   function toolLoopQuery() {
     let interrupted = false;
     let reachedEnd = false;
     const queryImpl = () => {
       async function* gen() {
         yield { type: "assistant", session_id: "s1", message: { content: [] } } as never;
-        // The tool CALL — a tool_use block in an ASSISTANT message (real shape).
+        // The tool call: a tool_use block in an assistant message.
         yield { type: "assistant", session_id: "s1", message: { content: [
           { type: "tool_use", id: "tc1", name: "mcp__scooter-env__check_subagent", input: { subagent_id: "x" } },
         ] } } as never;
-        // The RESULT — a tool_result in a USER message (real shape; adapter drops it).
+        // The result: a tool_result in a user message.
         yield { type: "user", session_id: "s1", message: { content: [
           { type: "tool_result", tool_use_id: "tc1", content: "still running" },
         ] } } as never;
-        // If the turn ISN'T interrupted at the CALL, it would keep looping.
+        // Reached only if the turn was not ended at the call.
         yield { type: "result", subtype: "success", session_id: "s1" } as never;
         reachedEnd = true;
       }
@@ -237,10 +218,10 @@ describe("SDK client back-pressure (stream-loop interrupt at tool-call boundarie
 
   it("ENDS the turn at a tool-call boundary when shouldYield() is true (the check_subagent-loop fix)", async () => {
     const tl = toolLoopQuery();
-    const client = await mk(() => true, tl.queryImpl); // a priority item IS waiting
+    const client = await mk(() => true, tl.queryImpl); // a priority item is waiting
     await client.newSession({ threadId: "c1" } as never);
     await client.prompt({ prompt: [{ type: "text", text: "poll" }] } as never);
-    // Breaks from stream without calling interrupt (no spurious "user stopped" signals; PR #453).
+    // Breaks from the stream without calling interrupt.
     expect(tl.wasInterrupted()).toBe(false);
     expect(tl.endedEarly()).toBe(true);
   });
@@ -251,7 +232,7 @@ describe("SDK client back-pressure (stream-loop interrupt at tool-call boundarie
     await client.newSession({ threadId: "c1" } as never);
     await client.prompt({ prompt: [{ type: "text", text: "poll" }] } as never);
     expect(tl.wasInterrupted()).toBe(false);
-    expect(tl.endedEarly()).toBe(false); // ran to completion
+    expect(tl.endedEarly()).toBe(false);
   });
 
   it("does NOT interrupt when no shouldYield is wired (default behavior unchanged)", async () => {
@@ -260,7 +241,7 @@ describe("SDK client back-pressure (stream-loop interrupt at tool-call boundarie
     await client.newSession({ threadId: "c1" } as never);
     await client.prompt({ prompt: [{ type: "text", text: "poll" }] } as never);
     expect(tl.wasInterrupted()).toBe(false);
-    expect(tl.endedEarly()).toBe(false); // ran to completion
+    expect(tl.endedEarly()).toBe(false);
   });
 });
 
@@ -276,9 +257,7 @@ describe("SDK client permission requests carry a UNIQUE id per call", () => {
       systemPrompt: "hi",
       queryImpl: fq.queryImpl,
     } as never);
-    // The bridge registers this; it keys pendingPermissions by req.toolCallId, so two
-    // concurrent requests sharing an id make the second OVERWRITE the first — and the
-    // first's promise then never resolves (the tool call hangs with no TOOL_CALL_RESULT).
+    // The bridge keys pendingPermissions by req.toolCallId, so two concurrent requests sharing an id would collide.
     (client as never as { onPermissionRequest: (h: (r: never) => Promise<never>) => void })
       .onPermissionRequest(async (req: never) => {
         const r = req as unknown as { toolCallId: string; title: string };
@@ -291,10 +270,6 @@ describe("SDK client permission requests carry a UNIQUE id per call", () => {
   };
 
   it("THE REGRESSION: two calls to the SAME tool get DISTINCT permission ids", async () => {
-    // Live on conv-1ribob: check_background / run_background are called repeatedly, so
-    // keying the pending permission by TOOL NAME collided — the second request evicted
-    // the first from pendingPermissions and its tool call never returned. 8 orphaned
-    // tool calls, 0 PERMISSION_RESOLVED across 629 calls.
     const { fq, seen } = await clientWithHandler();
     const canUseTool = fq.calls[0].options.canUseTool as (n: string, i: unknown) => Promise<unknown>;
     await Promise.all([
@@ -314,8 +289,7 @@ describe("SDK client permission requests carry a UNIQUE id per call", () => {
 });
 
 describe("multimodal prompt (attached images reach the model)", () => {
-  // A fake query() that records the RAW prompt arg (string OR AsyncIterable) so a
-  // test can assert an image rides the streaming-input form, not the text "[image]".
+  // A fake query() that records the raw prompt arg, string or AsyncIterable.
   function recordingQuery() {
     const calls: Array<{ prompt: unknown; options: Record<string, unknown> }> = [];
     const queryImpl = (params: { prompt: unknown; options: Record<string, unknown> }) => {
@@ -349,15 +323,12 @@ describe("multimodal prompt (attached images reach the model)", () => {
       ],
     } as never);
 
-    // Image prompt → streaming-input form (an async iterable), never a string.
+    // An image prompt takes the streaming-input form, never a string.
     expect(typeof rq.calls[0].prompt).not.toBe("string");
     const um = await firstUserMessage(rq.calls[0].prompt);
     const content = um.message.content as Array<Record<string, unknown>>;
-    // The text survives...
     expect(content).toContainEqual({ type: "text", text: "what is this?" });
-    // ...and the image is a real base64 image block the model can SEE.
     expect(content).toContainEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } });
-    // The old bug: a "[image]" text placeholder. It must be gone.
     expect(JSON.stringify(content)).not.toContain("[image]");
   });
 
@@ -373,9 +344,7 @@ describe("multimodal prompt (attached images reach the model)", () => {
 });
 describe("named MCP servers reach the SDK — the contrib provider tools", () => {
   it("THE BUG: scooter-broker is passed to the SDK, with its headers", async () => {
-    // Only the goose path offered scooter-broker (the github/gitlab/jira tools),
-    // so the SDK agent had the github SKILL telling it to call agent-broker and
-    // no github tool to call. Observed live on scooter.chadac.me.
+    // The SDK agent's github skill tells it to call agent-broker, so scooter-broker must be offered on this path too.
     const fq = fakeQuery();
     const client = await createSdkAcpClient({
       oauthToken: "t", model: "claude-x", exec: fakeExec, systemPrompt: "hi",
@@ -390,7 +359,7 @@ describe("named MCP servers reach the SDK — the contrib provider tools", () =>
     const servers = fq.calls[0].options.mcpServers as Record<string, { type: string; url: string; headers?: Record<string, string> }>;
     expect(Object.keys(servers)).toContain("scooter-broker");
     expect(servers["scooter-broker"].url).toBe("http://127.0.0.1:8080/broker-mcp");
-    // WITHOUT the header the proxy rejects the call, so the tool exists and fails.
+    // Without the header the proxy rejects the call, so the tool exists and fails.
     expect(servers["scooter-broker"].headers).toEqual({ "x-conv": "tok" });
   });
 

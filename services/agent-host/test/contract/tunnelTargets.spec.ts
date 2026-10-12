@@ -1,13 +1,8 @@
 /**
- * Tier 1 contract — tunnel target resolution, the SECURITY BOUNDARY for MCP over the wire.
- *
- * A BYO container asks for a NAMED target; the agent-host maps it to a real URL. The rules
- * here are what keep a tunnel from a user's laptop from becoming arbitrary cluster network
- * access, so they are pinned before the implementation exists.
- *
- * The conversation id is ALWAYS supplied server-side (from the stream's session), never read
- * from the container's frame — a container that could name another conversation's resources is
- * the cross-owner hole the attach path already guards against.
+ * Tunnel target resolution, the security boundary for MCP over the wire: a BYO container
+ * asks for a named target and the agent-host maps it to a real URL, never a raw address.
+ * The conversation id always comes from the stream's session, never from the container's
+ * frame, and credentials are injected server-side rather than offered to the container.
  */
 
 import { describe, it, expect } from "vitest";
@@ -27,8 +22,6 @@ describe("tunnel target resolution", () => {
   });
 
   it("scopes the endpoint to the SERVER-SIDE conversation, so streams cannot cross", () => {
-    // Two sessions, two conversations: each resolves to its own ?conv=. The container never
-    // supplies this — it comes from the stream's session.
     const a = resolveTunnelTarget("scooter-env", "conv-a", deps);
     const b = resolveTunnelTarget("scooter-env", "conv-b", deps);
     expect(a.ok && a.target.url).not.toBe(b.ok && b.target.url);
@@ -41,7 +34,6 @@ describe("tunnel target resolution", () => {
   });
 
   it("REJECTS a raw host:port — names only, never network addresses", () => {
-    // The whole reason this is a named mux and not a TCP tunnel.
     for (const bad of ["127.0.0.1:8080", "http://10.0.0.5:9000", "kubernetes.default.svc:443"]) {
       const r = resolveTunnelTarget(bad, "conv-a", deps);
       expect(r.ok, `${bad} must not resolve`).toBe(false);
@@ -49,16 +41,14 @@ describe("tunnel target resolution", () => {
   });
 
   it("RESERVES sandbox:<name> — recognised but not resolvable yet, and it says so", () => {
-    // The agent will declare MCP servers in its nixosConfiguration later; until that exists an
-    // unimplemented target must fail loudly, not silently behave like scooter-env.
+    // An unimplemented target fails loudly rather than behaving like scooter-env.
     const r = resolveTunnelTarget("sandbox:my-server", "conv-a", deps);
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.reason).toMatch(/not (yet )?(supported|implemented)|sandbox/i);
   });
 
   it("offers NOTHING when the MCP endpoint is not configured", () => {
-    // No endpoint -> no scooter-env -> the container starts no proxy, rather than one that
-    // dead-ends on every call.
+    // With no endpoint the container starts no proxy, rather than one that dead-ends on every call.
     expect(offeredTunnelServers("conv-a", {})).toEqual([]);
   });
 
@@ -68,7 +58,7 @@ describe("tunnel target resolution", () => {
   });
 });
 
-// --- the conversation token on a tunnelled target (issue #700) ----------------------
+// --- the conversation token on a tunnelled target -----------------------------------
 describe("tunnel target credentials", () => {
   const withHeaders = {
     mcpUrlFor: (_conv: string) => "http://127.0.0.1:8080/mcp",
@@ -93,8 +83,7 @@ describe("tunnel target credentials", () => {
     expect(r.ok && r.target.headers).toEqual([]);
   });
 
-  // The container runs on the USER'S machine. Offering it a credential would be
-  // handing them one; the agent-host injects when it proxies instead.
+  // The container runs on the user's machine, so the agent-host injects the credential when it proxies instead.
   it("never offers the credential to the container in the server list", () => {
     const offered = offeredTunnelServers("conv-a", withHeaders);
     expect(offered.every((o) => o.headers.length === 0)).toBe(true);
@@ -104,8 +93,7 @@ describe("scooter-broker — the contrib provider tools", () => {
   const withBroker = { ...deps, brokerMcpUrlFor: () => "http://127.0.0.1:8080/broker-mcp" };
 
   it("THE BUG: a BYO agent is offered scooter-broker, not just scooter-env", () => {
-    // Without it the agent has the github SKILL telling it to call agent-broker
-    // and no github tool to call. Observed live on scooter.chadac.me.
+    // Without it the agent has the github skill telling it to call agent-broker and no github tool to call.
     const names = offeredTunnelServers("c1", withBroker).map((s) => s.name);
     expect(names).toContain("scooter-env");
     expect(names).toContain("scooter-broker");

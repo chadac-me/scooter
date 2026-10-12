@@ -1,6 +1,5 @@
-// Package main — the conversation router. This file holds the PURE routing logic:
-// extract a conversation id from a request, and resolve which upstream (owner pod) a
-// request should go to. No k8s, no network — fully unit-testable (route_test.go).
+// The pure routing logic: extract a conversation id from a request and resolve which
+// upstream it should go to, with no k8s or network.
 package main
 
 import (
@@ -9,18 +8,11 @@ import (
 	"strings"
 )
 
-// ConvIDFromPath extracts the conversation id from a request PATH, for the path-scoped
-// routes. Returns ("", false) if the path carries no conversation id (a non-scoped route
-// like /healthz or /conversations with no id).
-//
-// Recognized shapes:
+// ConvIDFromPath extracts the conversation id from a request path, ("", false) when it carries none.
 //
 //	/conversations/<id>                     -> <id>
-//	/conversations/<id>/<anything...>       -> <id>   (events.integrity, cancel, links, …)
+//	/conversations/<id>/<anything...>       -> <id>
 //	/c/<id>/<service>/<rest...>             -> <id>   (the web-service proxy, incl. WS)
-//
-// POST /agui carries the id in the BODY (threadId), not the path — the caller reads that
-// separately (ConvIDFromAgui) since it needs the parsed body anyway.
 func ConvIDFromPath(path string) (string, bool) {
 	parts := splitPath(path)
 	if len(parts) < 2 {
@@ -28,10 +20,7 @@ func ConvIDFromPath(path string) (string, bool) {
 	}
 	switch parts[0] {
 	case "conversations", "c":
-		// GUARD: /conversations/events is the FLEET-WIDE list stream, not a conversation whose id
-		// happens to be "events". Without this it parses as convID="events", finds no such owner,
-		// and silently falls back to one arbitrary pod — so the sidebar's live stream showed only
-		// that pod's slice of the conversations. Same class as the /conversations list bug.
+		// /conversations/events is the list stream, not a conversation whose id is "events".
 		if parts[0] == "conversations" && parts[1] == "events" {
 			return "", false
 		}
@@ -42,34 +31,28 @@ func ConvIDFromPath(path string) (string, bool) {
 	return "", false
 }
 
-// IsConversationListRoute reports whether a request is the conversation LIST (GET /conversations)
-// or its live events stream (GET /conversations/events) — the two routes the router answers itself
-// from Postgres rather than proxying to a pod. An agent-host only knows the conversations it hosts
-// (with podCap=1 the controller spreads them one-per-pod), so no single pod can answer "all of this
-// user's conversations"; the durable store can. The list reads a snapshot (list.go), the stream
-// LISTENs for NOTIFYs (events.go). Both require the metadata store.
+// IsConversationListRoute reports whether a request is the conversation list or its live events stream, the two routes served from Postgres rather than proxied.
 func IsConversationListRoute(method, path string) bool {
 	if method != "GET" {
 		return false
 	}
 	parts := splitPath(path)
 	if len(parts) == 1 && parts[0] == "conversations" {
-		return true // GET /conversations — the list
+		return true // GET /conversations
 	}
 	if len(parts) == 2 && parts[0] == "conversations" && parts[1] == "events" {
-		return true // GET /conversations/events — the live list stream
+		return true // GET /conversations/events
 	}
 	return false
 }
 
-// IsAguiPost reports whether this is the POST /agui route (id lives in the body).
+// IsAguiPost reports whether this is the POST /agui route, whose id lives in the body.
 func IsAguiPost(method, path string) bool {
 	parts := splitPath(path)
 	return method == "POST" && len(parts) == 1 && parts[0] == "agui"
 }
 
 // MetadataPatch matches PATCH /conversations/<id>/{starred,title}, returning the field and id.
-// The router can serve these itself for an idle conversation; see metadata.go / PR #475.
 func MetadataPatch(method, path string) (field, id string, ok bool) {
 	if method != http.MethodPatch {
 		return "", "", false
@@ -84,8 +67,7 @@ func MetadataPatch(method, path string) (field, id string, ok bool) {
 	return parts[2], parts[1], true
 }
 
-// IsNonScoped reports whether a path is NOT conversation-scoped (routable to any ready
-// pod) — health checks and the like.
+// IsNonScoped reports whether a path is routable to any ready pod, such as a health check.
 func IsNonScoped(path string) bool {
 	parts := splitPath(path)
 	if len(parts) == 0 {
@@ -98,13 +80,7 @@ func IsNonScoped(path string) bool {
 	return false
 }
 
-// TargetURL builds the upstream base URL for an owner pod, addressed by its POD IP.
-// Deployments give random-named pods no stable DNS, so the router proxies straight to
-// the IP the controller recorded in status.hostIP (see route table in the CR). `hostIP`
-// is e.g. "10.42.0.49"; the upstream is http://<hostIP>:<port>.
-//
-// DESIGN NOTE: this replaces the old headless-Service DNS form
-// (<hostPod>.<headless>.<ns>.svc). The headless Service is being removed.
+// TargetURL builds the upstream base URL for an owner pod, addressed by the pod IP the controller recorded in status.hostIP.
 func TargetURL(hostIP string, port int) *url.URL {
 	return &url.URL{
 		Scheme: "http",
@@ -112,13 +88,7 @@ func TargetURL(hostIP string, port int) *url.URL {
 	}
 }
 
-// FallbackURL is the upstream for non-scoped / unassigned / stale-IP requests: the
-// regular agent-host ClusterIP Service, which load-balances to ANY ready pod. Used when
-// (a) the path isn't conversation-scoped, (b) the conversation has no known hostIP yet, or
-// (c) a dial to the owner's hostIP fails (the pod was replaced this tick) — the controller
-// converges the correct hostIP shortly.
-//
-// DESIGN STUB — signature only; the dial-fail retry that routes here lives in main.go.
+// FallbackURL is the agent-host ClusterIP Service, the upstream for non-scoped, unassigned and stale-IP requests.
 func FallbackURL(clusterIPService, namespace string, port int) *url.URL {
 	return &url.URL{
 		Scheme: "http",
@@ -136,7 +106,7 @@ func splitPath(path string) []string {
 	return out
 }
 
-// itoa avoids importing strconv just for a small positive int (ports).
+// itoa formats a small positive int without strconv.
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

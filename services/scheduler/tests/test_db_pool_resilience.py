@@ -1,14 +1,4 @@
-"""The scheduler's async DB engine must survive a postgres restart / failover / idle-timeout.
-
-Without `pool_pre_ping` the pool hands out a connection the server has already closed and the
-request dies with asyncpg "connection is closed" on the next transaction — the service then stays
-broken until it is itself restarted. `pool_recycle` retires connections proactively before common
-idle-timeout windows rather than waiting to be bitten.
-
-Scoped to THIS service's modules: each service's nix build sandbox contains only its own source, so
-a cross-service check would fail to find the files (it did — see the CI failure that introduced this
-split). The broker carries the same check for its three stores.
-"""
+"""The scheduler's async DB engine must carry pool_pre_ping and pool_recycle, so it survives a postgres restart, failover or idle timeout; scoped to this service's modules since the nix build sandbox holds only its own source."""
 
 from __future__ import annotations
 

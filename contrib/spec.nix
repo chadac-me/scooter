@@ -1,11 +1,5 @@
-# The contrib schema. Why: PR #585.
-#
-# `lib`-ONLY, deliberately: this is imported by every eval that reads the registry —
-# the package build (contrib/default.nix), the sandbox image
-# (contrib/sandbox-modules.nix) and the kubenix platform (modules/platform.nix).
-# Only the first of those has a `pkgs`. The build half — the one thing that needs
-# one — is plain Nix over the evaluated spec in contrib/build.nix, not an option in
-# here. Why: #711.
+# The contrib schema, lib-only because it is imported by the package build, the
+# sandbox image and the kubenix platform, and only the first has a `pkgs`.
 { lib, ... }:
 
 {
@@ -26,8 +20,7 @@
       form, which is why `shorthandOnlyDefinesConfig` stays false below.
     '';
     type = lib.types.attrsOf (lib.types.submoduleWith {
-      # shorthandOnlyDefinesConfig stays false so a contrib may use the strict
-      # module form and declare its own options.
+      # A contrib may use the strict module form and declare its own options.
       modules = [ ./submodule.nix ];
     });
   };

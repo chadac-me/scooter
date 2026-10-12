@@ -1,9 +1,6 @@
 /**
- * Tier 1 — the SubagentManager IMPL (createSubagentManager) over a controllable
- * fake sessions + store. This covers the real send/recentTurns/searchHistory logic
- * that the handler tests (over a fake manager) don't — including the send status
- * gate that behaved oddly live (a child shown "running" must accept a send). See
- * todo/docs/SUBAGENT_INTERACTION.md.
+ * The SubagentManager implementation over fake sessions and store, covering the
+ * send/recentTurns/searchHistory logic the handler tests do not.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -19,7 +16,7 @@ import type { SessionId } from "../../src/types.js";
 
 const PARENT = "parent-1" as SessionId;
 
-/** A fake child whose run-state we control via `running`. */
+/** A fake child whose run state is set by `running`. */
 function child(id: string, parentId: string | undefined, running: boolean, ended = false): SubagentConversation {
   return {
     id,
@@ -33,7 +30,7 @@ function child(id: string, parentId: string | undefined, running: boolean, ended
   };
 }
 
-/** Fake sessions + store over a fixed set of children + per-id event logs. */
+/** Fake sessions and store over a fixed set of children and per-id event logs. */
 function fakes(children: SubagentConversation[], logs: Record<string, AguiEvent[]> = {}) {
   const byId = new Map(children.map((c) => [c.id, c]));
   const prompt = vi.fn(async () => {});
@@ -59,12 +56,12 @@ describe("createSubagentManager", () => {
       const { mgr, prompt } = fakes([child("sub-a", PARENT, /* running */ true)]);
       const res = await mgr.send(PARENT, "sub-a", "focus on login()");
       expect(res).toEqual({ outcome: "sent" });
-      // It prompted the CHILD (not the parent), at PRIORITY_INTERRUPT, sourced.
+      // It prompted the child at PRIORITY_INTERRUPT with a source.
       expect(prompt).toHaveBeenCalledTimes(1);
       const [id, text, , priority, interrupt, , , source] = prompt.mock.calls[0];
       expect(id).toBe("sub-a");
       expect(text).toContain("focus on login()");
-      expect(priority).toBe(10); // PRIORITY_INTERRUPT
+      expect(priority).toBe(10);
       expect(interrupt).toBe("thinking");
       expect(source).toBe("parent-clarification");
     });
@@ -132,7 +129,7 @@ describe("createSubagentManager", () => {
 
     it("searchHistory matches tool summaries too, and returns [] on no match", async () => {
       const { mgr } = fakes([child("sub-a", PARENT, true)], { "sub-a": log });
-      expect((await mgr.searchHistory(PARENT, "sub-a", "grep"))?.length).toBe(1); // tool line
+      expect((await mgr.searchHistory(PARENT, "sub-a", "grep"))?.length).toBe(1);
       expect(await mgr.searchHistory(PARENT, "sub-a", "zzz")).toEqual([]);
     });
   });
@@ -145,10 +142,10 @@ describe("createSubagentManager", () => {
         child("sub-x", "other", true),
       ]);
       const listed = await mgr.list(PARENT);
-      expect(listed.map((c) => c.id).sort()).toEqual(["sub-a", "sub-b"]); // not sub-x
+      expect(listed.map((c) => c.id).sort()).toEqual(["sub-a", "sub-b"]);
       expect(listed.find((c) => c.id === "sub-a")?.status).toBe("running");
       expect(listed.find((c) => c.id === "sub-b")?.status).toBe("idle");
-      expect(await mgr.check(PARENT, "sub-x")).toBeUndefined(); // not YOUR child
+      expect(await mgr.check(PARENT, "sub-x")).toBeUndefined();
     });
   });
 });

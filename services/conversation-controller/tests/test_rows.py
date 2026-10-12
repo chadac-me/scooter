@@ -1,9 +1,4 @@
-"""The controller's conversations-row writer.
-
-What matters here is not that it issues an UPDATE — it is that it CANNOT take the reconcile loop
-down. The controller's job is assignment; a Postgres outage must cost a stale `phase` column and
-nothing else. Every test below is really a statement about that boundary.
-"""
+"""The controller's conversations-row writer, and the boundary that a Postgres outage can never take the reconcile loop down."""
 
 import pytest
 
@@ -52,7 +47,7 @@ def test_set_phase_updates_the_row():
 
 
 def test_connection_is_opened_once_and_reused():
-    """A connection per write would add a connect to every tick of a loop that runs forever."""
+    """One connection is reused across writes."""
     conn = FakeConn()
     opens = []
 
@@ -68,13 +63,13 @@ def test_connection_is_opened_once_and_reused():
 
 
 def test_a_write_failure_never_raises():
-    """THE BOUNDARY: Postgres being down must not abort a reconcile pass."""
+    """Postgres being down must not abort a reconcile pass."""
     rows = ConversationRows("dsn", connect=lambda _dsn: FakeConn(fail=True))
     assert rows.set_phase("conv-1", "Failed") is False
 
 
 def test_a_failed_write_drops_the_connection_so_the_next_call_reconnects():
-    """Without this, one broken connection silently swallows every later write until a restart."""
+    """A broken connection is dropped so the next write reconnects."""
     conns = [FakeConn(fail=True), FakeConn()]
     opened = []
 
@@ -86,13 +81,12 @@ def test_a_failed_write_drops_the_connection_so_the_next_call_reconnects():
     rows = ConversationRows("dsn", connect=connect)
     assert rows.set_phase("conv-1", "Failed") is False
     assert conns[0].closed, "the broken connection must be closed, not leaked"
-    # The recovery that matters: the very next write succeeds on a fresh connection.
     assert rows.set_phase("conv-1", "Failed") is True
     assert len(opened) == 2
 
 
 def test_no_matching_row_is_false_but_not_an_error():
-    """A deleted conversation, or a row that does not exist yet mid-migration. Not a failure."""
+    """A missing row (deleted, or not created yet) is not a failure."""
     rows = ConversationRows("dsn", connect=lambda _dsn: FakeConn(rowcount=0))
     assert rows.set_phase("gone", "Failed") is False
 
@@ -106,7 +100,7 @@ def test_connect_failure_is_swallowed_too():
 
 
 def test_mirror_phase_is_a_noop_without_a_writer():
-    """No DSN configured is a SUPPORTED deployment: the controller runs exactly as it did before."""
+    """No DSN configured is a supported deployment."""
     _mirror_phase(None, "conv-1", "Failed")  # must not raise
 
 
@@ -137,7 +131,7 @@ def test_an_explicit_dsn_wins(monkeypatch):
 
 @pytest.mark.parametrize("phase", ["Failed", "Pending", "Suspended", "Assigned"])
 def test_every_phase_the_controller_writes_can_be_mirrored(phase):
-    """Guards the set: Failed/Pending/the drift Suspended are phases NO other writer produces."""
+    """Every phase the controller writes can be mirrored."""
     conn = FakeConn()
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
     assert rows.set_phase("conv-1", phase) is True
@@ -145,29 +139,17 @@ def test_every_phase_the_controller_writes_can_be_mirrored(phase):
 
 
 def test_the_connection_overrides_the_roles_read_only_default():
-    """THE SILENT-FAILURE GUARD.
-
-    modules/postgres.nix pins every write role read-only (`ALTER ROLE ... SET
-    default_transaction_read_only = on`) and expects each writer to override it per-connection — a
-    startup option outranks an ALTER ROLE SET. Drop this and the UPDATE fails with "cannot execute
-    UPDATE in a read-only transaction"; because row writes are best-effort, that shows up as a
-    warning log and a phase column that never changes, with CI perfectly green.
-    """
+    """modules/postgres.nix pins every write role read-only, and without the per-connection override every best-effort UPDATE fails silently."""
     from conversation_controller.rows import CONNECT_OPTIONS
 
     assert "default_transaction_read_only=off" in CONNECT_OPTIONS
 
 
 # --- sync_phases: the convergent write ------------------------------------------------------
-#
-# set_phase alone leaves two permanent holes — a conversation that never transitions again is
-# never mirrored, and a dropped best-effort write is dropped for good. These pin the sweep that
-# closes both, and pin that it stays cheap enough to run every tick.
 
 
 def test_sync_phases_updates_only_rows_that_differ():
-    """IS DISTINCT FROM, not `<>`: a NULL phase (every row predating the mirror) is exactly the
-    case that must be backfilled, and `NULL <> 'Assigned'` is NULL — it would match nothing."""
+    """IS DISTINCT FROM is what lets a NULL phase be backfilled."""
     conn = FakeConn()
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
 
@@ -180,8 +162,7 @@ def test_sync_phases_updates_only_rows_that_differ():
 
 
 def test_sync_phases_is_one_statement_for_the_whole_fleet():
-    """This runs on every tick. One query per conversation would make the steady state cost scale
-    with fleet size for a pass that, by construction, usually changes nothing."""
+    """The sweep runs every tick, so it is one statement rather than one per conversation."""
     conn = FakeConn()
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
 
@@ -191,8 +172,7 @@ def test_sync_phases_is_one_statement_for_the_whole_fleet():
 
 
 def test_sync_phases_chunks_past_the_bind_parameter_limit():
-    """Two bind params per conversation against Postgres' 65535 cap: a big enough fleet in one
-    statement is not a slow query, it is a hard failure of the whole sweep."""
+    """A fleet large enough to exceed Postgres' bind-parameter cap is split across statements."""
     conn = FakeConn()
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
 
@@ -212,7 +192,7 @@ def test_sync_phases_of_nothing_issues_no_query():
 
 
 def test_sync_phases_survives_postgres_being_down():
-    """The boundary this whole module exists to hold: assignment keeps working without Postgres."""
+    """Assignment keeps working without Postgres."""
     conn = FakeConn(fail=True)
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
 
@@ -221,8 +201,7 @@ def test_sync_phases_survives_postgres_being_down():
 
 
 def test_sync_phases_skips_conversations_with_no_phase_on_the_cr():
-    """_state defaults a status-less CR to "Pending". That default is a guess, not an observation,
-    and the pass materializes the real phase moments later — mirroring the guess would race it."""
+    """A status-less CR's defaulted "Pending" is a guess the pass is about to replace, so it is not mirrored."""
     from conversation_controller.loop import _sync_rows
     from conversation_controller.reconcile import ConversationState
 
@@ -250,18 +229,13 @@ def test_sync_phases_skips_conversations_with_no_phase_on_the_cr():
 
 
 def test_sync_phases_is_a_no_op_without_a_database():
-    """No DSN configured is a supported deployment, not a degraded one."""
+    """No DSN configured is a supported deployment."""
     from conversation_controller.loop import _sync_rows
 
     _sync_rows(None, [])  # must not raise
 
 
-# --- assignment: where the monotonicity comes from -------------------------------------------
-#
-# The CR gets monotonicity from apiserver optimistic concurrency. The row has to get it from the
-# database, because the alternative — a leader lease — is not mutual exclusion: a paused replica
-# still believes it holds one, wakes with a stale view, and would overwrite a newer assignment.
-# These tests pin the WHERE clauses that make that impossible.
+# --- assignment: the WHERE clauses that keep ownership monotonic ------------------------------
 
 
 def test_set_assignment_claims_only_past_a_newer_generation():
@@ -279,8 +253,7 @@ def test_set_assignment_claims_only_past_a_newer_generation():
 
 
 def test_a_losing_claim_is_not_an_error():
-    """False means EITHER the claim lost to a newer epoch OR the row is gone. Neither is something
-    the controller can act on, and neither may interrupt the pass."""
+    """A claim that lost to a newer epoch, or found no row, is a normal outcome."""
     conn = FakeConn(rowcount=0)
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
 
@@ -289,8 +262,7 @@ def test_a_losing_claim_is_not_an_error():
 
 
 def test_release_keeps_the_generation_as_a_high_water_mark():
-    """Clearing host_generation would reset the fence to 0 and let any stale epoch claim next. A
-    release says 'no pod owns this', not 'ownership never advanced'."""
+    """A release clears host_pod but keeps host_generation, so no stale epoch can claim next."""
     conn = FakeConn()
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
 
@@ -304,8 +276,7 @@ def test_release_keeps_the_generation_as_a_high_water_mark():
 
 
 def test_release_cannot_detach_a_pod_assigned_at_a_newer_epoch():
-    """The >= is the whole guard: a stale controller holds a LOWER epoch than the row and its
-    release must match nothing, or it would unassign a conversation someone else just claimed."""
+    """A stale controller holds a lower epoch than the row, so its release matches nothing."""
     conn = FakeConn(rowcount=0)
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
 
@@ -313,8 +284,7 @@ def test_release_cannot_detach_a_pod_assigned_at_a_newer_epoch():
 
 
 def test_sync_assignments_converges_without_going_backwards():
-    """>= because this carries the CR's CURRENT epoch, not a new one: the current controller
-    refreshes, a stale one (lower epoch) is rejected."""
+    """The sweep carries the CR's current epoch, so the current controller refreshes and a stale one is rejected."""
     conn = FakeConn()
     rows = ConversationRows("dsn", connect=lambda _dsn: conn)
 
@@ -348,8 +318,7 @@ def test_sync_assignments_survives_postgres_being_down():
 
 
 def test_the_sweep_carries_every_conversation_including_the_unassigned():
-    """Unlike phase, an unassigned conversation is NOT skipped: host_pod=None is the observation
-    that no pod owns it, and the row has to learn that too."""
+    """An unassigned conversation is synced too, since host_pod=None is an observation the row needs."""
     from conversation_controller.loop import _sync_rows
     from conversation_controller.reconcile import ConversationState
 

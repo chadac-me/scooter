@@ -1,13 +1,7 @@
 /**
- * Tier 1 — parseLeadingJson (test/support/cluster.ts), the tolerant parse behind curlJson.
- *
- * WHY. Tier-2 tests fetch JSON through a throwaway `kubectl run -i` curl pod, whose captured
- * output can carry a stray line AFTER the payload (attach/teardown warnings) even with unique
- * per-call pod names. That failed the platform smoke with
- *   SyntaxError: Unexpected non-whitespace character after JSON at position 1513 (line 2 column 1)
- * where line 1 was the complete, valid response. The helper parses the LEADING JSON value so an
- * assertion on the payload is immune to appended junk — while a truly malformed payload still
- * throws the original error. Tested here (not in test/cluster/) because it needs no cluster.
+ * parseLeadingJson (test/support/cluster.ts), the tolerant parse behind curlJson: output
+ * captured from a `kubectl run -i` curl pod can carry a stray line after the payload, so
+ * the helper parses the leading JSON value while a malformed payload still throws.
  */
 
 import { describe, it, expect } from "vitest";

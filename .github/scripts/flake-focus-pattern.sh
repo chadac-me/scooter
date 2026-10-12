@@ -1,40 +1,20 @@
 #!/usr/bin/env bash
 # Extract the focused-flake test pattern from a PR description for the
-# `flake-focus` CI job (see .github/workflows/ci.yml).
-#
-# The PR that fixes a flake declares which test to hammer with a line in its body:
-#
-#     flake-test: <playwright -g pattern>
-#
-# e.g.  flake-test: multi-turn re-render
-#
-# The pattern is used TWICE: to select the run (`-g`), and afterwards to find that
-# test in the Playwright JSON report so the job can post a verdict — "the flake did
-# not reproduce in N runs" vs "it still reproduces" (scripts/flake-focus-report.mjs).
-# So it must name a REAL test title even on the contention path below, where it is
-# not passed to `-g`: a pattern matching nothing there yields a green run that
-# never executed the flaky test, and the job fails on that rather than report it
-# fixed.
-#
-# OPTIONAL — some flakes only reproduce under CROSS-SPEC CONTENTION (the flaky
-# test running interleaved with OTHER specs' load), so a lone `-g <test>` run
-# never triggers them. Such a PR ALSO declares the spec files to run together:
-#
-#     flake-specs: test/e2e/sessions.spec.ts test/e2e/chat-search-filter.spec.ts
-#
-# When present, the focused job runs exactly those spec files (each test 5×)
-# instead of the whole suite filtered to the pattern — recreating the contention
-# that surfaces the flake. When absent, only the `-g <pattern>` path runs.
-#
-# We emit `pattern=<...>` and `specs=<...>` to $GITHUB_OUTPUT. If the
-# `flake-check` label is set but no `flake-test:` line exists (or it's empty), we
-# FAIL — a targeted check that ran nothing must not masquerade as green.
+# `flake-focus` CI jobs (see .github/workflows/ci.yml). The PR body names the
+# test with `flake-test: <playwright -g pattern>` and may add
+# `flake-specs: <spec files>` for flakes that only reproduce under cross-spec
+# contention, in which case the job runs those files together instead of the
+# whole suite filtered to the pattern. The pattern must name a real test title
+# even on the contention path, where it is not passed to `-g`, because the
+# verdict is resolved against the report (scripts/flake-focus-report.mjs).
+# Emits `pattern=`, `specs=` and `specs_full=` to $GITHUB_OUTPUT, and fails when
+# the label is set but no `flake-test:` line exists.
 set -euo pipefail
 
 body="${PR_BODY:-}"
 
-# First `flake-test:` line; strip the key, surrounding whitespace, and any
-# wrapping backticks/quotes so `flake-test: \`multi-turn\`` works too.
+# First `flake-test:` line, stripped of the key, whitespace and wrapping
+# backticks/quotes.
 pattern="$(
   printf '%s\n' "$body" \
     | grep -iE '^[[:space:]]*flake-test:' \
@@ -52,9 +32,8 @@ fi
 echo "Focused flake pattern: '$pattern'"
 echo "pattern=$pattern" >>"$GITHUB_OUTPUT"
 
-# Optional `flake-specs:` line — a space-separated list of spec files to run
-# together under contention. Sanitised to just `test/e2e/*.spec.ts` tokens so a
-# malformed body can't inject arbitrary shell args into the run step.
+# Optional `flake-specs:` line, sanitised to `test/e2e/*.spec.ts` tokens so a
+# malformed body cannot inject shell args.
 specs_raw="$(
   printf '%s\n' "$body" \
     | { grep -iE '^[[:space:]]*flake-specs:' || true; } \
@@ -75,12 +54,9 @@ fi
 echo "Focused flake specs: '${specs}'"
 echo "specs=$specs" >>"$GITHUB_OUTPUT"
 
-# The FULL target runs an ALLOWLIST (test/e2e/full-specs.json), not every spec, so
-# `flake-specs:` written for the fast suite can name files the `full` project does
-# not match. Passing one anyway makes playwright exit "no tests found" and the
-# check reads as infrastructure breakage rather than "that spec is fast-only".
-# Emit the intersection, and — when FULL_TARGET=1 — fail if the PR named specs but
-# NONE survive, so the full check can't pass by running nothing.
+# The full target runs an allowlist (test/e2e/full-specs.json), so emit the
+# intersection and, when FULL_TARGET=1, fail if the PR named specs but none
+# survive.
 specs_full=""
 allow="$(dirname "$0")/../../test/e2e/full-specs.json"
 for tok in $specs; do

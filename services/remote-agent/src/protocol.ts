@@ -1,6 +1,6 @@
 /**
- * ACP-over-WS wire protocol (container side) — MUST match the cloud's
- * services/agent-host/src/acp/remoteProtocol.ts. Vendored here so the container is standalone.
+ * ACP-over-WS wire protocol, container side, vendored so the container is standalone;
+ * it must match services/agent-host/src/acp/remoteProtocol.ts.
  *
  * Channel A (ACP): cloud → container  initialize | new_session | prompt | cancel | kill_terminals
  *                  container → cloud  ack (reply) | session_update | terminal_created | permission_request
@@ -16,22 +16,18 @@ export interface WireFrame<P = unknown> {
   ch: Channel;
   type: string;
   id?: string;
-  /** The ACP session this frame belongs to, stamped by the CONTAINER on frames it originates
-   *  (exec requests especially — their payloads carry no session, unlike session_update's).
-   *  The relay routes container->cloud frames to the matching in-flight run by this, which is
-   *  what makes CONCURRENT conversations on one container safe: without it, exec requests were
-   *  broadcast to every run and two conversations would each execute the other's tool calls. */
+  /** The ACP session this frame belongs to, stamped by the container, by which the relay routes container-to-cloud frames to the matching in-flight run. */
   sid?: string;
   payload: P;
 }
 
-/** The connect hello the container sends first (protocol version + owner-bound join token). */
+/** The connect hello the container sends first. */
 export interface RemoteConnectHello {
   protocolVersion: number;
   joinToken: string;
 }
 
-// Minimal ACP shapes the container needs (mirrors the cloud AcpClient types).
+// Minimal ACP shapes the container needs, mirroring the cloud AcpClient types.
 export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "resource_link"; uri: string }
@@ -51,7 +47,7 @@ export interface AcpCancelPayload {
   sessionId: string;
 }
 
-// Channel B request payloads the container SENDS (its tool calls, run on the cloud sandbox).
+// Channel B request payloads the container sends: its tool calls, run on the cloud sandbox.
 export interface ExecRunPayload {
   command: string;
   args?: string[];
@@ -68,30 +64,15 @@ export interface FsWritePayload {
 
 // --- Channel C: TUNNEL (MCP over the wire, BYOC only) ---------------------------------------
 //
-// WHY. The container's SDK reaches MCP servers by URL, but `scooter-env` lives at
-// http://127.0.0.1:8080/mcp on the AGENT-HOST POD's loopback — goose and the in-cluster SDK
-// reach it because they run in that pod; a laptop cannot, by any route. So a BYO agent had no
-// scooter-env at all: no background jobs, model switch, scheduler, or resize.
-//
-// SHAPE. A named-target stream mux, NOT a raw TCP tunnel. `target` is a NAME the agent-host
-// resolves server-side ("scooter-env" today; "sandbox:<name>" reserved for sandbox-declared
-// servers). Raw host:port forwarding was rejected deliberately: it would open cluster network
-// reachability from a user's machine, give up per-stream attribution, and still need port
-// allocation + URL rewriting on the laptop.
-//
-// N SERVERS PER CONVERSATION. The container runs one local HTTP proxy per offered server and
-// hands its SDK ordinary http://127.0.0.1:<port>/ URLs. Adding a server later is a resolution
-// entry, not a protocol change.
-//
-// BIDIRECTIONAL STREAMS from day one: MCP StreamableHTTP streams responses, and a stateful or
-// server-push server would otherwise force a redesign. `open` starts a stream, `chunk` flows
-// BOTH ways, `close` ends it — always with a reason on failure, because a tunnel that goes
-// quiet leaves the agent with tools that HANG.
+// A named-target stream mux: `target` is a name the agent-host resolves server-side, the
+// container runs one local HTTP proxy per offered server, and streams are bidirectional
+// (`open` starts one, `chunk` flows both ways, `close` ends it, always with a reason on
+// failure).
 export type TunnelType = "open" | "chunk" | "end" | "close";
 
 /** container -> cloud: start a stream to a named target. */
 export interface TunnelOpenPayload {
-  /** The server NAME, resolved server-side. Never a host:port. */
+  /** The server name, resolved server-side; never a host:port. */
   target: string;
   method: string;
   /** Path + query as the local proxy received it (e.g. "/" or "/messages?x=1"). */
@@ -99,9 +80,7 @@ export interface TunnelOpenPayload {
   headers: Record<string, string>;
 }
 
-/** container -> cloud: the REQUEST body is complete (the response may still stream back).
- *  A distinct type rather than a flag on close: `close` ends the whole stream, and conflating
- *  "I finished sending" with "we are done" would cut off every response. */
+/** container -> cloud: the request body is complete, while the response may still stream back. */
 export type TunnelEndPayload = Record<string, never>;
 
 /** Either direction: a body chunk, base64 for binary safety. */
@@ -109,10 +88,10 @@ export interface TunnelChunkPayload {
   data: string;
 }
 
-/** Either direction: the stream is over. `error` set => it failed (never a silent stop). */
+/** Either direction: the stream is over, and `error` set means it failed. */
 export interface TunnelClosePayload {
   error?: string;
-  /** cloud -> container, on the FIRST frame of a response. */
+  /** cloud -> container, on the first frame of a response. */
   status?: number;
   headers?: Record<string, string>;
 }

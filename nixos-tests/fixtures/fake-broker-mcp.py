@@ -27,7 +27,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("content-length") or 0)
         req = json.loads(self.rfile.read(n) or b"{}")
-        # Record that a call ARRIVED, with the auth we were given: the test asserts
+        # Record that a call arrived with the auth we were given, since the test asserts
         # the agent-host attached the SA token rather than forwarding the container's.
         SEEN.append({"method": req.get("method"),
                      "authorization": self.headers.get("authorization")})
@@ -43,7 +43,7 @@ class H(BaseHTTPRequestHandler):
                                         {"name": "github_create_pr",
                                          "description": "the contrib tool the agent could not see",
                                          "inputSchema": {"type": "object"}}]}})
-        # The SDK probes optional methods and RELIES on a rejection (tunnelService.ts:101).
+        # The SDK probes optional methods and relies on a rejection.
         self._json(200, {"jsonrpc": "2.0", "id": req.get("id"),
                          "error": {"code": -32601, "message": "method not found"}})
 

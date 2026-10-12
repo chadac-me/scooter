@@ -1,4 +1,4 @@
-"""Post/update comments on Jira issues via Atlassian OAuth 2.0."""
+"""Post and update comments on Jira issues via Atlassian OAuth 2.0."""
 
 import logging
 import time
@@ -15,7 +15,7 @@ _token_cache: dict[str, str | float] = {}
 
 
 def jira_browse_url(issue_key: str) -> str:
-    """Build a human-readable Jira issue URL."""
+    """A human-readable Jira issue URL."""
     cloud_id = settings.atlassian_cloud_id
     return f"https://api.atlassian.com/ex/jira/{cloud_id}/browse/{issue_key}"
 
@@ -44,7 +44,7 @@ async def _get_access_token() -> str | None:
             token = data["access_token"]
             expires_in = data.get("expires_in", 3600)
             _token_cache["token"] = token
-            _token_cache["expires_at"] = now + expires_in - 60  # refresh 60s early
+            _token_cache["expires_at"] = now + expires_in - 60
             return token
     except httpx.HTTPError as e:
         logger.error("get atlassian oauth token failed", extra={**_C, "error": format_error(e)})
@@ -66,10 +66,10 @@ async def _headers() -> dict[str, str]:
 
 
 async def post_jira_comment(issue_key: str, body: str) -> str | None:
-    """Post a comment on a Jira issue. Returns comment ID or None."""
+    """Post a comment on a Jira issue, returning the comment id or None."""
     try:
         headers = await _headers()
-        # Jira Cloud API v3 uses ADF (Atlassian Document Format)
+        # Jira Cloud API v3 takes the body in Atlassian Document Format.
         adf_body = {
             "body": {
                 "version": 1,

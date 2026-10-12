@@ -1,17 +1,14 @@
 /**
- * Tier 1 contract test — title-marker extraction from a streaming message.
- *
- * The agent emits <title>…</title> as its first action; the bridge must extract
- * the title (once) and strip the marker from the displayed text — even when the
- * marker is split arbitrarily across streamed deltas.
+ * Title-marker extraction from a streaming message: the agent emits <title>…</title>
+ * first, and the bridge extracts the title once and strips the marker from the
+ * displayed text even when it is split across streamed deltas.
  */
 
 import { describe, it, expect } from "vitest";
 
 import { createTitleExtractor } from "../../src/agent/titleMarker.js";
 
-/** Feed a full string as one or more deltas, return concatenated display text +
- *  the title (if any). */
+/** Feed deltas through an extractor, returning the concatenated display text and the title. */
 function run(deltas: string[]): { text: string; title?: string } {
   const ex = createTitleExtractor();
   let text = "";
@@ -65,8 +62,7 @@ describe("title-marker extraction", () => {
   });
 
   it("does not leak a partial opening tag that never completes", () => {
-    // A lone "<tit" at the end is held back (could be a marker) — it must not be
-    // shown as-is mid-stream; here the stream simply ends without completing it.
+    // A lone "<tit" at the end is held back as a possible marker.
     const ex = createTitleExtractor();
     const r = ex.push("answer <tit");
     expect(r.text).toBe("answer ");

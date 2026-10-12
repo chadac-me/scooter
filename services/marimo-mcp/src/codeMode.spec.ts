@@ -1,4 +1,4 @@
-/** Unit — the code-mode snippet builders + marker parser. */
+/** Unit tests for the code-mode snippet builders and marker parser. */
 
 import { describe, it, expect } from "vitest";
 
@@ -29,7 +29,7 @@ describe("code-mode snippets", () => {
   it("listCellsSnippet dumps cell id/name/code via .id (not .cell_id)", () => {
     const s = listCellsSnippet();
     expect(s).toContain("ctx.cells");
-    expect(s).toContain('getattr(c, "id"'); // the real NotebookCell attr
+    expect(s).toContain('getattr(c, "id"');
   });
 
   it("installSnippet installs via ctx.packages.add(*pkgs)", () => {

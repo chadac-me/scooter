@@ -1,8 +1,7 @@
 /**
- * UI unit test — the scooter-embed parser + ShareEmbed render (pure). Covers UUID
- * extraction from uuid/path/url, width/height clamping + centering, and the security
- * invariants: the iframe src is a /s/<uuid>/ path (never external) and it is sandboxed
- * without allow-same-origin.
+ * The scooter-embed parser and ShareEmbed render (pure): UUID extraction from
+ * uuid/path/url, width/height clamping and centering, and the security invariants
+ * that the iframe src is a /s/<uuid>/ path and it is sandboxed without allow-same-origin.
  */
 
 import { describe, it, expect } from "vitest";
@@ -70,9 +69,7 @@ describe("ShareEmbed render", () => {
 });
 
 describe("preprocessShareEmbeds", () => {
-  // assistant-ui reads a fence language via /language-(\w+)/ (stops at a hyphen), so the
-  // renderer keys on the hyphen-free SHARE_EMBED_TOKEN; the opening fence must be rewritten
-  // to it or the block renders as a plain code block (the #393 bug this guards).
+  // assistant-ui reads a fence language via /language-(\w+)/, which stops at a hyphen, so the opening fence must be rewritten to the hyphen-free SHARE_EMBED_TOKEN.
   const fence = "```";
 
   it("rewrites the opening ```scooter-embed fence to the hyphen-free token", () => {

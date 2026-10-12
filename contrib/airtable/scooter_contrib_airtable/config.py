@@ -1,8 +1,4 @@
-"""Airtable settings, owned by this contrib rather than the broker app.
-
-Same env var the broker read before (AIRTABLE_TOKEN), so a deployment needs no
-manifest change. Why: PR #573.
-"""
+"""Airtable settings, owned by this contrib."""
 
 from __future__ import annotations
 

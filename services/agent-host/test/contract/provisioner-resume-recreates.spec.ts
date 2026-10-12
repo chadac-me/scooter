@@ -1,23 +1,14 @@
 /**
- * Tier 1 contract — resume() must RECREATE a Sandbox that is gone, not surface the 404.
- *
- * WHY: a conversation can legitimately outlive its Sandbox. The conversation-controller's
- * zombie escalation force-deletes a Sandbox it cannot reconcile, and suspend() already
- * tolerates a missing one ("already gone == already suspended"). resume() had no such
- * tolerance, so every later prompt patched operatingMode on a nonexistent object and threw
- * a raw k8s 404 at the user.
- *
- * Observed on scooter.chadac.me: conv-1ribob force-deleted at 03:59:35 after a 5-minute
- * zombie loop, still erroring at 15:44 — ~12 hours of RUN_ERROR, retrying every ~90s, with
- * no path to recovery. The work was never lost (it lives on the workspace PVC, which
- * outlives the Sandbox); only the Sandbox object was missing.
+ * resume() recreates a Sandbox that is gone instead of surfacing the 404. A conversation
+ * can outlive its Sandbox (the conversation-controller's zombie escalation force-deletes
+ * one it cannot reconcile) while its work lives on the workspace PVC.
  */
 
 import { describe, it, expect } from "vitest";
 
 import { createK8sProvisioner } from "../../src/session/k8sProvisioner.js";
 
-/** Sandbox get/patch/create, with the mode-patch tellable from the heal-path patch. */
+/** A fake Sandbox API whose mode patch and get can be told to fail. */
 function fakeKc(opts: { modePatchError?: number; sandboxGetError?: number } = {}) {
   const calls: string[] = [];
   const api = {
@@ -28,7 +19,7 @@ function fakeKc(opts: { modePatchError?: number; sandboxGetError?: number } = {}
     },
     getNamespacedCustomObject: async () => {
       if (opts.sandboxGetError) throw Object.assign(new Error("api"), { code: opts.sandboxGetError });
-      // No warm-store volume -> the heal path is a no-op and we land on the mode patch.
+      // No warm-store volume, so the heal path is a no-op.
       return { spec: { podTemplate: { spec: { volumes: [{ name: "workspace" }] } } } };
     },
     createNamespacedCustomObject: async () => {
@@ -51,9 +42,9 @@ describe("k8sProvisioner.resume — a GONE Sandbox is recreated", () => {
   it("THE REGRESSION: a 404 on the mode patch recreates the Sandbox instead of throwing", async () => {
     const { kc, calls } = fakeKc({ modePatchError: 404 });
     const ref = await provisioner(kc).resume({ name: "conv-abc", namespace: "agent-manager" }, "thread-1");
-    expect(ref.name).toBe("conv-abc"); // same name -> the conversation keeps its identity
-    expect(calls).toContain("patch:mode"); // tried the cheap path first
-    expect(calls).toContain("create:sandbox"); // then recreated
+    expect(ref.name).toBe("conv-abc");
+    expect(calls).toContain("patch:mode");
+    expect(calls).toContain("create:sandbox");
   });
 
   it("a healthy resume does NOT create — it is just the mode flip", async () => {
@@ -72,16 +63,14 @@ describe("k8sProvisioner.resume — a GONE Sandbox is recreated", () => {
   });
 
   it("recreating derives the conversation id from the Sandbox name", async () => {
-    // sandboxName is `conv-${id}`, so the recreate must strip that prefix or it would
-    // build `conv-conv-abc` and strand the conversation under a second identity.
+    // sandboxName is `conv-${id}`, so the recreate must strip that prefix.
     const { kc } = fakeKc({ modePatchError: 404 });
     const ref = await provisioner(kc).resume({ name: "conv-abc", namespace: "agent-manager" }, "thread-1");
     expect(ref.name).toBe("conv-abc");
   });
 
   it("a Sandbox unreadable by any other call still recreates", async () => {
-    // A gone Sandbox 404s every read, not just the mode patch — none of that may
-    // short-circuit the recovery.
+    // A gone Sandbox 404s every read, not just the mode patch.
     const { kc, calls } = fakeKc({ sandboxGetError: 404, modePatchError: 404 });
     const ref = await provisioner(kc).resume({ name: "conv-abc", namespace: "agent-manager" }, "thread-1");
     expect(ref.name).toBe("conv-abc");

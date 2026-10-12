@@ -1,7 +1,7 @@
 /**
- * `goose acp` must be launched with `--with-builtin developer` — without it the
- * agent has NO shell/read/write/edit tools at all (config.yaml cannot substitute,
- * since we always pass mcpServers). Verified on goose v1.47.0; details in PR #524.
+ * `goose acp` is launched with `--with-builtin developer`: without it the agent has no
+ * shell, read, write or edit tools, and config.yaml cannot substitute because
+ * mcpServers is always passed.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 

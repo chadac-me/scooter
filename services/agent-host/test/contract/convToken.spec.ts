@@ -1,13 +1,8 @@
 /**
- * Conversation-token contract (issue #700).
- *
- * The high-value assertions here are the NEGATIVE ones: this token is the only thing
- * standing between a caller and another conversation's sandbox exec, subagents and
- * scheduled tasks, now that `?conv=` is gone.
- *
- * It also pins the wire format against the frozen cross-language vector, because the
- * broker verifies these tokens in Python. A change here that alters the encoding
- * fails `services/broker/tests/test_conv_token.py` too.
+ * The conversation token is the only thing between a caller and another conversation's
+ * sandbox exec, subagents and scheduled tasks, so the negative assertions matter most.
+ * The wire format is pinned against a frozen cross-language vector because the broker
+ * verifies these tokens in Python (`services/broker/tests/test_conv_token.py`).
  */
 
 import { readFileSync } from "node:fs";
@@ -48,8 +43,7 @@ describe("conversation token", () => {
     expect(res).toEqual({ ok: true, conversationId: "conv-1" });
   });
 
-  // THE test. A token minted for one conversation must not verify as another, and the
-  // only way to get a conversation id out of this module is to have signed it.
+  // A token minted for one conversation must not verify as another.
   it("cannot be re-pointed at another conversation", () => {
     const token = mintConvToken("conv-victim", SECRET);
     const [h, payload, sig] = token.split(".");
@@ -64,8 +58,7 @@ describe("conversation token", () => {
     expect(verifyConvToken(token, SECRET)).toEqual({ ok: false, reason: "bad signature" });
   });
 
-  // alg confusion: verify() recomputes an HS256 MAC, so a token asking for `none`
-  // fails the signature comparison instead of selecting a no-op algorithm.
+  // verify() recomputes an HS256 MAC, so a token asking for alg `none` fails the signature comparison.
   it("rejects an alg:none token with an empty signature", () => {
     const claims = { aud: CONV_TOKEN_AUDIENCE, iss: CONV_TOKEN_ISSUER, sub: "conv-1", exp: 9999999999, iat: 0 };
     const h = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -74,8 +67,7 @@ describe("conversation token", () => {
   });
 
   it("rejects a BYOC join token replayed as a conversation token", () => {
-    // Same secret, same algorithm, different audience — which is exactly why the
-    // audience is pinned on both token types.
+    // Same secret and algorithm, different audience.
     const joinish = signHs256({ aud: "remote-agent", iss: CONV_TOKEN_ISSUER, sub: "conv-1", exp: 9999999999, iat: 0 }, SECRET);
     expect(verifyConvToken(joinish, SECRET)).toEqual({ ok: false, reason: "wrong audience" });
   });
@@ -97,8 +89,7 @@ describe("conversation token", () => {
     }
   });
 
-  // A missing secret must FAIL CLOSED. Verifying against "" would otherwise accept
-  // anything an attacker signed with "" — the worst possible misconfiguration.
+  // Verifying against "" would accept anything signed with "".
   it("fails closed when no secret is configured", () => {
     const token = mintConvToken("conv-1", SECRET);
     expect(verifyConvToken(token, "")).toEqual({
@@ -123,8 +114,7 @@ describe("conversation token", () => {
     });
 
     it("still re-mints byte-identically from the vector's claims", () => {
-      // Pins the ENCODING (claim order, base64url, no padding), not just the claims —
-      // the part the Python side cannot tell us is wrong, since it only verifies.
+      // Pins the encoding (claim order, base64url, no padding), which the verify-only Python side cannot check.
       const reminted = mintConvToken(vector.claims.sub, vector.secret, {
         owner: vector.claims.owner,
         now: vector.claims.iat,

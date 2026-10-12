@@ -50,7 +50,7 @@ describe("an explicit provider pick REACHES the bridge", () => {
       const conv = await sessions.start("thread-swap-1", "claude-opus-5", "alice");
       builds.length = 0;
 
-      // THE SWAP: same model, different provider. `model` does not move, so the
+      // The swap keeps the same model and changes only the provider.
       await sessions.promptByThread(
         conv.threadId ?? ("thread-swap-1" as never),
         "hi",

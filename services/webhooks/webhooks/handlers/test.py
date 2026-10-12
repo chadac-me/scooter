@@ -1,12 +1,4 @@
-"""Test webhook handler — a gated endpoint for end-to-end webhook tests.
-
-POST /webhooks/test {"task": "...", "title?": "..."} spawns a real conversation
-in the agent-host (no signature, no provider creds), and returns the
-conversation id. Lets a cluster e2e prove the full webhook -> spawn -> /agui ->
-result loop without real GitHub/Slack. Enabled only when test_webhook_enabled.
-
-Mirrors the broker's `test` (whoami) provider.
-"""
+"""Test webhook handler: POST /webhooks/test {"task": "...", "title?": "..."} spawns a real conversation in the agent-host and returns its id, enabled only when test_webhook_enabled."""
 
 from __future__ import annotations
 
@@ -43,10 +35,7 @@ async def test_webhook(event: TestEvent) -> dict:
     }
 
 
-# Discovered + mounted by webhooks.app via the registry (mirrors the broker's
-# provider registry, PR: contrib module system). Handlers self-gate in-route
-# (a disabled provider returns {"status": "disabled"}), so this registers
-# enabled and keeps its per-request gating.
+# Discovered and mounted by webhooks.app via the registry; the handler gates itself in-route.
 from scooter_webhooks_lib.registry import WebhookHandler, register_webhook
 
 

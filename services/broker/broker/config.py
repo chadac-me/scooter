@@ -1,11 +1,4 @@
-"""Broker configuration — secrets + enable/disable only.
-
-Providers own their upstream URLs; config supplies the secrets they need and
-which providers are active. Modeled on openhands-nix config.py (pydantic
-BaseSettings), restructured per-provider.
-
-Design stage: shape only.
-"""
+"""Broker configuration: secrets and enable/disable flags, while providers own their upstream URLs."""
 
 from __future__ import annotations
 
@@ -24,109 +17,66 @@ class BrokerSettings(ScooterBaseSettings):
     token_audience: str = "agent-broker"
     sandbox_namespace: str = "agent-sandbox"
 
-    # SA usernames admitted as non-sandbox callers acting for a user, CSV of
-    # system:serviceaccount:{ns}:{name}. Default: the agent-host. Sets
-    # Identity.is_approver, which core auth owns and TWO features consume — aws
-    # approve/deny AND shares' cross-conversation listing — so it is not aws's
-    # setting and was misnamed `aws_approver_service_accounts`. Why: #599.
+    # SA usernames admitted as non-sandbox callers acting for a user (CSV of
+    # system:serviceaccount:{ns}:{name}), which sets Identity.is_approver.
     approver_service_accounts: str = ""
 
     # --- The agent-facing MCP server (broker/mcp/) --------------------------
-    # Contrib-contributed agent tools, served at POST /mcp to ONE conversation at a
-    # time. ON by default: the tool set is whatever the enabled providers contribute,
-    # so a deployment with no tool-bearing contrib simply serves an empty tools/list.
-    # That costs nothing, because SERVING the endpoint is a separate question from
-    # OFFERING it to the agent — nothing offers it until phase 2 of #700.
+    # Contrib-contributed agent tools served at POST /mcp to one conversation at a time.
     mcp_enabled: bool = True
 
-    # SA usernames allowed to act FOR a conversation by presenting a conversation
-    # token, CSV of system:serviceaccount:{ns}:{name}. In practice the agent-host.
-    #
-    # SEPARATE from approver_service_accounts on purpose. That list answers "may this
-    # SA relay a human's approve/deny"; this one answers "may this SA act as any
-    # conversation it holds a signed token for". They name the same SA today and are
-    # not the same authorization — and #700 hit the damage that conflation does in
-    # the other direction, where the provider reply tools silently depended on an
-    # approver entry nobody knew they needed.
+    # SA usernames allowed to act for a conversation by presenting a conversation token
+    # (CSV of system:serviceaccount:{ns}:{name}), a separate authorization from
+    # approver_service_accounts even though both name the agent-host.
     mcp_caller_service_accounts: str = ""
 
-    # The HS256 secret the agent-host signs conversation tokens with. Shared via a
-    # k8s Secret mounted into both. EMPTY FAILS CLOSED: verification rejects every
-    # token rather than accepting anything signed with "" (see core/conv_token.py).
+    # The HS256 secret the agent-host signs conversation tokens with; empty fails closed.
     conv_token_secret: str = ""
 
-    # Test/diagnostic provider (the `test` whoami provider). OFF in prod.
+    # The `test` whoami provider, off in prod.
     test_provider_enabled: bool = False
 
     # --- The shared `broker` database ---------------------------------------
-    # Components for the platform Postgres database named `broker`, which EVERY
-    # broker store uses (aws permission requests, the module registry, static
-    # shares). Named for the database, not for aws: these were AWS_DB_*, which is
-    # why the kubenix module had to emit them once from the aws branch and again
-    # from a `!aws.enable` branch so shares kept working with aws off.
-    # SQLite default = the dev path; a set password wins (see store_config).
+    # Components for the platform Postgres database named `broker`, which every broker
+    # store uses; the SQLite default is the dev path and a set password wins (see store_config).
     broker_db_dsn: str = "sqlite+aiosqlite:////tmp/broker.db"
     broker_db_host: str = "agent-shared-db.agent-manager.svc.cluster.local"
     broker_db_port: int = 5432
-    # The `broker` database's own role. Was "webhooks" under the aws name — a
-    # copy-paste the deployment always overrode, so it only ever misled a reader.
     broker_db_user: str = "broker"
     broker_db_password: str = ""
     broker_db_name: str = "broker"
-    # e.g. "require" for RDS; empty = no ssl param. Without this field pydantic
-    # dropped what the module emitted and every broker store connected
-    # unencrypted anyway. Why: PR #621.
-    broker_db_sslmode: str = ""
-    # --- OpenFGA authorization (broker = the policy enforcement point) ------
-    # Off by default -> NoopAuthorizer -> the broker behaves as before. When on,
-    # the per-account approver gate on approve/deny is enforced via OpenFGA.
+    broker_db_sslmode: str = ""  # e.g. "require" for RDS; empty means no ssl param
+    # --- OpenFGA authorization --------------------------------------------
+    # Off by default, which selects the NoopAuthorizer.
     fga_enabled: bool = False
     fga_api_url: str = ""             # e.g. http://openfga.agent-manager.svc:8080
     fga_store_id: str = ""
     fga_authorization_model_id: str = ""
 
     # --- Sandbox-adjacent settings --------------------------------------------
-    # What the broker serves TO an existing sandbox. It does not provision them — see
-    # core/app.py.
-    #
-    # A mounted directory of `.nix` files served as the deployment's DEFAULT modules
-    # at GET /modules/default.tar.gz (fetched by the pod at re-converge, unauthed).
-    # Empty/unset -> an empty tarball (the pod imports nothing).
+    # A mounted directory of `.nix` files served unauthenticated as the deployment's
+    # default modules at GET /modules/default.tar.gz; empty serves an empty tarball.
     sandbox_default_modules_dir: str = ""
 
-    # --- Module registry (broker/registry/) — the shareable-module catalog -----
-    # The broker-side catalog: publish/list/download modules. Shares the broker DB
-    # (module_registry table). Off by default (SQLite dev DSN); on = a real catalog.
+    # --- Module registry (broker/registry/) ------------------------------------
+    # The shareable-module catalog, sharing the broker DB.
     registry_enabled: bool = False
     registry_db_dsn: str = "sqlite+aiosqlite:////tmp/broker-registry.db"
 
-    # --- Static shares (broker/shares/) — persistent static webpages -----------
-    # Agents publish static bundles; the broker mints a UUID and serves them at
-    # /s/<uuid>/. Shares the broker DB (static_shares + static_share_versions).
-    # Off by default (SQLite dev DSN). `shares_public_base_url` is the external
-    # origin used to build the returned share URL (e.g. https://scooter.example.com);
-    # empty -> a relative /s/<uuid>/ URL.
+    # --- Static shares (broker/shares/) ----------------------------------------
+    # Agents publish static bundles the broker serves at /s/<uuid>/; `shares_public_base_url`
+    # is the external origin of the returned share URL, or empty for a relative one.
     shares_enabled: bool = False
     shares_db_dsn: str = "sqlite+aiosqlite:////tmp/broker-shares.db"
     shares_public_base_url: str = ""
-    # Who may frame a served share in an <iframe> (CSP frame-ancestors). Shares are
-    # meant to be embedded ONLY inside the Scooter conversation UI, never arbitrary
-    # external sites, so this is a strict allowlist. Default `'self'` = same origin
-    # as the share; deployments where the UI is a different origin set this to the
-    # UI origin(s), space-separated (e.g. "https://scooter.example.com"). A served
-    # share also sends this so external embedding is blocked even if the value widens.
+    # The CSP frame-ancestors allowlist for a served share, which is meant to be embedded
+    # only inside the Scooter conversation UI (space-separated origins, or 'self').
     shares_frame_ancestors: str = "'self'"
 
     port: int = 8080
 
     def store_config(self, dsn: str = "") -> "StoreConfig":
-        """The shared-Postgres components as a StoreConfig, for any broker store.
-
-        ONE assembly point: the aws, registry and shares stores each built their own
-        from the same settings, and all three dropped sslmode. `dsn` is the store's
-        own dev-SQLite default (registry_db_dsn, shares_db_dsn, …), which loses to
-        the assembled Postgres DSN whenever a password is set.
-        """
+        """The shared-Postgres components as a StoreConfig, where `dsn` is the store's own dev-SQLite default that loses to Postgres whenever a password is set."""
         from scooter_broker_lib.store import StoreConfig
 
         return StoreConfig(
@@ -140,26 +90,17 @@ class BrokerSettings(ScooterBaseSettings):
         )
 
 
-# The process-wide settings snapshot. Most code reads `config.settings` directly.
-# It's instantiated at import time, which is fine in prod (env is fixed before
-# the app starts) but BRITTLE in tests: a test that sets an env var (e.g.
-# TEST_PROVIDER_ENABLED) AFTER this module was first imported would otherwise be
-# ignored. `refresh_settings()` re-reads the environment and updates this object
-# IN PLACE so existing `from ..config import settings` references see the new
-# values; `discover_providers()` calls it so provider factories always build
-# against current env. See get_settings() for a fresh, non-mutating read.
+# The process-wide settings snapshot, which `refresh_settings()` updates in place.
 settings = BrokerSettings()
 
 
 def get_settings() -> BrokerSettings:
-    """A fresh BrokerSettings read from the CURRENT environment (no caching)."""
+    """A fresh BrokerSettings read from the current environment."""
     return BrokerSettings()
 
 
 def refresh_settings() -> BrokerSettings:
-    """Re-read env into the shared `settings` object in place, so module-level
-    `settings` references (provider factories, etc.) pick up the current env.
-    Returns the shared object. Idempotent; cheap."""
+    """Re-read the environment into the shared `settings` object in place and return it."""
     fresh = BrokerSettings()
     settings.__dict__.update(fresh.__dict__)
     return settings

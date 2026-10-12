@@ -1,12 +1,4 @@
-"""PR review comments + CI status reaching the agent.
-
-Before this, handlers/github.py dispatched only issue_comment / issues /
-pull_request — so a comment on a specific LINE of a diff (the most common way a
-human reviews an agent's PR) hit `else: logger.debug("ignoring event type")` and
-the agent never saw it. Same for CI: nothing told it a run failed.
-
-Moved here with the handler (PR #591).
-"""
+"""PR review comments and CI status reaching the agent."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -56,18 +48,16 @@ class TestReviewComment:
         await gh._handle_review_comment(review_comment())
         msg = forwarded.call_args[0][1]
         assert "src/foo.ts:42" in msg
-        assert "const a = 1;" in msg  # the diff hunk
+        assert "const a = 1;" in msg
 
     @pytest.mark.asyncio
     async def test_TELLS_IT_TO_REPLY_IN_THREAD_with_the_comment_id(self, forwarded):
-        # A reply posted at the bottom of the PR is stranded away from the code.
         await gh._handle_review_comment(review_comment(cid=999))
         msg = forwarded.call_args[0][1]
         assert "in_reply_to=999" in msg
 
     @pytest.mark.asyncio
     async def test_INTERRUPTS_a_run_in_progress(self, forwarded):
-        # priority=True -> the agent-host applies interrupt:"thinking".
         await gh._handle_review_comment(review_comment())
         assert forwarded.call_args.kwargs["priority"] is True
 
@@ -86,8 +76,7 @@ class TestReviewComment:
 
     @pytest.mark.asyncio
     async def test_does_not_react_to_its_OWN_comment(self, forwarded):
-        # A real ack body rather than a patched predicate: the recognition itself is
-        # what must keep working, and it is shared policy now. Why: PR #577.
+        # A real ack body rather than a patched predicate, since the recognition itself must keep working.
         await gh._handle_review_comment(review_comment(body="Scooter is on it — conv-1"))
         assert not forwarded.called, "replying to itself would loop"
 
@@ -112,7 +101,6 @@ class TestReviewEnvelope:
 
     @pytest.mark.asyncio
     async def test_a_BARE_approval_is_still_forwarded(self, forwarded):
-        # Decided: the agent should learn its PR was approved.
         await gh._handle_review({
             "action": "submitted",
             "review": {"state": "approved", "body": "", "user": {"login": "chadac"}},
@@ -143,7 +131,6 @@ class TestWorkflowRun:
 
     @pytest.mark.asyncio
     async def test_a_ROUTINELY_GREEN_run_costs_nothing(self, forwarded):
-        # The agent asked for the push, not a receipt.
         with patch.object(gh, "_previous_run_failed", new=AsyncMock(return_value=False)):
             await gh._handle_workflow_run(self._run("success"))
         assert not forwarded.called

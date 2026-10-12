@@ -1,18 +1,10 @@
 /**
- * Tier 2 — the agent-self-modify LIVE SWITCH works in a real container.
+ * Tier 2: the agent self-modify live switch in a real container.
  *
- * This is the validation the nixosTest can't do: in a VM, switch-to-configuration
- * stops the test framework's backdoor.service (the control channel) and the test
- * hangs. A real pod has no backdoor, so the switch behaves as in prod. We drive
- * the same path moduleManager does — upload a module to a writable path, run
- * `scooter-apply-module --module <path>` — and assert:
- *   - a GOOD module applies live (its tool appears in a later exec, no restart),
- *   - the new system generation is registered,
- *   - a BAD module fails the apply (non-zero) and the good tool still works
- *     (build gate / auto-rollback kept the environment intact).
- *
- * Uses the overlay-store image (the in-pod nix build needs the writable upper).
- * Gated: RUN_CLUSTER_TESTS=1. Image: OVERLAY_IMAGE.
+ * Uploads a module to a writable path and runs `scooter-apply-module --module <path>`,
+ * asserting that a good module applies live with a new generation registered, and that a
+ * bad module fails the apply while the good tool keeps working. Gated on RUN_CLUSTER_TESTS=1;
+ * OVERLAY_IMAGE selects the image.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -26,15 +18,13 @@ const POD = "self-modify-boot";
 const SELECTOR = "app=self-modify-boot";
 const UPPER = "/nix/.scooter-rw";
 
-// A GOOD module: declares its own tool. Eager — the stub set is fixed when the
-// image is built (modules/sandbox-os/stubs.nix), so a module's own tool is built
-// during the switch. `hello` is tiny, so that is cheap here.
+// A good module declaring its own tool, which is built during the switch.
 const GOOD_MODULE = `{ pkgs, ... }: {
   environment.systemPackages = [
     (pkgs.writeShellScriptBin "selfmod-demo" ''exec \${pkgs.hello}/bin/hello "$@"'')
   ];
 }`;
-// A BAD module: references an undefined variable -> eval/build fails (the gate).
+// A bad module that fails eval.
 const BAD_MODULE = `{ ... }: { environment.systemPackages = [ thisIsNotDefined ]; }`;
 
 async function waitForUnit(cluster: Cluster, unit: string, timeoutMs: number): Promise<string> {
@@ -57,10 +47,7 @@ maybe("agent self-modify live switch works in a real container", () => {
       .apply({ apiVersion: "v1", kind: "Namespace", metadata: { name: NS } })
       .catch(() => {});
 
-    // Idempotent boot: on a reused cluster a prior run's pod may linger (a crashed
-    // run skips afterAll). A Pod's immutable spec means apply() can't update it, so
-    // delete any leftover and wait until it's actually gone before recreating —
-    // otherwise beforeAll 409s ("already exists") and the whole suite skips.
+    // Delete a lingering pod from a crashed prior run and wait until it is gone before recreating it.
     await cluster.deletePod(POD, NS).catch(() => {});
     for (let i = 0; i < 60; i++) {
       const gone = await cluster.get("Pod", POD, NS).then(() => false).catch(() => true);
@@ -89,7 +76,7 @@ maybe("agent self-modify live switch works in a real container", () => {
         volumes: [
           { name: "run", emptyDir: { medium: "Memory" } },
           { name: "tmp", emptyDir: { medium: "Memory" } },
-          { name: "overlay-upper", emptyDir: {} }, // disk-backed, NOT tmpfs
+          { name: "overlay-upper", emptyDir: {} },
         ],
       },
     });
@@ -114,14 +101,11 @@ maybe("agent self-modify live switch works in a real container", () => {
     const prof = "/nix/var/nix/profiles";
     const genBefore = (await cluster.exec(SELECTOR, ["readlink", "-f", `${prof}/system`], NS)).stdout.trim();
 
-    // BEFORE: the tool isn't present.
+    // Before: the tool is absent.
     const before = await cluster.exec(SELECTOR, ["sh", "-c", "command -v selfmod-demo; echo $?"], NS);
     expect(before.stdout.trim().split("\n").pop()).not.toBe("0");
 
-    // Upload the module + apply it (the moduleManager path, exercised directly).
-    // The FIRST apply is a COLD build — it realises a whole new system toplevel
-    // (substituting from cache) + switches, which is genuinely slow in k3d
-    // (several minutes). Generous timeout.
+    // The first apply is a cold build of a whole new system toplevel, hence the generous timeout.
     await cluster.exec(SELECTOR, ["sh", "-c", `mkdir -p /run/sm && cat > /run/sm/module.nix <<'EOF'\n${GOOD_MODULE}\nEOF`], NS);
     const apply = await cluster.exec(
       SELECTOR,
@@ -130,15 +114,12 @@ maybe("agent self-modify live switch works in a real container", () => {
     );
     expect(apply.exitCode).toBe(0);
 
-    // A new generation was registered, the running system advanced to it, and the
-    // module's tool now runs. PID 1 survived (systemd).
+    // A new generation was registered and the running system advanced to it.
     const genAfter = (await cluster.exec(SELECTOR, ["readlink", "-f", `${prof}/system`], NS)).stdout.trim();
     expect(genAfter).not.toBe(genBefore);
-    // The switch made the new generation current (so the tool is on the new PATH).
     const current = (await cluster.exec(SELECTOR, ["readlink", "-f", "/run/current-system"], NS)).stdout.trim();
     expect(current).toBe(genAfter);
-    // Run the tool via the NEW system's sw/bin (a long-lived exec shell may still
-    // hold the pre-switch PATH; the new generation's bin is authoritative).
+    // Run the tool via the new system's sw/bin, since a long-lived exec shell may still hold the pre-switch PATH.
     const run = await cluster.exec(SELECTOR, ["sh", "-lc", `${current}/sw/bin/selfmod-demo`], NS);
     expect(run.stdout).toContain("Hello, world!");
     expect((await cluster.exec(SELECTOR, ["ps", "-o", "comm=", "-p", "1"], NS)).stdout.trim()).toBe("systemd");
@@ -147,9 +128,9 @@ maybe("agent self-modify live switch works in a real container", () => {
   it("a BAD module fails the apply and leaves the good environment intact", async () => {
     await cluster.exec(SELECTOR, ["sh", "-c", `cat > /run/sm/bad.nix <<'EOF'\n${BAD_MODULE}\nEOF`], NS);
     const apply = await cluster.exec(SELECTOR, ["scooter-apply-module", "--module", "/run/sm/bad.nix"], NS);
-    expect(apply.exitCode).not.toBe(0); // build gate: never switched
+    expect(apply.exitCode).not.toBe(0);
 
-    // The previously-applied good tool still works (the environment wasn't broken).
+    // The previously applied good tool still works.
     const current = (await cluster.exec(SELECTOR, ["readlink", "-f", "/run/current-system"], NS)).stdout.trim();
     const run = await cluster.exec(SELECTOR, ["sh", "-lc", `${current}/sw/bin/selfmod-demo`], NS);
     expect(run.stdout).toContain("Hello, world!");

@@ -1,14 +1,8 @@
 /**
- * Tier 1 contract — conversation metadata lives in Postgres, so the sidebar survives a
- * rollout and listing is a query rather than a directory walk.
- *
- * Every test runs in the production shape: the file store is EMPTY (the emptyDir was
- * wiped) and the data is only in the database.
- *
- * Two fields carry more weight than the rest and are pinned hard here:
- *   - pendingQueue — messages the user already sent that were still queued at suspend.
- *     revive() re-enqueues them; losing one destroys a user's message with no error.
- *   - parentId — the subagent hierarchy, which shares a sandbox pod with its parent.
+ * Conversation metadata lives in Postgres so the sidebar survives a rollout. Every test
+ * runs with an empty file store and the data only in the database. pendingQueue
+ * (messages queued at suspend, re-enqueued by revive()) and parentId (the subagent
+ * hierarchy) must round-trip exactly.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -30,11 +24,7 @@ const meta = (over: Partial<ConversationMeta> = {}): ConversationMeta =>
     ...over,
   }) as ConversationMeta;
 
-/**
- * A tiny in-memory stand-in for the pg Pool covering the statements this store issues,
- * honouring the id primary key and both conflict actions.
- * `created(id)` stands in for the row the creator wrote.
- */
+/** A tiny in-memory stand-in for the pg Pool covering the statements this store issues and honouring the id primary key and both conflict actions, where `created(id)` stands in for the row the creator wrote. */
 function fakeDb(): {
   db: NodePgDatabase;
   rows: Map<string, Record<string, unknown>>;
@@ -42,8 +32,7 @@ function fakeDb(): {
 } {
   const rows = new Map<string, Record<string, unknown>>();
 
-  // Column order must match lib/sql/agent_host/schema.sql: drizzle's bare .select()
-  // asks for rowMode:"array" and maps positionally.
+  // Column order matches lib/sql/agent_host/schema.sql because drizzle's bare .select() maps positionally.
   const ORDER = [
     "id", "thread_id", "title", "created_at", "last_activity_at",
     "model", "owner", "parent_id", "user_titled", "starred", "pending_queue",
@@ -63,7 +52,7 @@ function fakeDb(): {
           id,
           thread_id: threadId,
           title,
-          // node-postgres returns bigint columns as STRINGS.
+          // node-postgres returns bigint columns as strings.
           created_at: String(createdAt),
           last_activity_at: String(lastActivityAt),
           model,
@@ -205,8 +194,7 @@ describe("conversation metadata in Postgres", () => {
   });
 
   it("persists a CLEARED queue as empty, not absent", async () => {
-    // revive() clears the queue after re-enqueuing. Collapsing [] to NULL would make the
-    // next hydrate re-deliver messages the user already received.
+    // revive() clears the queue after re-enqueuing, and collapsing [] to NULL would make the next hydrate re-deliver messages the user already received.
     const { db, created } = fakeDb();
     const store = createPgMetaStore({ db });
     created("conv-1");
@@ -306,7 +294,7 @@ describe("seeding from file-backed metadata", () => {
     const legacy = legacyWith([meta({ id: "on-disk" as SessionId })]);
     const store = createPgMetaStore({ db: fakeDb().db, legacy });
 
-    await store.listConversations(); // seeds
+    await store.listConversations();
     legacy.listConversations.mockClear();
 
     expect((await store.listConversations()).map((m) => m.id)).toEqual(["on-disk"]);
@@ -323,7 +311,7 @@ describe("seeding from file-backed metadata", () => {
     ]);
     const store = createPgMetaStore({ db: fakeDb().db, legacy });
 
-    await store.listConversations(); // seeds
+    await store.listConversations();
     legacy.listConversations.mockClear();
 
     const [got] = await store.listConversations();
@@ -352,8 +340,7 @@ describe("failure behaviour", () => {
   });
 
   it("listConversations THROWS rather than reporting an empty list", async () => {
-    // Answering [] for "I could not read them" is how an entire sidebar goes blank while
-    // the data is intact. The caller must be able to tell the difference.
+    // Answering [] for "could not read them" blanks the sidebar while the data is intact.
     const store = createPgMetaStore({ db: brokenDb() });
     await expect(store.listConversations()).rejects.toThrow();
   });

@@ -1,15 +1,8 @@
 /**
- * Shared types for the agent-host.
- *
- * The agent-host runs OUTSIDE the sandbox. Per conversation it spawns a
- * `goose acp` process and bridges three boundaries:
- *   - ACP (JSON-RPC/stdio) to Goose                            -> ./acp/
- *   - AG-UI (streaming events) to the browser                  -> ./agui/
- *   - exec: the agent's terminal/* + fs/* actions are serviced -> ./exec/
- *     by running commands in the session's pod via the K8s exec API
- *
- * The sandbox image itself is a plain generic Nix image (no in-pod server); it
- * does NOT contain Goose or this host.
+ * Shared types for the agent-host, which runs outside the sandbox and per
+ * conversation bridges ACP to the agent (./acp/), AG-UI to the browser (./agui/),
+ * and the agent's terminal/* and fs/* actions to the session's pod via the K8s exec
+ * API (./exec/). The sandbox image contains neither the agent nor this host.
  */
 
 // ---------------------------------------------------------------------------
@@ -29,8 +22,7 @@ export interface SessionConfig {
   agent: AgentLaunchConfig;
   /** How to reach the session's sandbox pod for exec. */
   sandbox: SandboxRef;
-  /** MCP servers offered to the agent on newSession (e.g. the agent-host's
-   *  modify_environment tool). Passed through ACP; empty/absent when none. */
+  /** MCP servers offered to the agent on newSession, passed through ACP. */
   mcpServers?: unknown[];
 }
 
@@ -47,17 +39,12 @@ export interface SandboxRef {
   /** SandboxClaim / Sandbox name. */
   name: string;
   namespace: string;
-  /** The ready pod's IP, when known (returned by the broker provisioner's
-   *  ensure/resume). CHANGES across suspend/resume — never cache it beyond the
-   *  current running lifetime; re-fetch on revive. Lets the exec client + the
-   *  web-service proxy reach the pod without the agent-host listing pods. */
+  /** The ready pod's IP when known, which changes across suspend/resume, so re-fetch it on revive rather than cache it. */
   podIP?: string;
 }
 
 // ---------------------------------------------------------------------------
-// Exec backend — ACP terminal/* and fs/* are serviced by calling the
-// agent-sandbox API (/execute, /upload, /download) against the session's pod.
-// (Decision: SDK-backed remote exec, NOT local OS. The agent runs outside.)
+// Exec backend: ACP terminal/* and fs/* are serviced by running commands in the session's pod.
 // ---------------------------------------------------------------------------
 
 export interface ExecRequest {
@@ -73,27 +60,19 @@ export interface ExecResult {
   exitCode: number;
 }
 
-/**
- * Executes the agent's tool actions in the remote sandbox pod via the
- * agent-sandbox client SDK. One ExecBackend is bound to one SandboxRef.
- */
+/** Executes the agent's tool actions in the remote sandbox pod; one ExecBackend is bound to one SandboxRef. */
 export interface ExecBackend {
-  /** agent-sandbox: POST /execute */
+  /** Run a command and collect its output. */
   run(req: ExecRequest, signal?: AbortSignal): Promise<ExecResult>;
 
-  /** Streaming variant for ACP terminal/* (incremental output). */
+  /** Streaming variant for ACP terminal/*. */
   spawn(req: ExecRequest): TerminalHandle;
 
-  /** agent-sandbox: GET /download/{path} */
+  /** Read a text file from the sandbox. */
   readTextFile(path: string): Promise<string>;
-  /** agent-sandbox: POST /upload */
+  /** Write a text file into the sandbox. */
   writeTextFile(path: string, content: string): Promise<void>;
-  /** Write raw BYTES (given as base64) to a file in the sandbox, creating parent
-   *  dirs. Binary-safe: the base64 is STREAMED over stdin to `base64 -d`, so it is
-   *  NOT subject to the ~128KB single-argv (MAX_ARG_STRLEN) limit that an inline
-   *  `printf '<b64>' | base64 -d` shell arg hits. Used to materialize user file
-   *  uploads into /workspace/uploads/<name>. Why base64 (not writeTextFile): the
-   *  bytes are arbitrary/binary; a UTF-8 string round-trip would corrupt them. */
+  /** Write raw bytes (base64) to a file in the sandbox, creating parent dirs, streamed over stdin so the single-argv limit does not apply. */
   writeBinaryFile(path: string, base64: string): Promise<void>;
 }
 
@@ -105,5 +84,5 @@ export interface TerminalHandle {
   release(): Promise<void>;
 }
 
-/** Constructs an ExecBackend bound to a sandbox (agent-sandbox SDK impl). */
+/** Constructs an ExecBackend bound to a sandbox. */
 export declare function createSandboxExecBackend(ref: SandboxRef): ExecBackend;

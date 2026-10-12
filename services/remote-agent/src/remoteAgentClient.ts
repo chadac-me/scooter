@@ -1,15 +1,13 @@
 /**
- * RemoteAgentClient — the container's core. Dials the cloud WS, sends the hello (protocol + join
- * token), then bridges Channel A to a local SdkAcpClient (@scooter/claude-sdk-provider, the SAME
- * driver the cloud uses on Bedrock): ACP requests from the cloud drive the local Claude; its
- * updates/permission requests go back up; its tool calls tunnel to the cloud sandbox (Channel B via
- * the tunnel ExecBackend). The Claude subscription token stays LOCAL. See
- * todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+ * RemoteAgentClient, the container's core. It dials the cloud WS, sends the hello, then
+ * bridges Channel A to a local SdkAcpClient: ACP requests from the cloud drive the local
+ * Claude, its updates and permission requests go back up, and its tool calls tunnel to
+ * the cloud sandbox over Channel B. The Claude subscription token stays local.
  */
 
 import { WebSocket } from "ws";
-// The SDK-backed AcpClient — the same package the agent-host imports cloud-side.
 import { pruneSkillDirs, writeSkillPayloads } from "./skills.js";
+// The SDK-backed AcpClient, the same package the agent-host imports cloud-side.
 import { createSdkAcpClient } from "@scooter/claude-sdk-provider";
 
 import { REMOTE_PROTOCOL_VERSION, type WireFrame } from "./protocol.js";
@@ -22,35 +20,33 @@ import { startMcpProxies } from "./mcpProxy.js";
 export interface RemoteAgentClientDeps {
   /** wss URL (…/remote-agent/connect). */
   url: string;
-  /** Owner-bound join token (from the UI one-liner). Used ONCE, to register this device. */
+  /** Owner-bound join token from the UI one-liner, used once to register this device. */
   joinToken: string;
-  /** Fetch a fresh challenge nonce from the controller (§P). Absent => token-only mode. */
+  /** Fetch a fresh challenge nonce from the controller; absent means token-only mode. */
   challengeNonce?: () => Promise<string>;
-  /** The user's Claude subscription OAuth token (from ~/.claude — stays local). */
+  /** The user's Claude subscription OAuth token, which stays local. */
   oauthToken: string;
-  /** Model for the SDK query(). Defaults to a sensible current model. */
+  /** Model for the SDK query(). */
   model?: string;
   /** Agent identity/skills as the system prompt. */
   systemPrompt?: string;
-  /** Path to a glibc `claude` CLI (the SDK bundles a musl one). */
+  /** Path to a glibc `claude` CLI. */
   claudeCodePath?: string;
-  /** Log sink (defaults to console). */
+  /** Log sink, defaulting to console. */
   log?: (msg: string) => void;
 }
 
 export interface RemoteAgentClient {
-  /** Resolves when the connection closes (after any reconnect attempts stop). */
+  /** Resolves when the connection closes and reconnect attempts stop. */
   closed: Promise<void>;
   stop(): void;
 }
 
 /**
- * The WS URL to dial, carrying whatever credential this container has.
- *
- * A REGISTERED device signs a fresh server nonce (§P) — that is what survives a laptop sleeping
- * past the join token's ten-minute life. A first-time container falls back to the join token. Both
- * travel as query params because the controller authorizes the UPGRADE itself, before any message
- * exists.
+ * The WS URL to dial, carrying whatever credential this container has: a registered
+ * device signs a fresh server nonce, and a first-time container falls back to the join
+ * token. Both travel as query params because the controller authorizes the upgrade
+ * itself, before any message exists.
  */
 export async function buildConnectUrl(deps: RemoteAgentClientDeps): Promise<string> {
   const url = new URL(deps.url);
@@ -63,8 +59,7 @@ export async function buildConnectUrl(deps: RemoteAgentClientDeps): Promise<stri
       url.searchParams.set("signature", signChallenge(identity.privateKeyPem, nonce));
       return url.toString();
     } catch {
-      // Controller mid-rollout or no challenge endpoint: fall back to the join token for this
-      // attempt; the jittered backoff retries.
+      // No challenge endpoint reachable: fall back to the join token for this attempt.
     }
   }
   if (deps.joinToken) url.searchParams.set("token", deps.joinToken);
@@ -81,10 +76,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
 
   const connect = async () => {
     if (stopped) return;
-    // The controller authorizes at the UPGRADE, before any application message can be sent, so
-    // credentials must ride on the URL. An earlier cut sent them in the hello FRAME: the controller
-    // read query params, the container sent a message, and device auth silently NEVER ENGAGED —
-    // every reconnect quietly fell back to the join token and died once it expired.
+    // The controller authorizes at the upgrade, so credentials must ride on the URL.
     const connectUrl = await buildConnectUrl(deps);
     ws = new WebSocket(connectUrl);
     const frameCbs = new Set<(f: WireFrame) => void>();
@@ -93,23 +85,14 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
         ws.send(JSON.stringify(f));
         return;
       }
-      // A DROPPED frame, not a no-op. Silence here is how an MCP call turns into
-      // a 30s CONNECT_TIMEOUT with nothing logged on either end.
+      // A dropped frame must be logged, or an MCP call becomes a silent 30s timeout.
       log(`DROPPED ${f.ch}/${f.type} frame — socket ${ws ? "state " + ws.readyState : "absent"}`);
     };
 
-    // Permission answers route by unique frame id, so ONE shared waiter map serves every
-    // per-session client below.
+    // Permission answers route by unique frame id, so one shared waiter map serves every per-session client.
     const permissionWaiters = new Map<string, (ans: { optionId: string } | { cancelled: true }) => void>();
 
-    /** Build one SDK-backed brain. ONE PER ACP SESSION (i.e. per conversation): each client's
-     *  outbound frames are STAMPED with its session id (`sid`), which is the only attribution
-     *  exec frames have — their payloads carry no session, unlike session_update's. The relay
-     *  routes by that stamp, which is what makes CONCURRENT conversations on one container
-     *  safe: with a single shared client, exec requests were broadcast to every in-flight run
-     *  and two conversations would each execute the other's tool calls in the wrong sandbox.
-     *  The stamp is a mutable box because the session id only exists AFTER newSession returns;
-     *  nothing tool-shaped flows before that. */
+    /** Build one SDK-backed brain per ACP session, stamping its outbound frames with the session id (known only after newSession returns) so the relay can route concurrent conversations on one container. */
     const buildClient = async (
       model?: string,
       mcpServers?: Array<{ name?: string }>,
@@ -124,30 +107,17 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
           return () => frameCbs.delete(cb);
         },
       });
-      // MCP OVER THE TUNNEL. scooter-env (and any future server) lives on the AGENT-HOST's
-      // loopback, which this laptop cannot reach — so start a local proxy per offered server
-      // and hand the SDK ordinary http://127.0.0.1:<port>/ URLs. Without this a BYO agent has
-      // sandbox tools only: no background jobs, model switch, scheduler, or resize.
-      // The cloud sends skills as DATA (this container cannot read the pod's
-      // filesystem). Write them locally so our SDK discovers them exactly as the
-      // in-pod one does -- name + description up front, body on demand.
+      // Start a local proxy per offered MCP server (they live on the agent-host's loopback) and write the cloud-sent skills locally so the SDK discovers them.
       let skillCwd: string | undefined;
       if (skills?.length) {
-        // NON-FATAL. Skills are an enhancement; a write failure must not take the
-        // conversation down. The first version let an ENOENT from mkdtemp
-        // propagate and every BYOC run died with "no such file or directory,
-        // mkdtemp '/tmp/scooter-skills-XXXXXX'".
+        // Skills are an enhancement, so a write failure must not take the conversation down.
         try {
           const { mkdtempSync, mkdirSync } = await import("node:fs");
           const { join } = await import("node:path");
-          // NOT os.tmpdir(): this image has no /tmp. Use the mounted config dir,
-          // which exists and is writable, and create the parent rather than
-          // assuming it.
+          // This image has no /tmp, so use the mounted config dir and create the parent.
           const parent = join(process.env.CLAUDE_CONFIG_DIR ?? "/root/.claude", "sessions");
           mkdirSync(parent, { recursive: true });
-          // The volume is persistent, so without this every session leaves a
-          // copy of the skills behind forever. Keep the most recent few: an
-          // in-flight session's dir must not be removed from under it.
+          // The volume is persistent, so keep only the most recent few session dirs.
           pruneSkillDirs(parent, 5);
           skillCwd = mkdtempSync(join(parent, "skills-"));
           const written = writeSkillPayloads(skillCwd, skills);
@@ -173,21 +143,15 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       const sdk = await createSdkAcpClient({
         oauthToken: deps.oauthToken,
         mcpServers: mcp?.servers.map((m) => ({ name: m.name, url: m.url })),
-        // Per-session model, sent by the cloud in new_session (the bridge resolves it against
-        // the catalog's "byoc"-tagged models, so a Bedrock id never reaches us). Fallbacks:
-        // the container's --model flag, then a sane default.
+        // The per-session model sent by the cloud in new_session, then the container's --model flag, then a default.
         model: model ?? deps.model ?? "claude-sonnet-4-5",
-        exec, // the provider's OWN ExecBackend type — a contract drift is now a compile error
+        exec,
         systemPrompt: deps.systemPrompt ?? "You are Scooter, a helpful agent.",
         claudeCodePath: deps.claudeCodePath,
-        // Point the SDK at the skills we just wrote. Without settingSources it
-        // loads no filesystem settings, so no skill list is ever sent; without
-        // `skills` the Skill tool is left out of allowedTools.
+        // Without settingSources the SDK loads no filesystem settings, and without `skills` the Skill tool is left out of allowedTools.
         ...(skillCwd ? { cwd: skillCwd, settingSources: ["project" as const], skills: "all" as const } : {}),
       });
-      // Route the SDK's notifications UP the wire, stamped. session_update carries its session
-      // in the payload too (that has been true since day one — the relay uses it as a fallback
-      // for old containers); the stamp makes every frame uniform.
+      // Route the SDK's notifications up the wire, stamped.
       sdk.onSessionUpdate((sessionId, update) =>
         send({ ch: "acp", type: "session_update", sid: sessionId, payload: { sessionId, update } }));
       sdk.onTerminalCreated((terminalId, command, args) => stampedSend({ ch: "acp", type: "terminal_created", payload: { terminalId, command, args } }));
@@ -201,9 +165,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       return { sdk, stamp, closeMcp: mcp?.close };
     };
 
-    // The PRIMARY client answers `initialize` (which precedes any session) and serves legacy
-    // dispatches; every `new_session` gets its OWN client so concurrent conversations have
-    // isolated brains and attributable tool calls.
+    // The primary client answers `initialize`, which precedes any session; every `new_session` gets its own client.
     const primary = await buildClient();
     const sdk = primary.sdk;
     const clients = new Map<string, { sdk: typeof primary.sdk; stamp: { sid?: string }; closeMcp?: () => Promise<void> }>();
@@ -211,8 +173,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
     ws.on("open", () => {
       void (async () => {
         attempt = 0; // a successful connect resets the backoff window
-        // Auth already happened at the UPGRADE (see buildConnectUrl). The hello now only
-        // negotiates the protocol version, so a mismatch fails clean rather than mid-conversation.
+        // Auth already happened at the upgrade; the hello only negotiates the protocol version.
         ws!.send(JSON.stringify({ protocolVersion: REMOTE_PROTOCOL_VERSION, joinToken: deps.joinToken }));
       })();
     });
@@ -229,7 +190,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
         log(`registered as owner ${(frame.payload as { owner?: string })?.owner ?? "?"} — ready`);
         return;
       }
-      // Channel B exec_result → the tunnel backend's waiters.
+      // Channel B exec_result frames go to the tunnel backend's waiters.
       if (frame.ch === "exec") {
         for (const cb of frameCbs) cb(frame);
         return;
@@ -250,8 +211,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
             return ack(frame.id, r);
           }
           case "new_session": {
-            // ONE CLIENT PER SESSION (see buildClient): the returned session id becomes both the
-            // routing key for later prompts and the sid stamped on this client's tool frames.
+            // The returned session id becomes both the routing key for later prompts and the sid stamped on this client's tool frames.
             const params = (frame.payload as {
               params?: {
                 model?: string;
@@ -271,10 +231,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
           }
           case "prompt": {
             const p = frame.payload as { sessionId: string; prompt: Array<{ type?: string; text?: string }> };
-            // Prove WHICH agent served a turn. Without this there is no way to tell from the
-            // outside whether a reply came from THIS container or from the cloud-side provider —
-            // the cloud falls back silently when the container is offline, so an answer arriving
-            // is NOT evidence the container produced it.
+            // Log the prompt so it is provable from the outside that this container served the turn.
             const preview = (p.prompt ?? [])
               .map((b) => (typeof b?.text === "string" ? b.text : ""))
               .join(" ")
@@ -282,13 +239,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
               .slice(0, 80);
             log(`prompt acp-session=${p.sessionId} text="${preview}"`);
             const started = Date.now();
-            // STRICT: a session id this instance never issued means the container RESTARTED
-            // since the cloud established it (per-session clients die with the process). The
-            // old fallback served such prompts from the blank primary client — no history, no
-            // error, an agent "with no context" (observed live: the session predated the
-            // container's own start time, zero new_session calls in its log). Refusing loudly
-            // lets the cloud drop its cached session, re-establish on THIS instance, and
-            // re-seed the transcript.
+            // A session id this instance never issued means the container restarted since the cloud established it; refusing lets the cloud re-establish the session here.
             const owner = clients.get(p.sessionId)?.sdk;
             if (!owner) {
               log(`prompt for unknown acp-session=${p.sessionId} — refusing (container restarted since it was created)`);
@@ -299,24 +250,18 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
             return ack(frame.id, r);
           }
           case "cancel": {
-            // Cancelling a session this instance never issued is a NO-OP success: whatever ran
-            // there died with the previous container, which is the outcome a cancel wants.
+            // Cancelling a session this instance never issued is a no-op success.
             const sid = (frame.payload as { sessionId: string }).sessionId;
             await clients.get(sid)?.sdk.cancel(sid);
             return ack(frame.id, {});
           }
           case "kill_terminals": {
-            // The cloud does not say WHICH session's terminals — kill across every client, same
-            // blast radius the single-client world had.
+            // The cloud does not say which session's terminals, so kill across every client.
             await Promise.all([sdk, ...[...clients.values()].map((c) => c.sdk)].map((c) => c.killActiveTerminals().catch(() => {})));
             return ack(frame.id, {});
           }
           case "ack": {
-            // A permission answer (the cloud replied to our permission_request id). The payload is
-            // FLAT from the BYOC controller ({optionId}) but was nested ({result:{optionId}}) on the
-            // old webhooks bridge; parsePermissionAnswer accepts both and fails CLOSED on anything
-            // else. The previous `?? {}` turned an unrecognised answer into an empty selection,
-            // which the SDK would act on — a tool call running without an approval.
+            // A permission answer to our permission_request id; parsePermissionAnswer fails closed on anything unrecognised.
             const w = frame.id ? permissionWaiters.get(frame.id) : undefined;
             if (w && frame.id) {
               permissionWaiters.delete(frame.id);
@@ -330,23 +275,15 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       }
     };
 
-    // Set when the UPGRADE itself was rejected (non-101): the socket never opened, so the
-    // close event that follows terminate() carries a meaningless 1006 — this flag makes that
-    // close use the AUTH disposition (slow retry) instead of the fast network-blip schedule.
+    // Set when the upgrade itself was rejected, so the meaningless 1006 close that follows terminate() takes the auth disposition.
     let upgradeAuthRejected = false;
     ws.on("close", (code, reasonBuf) => {
-      // Interpret the close CODE — the controller uses application codes for conditions a
-      // container must react to differently than a network blip. The observed failure: token
-      // auth rejected, a generic "disconnected (code 1005)", and a fast retry loop forever —
-      // the machine looked fine while permanently unauthenticated.
+      // The controller uses application close codes for conditions a container must react to differently than a network blip.
       const disposition = upgradeAuthRejected
         ? closeDisposition(4001, "rejected at the WebSocket upgrade (HTTP 401)", attempt + 1)
         : closeDisposition(code, reasonBuf?.toString() ?? "", attempt + 1);
       if (!upgradeAuthRejected) log(disposition.message ?? `disconnected (code ${code})`);
-      // FAIL EVERY PARKED PERMISSION. `permissionWaiters` lives inside connect(), so a disconnect
-      // used to abandon its promises: the local SDK would wait forever on an approval that can
-      // never arrive, wedging the agent until the container was restarted by hand. Cancelling is
-      // the safe resolution — the tool call is refused, not silently allowed.
+      // Cancel every parked permission, or the local SDK waits forever on an approval that can never arrive.
       for (const [id, waiter] of [...permissionWaiters]) {
         permissionWaiters.delete(id);
         waiter({ cancelled: true });
@@ -354,8 +291,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       void sdk.close().catch(() => {});
       for (const c of clients.values()) {
         void c.sdk.close().catch(() => {});
-        // Tear down the session's MCP proxies with it — a stale proxy pointing at a dead
-        // session would hang the SDK instead of failing it.
+        // A stale proxy pointing at a dead session would hang the SDK instead of failing it.
         void c.closeMcp?.().catch(() => {});
       }
       clients.clear();
@@ -363,17 +299,13 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
         resolveClosed();
         return;
       }
-      // Exponential backoff WITH JITTER (see reconnect.ts). The old fixed 3s meant every container
-      // in the fleet retried on the same tick after a rollout, a synchronised herd against the
-      // single-replica controller.
+      // Exponential backoff with jitter (see reconnect.ts).
       attempt += 1;
       const delay = disposition.delayMs;
       log(`reconnecting in ${delay}ms (attempt ${attempt})`);
       setTimeout(() => void connect(), delay);
     });
-    // A NON-101 upgrade response (an older controller rejects with a raw 401 before any WS
-    // exists). Without this handler the ws lib emits a generic error and the fast retry loop —
-    // the same silent-auth-failure shape as an uncoded close.
+    // A non-101 upgrade response, which the ws lib would otherwise surface as a generic error.
     ws.on("unexpected-response", (_req, res) => {
       if (res.statusCode === 401) {
         upgradeAuthRejected = true;
@@ -384,7 +316,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       } else {
         log(`unexpected server response ${res.statusCode ?? "?"} during connect`);
       }
-      // terminate() fires the close handler, which schedules the retry (slow, via the flag).
+      // terminate() fires the close handler, which schedules the retry.
       ws?.terminate();
     });
     ws.on("error", (e) => log(`ws error: ${(e as Error).message}`));

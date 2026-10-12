@@ -1,8 +1,7 @@
 /**
- * Tier 1 — detect an interrupted (dangling) run from the event-log tail.
- *
- * A run is RUN_STARTED … RUN_FINISHED|RUN_ERROR. If the last RUN_STARTED has no
- * later finish/error, the process died mid-run → dangling → resume on boot.
+ * Detecting an interrupted (dangling) run from the event-log tail: a run is
+ * RUN_STARTED … RUN_FINISHED|RUN_ERROR, and a last RUN_STARTED with no later terminal
+ * means the process died mid-run and the run is resumed on boot.
  */
 
 import { describe, it, expect } from "vitest";
@@ -40,8 +39,7 @@ describe("hasDanglingRun", () => {
 
 describe("lastRunCompleted (subagent completion signal)", () => {
   it("true when a run started and finished (the fast-run-between-ticks case)", () => {
-    // The bug: a subagent run that starts + finishes within one watcher interval.
-    // The event log still shows the completion, so this must be true.
+    // A subagent run can start and finish within one watcher interval.
     expect(lastRunCompleted([started("r1"), text(), finished("r1")])).toBe(true);
   });
 
@@ -51,7 +49,7 @@ describe("lastRunCompleted (subagent completion signal)", () => {
 
   it("false while a run is still in flight (dangling — not done yet)", () => {
     expect(lastRunCompleted([started("r1"), text()])).toBe(false);
-    // A finished run followed by a NEW in-flight run: not complete yet.
+    // A finished run followed by a new in-flight run is not complete yet.
     expect(lastRunCompleted([started("r1"), finished("r1"), started("r2"), text()])).toBe(false);
   });
 
@@ -61,15 +59,8 @@ describe("lastRunCompleted (subagent completion signal)", () => {
   });
 });
 
-/**
- * Tier 1 — a dangling run must be attributed to a HOST, not just detected.
- *
- * Regression guard for the production bug where revive-on-assign nudged a
- * conversation's OWN live first run: the controller pushes revive on every Assign
- * (including a brand-new conversation's first), and the predicate could not tell a
- * run this pod started 1.8s ago from one a drained pod left behind. The user saw
- * "[System: interrupted by a restart…]" during their first message.
- */
+// A dangling run is attributed to a host: the controller pushes revive on every Assign,
+// so the predicate must tell a run this pod started from one a drained pod left behind.
 const startedBy = (r: string, host?: string, gen?: number): AguiEvent =>
   ({ type: "RUN_STARTED", threadId: "c", runId: r, host, gen }) as AguiEvent;
 
@@ -77,7 +68,6 @@ describe("hasDanglingRun — run ownership", () => {
   const self = { host: "agent-host-0", gen: 5 };
 
   it("a run THIS pod started is in flight, NOT dangling", () => {
-    // The bug: without `self` this returns true and the live run gets a resume nudge.
     expect(hasDanglingRun([startedBy("r1", "agent-host-0", 5)], self)).toBe(false);
   });
 
@@ -86,13 +76,12 @@ describe("hasDanglingRun — run ownership", () => {
   });
 
   it("a run this pod started at an EARLIER generation is stranded", () => {
-    // Reassigned away and back: same pod name, older assignment — genuinely orphaned.
+    // Reassigned away and back: same pod name, older assignment.
     expect(hasDanglingRun([startedBy("r1", "agent-host-0", 4)], self)).toBe(true);
   });
 
   it("an UNSTAMPED run (persisted before origin existed) stays dangling", () => {
-    // Conservative: unknown origin reads as foreign, preserving the pre-fix behaviour
-    // rather than silently skipping a resume a rollout depends on.
+    // An unknown origin reads as foreign.
     expect(hasDanglingRun([startedBy("r1")], self)).toBe(true);
   });
 
@@ -106,9 +95,7 @@ describe("hasDanglingRun — run ownership", () => {
 });
 
 describe("danglingRunInfo — persisted cancel intent", () => {
-  // A Stop that races a scale-down/rollout: the CANCEL_REQUESTED marker is durable,
-  // the RUN_FINISHED the old host would have emitted is not. The next owner must
-  // read the intent from the log — its memory of the cancel died with the old pod.
+  // When a Stop races a scale-down, the CANCEL_REQUESTED marker is durable and the next owner reads the intent from the log.
   const cancelReq = (r: string): AguiEvent => ({ type: "CANCEL_REQUESTED", threadId: "c", runId: r });
 
   it("a dangling run whose tail carries its cancel marker reads cancelRequested @proves", () => {
@@ -117,7 +104,7 @@ describe("danglingRunInfo — persisted cancel intent", () => {
   });
 
   it("a cancel marker for a PREVIOUS run does not taint the current dangling run @proves", () => {
-    // r1 was stopped and finished properly; r2 dangles UNstopped and must resume.
+    // r1 was stopped and finished properly; r2 dangles unstopped and must resume.
     const info = danglingRunInfo([started("r1"), cancelReq("r1"), finished("r1"), started("r2"), text()]);
     expect(info).toMatchObject({ runId: "r2", cancelRequested: false });
   });
@@ -135,11 +122,11 @@ describe("OwnershipTracker.onGained — the settlement trigger", () => {
     t.onGained = (id, gen) => gained.push([id, gen]);
 
     t.observe("c1", { hostPod: "other", generation: 1 }); // someone else's
-    t.observe("c1", { hostPod: "me", generation: 2 });    // moved to us -> fire
-    t.observe("c1", { hostPod: "me", generation: 2 });    // echo -> silent
-    t.observe("c2", { hostPod: "me", generation: 1 });    // boot-list reveal -> fire
-    t.observe("c1", { hostPod: "other", generation: 3 }); // moved away -> silent
-    t.observe("c1", { hostPod: "me", generation: 4 });    // back again -> fire
+    t.observe("c1", { hostPod: "me", generation: 2 });    // moved to us: fires
+    t.observe("c1", { hostPod: "me", generation: 2 });    // echo: silent
+    t.observe("c2", { hostPod: "me", generation: 1 });    // boot-list reveal: fires
+    t.observe("c1", { hostPod: "other", generation: 3 }); // moved away: silent
+    t.observe("c1", { hostPod: "me", generation: 4 });    // back again: fires
 
     expect(gained).toEqual([["c1", 2], ["c2", 1], ["c1", 4]]);
   });

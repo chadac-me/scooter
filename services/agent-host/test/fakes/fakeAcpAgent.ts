@@ -1,14 +1,8 @@
 /**
- * Fake ACP agent (in-process) — honors the ACP *agent* side for Tier 1 tests.
- *
- * Drives the agent-host's AcpClient deterministically: given a script, it emits
- * session/update notifications and (optionally) calls client methods
- * (terminal/*, fs/*, session/request_permission) so we can assert the bridge's
- * AG-UI output and the ExecBackend routing.
- *
- * Implemented as an in-process transport: the AcpClient created with this
- * agent's `transport` invokes the agent directly (no real subprocess/stdio),
- * keeping Tier 1 fast and deterministic.
+ * In-process fake ACP agent for the unit tests. Given a script, it emits
+ * session/update notifications and permission requests through an in-process
+ * transport that the AcpClient invokes directly, so the bridge's AG-UI output
+ * can be asserted deterministically.
  */
 
 import type { SessionUpdate, PermissionRequest } from "../../src/acp/client.js";
@@ -21,11 +15,7 @@ export type ScriptStep =
   | { requestPermission: Omit<PermissionRequest, "sessionId"> }
   | { finish: { stopReason: string } };
 
-/**
- * In-process ACP transport: the side the AcpClient talks to. The fake agent
- * plays its script when `prompt` is called, pushing updates back through the
- * provided callbacks.
- */
+/** The transport side the AcpClient talks to; the fake plays its script when `prompt` is called. */
 export interface FakeAcpTransport {
   initialize(): Promise<{ protocolVersion: number }>;
   newSession(): Promise<{ sessionId: string }>;
@@ -37,14 +27,11 @@ export interface FakeAcpTransport {
     },
   ): Promise<{ stopReason: string }>;
   cancel(sessionId: string): Promise<void>;
-  /** Optional: a cancel test can set this to assert active terminals were killed. */
+  /** Lets a cancel test assert active terminals were killed. */
   killActiveTerminals?(): Promise<void>;
-  /** Optional liveness signal for the bridge's mid-stream liveness watchdog. A test
-   *  can flip it to false via FakeAcpAgent.die() to simulate the agent process
-   *  crashing/exiting mid-run. Absent → the adapter treats the agent as alive. */
+  /** Liveness signal for the bridge's watchdog; absent means alive. */
   isAlive?(): boolean;
-  /** Subscribe to terminal/create (goose's shell command source). A test drives it
-   *  via FakeAcpAgent.terminalCreated(...). */
+  /** Subscribe to terminal/create, driven by FakeAcpAgent.terminalCreated(). */
   onTerminalCreated?(cb: (terminalId: string, command: string, args: string[]) => void): void;
   close(): Promise<void>;
 }
@@ -52,32 +39,22 @@ export interface FakeAcpTransport {
 export interface FakeAcpAgent {
   setScript(steps: ScriptStep[]): void;
   readonly transport: FakeAcpTransport;
-  /** Hold every prompt in flight until releaseGate() (so a test can inspect the
-   *  queue mid-run / drive a cancel). Off by default.
-   *  `ignoreCancel` models an agent STALLED inside a model call: it has no terminal to
-   *  kill and never services session/cancel, so only releaseGate() frees it. */
+  /** Hold every prompt in flight until releaseGate(); `ignoreCancel` models an agent stalled in a model call that only releaseGate() frees. */
   gate(opts?: { ignoreCancel?: boolean }): void;
   releaseGate(): void;
-  /** Number of times killActiveTerminals was called (cancel assertions). */
+  /** Number of times killActiveTerminals was called. */
   killCount(): number;
-  /** Number of prompts that have STARTED (entered the fake's prompt()). */
+  /** Number of prompts that have entered prompt(). */
   startedCount(): number;
-  /** Simulate the agent PROCESS dying mid-run (crash/exit) — isAlive() flips to
-   *  false so the bridge's liveness watchdog observes a dead agent. Does NOT release
-   *  a gated prompt (a real dead process leaves prompt() hanging until cancel). */
+  /** Flip isAlive() to false without releasing a gated prompt, as a dead process would. */
   die(): void;
-  /** Bring a died agent back alive (isAlive() → true) — so a test can assert the pump's
-   *  auto-retry SUCCEEDS on a later attempt after a transient death. */
+  /** Flip isAlive() back to true after die(). */
   heal(): void;
-  /** Make the next prompt REJECT with `message` once it is released. A real agent's
-   *  abandoned stream rejects late — often after the dead-on-arrival watchdog has
-   *  already given up — and that rejection carries the only account of why. */
+  /** Make the next prompt reject with `message` once it is released. */
   failNext(message: string): void;
-  /** Push a session update to the CURRENTLY-RUNNING prompt's onUpdate — for a
-   *  test to deliver a tool_call_update result while the run is gated. */
+  /** Push a session update to the currently running prompt's onUpdate. */
   emit(u: SessionUpdate): void;
-  /** Simulate goose creating a terminal for a shell command (the terminal/create
-   *  call where the command text lives). Fires the bridge's onTerminalCreated. */
+  /** Fire the bridge's onTerminalCreated as goose's terminal/create would. */
   terminalCreated(terminalId: string, command: string, args: string[]): void;
   close(): void;
 }
@@ -91,10 +68,9 @@ export function createFakeAcpAgent(): FakeAcpAgent {
   let kills = 0;
   let starts = 0;
   let alive = true;
-  let failWith: string | undefined; // see failNext()
+  let failWith: string | undefined;
   const cancelledSessions = new Set<string>();
-  // The live onUpdate of the currently-running prompt, so a test can push an
-  // update MID-RUN (e.g. a tool_call_update result while the run is gated).
+  // The live onUpdate of the currently running prompt, exposed via emit().
   let liveUpdate: ((u: SessionUpdate) => void) | undefined;
   const terminalCreatedCbs = new Set<(terminalId: string, command: string, args: string[]) => void>();
 
@@ -108,7 +84,7 @@ export function createFakeAcpAgent(): FakeAcpAgent {
     },
     async prompt(sessionId, handlers) {
       starts += 1;
-      liveUpdate = handlers.onUpdate; // exposed via emit() for mid-run pushes
+      liveUpdate = handlers.onUpdate;
       let stopReason = "end_turn";
       for (const step of script) {
         if ("emit" in step) {
@@ -120,18 +96,14 @@ export function createFakeAcpAgent(): FakeAcpAgent {
         } else if ("finish" in step) {
           stopReason = step.finish.stopReason;
         }
-        // callTerminal / callFsRead / callFsWrite are exercised by the real
-        // ACP client method path in higher tiers; the in-process fake focuses
-        // on update emission + permission flow for bridge assertions.
+        // callTerminal / callFsRead / callFsWrite steps are not played by this fake.
       }
-      // Optional gate: hold the run in flight until releaseGate(), so a test can
-      // inspect the queue / drive a cancel while this run is "running".
       if (gated) {
         await new Promise<void>((res) => { releaseGateFn = res; });
       }
-      // Consume the cancel flag first either way, so it can't leak into a later prompt.
+      // Consume the cancel flag either way so it cannot leak into a later prompt.
       const wasCancelled = cancelledSessions.delete(sessionId);
-      // A rejection wins over it: the stream FAILED, it did not end cleanly.
+      // A rejection wins over a cancel.
       if (failWith !== undefined) {
         const message = failWith;
         failWith = undefined;
@@ -142,8 +114,7 @@ export function createFakeAcpAgent(): FakeAcpAgent {
     },
     async cancel(sessionId: string) {
       cancelledSessions.add(sessionId);
-      // Release a gated run so its prompt() resolves (as cancelled) — unless the gate models
-      // a stalled agent, which ignores the cancel and keeps prompt() pending.
+      // A stalled-agent gate ignores the cancel and keeps prompt() pending.
       if (gateIgnoresCancel) return;
       releaseGateFn?.();
       releaseGateFn = undefined;

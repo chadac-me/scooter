@@ -1,47 +1,25 @@
 /**
- * Device-key auth — long-lived BYOC connections without a long-lived secret (§P).
- *
- * The join token is a BEARER credential with a 10-minute TTL, pasted into a copy-paste one-liner, so
- * it ends up in shell history, screenshots, and chat logs. But the container runs on a LAPTOP with
- * `--restart always`: it must serve turns while the laptop is open and reconnect cleanly after every
- * sleep/wake. With only the bearer token, reconnects past ten minutes die `4004` FOREVER and just
- * spin (~30,000 failed attempts over 25h on the real container, §N).
- *
- * Extending the TTL would be the wrong fix — it extends the blast radius of a credential that leaks
- * by design. So: split REGISTRATION (short-lived, bearer) from AUTHENTICATION (long-lived,
- * asymmetric).
- *
- *   first connect   join token + PUBLIC key   -> stored as a trusted device
- *   every later     sign a server NONCE       -> verified against the stored key, valid indefinitely
- *
- * The private key never leaves the laptop, so the cloud holds nothing worth stealing: a database
- * compromise yields public keys only.
- *
- * WHY A SERVER NONCE, not a client-chosen timestamp: a timestamp signature is replayable by anyone
- * who captures it once. The nonce binds the signature to ONE connection attempt and is consumed on
- * use — which matters most here, because `/byoc/ws/:id` is the deliberately UNAUTHENTICATED ingress
- * (§L Q3).
- *
- * Ed25519 (locked with the user): in `node:crypto` with no external dependency, 32-byte keys, and
- * sign/verify take the key directly with no digest argument to get wrong.
+ * Device-key auth: long-lived BYOC connections without a long-lived secret. Registration is
+ * short-lived and bearer (the join token plus a public key stores a trusted device);
+ * authentication is long-lived and asymmetric (every later connect signs a server-issued
+ * nonce, consumed on use, verified against the stored Ed25519 public key). The private key
+ * never leaves the device.
  */
 
 import { createPublicKey, randomUUID, verify as cryptoVerify } from "node:crypto";
 
 import { verifyJoinToken } from "./joinToken.js";
 
-/** Three devices per owner (locked with the user): a laptop, a desktop, and one spare. Unbounded
- *  rows are a slow leak, and every extra key is another way in. */
+/** Three devices per owner: a laptop, a desktop, and one spare. */
 export const MAX_DEVICES_PER_OWNER = 3;
 
-/** How long a challenge stays valid. Long enough for a slow handshake, short enough that a captured
- *  nonce is useless by the time it could be replayed. */
+/** How long a challenge stays valid, long enough for a slow handshake and short enough that a captured nonce is useless. */
 export const CHALLENGE_TTL_SECONDS = 120;
 
 export interface DeviceRow {
   id: string;
   owner: string;
-  /** SPKI/PEM. The cloud stores ONLY this — never anything that could sign. */
+  /** SPKI/PEM, the only key material the cloud stores. */
   publicKey: string;
   label?: string;
   lastSeen: number;
@@ -50,14 +28,14 @@ export interface DeviceRow {
 export interface DeviceStore {
   add(device: DeviceRow): Promise<void>;
   listByOwner(owner: string): Promise<DeviceRow[]>;
-  /** Look a device up by id — the container knows its own id but not its owner. */
+  /** Look a device up by id, since the container knows its own id but not its owner. */
   getById(id: string): Promise<DeviceRow | undefined>;
   remove(id: string): Promise<void>;
   touch(id: string, at: number): Promise<void>;
   close(): Promise<void>;
 }
 
-/** What the settings page renders. Deliberately NO key material. */
+/** What the settings page renders, with no key material. */
 export interface DeviceSummary {
   id: string;
   label?: string;
@@ -69,7 +47,7 @@ export type VerifyResult = { ok: true; owner: string; deviceId: string } | { ok:
 
 export interface DeviceAuthConfig {
   store: DeviceStore;
-  /** HMAC secret for join tokens (registration only). */
+  /** HMAC secret for join tokens. */
   secret: string;
   /** Injectable clock (seconds) for tests. */
   now?: () => number;
@@ -82,16 +60,14 @@ export interface DeviceAuth {
   verify(deviceId: string, nonce: string, signatureB64: string): Promise<VerifyResult>;
   deregister(owner: string, deviceId: string): Promise<void>;
   listDevices(owner: string): Promise<DeviceSummary[]>;
-  /** The owner a device id belongs to (undefined if unknown). DIAGNOSTIC ONLY — labelling an
-   *  auth-failure event for the Settings UI; never an authorization input. */
+  /** The owner a device id belongs to, for labelling an auth-failure event only and never as an authorization input. */
   ownerOf(deviceId: string): Promise<string | undefined>;
 }
 
 export function createDeviceAuth(config: DeviceAuthConfig): DeviceAuth {
   const { store, secret } = config;
   const now = config.now ?? (() => Math.floor(Date.now() / 1000));
-  // Issued, unconsumed challenges. In-memory on purpose: a nonce is meaningful only for the seconds
-  // between issue and use, and persisting it would create a way to replay across a restart.
+  // Issued, unconsumed challenges, in-memory so a nonce cannot be replayed across a restart.
   const pending = new Map<string, number>(); // nonce -> expiresAt
 
   const sweep = (): void => {
@@ -105,8 +81,7 @@ export function createDeviceAuth(config: DeviceAuthConfig): DeviceAuth {
       if (!verified.ok) return { ok: false, reason: `join token rejected: ${verified.reason}` };
       const owner = verified.claims.owner;
 
-      // Parse BEFORE storing. A row whose key cannot verify anything is a permanently-failing
-      // device that still consumes one of the owner's three slots.
+      // Parse before storing, or an unusable key consumes one of the owner's slots.
       try {
         const key = createPublicKey(publicKeyPem);
         if (key.asymmetricKeyType !== "ed25519") {
@@ -116,8 +91,7 @@ export function createDeviceAuth(config: DeviceAuthConfig): DeviceAuth {
         return { ok: false, reason: "unparseable public key" };
       }
 
-      // Enforce the cap by evicting the LEAST-RECENTLY-SEEN device, not the oldest-registered: a
-      // laptop in daily use must not lose its slot to one that has not connected in months.
+      // Enforce the cap by evicting the least-recently-seen device.
       const existing = await store.listByOwner(owner);
       if (existing.length >= MAX_DEVICES_PER_OWNER) {
         const evictable = [...existing].sort((a, b) => a.lastSeen - b.lastSeen);
@@ -141,8 +115,7 @@ export function createDeviceAuth(config: DeviceAuthConfig): DeviceAuth {
     async verify(deviceId, nonce, signatureB64) {
       sweep();
       const exp = pending.get(nonce);
-      // Unknown covers both "we never issued this" (a client-chosen nonce) and "already used" —
-      // consumed below, so a captured signature cannot be replayed.
+      // Unknown covers both a never-issued nonce and an already-used one.
       if (exp === undefined) return { ok: false, reason: "unknown or already-used nonce" };
       if (exp <= now()) {
         pending.delete(nonce);
@@ -163,8 +136,7 @@ export function createDeviceAuth(config: DeviceAuthConfig): DeviceAuth {
       } catch {
         valid = false;
       }
-      // Consume the nonce whatever the outcome: a failed attempt must not leave a live challenge
-      // for an attacker to keep guessing against.
+      // Consume the nonce whatever the outcome, so a failed attempt leaves no live challenge to guess against.
       pending.delete(nonce);
       if (!valid) return { ok: false, reason: "signature does not match the device key" };
 
@@ -174,16 +146,14 @@ export function createDeviceAuth(config: DeviceAuthConfig): DeviceAuth {
 
     async deregister(owner, deviceId) {
       const row = await store.getById(deviceId);
-      // Ownership check: one user must never be able to revoke another's device.
+      // One user must never be able to revoke another's device.
       if (!row || row.owner !== owner) return;
       await store.remove(deviceId);
     },
 
     async listDevices(owner) {
       const rows = await store.listByOwner(owner);
-      // Project to a summary — no key material reaches the browser, even though a PUBLIC key would
-      // be harmless. Keeping key handling entirely server-side means no future UI change can leak
-      // something that matters.
+      // Project to a summary so no key material reaches the browser.
       return rows
         .map((r) => ({ id: r.id, label: r.label, lastSeen: r.lastSeen }))
         .sort((a, b) => b.lastSeen - a.lastSeen);

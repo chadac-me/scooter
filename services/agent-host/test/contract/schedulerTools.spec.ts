@@ -1,7 +1,6 @@
 /**
- * Tier 1 — the scheduled-task agent tools: pure handlers over a fake SchedulerClient.
- * Asserts owner-scoping (no owner → clear refusal) and the client is called on behalf
- * of the conversation's owner.
+ * The scheduled-task agent tools, pure handlers over a fake SchedulerClient: every call
+ * is scoped to the conversation's owner.
  */
 
 import { describe, it, expect } from "vitest";
@@ -16,9 +15,7 @@ const task = (over: Partial<ScheduledTask> = {}): ScheduledTask => ({
   timezone: "UTC", owner: "alice", enabled: true, next_run_at: "2026-07-25T09:00:00Z", last_run_at: null, ...over,
 });
 
-/** A fake client recording who it was called for + serving canned tasks. A null
- *  owner and the empty-string owner are the SAME unowned bucket (the HTTP client
- *  sends "" for null), so match on the normalized key. */
+/** A fake client recording who it was called for and serving canned tasks, with null and "" as the same unowned bucket. */
 function fakeClient(tasks: ScheduledTask[] = []) {
   const calls: Array<{ method: string; owner: Owner; arg?: unknown }> = [];
   const owns = (t: ScheduledTask, owner: Owner) => t.owner === (owner ?? "");
@@ -46,19 +43,18 @@ describe("scheduler agent tools", () => {
     const res = await handleList(wiring, CONV);
     expect(res.isError).toBeUndefined();
     expect(res.content[0].text).toContain("t1");
-    expect(res.content[0].text).not.toContain("t2"); // bob's task isn't shown
+    expect(res.content[0].text).not.toContain("t2");
     expect(calls[0]).toMatchObject({ method: "list", owner: "alice" });
   });
 
   it("allows a null owner (the unowned bucket) — lists unowned tasks, no refusal", async () => {
-    // A task with owner "" is the unowned bucket; wiring resolves owner -> null,
-    // and the fake client filters list by owner === owner, so null matches "".
+    // A task with owner "" is the unowned bucket, which a null owner matches.
     const { wiring, calls } = wiringFor(null, [task({ owner: "" }), task({ id: "t2", owner: "alice" })]);
     const res = await handleList(wiring, CONV);
     expect(res.isError).toBeUndefined();
     expect(calls[0]).toMatchObject({ method: "list", owner: null });
     expect(res.content[0].text).toContain("t1");
-    expect(res.content[0].text).not.toContain("t2"); // alice's task isn't in the unowned bucket
+    expect(res.content[0].text).not.toContain("t2");
   });
 
   it("search filters by title/prompt", async () => {

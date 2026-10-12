@@ -1,8 +1,7 @@
 /**
- * Contract — the marimo client against a REAL fake marimo http.Server that emits
- * the exact /api/sessions JSON + /api/kernel/execute SSE frames verified from
- * marimo-pair. Highest-fidelity: exercises the real node:http path, headers, and
- * SSE fold — not a stubbed fetch.
+ * Contract test for the marimo client against a fake marimo http.Server that emits the
+ * exact /api/sessions JSON and /api/kernel/execute SSE frames, exercising the real
+ * node:http path, headers and SSE fold.
  */
 
 import { AddressInfo } from "node:net";
@@ -12,15 +11,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createMarimoClient } from "./client.js";
 import { MarimoError } from "./types.js";
 
-/** A configurable fake marimo. `sessions` is the /api/sessions payload; `onExecute`
- *  returns the SSE body (and can assert the received headers/body). */
+/** A configurable fake marimo: `sessions` is the /api/sessions payload and `onExecute` returns the SSE body. */
 interface FakeOpts {
   sessions?: Record<string, { path?: string; filename?: string }>;
   sessionsStatus?: number;
   executeStatus?: number;
   onExecute?: (req: IncomingMessage, body: string, headers: Record<string, string | string[] | undefined>) => string;
-  /** Serve the API UNDER this prefix (mirrors marimo `--base-url /c/<id>/marimo`,
-   *  which prefixes ALL routes incl. /api/*). "" = bare server. */
+  /** Serve the API under this prefix, as marimo `--base-url` prefixes all routes including /api/*. */
   basePath?: string;
 }
 
@@ -29,8 +26,7 @@ function fakeMarimo(opts: FakeOpts = {}): Promise<{ server: Server; baseUrl: str
   const prefix = opts.basePath ?? "";
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
-      // Only answer under the configured prefix — an unprefixed request 404s, exactly
-      // like the real base-url'd marimo (the live bug this reproduces).
+      // Only answer under the configured prefix; an unprefixed request 404s like the real base-url'd marimo.
       const path = req.url ?? "";
       const under = (p: string) => path === `${prefix}${p}`;
       if (under("/api/sessions")) {
@@ -60,8 +56,7 @@ function fakeMarimo(opts: FakeOpts = {}): Promise<{ server: Server; baseUrl: str
       res.writeHead(404).end();
     });
     server.listen(0, "127.0.0.1", () =>
-      // baseUrl INCLUDES the prefix — the caller points the client at the base-url'd
-      // origin (as the agent-host wiring does for the real base-url'd marimo).
+      // baseUrl includes the prefix, as the agent-host wiring points the client at the base-url'd origin.
       resolve({ server, baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}${prefix}`, ...state }),
     );
   });
@@ -168,11 +163,7 @@ describe("MarimoClient", () => {
     });
   });
 
-  // Regression: the real in-pod marimo runs with `--base-url /c/<id>/marimo`, which
-  // prefixes ALL routes incl. /api/*. The client's baseUrl must carry that prefix, or
-  // GET /api/sessions 404s (the live bug — the earlier fake had no base-url so it slipped
-  // through). Here the fake serves ONLY under the prefix and the client is pointed at the
-  // prefixed origin, proving the paths compose correctly.
+  // The in-pod marimo runs with `--base-url /c/<id>/marimo`, which prefixes all routes including /api/*, so the client's baseUrl must carry that prefix.
   describe("served under a --base-url prefix (the real in-pod topology)", () => {
     const BASE = "/c/00afea75-0725-43d9-8be1-f0ed8b4b2319/marimo";
 
@@ -185,7 +176,7 @@ describe("MarimoClient", () => {
 
     it("a client pointed at the BARE origin (no prefix) 404s — reproduces the bug", async () => {
       fake = await fakeMarimo({ basePath: BASE, sessions: { s1: {} } });
-      // Strip the prefix the fake appended, to simulate the old (buggy) wiring.
+      // Strip the prefix the fake appended.
       const bare = fake.baseUrl.slice(0, fake.baseUrl.length - BASE.length);
       const client = createMarimoClient({ baseUrl: bare });
       await expect(client.listSessions()).rejects.toMatchObject({ kind: "http-error" });
@@ -207,7 +198,7 @@ describe("MarimoClient", () => {
   });
 
   it("rejects unreachable when the server is down", async () => {
-    // Point at a closed port (start then immediately close).
+    // Point at a closed port.
     fake = await fakeMarimo({});
     const url = fake.baseUrl;
     await new Promise<void>((r) => fake.server.close(() => r()));

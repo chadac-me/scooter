@@ -1,12 +1,4 @@
-"""token-vend transport — returns a short-lived raw token to an authorized
-caller.
-
-Mounts `/{provider}/token`. For callers that must briefly hold the token
-themselves (vs. proxying through the broker). Use sparingly — the token is
-exposed to the caller, unlike http-proxy.
-
-Design stage: interface only.
-"""
+"""token-vend transport: returns a short-lived raw token to an authorized caller at `/{provider}/token`, exposing the token unlike http-proxy."""
 
 from __future__ import annotations
 
@@ -22,7 +14,5 @@ class TokenVend(Transport):
     name: str = "token-vend"
 
     def routes(self, provider: Provider, authed: AuthDependency) -> APIRouter:
-        """Mount GET /token: authenticate -> credential.get ->
-        return {token, expires_at}.
-        """
+        """Mount GET /token, returning {token, expires_at} for the authenticated caller."""
         ...

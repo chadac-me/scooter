@@ -1,10 +1,4 @@
-"""The slack handler, exercised through the real extension seam.
-
-These moved out of the webhooks app's suite with the handler (PR #588). The app no
-longer knows slack exists, so what proves the integration is the entry point plus
-the registries: discovery finds the handler, its route mounts, its gating answers,
-and its owner lookup and resource shapes arm when it is imported.
-"""
+"""The slack handler through the real extension seam: discovery finds it, its route mounts, its gating answers, and its owner lookup and resource shapes arm on import."""
 
 from __future__ import annotations
 
@@ -20,7 +14,7 @@ from scooter_contrib_slack import webhooks_handler as slack_h
 
 @pytest.fixture
 def client():
-    """A minimal app with only this contrib's router mounted — no webhooks app."""
+    """A minimal app with only this contrib's router mounted."""
     app = FastAPI()
     app.include_router(slack_h.router)
     return TestClient(app)
@@ -45,7 +39,7 @@ def test_webhooks_discovers_slack_via_entrypoint():
 
 
 def test_slack_webhook_disabled(client):
-    """Off toggle answers `disabled` in-route rather than unmounting."""
+    """The off toggle answers `disabled` in-route rather than unmounting."""
     with patch.object(slack_h, "settings") as mock_settings:
         mock_settings.slack_enabled = False
         resp = client.post("/webhooks/slack", json={})
@@ -53,9 +47,7 @@ def test_slack_webhook_disabled(client):
 
 
 def test_slack_event_deduped_by_event_id(client):
-    """Slack redelivers the same event (retries + app_mention/message dual
-    delivery). The handler must process a given event_id EXACTLY ONCE, else one
-    user message creates two conversations / two replies."""
+    """A redelivered event_id is processed exactly once."""
     slack_h._SEEN_EVENT_IDS.clear()
     payload = {
         "type": "event_callback",
@@ -70,38 +62,29 @@ def test_slack_event_deduped_by_event_id(client):
         mock_settings.slack_enabled = True
 
         first = client.post("/webhooks/slack", json=payload)
-        second = client.post("/webhooks/slack", json=payload)  # retry / dual delivery
+        second = client.post("/webhooks/slack", json=payload)
 
     assert first.json()["status"] == "ok"
     assert second.json().get("deduped") is True
-    # The event was handled exactly once despite two identical deliveries.
     assert mock_handle.await_count == 1
 
 
 def test_importing_the_handler_arms_the_resource_shapes():
-    """Shapes register by import side effect and nothing else imports them: losing
-    that line would make a thread link stop matching the id a webhook arrives with
-    (issue #563)."""
+    """Shapes register by import side effect and nothing else imports them."""
     from scooter_webhooks_lib import resources
 
     assert "slack" in resources.registered_sources()
 
 
 def test_importing_the_handler_arms_the_owner_lookup():
-    """Same hazard, different failure: without the resolver every Slack-spawned
-    conversation silently becomes unowned (#575)."""
+    """Without the resolver every Slack-spawned conversation silently becomes unowned."""
     from scooter_webhooks_lib import identity
 
     assert "slack" in identity.registered_providers()
 
 
 async def test_slack_ack_posts_before_the_run():
-    """The 'Scooter is on it' ack must post BEFORE the agent run.
-
-    create_conversation() blocks until the whole turn finishes, so posting the ack
-    after it returned delayed the link by the entire run. The handler posts inside
-    the `on_created` hook; a fake create_conversation fires it and records ORDER.
-    """
+    """The 'Scooter is on it' ack posts inside the `on_created` hook, before the agent run."""
     order: list[str] = []
 
     async def rec_post(*a, **k):

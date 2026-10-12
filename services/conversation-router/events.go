@@ -1,17 +1,9 @@
-// The conversation-LIST push stream — GET /conversations/events — served by the router directly
-// from Postgres LISTEN/NOTIFY instead of fanning SSE out to every agent-host pod and multiplexing
-// their frames. A single dedicated connection LISTENs on 'conversations_changed' (raised by the
-// trigger in migration 20260902183131); each notification names one conversation id, whose row the
-// loop re-reads and fans out to the subscribers entitled to see it.
-//
-// Why the store is the source of truth here, not the pods: the fan-out re-emitted whatever each
-// pod's in-memory session map said, so a stale per-pod copy could push a `starred`/title value the
-// durable row had already superseded. Reading the row the trigger fired on means the push and the
-// GET /conversations snapshot (assembleList, same makeListRow) can never disagree.
-//
-// Contract preserved for the UI (conversationStream.ts): an initial `snapshot` then `upsert`
-// frames. Removals are NOT pushed (the trigger fires on delete, but the loop drops it) — exactly as
-// agent-host's old emitChange never fired on end(); the 10s poll reconciles removals.
+// The conversation-list push stream, GET /conversations/events, served from Postgres
+// LISTEN/NOTIFY. A single dedicated connection listens on 'conversations_changed'; each
+// notification names one conversation id, whose row the loop re-reads and fans out to the
+// subscribers entitled to see it, so the push and the GET /conversations snapshot can never
+// disagree. The UI contract is an initial `snapshot` then `upsert` frames; removals are not
+// pushed and are reconciled by the poll.
 package main
 
 import (
@@ -23,31 +15,23 @@ import (
 	"time"
 )
 
-// listenBackoff paces reconnects after the LISTEN connection drops or fails to open. Short: a lost
-// notification stream means the sidebar silently stops updating live until the poll, so reconnect
-// briskly — but not so tight it hammers a DB that is actually down.
+// listenBackoff paces reconnects after the LISTEN connection drops or fails to open.
 const listenBackoff = 2 * time.Second
 
-// sseHeartbeat keeps the SSE connection (and any intermediary idle timeout) alive between upserts.
-// A comment frame the UI parser ignores.
+// sseHeartbeat keeps the SSE connection alive between upserts with a comment frame the UI parser ignores.
 const sseHeartbeat = 25 * time.Second
 
-// subBuffer bounds how many upserts a slow subscriber may queue before the loop drops frames for it
-// rather than blocking every OTHER subscriber. A dropped frame is reconciled by the poll; blocking
-// the fan-out would let one stuck client freeze live updates for all.
+// subBuffer bounds how many upserts a slow subscriber may queue before frames are dropped for it rather than blocking every other subscriber.
 const subBuffer = 64
 
-// sseSub is one connected /conversations/events client: its scope filter and a buffered channel of
-// pre-serialized frames. owner/scope decide which upserts it may see (the same boundary the poll
-// enforces — the stream must never reveal a conversation the snapshot would hide).
+// sseSub is one connected /conversations/events client: its visibility scope and a buffered channel of pre-serialized frames.
 type sseSub struct {
 	ch          chan []byte
 	callerOwner string
 	scope       string
 }
 
-// sseHub is the set of live subscribers. broadcast walks it under RLock; subscribe/unsubscribe
-// mutate under the write lock.
+// sseHub is the set of live subscribers.
 type sseHub struct {
 	mu   sync.RWMutex
 	subs map[*sseSub]struct{}
@@ -71,10 +55,7 @@ func (h *sseHub) unsubscribe(s *sseSub) {
 	h.mu.Unlock()
 }
 
-// broadcast serializes the upsert ONCE and delivers it to every subscriber the row is visible to.
-// The frame bytes are identical across subscribers — only visibility differs — so marshalling per
-// subscriber would be waste. A subscriber whose buffer is full is skipped (its poll reconciles),
-// never blocked, so one slow client can't stall the fan-out.
+// broadcast serializes the upsert once and delivers it to every subscriber the row is visible to, skipping rather than blocking on a full buffer.
 func (h *sseHub) broadcast(row listRow) {
 	frame, err := json.Marshal(struct {
 		Kind         string  `json:"kind"`
@@ -92,15 +73,12 @@ func (h *sseHub) broadcast(row listRow) {
 		}
 		select {
 		case s.ch <- msg:
-		default: // buffer full — drop; the 10s poll reconciles this subscriber.
+		default: // buffer full; the poll reconciles this subscriber
 		}
 	}
 }
 
-// runConversationListener owns the dedicated LISTEN connection: it opens it, LISTENs on the
-// channel, and on each notification re-reads the row and fans it out via the hub. It reconnects
-// through NewListenConn after any drop (a notification stream is not resumable — reconnect + the
-// poll are the recovery), and returns when ctx is cancelled. No-op when store is nil (dev/pg-less).
+// runConversationListener owns the dedicated LISTEN connection, re-reading and fanning out each notified row, reconnecting after any drop and returning when ctx is cancelled.
 func runConversationListener(ctx context.Context, store *Store, links *LinkStore, hub *sseHub) {
 	if store == nil {
 		return
@@ -139,8 +117,7 @@ func runConversationListener(ctx context.Context, store *Store, links *LinkStore
 			}
 			handleNotification(ctx, n.Payload, store, links, hub, log)
 		}
-		// Close with a background context: ctx may already be cancelled (shutdown), and a Close on
-		// a cancelled context would skip the connection teardown.
+		// Close with a background context, since a Close on a cancelled ctx would skip the teardown.
 		_ = conn.Close(context.Background())
 		if ctx.Err() == nil {
 			sleep(ctx, listenBackoff)
@@ -148,15 +125,7 @@ func runConversationListener(ctx context.Context, store *Store, links *LinkStore
 	}
 }
 
-// notifyDecision parses a NOTIFY payload ({id, op}) and applies the drop rules, returning the
-// conversation id to read and whether to proceed. Pure (no DB, no logging) so the branch logic is
-// unit-testable. Drops:
-//   - unparseable / empty-id payloads (never expected from our own trigger);
-//   - op=delete — removals ride the 10s poll, exactly as agent-host's emitChange never pushed end().
-//
-// It consults no existence set: the row IS existence, and handleNotification's re-read already drops
-// an id whose row is gone (ConversationByID returns nil), which covers the "do not resurrect a
-// ghost" case with one fewer store to disagree with.
+// notifyDecision parses a NOTIFY payload ({id, op}) and returns the conversation id to read and whether to proceed, dropping unparseable payloads and op=delete.
 func notifyDecision(payload string) (string, bool) {
 	var p struct {
 		ID string `json:"id"`
@@ -168,8 +137,7 @@ func notifyDecision(payload string) (string, bool) {
 	return p.ID, true
 }
 
-// handleNotification turns one NOTIFY payload into an upsert broadcast: decide (notifyDecision),
-// then re-read the row + links (the payload carries only the id) and fan the built row out.
+// handleNotification turns one NOTIFY payload into an upsert broadcast by re-reading the row and its links.
 func handleNotification(ctx context.Context, payload string, store *Store, links *LinkStore, hub *sseHub, log *slog.Logger) {
 	id, proceed := notifyDecision(payload)
 	if !proceed {
@@ -183,7 +151,7 @@ func handleNotification(ctx context.Context, payload string, store *Store, links
 		return
 	}
 	if m == nil {
-		return // raced with a delete between the notify and the read.
+		return // raced with a delete
 	}
 	var ls []Link
 	if links != nil {
@@ -196,11 +164,7 @@ func handleNotification(ctx context.Context, payload string, store *Store, links
 	hub.broadcast(makeListRow(*m, ls, time.Now().UnixMilli()))
 }
 
-// serveConversationEvents streams GET /conversations/events from the store: an initial snapshot
-// (the caller's visible list, same shape as GET /conversations) then live upserts from the hub.
-// The subscription is registered BEFORE the snapshot read so an upsert arriving during that read is
-// buffered, not lost — a duplicate upsert of a row already in the snapshot is folded idempotently
-// by the UI (mergeFromServer). All writes happen on this one goroutine, so w needs no locking.
+// serveConversationEvents streams an initial snapshot then live upserts, subscribing before the snapshot read so an upsert arriving during it is buffered rather than lost.
 func serveConversationEvents(w http.ResponseWriter, r *http.Request, store *Store, links *LinkStore, hub *sseHub) {
 	log := logger("events")
 	flusher, ok := w.(http.Flusher)
@@ -216,7 +180,7 @@ func serveConversationEvents(w http.ResponseWriter, r *http.Request, store *Stor
 
 	callerOwner, scope := ownerFrom(r), listScope(r)
 
-	// Subscribe FIRST (see the func comment) — the buffer holds any upsert racing the snapshot.
+	// Subscribe first so the buffer holds any upsert racing the snapshot.
 	sub := hub.subscribe(callerOwner, scope)
 	defer hub.unsubscribe(sub)
 
@@ -235,7 +199,7 @@ func serveConversationEvents(w http.ResponseWriter, r *http.Request, store *Stor
 			return
 		case msg := <-sub.ch:
 			if _, err := w.Write(msg); err != nil {
-				return // client hung up mid-write.
+				return // client hung up
 			}
 			flusher.Flush()
 		case <-ticker.C:
@@ -247,10 +211,7 @@ func serveConversationEvents(w http.ResponseWriter, r *http.Request, store *Stor
 	}
 }
 
-// snapshotFrame builds the initial `snapshot` SSE frame — the caller's visible list, assembled the
-// same way GET /conversations is. On a store read error it returns an EMPTY-list snapshot rather
-// than nil so the client still gets a valid first frame and then rides live upserts + the poll;
-// only a marshalling failure (never expected) yields nil.
+// snapshotFrame builds the initial `snapshot` SSE frame, an empty list on a store read error and nil only on a marshalling failure.
 func snapshotFrame(ctx context.Context, store *Store, links *LinkStore, callerOwner, scope string, log *slog.Logger) []byte {
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -281,8 +242,7 @@ func snapshotFrame(ctx context.Context, store *Store, links *LinkStore, callerOw
 	return sseData(frame)
 }
 
-// sseData wraps a JSON frame in the SSE `data:` envelope the UI parser expects (a frame is
-// terminated by the blank line).
+// sseData wraps a JSON frame in the SSE `data:` envelope.
 func sseData(frame []byte) []byte {
 	out := make([]byte, 0, len(frame)+8)
 	out = append(out, "data: "...)

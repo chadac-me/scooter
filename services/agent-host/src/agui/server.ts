@@ -1,12 +1,8 @@
 /**
- * AG-UI server — streams AG-UI events from the agent-host to the browser.
- *
- * Transport: Server-Sent Events (SSE). AG-UI's event stream is one-directional
- * (agent -> UI), so SSE fits; prompts/permission answers come over POST.
- * assistant-ui's native AG-UI runtime consumes the SSE stream.
- *
- * Events are encoded with @ag-ui/encoder so the wire format is the canonical
- * AG-UI SSE framing.
+ * AG-UI server: streams AG-UI events from the agent-host to the browser over SSE,
+ * with prompts and permission answers arriving over POST. Events are encoded with
+ * @ag-ui/encoder so the wire format is the canonical AG-UI SSE framing that
+ * assistant-ui's AG-UI runtime consumes.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
@@ -22,42 +18,30 @@ import { logger, withConversation } from "../log.js";
 
 const log = logger("agui");
 
-/** Defensive guard for the /agui RESUME branch: after answering, the resumed run's
- *  events stream back over the SSE. If NOTHING streams within this window (any silent-
- *  hang cause), close the stream with a RUN_ERROR instead of relying on a proxy to kill
- *  an idle upstream. Must comfortably exceed a legitimately-slow resume (a revive can
- *  re-spawn goose + replay history), so it's generous — it only fires on a true hang.
- *  Read per-branch (not at module load) so it's overridable via SCOOTER_RESUME_GUARD_MS,
- *  including in tests. */
+/** How long the /agui resume branch waits for the resumed run to stream anything before closing with a RUN_ERROR, read per call so SCOOTER_RESUME_GUARD_MS can override it. */
 const resumeStreamGuardMs = (): number => Number(process.env.SCOOTER_RESUME_GUARD_MS ?? 60_000);
 
-/** A raw inbound image on a user message (base64 bytes + mime) — before it's
- *  stored in the AssetStore. The promptHandler (index.ts) stores it and passes the
- *  resulting assetId to the bridge. */
+/** A raw inbound image on a user message, before the promptHandler stores it in the AssetStore. */
 export interface InboundImage {
   data: string; // base64
   mimeType: string;
 }
 
-/** A NON-image attachment (Slack binary: pdf/zip/docx/…). The bytes ride base64;
- *  the agent-host materializes it into the sandbox at /workspace/uploads/<name>. */
+/** A non-image attachment (base64 bytes) that the agent-host materializes into the sandbox at /workspace/uploads/<name>. */
 export interface InboundFile {
   name: string;
   data: string; // base64
   mimeType: string;
 }
 
-/** One part of a multimodal message content array. Text, image, or file; other
- *  AG-UI part shapes are tolerated (ignored). */
+/** One part of a multimodal message content array; shapes other than text, image and file are ignored. */
 export type ContentPart =
   | { type: "text"; text?: string }
   | { type: "image"; data?: string; mimeType?: string; image?: string; [k: string]: unknown }
   | { type: "file"; name?: string; data?: string; mimeType?: string; [k: string]: unknown }
   | { type: string; [k: string]: unknown };
 
-/** Normalize a message's `content` (string | ContentPart[]) into prompt text +
- *  inbound images + inbound files. A plain string is the text (no attachments) —
- *  the unchanged path. */
+/** Normalize a message's `content` (string or ContentPart[]) into prompt text, inbound images and inbound files. */
 export function normalizeContent(content: string | ContentPart[] | undefined): {
   text: string;
   images: InboundImage[];
@@ -73,7 +57,7 @@ export function normalizeContent(content: string | ContentPart[] | undefined): {
     if (part.type === "text" && typeof (part as { text?: unknown }).text === "string") {
       texts.push((part as { text: string }).text);
     } else if (part.type === "image") {
-      // Accept {data, mimeType} (our shape) or {image} (assistant-ui data URL).
+      // Accept {data, mimeType} or an assistant-ui {image} data URL.
       const p = part as { data?: string; mimeType?: string; image?: string };
       const parsed = p.data && p.mimeType
         ? { data: p.data, mimeType: p.mimeType }
@@ -82,7 +66,7 @@ export function normalizeContent(content: string | ContentPart[] | undefined): {
           : null;
       if (parsed) images.push(parsed);
     } else if (part.type === "file") {
-      // A binary attachment (Slack pdf/zip/…): {name, data(base64), mimeType}.
+      // A binary attachment: {name, data(base64), mimeType}.
       const p = part as { name?: string; data?: string; mimeType?: string };
       if (p.name && p.data) {
         files.push({ name: p.name, data: p.data, mimeType: p.mimeType || "application/octet-stream" });
@@ -102,35 +86,21 @@ function parseDataUrl(url: string): InboundImage | null {
 export interface RunAgentInput {
   threadId: ThreadId;
   text: string;
-  /** Per-conversation model pick/switch (from the X-Agent-Model header on the
-   *  /agui POST). Undefined = keep the conversation's current model. */
+  /** Per-conversation model pick from the X-Agent-Model header; undefined keeps the current model. */
   model?: string;
   /** The provider the user explicitly picked, from "<provider>:<model>". */
   provider?: string;
-  /** Priority tier (PRIORITY_INTERRUPT) for a force-interrupting message — a
-   *  webhooks `@scooter` mention to an ACTIVE conversation sets this so it can
-   *  preempt a stuck turn after the bridge's priority timeout. The UI (a human
-   *  typing) never sets it. Undefined/0 = normal (waits its turn). */
+  /** Priority tier (PRIORITY_INTERRUPT) for a force-interrupting message, set by a webhooks
+   *  `@scooter` mention to an active conversation so it can preempt a stuck turn and never by
+   *  the UI; undefined/0 waits its turn. */
   priority?: number;
-  /** The Scooter user id to OWN a webhook-spawned conversation (the external-user
-   *  identity mapping resolved this). SECURITY: honored ONLY when the caller is the
-   *  TRUSTED webhooks service, verified by its ServiceAccount token via k8s
-   *  TokenReview (see auth/webhooksCaller.ts) — a browser / any other caller can't
-   *  claim a conversation. Undefined = no owner set here (the UI path stamps the
-   *  ingress identity on POST /conversations instead). */
+  /** The Scooter user id to own a webhook-spawned conversation, honored only when the caller is the TokenReview-verified webhooks service. */
   owner?: string;
-  /** Images attached to the latest user message (base64), from a multimodal
-   *  content array. Empty/undefined = a text-only message (the unchanged path). */
+  /** Images attached to the latest user message (base64). */
   images?: InboundImage[];
-  /** Binary file attachments (Slack pdf/zip/…) on the latest user message (base64).
-   *  The agent-host materializes each into the sandbox at /workspace/uploads/<name>.
-   *  Empty/undefined = no file attachments (the unchanged path). */
+  /** Binary file attachments on the latest user message (base64), materialized into the sandbox at /workspace/uploads/<name>. */
   files?: InboundFile[];
-  /** SYSTEM message source — set when a PLATFORM caller (webhooks, scheduler) injects
-   *  a message that isn't a human turn. Tags it so the agent gets a "system event"
-   *  decoration and the UI can hide it. Undefined = a human message. Trusted like
-   *  `owner`: only meaningful from the webhooks/scheduler SA, but harmless if spoofed
-   *  (it just makes a message render as system, no privilege). */
+  /** System message source set by a platform caller (webhooks, scheduler), so the agent sees a "system event" and the UI can hide it; harmless if spoofed. */
   source?: string;
 }
 
@@ -141,19 +111,13 @@ export interface AguiConnection {
   close(): void;
 }
 
-/** The result of handling one resume entry. `ok:false` (with an optional human reason)
- *  tells the /agui resume branch to close the SSE with a RUN_ERROR rather than leave it
- *  open with no data — the difference between a rendered failure and a silent hang/502. */
+/** The result of handling one resume entry; `ok:false` makes the /agui resume branch close the SSE with a RUN_ERROR rather than leave it open and silent. */
 export interface ResumeOutcome {
   ok: boolean;
   reason?: string;
 }
 
-/** What the ingress identity resolver returns. `email`/`name` are optional because a
- *  header-auth ingress may supply only an id — but they must be CARRIED, not dropped:
- *  an approval is authorized against a configured claim (email by default), so a
- *  resolver result narrowed to `{id, anonymous}` silently costs the answering human
- *  their identity on every approval. Why: PR #649. */
+/** What the ingress identity resolver returns; `email`/`name` must be carried when present, since an approval is authorized against a configured claim. */
 export interface ResolvedUser {
   id: string;
   email?: string;
@@ -163,24 +127,18 @@ export interface ResolvedUser {
 
 export interface AguiServer {
   listen(port: number): Promise<void>;
-  /** The bound port after listen() (for tests binding to :0). undefined if not listening. */
+  /** The bound port after listen(), or undefined if not listening. */
   port(): number | undefined;
   close(): Promise<void>;
   onPrompt(handler: (sessionId: SessionId, input: RunAgentInput) => Promise<void>): void;
   /** Answer a pending permission request (toolCallId -> optionId). */
   onPermission(handler: (sessionId: SessionId, toolCallId: string, optionId: string) => Promise<void>): void;
-  /** Resume a paused run: the user answered an interrupt via RunAgentInput.resume.
-   *  status "cancelled" -> the request is cancelled; otherwise payload carries the
-   *  chosen optionId. Returns whether the answer was routed: `ok:false` means the run
-   *  isn't (and couldn't be revived into) a state that can accept this answer, so the
-   *  resume branch closes the SSE with a RUN_ERROR instead of leaving it open + silent. */
+  /** Resume a paused run with the user's interrupt answer; `ok:false` means the run could not accept it, so the resume branch closes the SSE with a RUN_ERROR. */
   onResume(
     handler: (
       sessionId: SessionId,
       entry: { interruptId: string; status: "resolved" | "cancelled"; payload?: unknown },
-      /** The human who answered, from the ingress identity on THIS request. An
-       *  approval interrupt is authorized against this person, not the conversation
-       *  — undefined only when the caller is anonymous. */
+      /** The human who answered, from the ingress identity on this request; undefined only when anonymous. */
       approver?: ApproverIdentity,
     ) => Promise<ResumeOutcome>,
   ): void;
@@ -189,30 +147,19 @@ export interface AguiServer {
   onAttach(handler: (sessionId: SessionId, conn: AguiConnection) => Promise<void>): void;
   /** Mount a management router; tried before the built-in AG-UI routes. */
   use(router: Router): void;
-  /** Mount the web-service reverse proxy (/c/<id>/<service>/...): consulted as an
-   *  HTTP fallback before the 404, and wired to the server's `upgrade` event for
-   *  WebSocket services (marimo/xterm/vscode). */
+  /** Mount the web-service reverse proxy (/c/<id>/<service>/...), an HTTP fallback before the 404 and the `upgrade` handler for WebSocket services. */
   useProxy(proxy: WebServiceProxy): void;
-  /** Register a raw WebSocket upgrade handler for an exact pathname (e.g.
-   *  /remote-agent/connect for bring-your-own-Claude). Consulted on `upgrade` BEFORE the
-   *  proxy; the handler owns the socket (auth + protocol). Generic — the server needs no
-   *  knowledge of what it connects. */
+  /** Register a raw WebSocket upgrade handler for an exact pathname, consulted before the proxy; the handler owns the socket. */
   onUpgrade(pathname: string, handler: (req: import("node:http").IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => void): void;
-  /** Set the verifier that decides whether a /agui request is the TRUSTED webhooks
-   *  caller (its SA token via TokenReview) — gating the privileged `owner` field.
-   *  Absent = owner is never honored. */
+  /** Set the verifier that decides whether a /agui request is the trusted webhooks caller, gating the privileged `owner` field. */
   useOwnerVerifier(verify: (req: import("node:http").IncomingMessage) => Promise<boolean>): void;
-  /** Resolve the caller's ingress identity so a UI-created conversation (POST /agui)
-   *  is OWNED by the human who created it. Without this, a browser-created
-   *  conversation gets no owner (the Mine/All filter can't see it as yours). Absent =
-   *  no owner stamped from /agui (single-user / no-FGA deployments). */
+  /** Resolve the caller's ingress identity so a conversation created via POST /agui is owned by the human who created it. */
   useIdentityResolver(resolve: (req: import("node:http").IncomingMessage) => ResolvedUser | Promise<ResolvedUser>): void;
-  /** Attach an SSE response to a session's persistent event stream (for the
-   *  management API's GET .../events). Returns once replay (onAttach) is done. */
+  /** Attach an SSE response to a session's persistent event stream, returning once replay is done. */
   subscribeSSE(sessionId: SessionId, res: ServerResponse): Promise<void>;
 }
 
-/** Our internal AguiEvent IS a BaseEvent once `type` is the discriminator. */
+/** An AguiEvent is a BaseEvent once `type` is the discriminator. */
 function toBaseEvent(event: AguiEvent): BaseEvent {
   return event as unknown as BaseEvent;
 }
@@ -241,18 +188,12 @@ export function createAguiServer(): AguiServer {
   let server: Server | undefined;
   let mountedRouter: Router | undefined;
   let mountedProxy: WebServiceProxy | undefined;
-  // Exact-pathname WS upgrade handlers (bring-your-own-Claude /remote-agent/connect, etc.),
-  // consulted before the proxy on `upgrade`.
+  // Exact-pathname WS upgrade handlers, consulted before the proxy on `upgrade`.
   const upgradeHandlers = new Map<string, (req: IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => void>();
   let ownerVerifier: ((req: IncomingMessage) => Promise<boolean>) | undefined;
   let identityResolver: ((req: IncomingMessage) => ResolvedUser | Promise<ResolvedUser>) | undefined;
 
-  /** Resolve the caller's ingress identity, never throwing. The try/catch wraps the
-   *  CALL, not just the promise: a resolver that throws synchronously (a misconfigured
-   *  backend, a bad header parse) escapes `Promise.resolve(f()).catch(...)` entirely
-   *  and would take the whole request down — on the resume path that means a security
-   *  decision the user already made is lost to an identity-lookup failure. Degrading to
-   *  "unknown" is always the right trade here: both callers treat it as anonymous. */
+  /** Resolve the caller's ingress identity, degrading to undefined (anonymous) on any throw, synchronous or not. */
   const resolveUserSafely = async (req: IncomingMessage): Promise<ResolvedUser | undefined> => {
     if (!identityResolver) return undefined;
     try {
@@ -284,20 +225,12 @@ export function createAguiServer(): AguiServer {
     await attachHandler?.(sessionId, conn); // replay the event log
   };
 
-  // Connections opened via POST /agui are run-scoped: they close when the run
-  // ends. The persistent GET /sessions/:id/events connections stay open.
+  // Connections opened via POST /agui are run-scoped and close when the run ends.
   const runScoped = new WeakSet<ServerResponse>();
 
-  // Broadcast a run's live AG-UI events ONLY to run-scoped connections — i.e.
-  // the POST /agui stream of the client that started THIS run. We deliberately
-  // do NOT push to persistent (GET .../events) connections: a run the client
-  // didn't initiate (driven by another tab or a webhook via POST
-  // /conversations/:id/messages) would otherwise reach an idle @ag-ui client as
-  // a stray RUN_STARTED — which it rejects ("RUN_STARTED while a run is still
-  // active"). The open UI renders those external runs through the separate
-  // integrity stream (GET .../events.integrity) instead, which is fed off the
-  // persist path and carries every event with its checksum. The right primitive
-  // for each: run-scoped SSE for your own run, the integrity stream for the rest.
+  // Broadcast a run's live events only to run-scoped connections, since a stray
+  // RUN_STARTED on a persistent connection would be rejected by an idle @ag-ui client;
+  // persistent viewers get external runs through the integrity stream instead.
   const broadcast = (sessionId: SessionId, event: AguiEvent) => {
     const set = connections.get(sessionId);
     if (!set) return;
@@ -327,32 +260,27 @@ export function createAguiServer(): AguiServer {
     // Management API (mounted router) is tried first.
     if (mountedRouter && (await mountedRouter.handle(req, res))) return;
 
-    // GET /healthz  -> readiness probe
+    // GET /healthz is the readiness probe.
     if (req.method === "GET" && parts[0] === "healthz") {
       res.writeHead(200, { "Content-Type": "application/json" }).end('{"status":"ok"}');
       return;
     }
 
-    // POST /agui  -> the standard AG-UI HttpAgent protocol: accept a
-    // RunAgentInput and stream this run's AG-UI events back over SSE. This is
-    // what @ag-ui/client HttpAgent (used by assistant-ui) talks to.
+    // POST /agui is the standard AG-UI HttpAgent protocol: accept a RunAgentInput and
+    // stream this run's events back over SSE.
     if (req.method === "POST" && parts[0] === "agui") {
       const input = JSON.parse((await readBody(req)) || "{}") as {
         threadId: string;
         runId?: string;
-        // content is a plain string (text-only, the common case) OR an array of
-        // content parts (multimodal: text + image parts).
+        // content is a plain string or an array of multimodal content parts.
         messages?: Array<{ role: string; content?: string | ContentPart[] }>;
-        /** Priority tier for a force-interrupting message (webhooks @mention). */
+        /** Priority tier for a force-interrupting message. */
         priority?: number;
-        /** The Scooter user to OWN a webhook-spawned conversation. Honored ONLY for
-         *  a TokenReview-verified webhooks caller (ownerVerifier); ignored otherwise. */
+        /** The Scooter user to own a webhook-spawned conversation, honored only for a TokenReview-verified caller. */
         owner?: string;
-        /** Per-interrupt responses (assistant-ui resumes a paused run with these
-         *  instead of a new user message). */
+        /** Per-interrupt responses with which assistant-ui resumes a paused run instead of sending a new message. */
         resume?: Array<{ interruptId: string; status: "resolved" | "cancelled"; payload?: unknown }>;
-        /** SYSTEM message source (webhooks/scheduler) — renders as a hideable system
-         *  message + decorates the agent prompt. Absent = a human message. */
+        /** System message source (webhooks/scheduler); absent means a human message. */
         source?: string;
       };
       const sessionId = input.threadId;
@@ -362,34 +290,19 @@ export function createAguiServer(): AguiServer {
         Connection: "keep-alive",
       });
 
-      // Subscribe this response to the session's events for the duration of the
-      // run; unsubscribe when the run completes.
+      // Subscribe this response to the session's events for the duration of the run.
       let set = connections.get(sessionId);
       if (!set) connections.set(sessionId, (set = new Set()));
       set.add(res);
       runScoped.add(res);
       req.on("close", () => set!.delete(res));
 
-      // A RESUME (answer to a pending interrupt) reconnects to the still-blocked
-      // run and unpauses it — its continued events stream back over THIS SSE. We
-      // do NOT start a new prompt for a resume.
+      // A resume (an answer to a pending interrupt) unpauses the still-blocked run, whose
+      // continued events stream back over this SSE; no new prompt is started.
       if (input.resume && input.resume.length > 0) {
-        // The handler REVIVES the run if needed, then answers; it reports whether the
-        // answer was actually routed. If ANY entry can't be answered (dormant/expired
-        // interrupt with nothing to revive into), close with a RUN_ERROR instead of
-        // leaving the stream open + silent — the reported hang/502
-        // (docs/scooter-bug-resume-hangs-when-run-not-live.md). When answered, the run
-        // resumes and streams its continued events over THIS res (via broadcast), which
-        // terminal-closes it as usual.
-        // WHO answered. An approval interrupt is authorized against the answering
-        // human (the broker checks a configured claim — email by default), and this
-        // is the only place that identity exists: the resume arrives on a plain
-        // POST /agui, not through the management Router's ctx.user. Resolve it ONCE
-        // for the batch — every entry came in on the same request.
-        //
-        // Anonymous stays undefined rather than becoming a synthetic principal, so a
-        // deployment with no ingress identity keeps its existing behavior instead of
-        // authorizing something that isn't a person.
+        // The answering human, resolved once for the batch, is who an approval interrupt
+        // is authorized against; anonymous stays undefined rather than becoming a
+        // synthetic principal.
         const answerer = await resolveUserSafely(req);
         const approver: ApproverIdentity | undefined =
           answerer && !answerer.anonymous
@@ -412,12 +325,9 @@ export function createAguiServer(): AguiServer {
           res.end();
           return;
         }
-        // Answered — keep the stream open for the resumed run's continued events, but
-        // GUARD against a silent hang from ANY other cause: if this res is still open
-        // and has streamed nothing by the deadline, close it with a RUN_ERROR rather
-        // than relying on a proxy to kill an idle upstream. broadcast() removes res from
-        // `set` + res.end()s it on the run's terminal event, so "still in set and
-        // writable" == "the resumed run never produced anything".
+        // Keep the stream open for the resumed run, but close it with a RUN_ERROR if it
+        // has streamed nothing by the deadline; broadcast() removes res from `set` on
+        // the terminal event, so "still in set and writable" means nothing resumed.
         const guard = setTimeout(() => {
           if (!set.has(res) || res.writableEnded) return; // run already streamed/closed it
           try {
@@ -436,32 +346,23 @@ export function createAguiServer(): AguiServer {
         return;
       }
 
-      // The latest user message is the prompt. Its content is either a plain
-      // string (text-only) or an array of parts (multimodal); normalize to text +
-      // inbound images.
+      // The latest user message is the prompt.
       const lastUser = [...(input.messages ?? [])].reverse().find((m) => m.role === "user");
       const { text, images, files } = normalizeContent(lastUser?.content);
-      // The UI rides the per-conversation model on a header (the assistant-ui
-      // runtime drives the AG-UI body, so a header is the clean injection point).
+      // The UI rides the per-conversation model on a header, since the assistant-ui
+      // runtime drives the AG-UI body.
       const hdr = req.headers["x-agent-model"];
       const rawModel = (Array.isArray(hdr) ? hdr[0] : hdr) || undefined;
-      // The picker sends "<provider>:<model>" when the catalog groups by provider, so an
-      // explicit pick can move a run OFF the highest-priority eligible provider (BYOC wins
-      // on priority whenever a container is connected, so a bare id could never route).
-      // Only the MODEL travels on; provider selection keys on it via modelAllowedFor.
+      // The picker sends "<provider>:<model>" when the catalog groups by provider so an
+      // explicit pick can move a run off the highest-priority eligible provider, and only the
+      // model travels on while provider selection keys on it via modelAllowedFor.
       const sep = rawModel ? rawModel.indexOf(":") : -1;
       const model = sep > 0 ? rawModel!.slice(sep + 1) : rawModel;
       const pickedProvider = sep > 0 ? rawModel!.slice(0, sep) : undefined;
-      // Resolve the conversation OWNER, stamped on first creation so the Mine/All
-      // filter attributes a UI-created conversation to the human who made it.
-      //   1. PRIVILEGED webhooks path: an explicit `input.owner` (a Scooter user the
-      //      webhooks service resolved), honored ONLY when the caller is the TRUSTED
-      //      webhooks SA (TokenReview via ownerVerifier) — not a header the ingress
-      //      is trusted to strip. A browser can't set this.
-      //   2. NORMAL UI path: the browser doesn't send `owner`; instead we resolve the
-      //      caller's INGRESS IDENTITY here (the same resolver /whoami + POST
-      //      /conversations use) and own the conversation to that user. Anonymous
-      //      (no identity / FGA-off / dev) → no owner, preserving single-user mode.
+      // Resolve the conversation owner stamped on first creation: an explicit `input.owner` is
+      // honored only for the TokenReview-verified webhooks caller, otherwise the caller's
+      // ingress identity (the same resolver /whoami uses) owns it, and anonymous leaves it
+      // unowned.
       let owner: string | undefined;
       if (input.owner && ownerVerifier && (await ownerVerifier(req).catch(() => false))) {
         owner = input.owner;
@@ -469,27 +370,20 @@ export function createAguiServer(): AguiServer {
         const user = await resolveUserSafely(req);
         if (user && !user.anonymous) owner = user.id;
       }
-      // Drive the run. If promptHandler THROWS before the run ever emits a terminal
-      // event (the big one: revive/provision fails — e.g. 409 AlreadyExists from a
-      // wrong hydrate map, goose spawn/ACP-connect error), the SSE 200 header is
-      // ALREADY sent, so the outer handle().catch can't send a 500 — it would just
-      // res.end() a raw error string that assistant-ui can't parse, and the UI hangs
-      // with NO error (the hydrate-silent-drop bug). Emit a proper RUN_ERROR event on
-      // THIS stream + close it, so the UI has something to render as a failed send.
+      // If promptHandler throws before the run emits a terminal event, the SSE 200 header
+      // is already sent, so emit a RUN_ERROR on this stream and close it rather than let
+      // the outer catch end it with an unparseable raw error.
       try {
         await promptHandler?.(sessionId, { threadId: sessionId, text, model, provider: pickedProvider, priority: input.priority, owner, images, files, source: input.source });
         // promptHandler drives the run; RUN_FINISHED/RUN_ERROR close the stream.
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        // The caller prompted an id that does not exist — a caller bug, not a run
-        // failure. The 200 + SSE head is already committed here, so this cannot be a
-        // real 404; give the caller an actionable message instead.
+        // An unknown id is a caller bug rather than a run failure, but the SSE head is
+        // already committed so it cannot be a real 404.
         const unknown = err instanceof Error && err.name === "UnknownConversationError";
         // eslint-disable-next-line no-console
         withConversation(sessionId, () =>
           log.errorWith("prompt failed; surfacing RUN_ERROR to the client", err, {
-            // Distinguishes "the caller asked for a conversation that does not exist" from
-            // "the run itself blew up", without parsing the message.
             unknown_conversation: unknown,
           }),
         );
@@ -515,7 +409,7 @@ export function createAguiServer(): AguiServer {
       return;
     }
 
-    // GET /sessions/:id/events  -> SSE subscription
+    // GET /sessions/:id/events is the SSE subscription.
     if (req.method === "GET" && parts[0] === "sessions" && parts[2] === "events") {
       const sessionId = parts[1];
       res.writeHead(200, {
@@ -553,8 +447,7 @@ export function createAguiServer(): AguiServer {
       return;
     }
 
-    // Web-service reverse proxy (/c/<id>/<service>/...) — last, so it never
-    // shadows the API routes above.
+    // The web-service reverse proxy (/c/<id>/<service>/...) goes last so it never shadows the API routes.
     if (mountedProxy && mountedProxy.matches(url.pathname)) {
       await mountedProxy.handleHttp(req, res);
       return;
@@ -568,13 +461,8 @@ export function createAguiServer(): AguiServer {
       return new Promise((resolve) => {
         server = createServer((req, res) => {
           handle(req, res).catch((err) => {
-            // LAST-RESORT catch — a route that throws instead of returning an error result.
-            // Log the real error here; the RESPONSE gets a generic JSON envelope, never
-            // `String(err)`: raw error strings have no content-type (JSON-expecting clients
-            // render parser artifacts instead of a message) and can carry internals into
-            // something that gets screenshotted and pasted into issues. Routes with an
-            // expected failure mode should catch it themselves and answer specifically
-            // (see /remote-agent/join-token) — landing here is a bug worth the log line.
+            // Last-resort catch for a route that throws: log the real error and answer with
+            // a generic JSON envelope, never the raw error string.
             log.errorWith("unhandled route error", err, {
               http_method: req.method,
               url: req.url,
@@ -583,12 +471,11 @@ export function createAguiServer(): AguiServer {
               res.writeHead(500, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: "internal error" }));
             } else {
-              res.end(); // headers gone (e.g. mid-SSE) — just close; the log has the cause
+              res.end(); // headers already sent (e.g. mid-SSE)
             }
           });
         });
-        // WebSocket upgrades for proxied services (marimo kernel, xterm PTY,
-        // vscode RPC). The agent-host had no upgrade handler before this.
+        // WebSocket upgrades for registered handlers and proxied services.
         server.on("upgrade", (req, socket, head) => {
           const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
           const registered = upgradeHandlers.get(pathname);
@@ -615,12 +502,8 @@ export function createAguiServer(): AguiServer {
       });
     },
     onPrompt(handler) {
-      // Bind the conversation id ONCE, here, rather than at each call site that invokes
-      // promptHandler. Everything the handler touches — session manager, bridge, exec, the
-      // k8s registry — then logs it without taking it as a parameter, which is the point:
-      // those sites are frames deep and have no other reason to know it.
-      // Wrapping the HANDLER (not its callers) keeps control flow identical: a throw still
-      // propagates to the caller's catch, so the /agui error path is unchanged.
+      // Bind the conversation id once here so everything the handler touches logs it
+      // without taking it as a parameter; a throw still propagates to the caller's catch.
       promptHandler = (sessionId, input) =>
         withConversation(sessionId, () => handler(sessionId, input));
     },

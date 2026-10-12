@@ -1,14 +1,8 @@
 /**
- * Skill delivery, container side.
- *
- * A BYO container cannot read the agent-host pod's filesystem, so the cloud
- * sends each skill as DATA on `new_session` and this writes it locally. The
- * layout is the same one the in-pod path builds —
- * `<cwd>/.claude/skills/<name>/SKILL.md` — so the container's own SDK discovers
- * them identically: name + description up front, body loaded on invocation.
- *
- * Deliberately duplicated rather than imported: this package ships to a user's
- * machine and must not depend on agent-host.
+ * Skill delivery, container side. A BYO container cannot read the agent-host pod's
+ * filesystem, so the cloud sends each skill as data on `new_session` and this writes it
+ * to `<cwd>/.claude/skills/<name>/SKILL.md`, the layout the container's own SDK discovers.
+ * This package ships to a user's machine and must not depend on agent-host.
  */
 
 import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -21,7 +15,7 @@ export interface SkillPayload {
   content: string;
 }
 
-/** Written as `<cwd>/.claude/skills/<name>/SKILL.md`. Returns how many landed. */
+/** Write each skill as `<cwd>/.claude/skills/<name>/SKILL.md`, returning how many landed. */
 export function writeSkillPayloads(cwd: string, skills: readonly SkillPayload[]): number {
   let n = 0;
   for (const s of skills) {
@@ -36,13 +30,7 @@ export function writeSkillPayloads(cwd: string, skills: readonly SkillPayload[])
   return n;
 }
 
-/**
- * Drop all but the `keep` newest `skills-*` dirs under `parent`.
- *
- * The container's config dir is a persistent volume, so one dir per session
- * accumulates without bound. Best-effort: a failure here must never break a
- * session, and an in-flight session's own dir is among the newest.
- */
+/** Drop all but the `keep` newest `skills-*` dirs under `parent`, best-effort because a failure must never break a session. */
 export function pruneSkillDirs(parent: string, keep: number): number {
   let removed = 0;
   try {

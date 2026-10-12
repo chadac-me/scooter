@@ -1,17 +1,7 @@
-"""Regression test: the github provider's git-credentials route must NOT be
-shadowed by its HttpProxy catch-all.
+"""The github provider's git-credentials route must not be shadowed by its HttpProxy catch-all.
 
-The github provider mounts BOTH a GitCredential transport (/github/git-credentials)
-and an HttpProxy transport (/github/{path:path}, all methods). FastAPI matches in
-registration order, so GitCredential MUST come first — otherwise the proxy
-catches /github/git-credentials and forwards it to api.github.com (404), and the
-in-pod git-credential-broker helper gets nothing -> git can't authenticate.
-
-Tested at the provider level (no settings/env singleton games): the github
-provider's first transport must be the GitCredential one.
-
-Moved here with the provider (PR #591): the App source it composes came too, so
-this is where the composition is now proved.
+FastAPI matches in registration order, so the GitCredential transport must precede
+the HttpProxy one or /github/git-credentials is forwarded to api.github.com.
 """
 
 from __future__ import annotations
@@ -26,7 +16,6 @@ def test_git_credential_transport_precedes_proxy():
     kinds = [type(t).__name__ for t in provider.transports]
     assert "GitCredential" in kinds, kinds
     assert "HttpProxy" in kinds, kinds
-    # Specific route before the catch-all proxy.
     assert kinds.index("GitCredential") < kinds.index("HttpProxy"), (
         f"GitCredential must come before HttpProxy, got {kinds}"
     )
@@ -46,13 +35,7 @@ def test_proxy_targets_github_api():
 
 
 def test_git_credentials_are_vended_by_the_app_source(monkeypatch):
-    """The end of the `git clone` chain, now that the App source lives here.
-
-    git-credential-broker -> GET /github/git-credentials -> the GENERIC
-    GitCredential transport (still in scooter_broker_lib) -> provider.credential.
-    Only that last link is github's, so the move must leave the transport reading
-    a GitHubAppSource. Why: PR #591.
-    """
+    """The generic GitCredential transport reads a GitHubAppSource as provider.credential."""
     from scooter_contrib_github.github_app import GitHubAppSource
 
     monkeypatch.setenv("GITHUB_APP_ID", "123")

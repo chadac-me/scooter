@@ -1,14 +1,4 @@
-"""The 'Scooter is on it — follow along: <link>' ack must post BEFORE the agent run.
-
-create_conversation() blocks until the whole agent turn finishes, so posting the
-link ack after it returned delayed the link by the entire run (the 5-10min lag).
-The handler posts the ack inside the `on_created` hook (fired pre-run); this drives
-_background_create_conversation with a fake create_conversation that (a) invokes
-on_created, (b) records call ORDER, so the ack is proven to fire during on_created.
-
-Moved here with the handler (PR #580) — the webhooks app's copy covered the three
-in-tree handlers, and gitlab's half travels with gitlab.
-"""
+"""The 'Scooter is on it' ack posts inside the `on_created` hook, before the agent run."""
 
 from __future__ import annotations
 
@@ -21,7 +11,7 @@ def _fake_create_conversation(order: list[str]):
     async def fake(*args, on_created=None, **kwargs):
         if on_created is not None:
             await on_created("conv-xyz")
-        order.append("run")  # the blocking run finishes AFTER on_created
+        order.append("run")
         return {"conversation_id": "conv-xyz", "result": "done"}
 
     return fake

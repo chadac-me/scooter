@@ -1,10 +1,7 @@
 /**
- * Tier 1 contract test — the in-process MCP tool handlers (background jobs).
- *
- * The agent (goose) calls these tools over MCP; each handler maps a JobManager
- * call back to an MCP tool response. The conversationId is bound per MCP server
- * instance (one server per conversation's newSession). We test the HANDLER logic
- * directly (not the HTTP transport).
+ * The in-process MCP tool handlers for background jobs, each mapping a JobManager call
+ * to an MCP tool response, tested directly rather than over the HTTP transport. The
+ * conversationId is bound per MCP server instance.
  */
 
 import { describe, it, expect } from "vitest";
@@ -128,9 +125,7 @@ describe("kill_background MCP tool handler", () => {
 });
 
 // --- marimo tools wiring ------------------------------------------------------
-// buildServer registers the marimo notebook tools when a `marimo` wiring is given
-// (both providers see them via the shared MCP endpoint). We drive the REAL McpServer
-// through an in-memory client and assert the tools appear + dispatch to the client.
+// buildServer registers the marimo notebook tools when a `marimo` wiring is given, driven here through the real McpServer over an in-memory client.
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -146,9 +141,7 @@ function fakeMarimoClient(over: Partial<MarimoClient> = {}): MarimoClient {
 }
 
 async function clientForServer(marimo?: MarimoToolsWiring): Promise<Client> {
-  // Always wire the jobs tools too, so the server advertises the `tools` capability
-  // even when marimo is absent (an all-empty server has no tools/list method — an
-  // SDK artifact, never a real deployment). We assert on the marimo_* subset.
+  // The jobs tools are always wired so the server advertises the `tools` capability even without marimo.
   const { jobs } = fakeJobs();
   const server = await buildServer("conv-1", undefined, jobs, undefined, undefined, undefined, undefined, marimo);
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
@@ -174,19 +167,14 @@ describe("marimo tools wiring (buildServer)", () => {
   });
 
   it("registers web_fetch even with NO agentTools/broker wiring", async () => {
-    // The decoupling: web_fetch needs no broker and no credential, so buildServer must
-    // register it regardless of whether agentTools is wired. clientForServer passes
-    // agentTools = undefined.
+    // web_fetch needs no broker and no credential, so it is registered without agentTools.
     const client = await clientForServer(undefined);
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toContain("web_fetch");
   });
 
   it("does NOT register web_search — a search key makes it a CONTRIB's tool", async () => {
-    // It reaches the agent over the broker's /mcp from a search contrib, one tool per
-    // enabled provider (`brave_web_search`, `kagi_web_search`, `duckduckgo_web_search`),
-    // so a deployment with no search key has no search tool at all — rather than one
-    // that answers every real query with an empty result set (PR #698, issue #700).
+    // Search reaches the agent over the broker's /mcp, one tool per enabled search contrib.
     const client = await clientForServer(undefined);
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).not.toContain("web_search");
@@ -198,7 +186,7 @@ describe("marimo tools wiring (buildServer)", () => {
       clientFor: (id) => { seenConv = id; return fakeMarimoClient({ execute: async () => ({ success: true, stdout: "", stderr: "", output: "99" }) }); },
     });
     const res = await client.callTool({ name: "marimo_execute", arguments: { code: "1+1" } });
-    expect(seenConv).toBe("conv-1"); // clientFor got the bound conversation id
+    expect(seenConv).toBe("conv-1");
     const text = (res.content as Array<{ type: string; text: string }>)[0].text;
     expect(text).toContain("=> 99");
   });

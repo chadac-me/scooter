@@ -1,4 +1,4 @@
-"""Post/update comments on GitLab issues and MRs."""
+"""Post and update comments on GitLab issues and MRs."""
 
 import logging
 
@@ -16,7 +16,7 @@ GITLAB_API = "https://gitlab.com/api/v4"
 async def post_gitlab_comment(
     project_id: int, noteable_type: str, noteable_iid: int, body: str,
 ) -> int | None:
-    """Post a comment on a GitLab issue or MR. Returns note ID or None."""
+    """Post a comment on a GitLab issue or MR, returning the note id or None."""
     if not settings.gitlab_token:
         logger.warning(
             "gitlab token not set, skipping comment post",

@@ -1,16 +1,4 @@
-"""Slack's agent tools (issue #700).
-
-Ported from services/agent-host/test/contract/agentTools.spec.ts along with the code.
-The assertions that matter are the ones protecting against specific past incidents:
-
-  * the gate is CLOSED with no Slack link — an ungated reply tool is what sent the
-    agent raw-curling Slack into the root channel;
-  * a Slack 200-with-`{"ok": false}` is a FAILURE, not a success;
-  * `already_reacted` is SUCCESS, because the webhooks handler's pre-dispatch 👀 makes
-    the agent's own ack-react hit it constantly;
-  * the OLDEST slack link wins, so a conversation started from one thread keeps
-    replying there.
-"""
+"""Slack's agent tools: the attachment gate, target resolution, and the result mapping."""
 
 from __future__ import annotations
 
@@ -78,15 +66,13 @@ async def test_the_gate_is_CLOSED_with_no_links():
 
 
 async def test_the_gate_is_CLOSED_when_only_another_provider_is_attached():
-    """The incident this prevents: a GitHub-only conversation being offered Slack's
-    reply tool, firing it, and posting to whatever channel it could find."""
+    """A GitHub-only conversation is not offered Slack's reply tool."""
     ctx = _ctx(links=[{"source": "github", "resourceType": "pr", "url": "https://github.com/o/r/pull/1", "ref": {}}])
     assert await gate_for("slack_respond")(ctx) is False
 
 
 async def test_the_gate_is_CLOSED_for_a_slack_link_with_no_channel():
-    """A link with a ref but no channel resolves to no target, so the tool must not be
-    offered — it could not act even if it fired."""
+    """A link with a ref but no channel resolves to no target."""
     assert await gate_for("slack_respond")(_ctx(links=[_link(channel=None)])) is False
 
 
@@ -95,32 +81,28 @@ async def test_the_gate_OPENS_with_a_slack_link():
 
 
 async def test_a_channel_with_no_thread_is_a_COMPLETE_target():
-    """Posting without a thread_ts is a channel message, which is right for a
-    conversation attached to a channel rather than a thread."""
+    """Posting without a thread_ts is a channel message."""
     assert await gate_for("slack_respond")(_ctx(links=[_link(thread=None)])) is True
 
 
 # --- target resolution ------------------------------------------------------------
 
 async def test_the_OLDEST_slack_link_wins():
-    """listLinks orders by insert id, so the thread the conversation STARTED from wins
-    over one attached later."""
+    """listLinks orders by insert id, so the thread the conversation started from wins."""
     ctx = _ctx(links=[_link(channel="C-first"), _link(channel="C-second")])
     target = await slack_tools.slack_target(ctx)
     assert target["channel"] == "C-first"
 
 
 async def test_a_link_with_no_channel_is_SKIPPED_not_fatal():
-    """Completeness is per link: an incomplete one is passed over, and fields are never
-    mixed with the next link's."""
+    """An incomplete link is passed over and its fields are never mixed with the next link's."""
     ctx = _ctx(links=[_link(channel=None, thread="9999.9"), _link(channel="C-real", thread="1700.5")])
     target = await slack_tools.slack_target(ctx)
     assert target == {"channel": "C-real", "thread_ts": "1700.5"}
 
 
 async def test_snake_case_thread_ts_is_also_accepted():
-    """Writers disagree on the spelling, and a dropped thread_ts silently posts to the
-    channel instead of the thread."""
+    """Writers disagree on the spelling, and a dropped thread_ts silently posts to the channel."""
     ctx = _ctx(links=[{"source": "slack", "resourceType": "thread", "url": "", "ref": {"channel": "C1", "thread_ts": "1700.5"}}])
     assert (await slack_tools.slack_target(ctx))["thread_ts"] == "1700.5"
 
@@ -149,8 +131,7 @@ async def test_respond_lets_an_explicit_thread_ts_override():
 
 
 async def test_respond_treats_a_200_with_ok_false_as_a_FAILURE():
-    """Slack reports logical failure with HTTP 200. Without this check a message that
-    never posted reads as success — and the agent moves on believing it replied."""
+    """Slack reports logical failure with HTTP 200."""
     ctx = _ctx(links=[_link()], response=httpx.Response(200, json={"ok": False, "error": "channel_not_found"}))
     res = await _fn("slack_respond")(text="hi", ctx=ctx)
     assert res.is_error is True
@@ -167,15 +148,14 @@ async def test_respond_surfaces_a_transport_failure_VERBATIM():
 # --- slack_react ------------------------------------------------------------------
 
 async def test_react_strips_colons_from_the_emoji_name():
-    """reactions.add wants the bare name; a model will often send `:eyes:`."""
+    """reactions.add wants the bare name, and a model will often send `:eyes:`."""
     ctx = _ctx(links=[_link()])
     await _fn("slack_react")(emoji=":eyes:", message_ts="1700.9", ctx=ctx)
     assert ctx.upstream.calls[0]["json"]["name"] == "eyes"
 
 
 async def test_react_targets_the_GIVEN_message_not_the_thread_anchor():
-    """The point of requiring message_ts: a 👀 must land on the message being
-    acknowledged, not on the thread root."""
+    """A reaction must land on the message being acknowledged, not on the thread root."""
     ctx = _ctx(links=[_link(thread="1700.5")])
     await _fn("slack_react")(emoji="eyes", message_ts="1800.7", ctx=ctx)
     assert ctx.upstream.calls[0]["json"]["timestamp"] == "1800.7"
@@ -189,8 +169,7 @@ async def test_react_requires_a_message_ts(ts):
 
 
 async def test_react_treats_already_reacted_as_SUCCESS():
-    """The webhooks handler adds 👀 before dispatch, so the agent's own ack-react hits
-    this constantly. Reporting it as an error wasted a turn every time."""
+    """The webhooks handler reacts before dispatch, so the agent's own ack-react hits this constantly."""
     ctx = _ctx(links=[_link()], response=httpx.Response(200, json={"ok": False, "error": "already_reacted"}))
     res = await _fn("slack_react")(emoji="eyes", message_ts="1700.9", ctx=ctx)
     assert res.is_error is False
@@ -223,8 +202,7 @@ async def test_context_omits_the_thread_when_there_is_none():
 async def test_the_provider_contributes_the_three_tools():
     from scooter_contrib_slack.broker_provider import slack
 
-    # The factory is enabled only with a token configured; the tool server is built
-    # regardless, so assert on the server rather than the provider's `enabled`.
+    # The tool server is built regardless of whether the provider is enabled.
     tools = await slack_tools.mcp.list_tools(run_middleware=False)
     assert {t.name for t in tools} == {"slack_respond", "slack_react", "get_slack_context"}
     assert slack is not None
@@ -235,11 +213,10 @@ async def test_no_tool_exposes_ctx_to_the_model():
         assert "ctx" not in tool.parameters.get("properties", {}), tool.name
 
 
-# --- the conversation_map fallback (issue #700) ------------------------------------
+# --- the conversation_map fallback ------------------------------------
 
 async def test_a_mapping_row_supplies_the_channel_and_thread():
-    """Slack is the one source whose channel/ts are their own columns, so the broker
-    turns them into a real `ref` rather than a raw resource_id."""
+    """Slack's channel and ts are their own columns, so the broker turns them into a real `ref`."""
     ctx = _ctx(links=[{"source": "slack", "resourceType": "thread", "url": "C9:1700.1",
                        "ref": {"channel": "C9", "threadTs": "1700.1"}}])
     assert await slack_tools.slack_target(ctx) == {"channel": "C9", "thread_ts": "1700.1"}

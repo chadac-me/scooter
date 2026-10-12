@@ -1,17 +1,9 @@
 /**
- * Tier 3 E2E — HOSTILE integrity-stream conditions.
- *
- * The previous passes proved the UI is coherent when the stream behaves. This spec attacks the
- * stream itself: frames that arrive TWICE, OUT OF ORDER, MALFORMED, TRUNCATED, with a BROKEN
- * CHECKSUM, or carrying an UNKNOWN event type. The client keeps reading throughout — so unlike a
- * drop/kill (where recovery is a reconnect), the failure mode here is a POISONED FOLD: the UI
- * renders something wrong and never notices.
- *
- * Every test asserts the whole-UI invariants (assertConsistent) plus, critically, that the
- * transcript matches the SERVER's own view (assertMatchesServer) — a UI that quietly diverges from
- * the agent-host is exactly the "weird detached state" being hunted.
- *
- * Runs on the isolated fault-proxy stack (baseURL 5273, fast idle-watchdog).
+ * Tier 3 E2E for hostile integrity-stream conditions: frames that arrive twice, out of
+ * order, malformed, truncated, with a broken checksum, or carrying an unknown event type.
+ * The client keeps reading throughout, so the failure mode is a poisoned fold rather than a
+ * reconnect; every test asserts the whole-UI invariants and that the transcript matches the
+ * server's own view. Runs on the isolated fault-proxy stack (baseURL 5273).
  */
 
 import { test, expect, snapshot, assertConsistent, assertMatchesServer } from "./fixtures.js";
@@ -42,7 +34,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
 
     const after = await snapshot(page);
     assertConsistent(after, "after duplicated frames");
-    // Exactly ONE new user turn and ONE new reply — redelivery must not inflate the transcript.
+    // Exactly one new user turn and one new reply; redelivery must not inflate the transcript.
     expect(after.userMessages, "a duplicated frame must not duplicate the user turn").toBe(before.userMessages + 1);
     expect(after.assistantMessages, "a duplicated frame must not duplicate the reply").toBe(before.assistantMessages + 1);
     await assertMatchesServer(page, request, baseURL, "after duplicated frames");
@@ -50,8 +42,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
 
   test("a DUPLICATED tool-call frame must not render the tool card twice", async ({ chat, page, request }) => {
     await chat.open();
-    // Baseline turn (also runs a tool) so the fault lands on a live stream — so measure the DELTA in
-    // tool cards, not the absolute count.
+    // A baseline turn so the fault lands on a live stream; measure the delta in tool cards.
     await chat.completeTurn("!echo healthy baseline before the fault");
     const before = await snapshot(page);
     await setFault(request, { mode: "duplicate", eventType: "TOOL_CALL_START", n: 2 });
@@ -70,7 +61,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
     await chat.completeTurn("baseline before reordering");
     const before = await snapshot(page);
 
-    // Hold TEXT_MESSAGE_START and release it AFTER the following frame — content before start.
+    // Hold TEXT_MESSAGE_START and release it after the following frame, so content precedes start.
     await setFault(request, { mode: "reorder", eventType: "TEXT_MESSAGE_START" });
     await chat.completeTurn("frames arrive out of order");
 
@@ -83,8 +74,8 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
 
   test("a MALFORMED (unparseable) frame is skipped — the run still completes", async ({ chat, page, request, baseURL }) => {
     await chat.open();
-    // Establish a healthy conversation FIRST: a fault armed before any stream exists lands on the
-    // conversation's very first connection, so the send never gets through and the test proves nothing.
+    // A fault armed before any stream exists lands on the very first connection, so establish
+    // a healthy conversation first.
     await chat.completeTurn("healthy baseline before the fault");
     const before = await snapshot(page);
     await setFault(request, { mode: "garbage", afterN: 2 });
@@ -99,8 +90,8 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
 
   test("a TRUNCATED frame (torn mid-JSON) must not wedge or poison the fold", async ({ chat, page, request }) => {
     await chat.open();
-    // Establish a healthy conversation FIRST: a fault armed before any stream exists lands on the
-    // conversation's very first connection, so the send never gets through and the test proves nothing.
+    // A fault armed before any stream exists lands on the very first connection, so establish
+    // a healthy conversation first.
     await chat.completeTurn("healthy baseline before the fault");
     const before = await snapshot(page);
     await setFault(request, { mode: "truncate", afterN: 2 });
@@ -114,8 +105,8 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
 
   test("an UNKNOWN event type is ignored gracefully (forward compatibility)", async ({ chat, page, request, baseURL }) => {
     await chat.open();
-    // Establish a healthy conversation FIRST: a fault armed before any stream exists lands on the
-    // conversation's very first connection, so the send never gets through and the test proves nothing.
+    // A fault armed before any stream exists lands on the very first connection, so establish
+    // a healthy conversation first.
     await chat.completeTurn("healthy baseline before the fault");
     const before = await snapshot(page);
     await setFault(request, { mode: "bogusEvent", afterN: 2 });
@@ -132,8 +123,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
     await chat.open();
     await chat.completeTurn("baseline before checksum corruption");
 
-    // Break the integrity chain mid-stream. Whatever the client does about it (re-sync, refetch), the
-    // end state must still agree with the server — the whole point of the checksum.
+    // Break the integrity chain mid-stream; the end state must still agree with the server.
     await setFault(request, { mode: "corruptChecksum", afterN: 2 });
     await chat.completeTurn("checksum will be corrupted");
 
@@ -143,9 +133,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
   });
 
   test("corruption DURING a queued message must not lose the queued turn", async ({ chat, page, request, baseURL }) => {
-    // Real end-to-end work (a run draining behind a queued turn) needs more than the 60s suite
-    // default — the 90s polls below were otherwise silently capped by the TEST budget, so a slower
-    // CI runner failed the test while the poll still had time left on paper.
+    // A run draining behind a queued turn needs more than the 60s suite default.
     test.setTimeout(180_000);
     await chat.open();
     await chat.send("!sleep 4");
@@ -154,7 +142,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
     await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 20_000 });
 
-    // Corrupt the stream WHILE a message waits in the queue — the riskiest moment.
+    // Corrupt the stream while a message waits in the queue.
     await setFault(request, { mode: "duplicate", eventType: "RUN_FINISHED", n: 2 });
     await expect.poll(async () => (await snapshot(page)).queued.length, { timeout: 90_000 }).toBe(0);
     await chat.waitForIdle(90_000);
@@ -182,8 +170,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
       await chat.completeTurn(`hostile turn ${i + 1}`, 60_000);
       const s = await snapshot(page);
       assertConsistent(s, `hostile turn ${i + 1}`);
-      // The transcript grows by EXACTLY one turn per send, whatever the stream did.
-      // +1 for the healthy baseline turn established before the faults.
+      // The transcript grows by exactly one turn per send (+1 for the baseline turn).
       expect(s.userMessages, `hostile turn ${i + 1}: exact user count`).toBe(i + 2);
       expect(s.assistantMessages, `hostile turn ${i + 1}: exact assistant count`).toBe(i + 2);
     }

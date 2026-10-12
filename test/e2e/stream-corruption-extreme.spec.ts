@@ -1,16 +1,9 @@
 /**
- * Tier 3 E2E — EXTREME hostile stream conditions.
- *
- * The first corruption pass (stream-corruption.spec.ts) proved the fold survives a SINGLE corrupt
- * frame per turn. This escalates to the conditions where recovery logic is most likely to break:
- *   - PERSISTENT corruption (once:false — every occurrence, not one-shot)
- *   - corruption of the TERMINAL events that drive run-state (RUN_STARTED / RUN_FINISHED)
- *   - corruption while an INTERRUPT is pending (a paused run is a fragile state)
- *   - corruption STACKED with a reconnect (kill the stream, then corrupt the replay)
- *   - a long hostile session (10 turns, corruption on every one — cumulative drift)
- *
- * Every step asserts the whole-UI invariants and the DOM-vs-server agreement, so a UI that survives
- * "looking right" but has silently diverged still fails.
+ * Tier 3 E2E for extreme hostile stream conditions: persistent corruption (every
+ * occurrence, not one-shot), corruption of the terminal events that drive run-state,
+ * corruption while an interrupt is pending, corruption stacked with a reconnect, and a
+ * long hostile session with corruption on every turn. Every step asserts the whole-UI
+ * invariants and the DOM-vs-server agreement.
  */
 
 import { test, expect, snapshot, assertConsistent, assertMatchesServer } from "./fixtures.js";
@@ -32,7 +25,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("extreme stream c
     await chat.completeTurn("baseline before persistent duplication");
     const before = await snapshot(page);
 
-    // once:false → EVERY TEXT_MESSAGE_CONTENT frame is delivered twice, for the whole turn.
+    // once:false delivers every TEXT_MESSAGE_CONTENT frame twice for the whole turn.
     await setFault(request, { mode: "duplicate", eventType: "TEXT_MESSAGE_CONTENT", n: 1, once: false });
     await chat.completeTurn("every content frame duplicated");
     await clearFault(request);
@@ -45,10 +38,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("extreme stream c
   });
 
   test("a DUPLICATED RUN_FINISHED must not double-drain the queue or wedge run-state", async ({ chat, page, request, baseURL }) => {
-    // This test does REAL work end-to-end (a baseline turn, a sleeping run, a queued turn draining
-    // behind it) so it needs more than the 60s suite default — its internal polls were already
-    // written for 90s, which the default silently capped, so on a slower CI runner the queue had not
-    // finished draining when the TEST (not the poll) timed out.
+    // A queued turn draining behind a sleeping run needs more than the 60s suite default.
     test.setTimeout(180_000);
     await chat.open();
     await chat.completeTurn("baseline before terminal duplication");
@@ -87,15 +77,14 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("extreme stream c
   });
 
   test("corruption WHILE AN INTERRUPT IS PENDING must keep the approval answerable", async ({ chat, page, request, baseURL }) => {
-    // A 60s wait inside the 60s suite default leaves ZERO headroom — the test dies at the same
-    // moment its own poll would have. Give this one a budget larger than the work it waits on.
+    // A 60s wait inside the 60s suite default leaves no headroom.
     test.setTimeout(180_000);
     await chat.open();
     await chat.completeTurn("baseline before interrupt corruption");
     await chat.send("?pick a color");
     await expect(page.locator('[data-testid="interrupt-panel"]')).toBeVisible({ timeout: 30_000 });
 
-    // Corrupt the stream while the run is PAUSED awaiting a human answer.
+    // Corrupt the stream while the run is paused awaiting a human answer.
     await setFault(request, { mode: "garbage", afterN: 1 });
     const paused = await snapshot(page);
     assertConsistent(paused, "interrupt pending under corruption");
@@ -112,15 +101,13 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("extreme stream c
   });
 
   test("a KILLED stream whose RECONNECT is then corrupted still converges on the server's truth", async ({ chat, page, request, baseURL }) => {
-    // Real end-to-end work (a run draining behind a queued turn) needs more than the 60s suite
-    // default — the 90s polls below were otherwise silently capped by the TEST budget, so a slower
-    // CI runner failed the test while the poll still had time left on paper.
+    // A run draining behind a queued turn needs more than the 60s suite default.
     test.setTimeout(180_000);
     await chat.open();
     await chat.completeTurn("baseline before stacked faults");
     const before = await snapshot(page);
 
-    // Kill the stream mid-turn; the client reconnects — and the REPLAY it fetches is corrupted too.
+    // Kill the stream mid-turn; the client reconnects, and the replay it fetches is corrupted too.
     await setFault(request, { mode: "killAfter", n: 2 });
     await chat.send("stacked faults: kill then corrupt");
     await page.waitForTimeout(500);
@@ -156,7 +143,7 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("extreme stream c
       await chat.completeTurn(`hostile session turn ${i + 1}`, 60_000);
       const s = await snapshot(page);
       assertConsistent(s, `hostile session turn ${i + 1}`);
-      // +1 for the baseline: the transcript grows by EXACTLY one turn per send, every time.
+      // The transcript grows by exactly one turn per send (+1 for the baseline).
       expect(s.userMessages, `turn ${i + 1}: exact user count`).toBe(i + 2);
       expect(s.assistantMessages, `turn ${i + 1}: exact assistant count`).toBe(i + 2);
       expect(s.queued, `turn ${i + 1}: no phantom queue rows`).toEqual([]);

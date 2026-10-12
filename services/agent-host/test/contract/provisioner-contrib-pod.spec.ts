@@ -1,14 +1,8 @@
 /**
- * Contract — a CONTRIB reaches the sandbox pod through the manifest-overlay seam the
- * provisioner ALREADY has, and the provisioner knows no integration by name.
- *
- * This replaced a hardcoded `awsAccountsConfigMap` option that spliced aws's account
- * registry into three places here (a mount, a volume, an env var). Those three splices
- * are gone: modules/platform.nix renders the parts as an overlay, so what needs
- * guarding is that the overlay shape it emits ACTUALLY lands in all three places (a
- * dropped one leaves the pod Pending on a volume it can't satisfy, or mounted with
- * nothing telling the sandbox where), and that a deployment's own patch still wins a
- * name collision. Why: PR #640.
+ * A contrib reaches the sandbox pod through the manifest-overlay seam, so the
+ * provisioner knows no integration by name. The overlay modules/platform.nix renders
+ * must land its volume, mount and env in the pod, and a deployment's own patch wins a
+ * name collision.
  */
 
 import { describe, it, expect } from "vitest";
@@ -30,8 +24,7 @@ interface Manifest {
   };
 }
 
-/** aws's real parts in the overlay shape modules/platform.nix renders from
- *  `scooter.sandboxPod.*` — the motivating case, copied from that render. */
+/** aws's parts in the overlay shape modules/platform.nix renders from `scooter.sandboxPod.*`. */
 const AWS_OVERLAY = {
   spec: {
     podTemplate: {
@@ -79,15 +72,14 @@ describe("sandbox pod: contributed parts", () => {
 
   it("keeps the platform's own wiring intact alongside a contrib's", () => {
     const m = render({ overlay: AWS_OVERLAY });
-    // The seam appends; it must not displace the identity/auth wiring the
-    // conversation depends on.
+    // The seam appends without displacing the identity/auth wiring.
     expect(named(m.spec.podTemplate.spec.volumes, "broker-token")).toHaveLength(1);
     expect(named(ctr(m).volumeMounts, "workspace")).toHaveLength(1);
     expect(named(ctr(m).env, "CONVERSATION_ID")[0]?.value).toBe("conv-abc");
   });
 
   it("lets a deployment override a contrib's env BY NAME, exactly once", () => {
-    // What loadManifestOverlay composes: contrib parts, consumer patch on top.
+    // loadManifestOverlay composes contrib parts with the consumer patch on top.
     const consumer = {
       spec: {
         podTemplate: {
@@ -101,8 +93,7 @@ describe("sandbox pod: contributed parts", () => {
     };
     const m = render({ overlay: deepMerge(AWS_OVERLAY, consumer) as Record<string, unknown> });
     const hits = named(ctr(m).env, "AWS_ACCOUNTS_FILE");
-    // Strategic merge by name, so the deployment wins in place — NOT two entries
-    // relying on k8s keeping the last duplicate.
+    // Strategic merge by name, so the deployment wins in place rather than as a duplicate entry.
     expect(hits).toHaveLength(1);
     expect(hits[0]?.value).toBe("/mine.json");
   });

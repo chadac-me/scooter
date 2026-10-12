@@ -1,11 +1,7 @@
 /**
- * Tier 1 (ui) — the ?thread=<id> deep-link selection.
- *
- * requestSelect must select a conversation even when it isn't in the list yet
- * (a webhook-created thread the user has never opened arrives via the server
- * poll/stream). It selects immediately when known, else waits (pendingSelect)
- * and mergeFromServer honors it the moment the target appears — the one
- * deliberate exception to mergeFromServer's selection-neutrality.
+ * Session store unit tests: deep-link selection, merge reference stability, link-source
+ * ownership, the rename lock, per-conversation models, starring, subagent pruning and
+ * nesting, and the rule that only the server issues conversation ids.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -23,12 +19,9 @@ import {
 
 beforeEach(() => {
   globalThis.localStorage?.clear?.();
-  // The store is a module singleton with no per-test reset. A rename lock left set by
-  // a prior test (setEditing without a matching clearEditing) now FREEZES every later
-  // test's mergeFromServer (the whole-sidebar freeze), so clear it between tests.
+  // The store is a module singleton, so a leaked rename lock would freeze every later test's mergeFromServer.
   sessionStore.clearEditing();
-  // Likewise the search: a query left behind now also decides whether a rename lock is
-  // still honored (a hidden row releases it), so a leaked one would couple these tests.
+  // A leaked query would decide whether a rename lock is still honored.
   sessionStore.setQuery("");
 });
 
@@ -40,24 +33,22 @@ describe("deep-link selection (requestSelect)", () => {
   });
 
   it("selects a NOT-yet-known conversation once it arrives via the server", () => {
-    // The deep-link target isn't in the list yet.
+    // The deep-link target is not in the list yet.
     sessionStore.requestSelect("from-slack");
     expect(sessionStore.get().currentId).not.toBe("from-slack");
     expect(sessionStore.get().pendingSelect).toBe("from-slack");
 
-    // It arrives (poll/stream) — now it gets selected, and the pending clears.
+    // Once it arrives it is selected and the pending clears.
     sessionStore.mergeFromServer([{ id: "from-slack", title: "Slack: help" }]);
     expect(sessionStore.get().currentId).toBe("from-slack");
     expect(sessionStore.get().pendingSelect).toBeUndefined();
   });
 
   it("a background merge does NOT hijack the selection (still selection-neutral)", () => {
-    // Real server conversations carry a title (non-pristine), so they persist
-    // across merges — the deep-link target isn't dropped as a phantom.
     sessionStore.mergeFromServer([{ id: "a", title: "Conv A" }]);
     sessionStore.requestSelect("a");
     expect(sessionStore.get().currentId).toBe("a");
-    // A later merge bringing a newer conversation must NOT move the selection.
+    // A later merge bringing a newer conversation must not move the selection.
     const now = Date.now();
     sessionStore.mergeFromServer([
       { id: "a", title: "Conv A" },
@@ -73,11 +64,10 @@ describe("merge reference stability (sidebar re-render / flake root)", () => {
   it("reuses the SAME object reference for an unchanged conversation across merges", () => {
     sessionStore.mergeFromServer([{ id: "ref-a", title: "Alpha", createdAt: 1000, lastActivityAt: 1000 }]);
     const first = byId("ref-a");
-    // A later poll returns the SAME conversation, unchanged.
+    // A later poll returns the same conversation, unchanged.
     sessionStore.mergeFromServer([{ id: "ref-a", title: "Alpha", createdAt: 1000, lastActivityAt: 1000 }]);
     const second = byId("ref-a");
-    // Same reference -> React.memo skips the row -> no re-render disrupts an
-    // in-progress interaction (open rename / hover). This is the flake-family fix.
+    // The same reference lets React.memo skip the row.
     expect(second).toBe(first);
   });
 
@@ -93,8 +83,8 @@ describe("merge reference stability (sidebar re-render / flake root)", () => {
       { id: "ch-x", title: "X", createdAt: 1, lastActivityAt: 1 },
       { id: "ch-y", title: "Y renamed", createdAt: 2, lastActivityAt: 2 },
     ]);
-    expect(byId("ch-x")).toBe(x1); // unchanged -> same ref
-    expect(byId("ch-y")).not.toBe(y1); // changed -> new ref
+    expect(byId("ch-x")).toBe(x1);
+    expect(byId("ch-y")).not.toBe(y1);
     expect(byId("ch-y")?.title).toBe("Y renamed");
   });
 });
@@ -103,19 +93,16 @@ describe("link sources ownership (poll owns them; an SSE upsert must not clobber
   const sourcesOf = (id: string) => sessionStore.get().sessions.find((s) => s.id === id)?.sources;
 
   it("a []-sources single-row upsert does NOT wipe poll-populated sources (the sidebar-icon flake)", () => {
-    // The router always serializes `sources: []` for a link-less row, and link add/remove does
-    // not fire the conversations_changed trigger — so a single-row upsert (fired by an
-    // INSERT/title change before the link existed) carries `sources: []`. It must not clobber
-    // the sources the poll already populated, or the sidebar provider icon vanishes.
+    // A single-row upsert always carries `sources: []`, which must not clobber the poll-populated sources.
     sessionStore.mergeFromServer([{ id: "conv-1", sources: ["github"] }]); // authoritative poll
     expect(sourcesOf("conv-1")).toEqual(["github"]);
     sessionStore.mergeFromServer([{ id: "conv-1", sources: [] }], { sourcesAuthoritative: false });
-    expect(sourcesOf("conv-1")).toEqual(["github"]); // preserved, not clobbered to []
+    expect(sourcesOf("conv-1")).toEqual(["github"]);
   });
 
   it("an authoritative poll STILL clears sources when a link is removed (poll owns them)", () => {
     sessionStore.mergeFromServer([{ id: "conv-2", sources: ["github"] }]);
-    // A later poll (authoritative) reflects the link removal — this MUST take effect.
+    // An authoritative poll reflecting the link removal must take effect.
     sessionStore.mergeFromServer([{ id: "conv-2", sources: [] }]);
     expect(sourcesOf("conv-2")).toEqual([]);
   });
@@ -132,8 +119,7 @@ describe("editing lock (rename in progress freezes the sidebar — the CI rename
   it("a merge does NOT mutate the row being renamed (title/userTitled held)", () => {
     sessionStore.mergeFromServer([{ id: "edit-a", title: "Original", createdAt: 1, lastActivityAt: 1 }]);
     sessionStore.setEditing("edit-a");
-    // The agent's <title> update lands on the poll mid-rename — it must be ignored
-    // for the editing row (which is exactly what re-rendered the open input away).
+    // An agent title landing mid-rename must be ignored for the editing row.
     sessionStore.mergeFromServer([{ id: "edit-a", title: "Agent-picked title", createdAt: 1, lastActivityAt: 1 }]);
     expect(byId("edit-a")?.title).toBe("Original");
     expect(byId("edit-a")?.userTitled).toBeFalsy();
@@ -143,7 +129,7 @@ describe("editing lock (rename in progress freezes the sidebar — the CI rename
     sessionStore.mergeFromServer([{ id: "edit-ref", title: "Alpha", createdAt: 2, lastActivityAt: 2 }]);
     sessionStore.setEditing("edit-ref");
     const before = byId("edit-ref");
-    // A merge that WOULD otherwise change the title (new object) must not touch it.
+    // A merge that would otherwise change the title must not touch it.
     sessionStore.mergeFromServer([{ id: "edit-ref", title: "Changed by agent", createdAt: 2, lastActivityAt: 2 }]);
     expect(byId("edit-ref")).toBe(before);
   });
@@ -154,18 +140,13 @@ describe("editing lock (rename in progress freezes the sidebar — the CI rename
       { id: "lock-b", title: "B", createdAt: 2, lastActivityAt: 2 },
     ]);
     sessionStore.setEditing("lock-a");
-    // A background merge that changes BOTH the editing row AND another row must be
-    // dropped entirely — per-row locking wasn't enough: the merge still re-rendered
-    // <Sidebar> and that reconciliation detached the open input / swallowed the
-    // open-click (the CI flake, mode "input never appears"). So while any rename is
-    // open, mergeFromServer no-ops for every row; the next poll after clearEditing
-    // reconciles server-truth.
+    // While any rename is open, a merge that changes both the editing row and another row is dropped entirely.
     sessionStore.mergeFromServer([
       { id: "lock-a", title: "A changed", createdAt: 1, lastActivityAt: 1 },
       { id: "lock-b", title: "B changed", createdAt: 2, lastActivityAt: 2 },
     ]);
-    expect(byId("lock-a")?.title).toBe("A"); // editing row held
-    expect(byId("lock-b")?.title).toBe("B"); // other rows ALSO held (whole-sidebar freeze)
+    expect(byId("lock-a")?.title).toBe("A");
+    expect(byId("lock-b")?.title).toBe("B");
   });
 
   it("applies server-truth again once the rename clears", () => {
@@ -173,7 +154,7 @@ describe("editing lock (rename in progress freezes the sidebar — the CI rename
     sessionStore.setEditing("edit-clear");
     sessionStore.mergeFromServer([{ id: "edit-clear", title: "Agent title", createdAt: 3, lastActivityAt: 3 }]);
     expect(byId("edit-clear")?.title).toBe("Original"); // held while editing
-    // Rename committed/cancelled -> lock clears -> the next merge applies again.
+    // Once the lock clears the next merge applies again.
     sessionStore.clearEditing("edit-clear");
     sessionStore.mergeFromServer([{ id: "edit-clear", title: "Agent title", createdAt: 3, lastActivityAt: 3 }]);
     expect(byId("edit-clear")?.title).toBe("Agent title");
@@ -194,24 +175,21 @@ describe("editing lock (rename in progress freezes the sidebar — the CI rename
       { id: "stuck-b", title: "Beta", createdAt: 2, lastActivityAt: 2 },
     ]);
     sessionStore.setEditing("stuck-a");
-    // The search now hides the row being renamed, so its input unmounts and no commit,
-    // blur or Escape can ever reach the store. The lock would then freeze EVERY merge
-    // for the rest of the session — the sidebar silently stops reconciling and stale /
-    // duplicate rows survive until a reload.
+    // The search hides the row being renamed, so its input unmounts and nothing can ever clear the lock from the row.
     sessionStore.setQuery("Beta");
     sessionStore.mergeFromServer([
       { id: "stuck-a", title: "Alpha changed", createdAt: 1, lastActivityAt: 1 },
       { id: "stuck-b", title: "Beta changed", createdAt: 2, lastActivityAt: 2 },
     ]);
     expect(sessionStore.get().editingId).toBeUndefined();
-    expect(byId("stuck-a")?.title).toBe("Alpha changed"); // the merge ran, not just the unlock
+    expect(byId("stuck-a")?.title).toBe("Alpha changed"); // the merge ran as well as the unlock
     expect(byId("stuck-b")?.title).toBe("Beta changed");
   });
 
   it("a user rename made during editing survives the merge that arrives before clear", () => {
     sessionStore.mergeFromServer([{ id: "edit-user", title: "Original", createdAt: 4, lastActivityAt: 4 }]);
     sessionStore.setEditing("edit-user");
-    sessionStore.renameSession("edit-user", "My pinned project"); // optimistic + lock
+    sessionStore.renameSession("edit-user", "My pinned project"); // optimistic and locked
     // A poll still reporting the agent's guess arrives before the input closes.
     sessionStore.mergeFromServer([{ id: "edit-user", title: "Agent guess", createdAt: 4, lastActivityAt: 4 }]);
     expect(byId("edit-user")?.title).toBe("My pinned project");
@@ -226,17 +204,16 @@ describe("per-conversation model (model-switch scoping)", () => {
 
     const byId = Object.fromEntries(sessionStore.get().sessions.map((s) => [s.id, s.model]));
     expect(byId.a).toBe("claude-sonnet-4-6");
-    expect(byId.b).toBeUndefined(); // NOT leaked
-    expect(byId.c).toBeUndefined(); // NOT leaked
+    expect(byId.b).toBeUndefined();
+    expect(byId.c).toBeUndefined();
   });
 
   it("a background list-refresh does NOT propagate one conversation's model to the rest", () => {
-    // The reported "one switch, four others followed" shape: switch A, then a poll
-    // (mergeFromServer) arrives. B/C must keep their own (unset) model.
+    // After switching A, a poll arrives and B/C must keep their own unset model.
     sessionStore.mergeFromServer([{ id: "a" }, { id: "b" }, { id: "c" }]);
     sessionStore.setModel("a", "claude-sonnet-4-6");
 
-    // Poll returns the server's view: A persisted its pick; B/C never set one.
+    // The poll reports A's persisted pick and no model for B/C.
     sessionStore.mergeFromServer([
       { id: "a", model: "claude-sonnet-4-6" },
       { id: "b" },
@@ -250,9 +227,7 @@ describe("per-conversation model (model-switch scoping)", () => {
   });
 
   it("a locally-chosen model survives a poll that hasn't persisted it yet (first send pending)", () => {
-    // The merge prefers the LOCAL pick (existing?.model ?? c.model): a switch made
-    // before the first prompt persists it server-side must not be clobbered by a
-    // poll that still reports the conversation with no model.
+    // A switch made before the first prompt persists it must not be clobbered by a poll that still reports no model.
     sessionStore.mergeFromServer([{ id: "a" }]);
     sessionStore.setModel("a", "claude-haiku-4-5");
     sessionStore.mergeFromServer([{ id: "a" /* server hasn't stored the model yet */ }]);
@@ -263,16 +238,14 @@ describe("per-conversation model (model-switch scoping)", () => {
     sessionStore.mergeFromServer([{ id: "a" }, { id: "b" }]);
     sessionStore.setModel("a", "claude-sonnet-4-6");
     sessionStore.switchTo("b");
-    // B's determined model is still its own (unset) — not A's pick.
+    // B's model is still its own, not A's pick.
     expect(sessionStore.get().sessions.find((s) => s.id === "b")?.model).toBeUndefined();
     expect(sessionStore.get().currentId).toBe("b");
   });
 });
 
 describe("favoriting pins a conversation to the top of the list", () => {
-  // The store is a module singleton with no per-test reset, so use UNIQUE ids to
-  // avoid cross-test accumulation (the existing tests follow the same convention).
-  // `only` restricts the visible list to just these ids for a clean assertion.
+  // Unique ids avoid cross-test accumulation in the singleton store, and `only` restricts the assertion to them.
   const only = (...ids: string[]) => sessionStore.get().sessions.filter((s) => ids.includes(s.id)).map((s) => s.id);
 
   it("starred conversations sort ABOVE unstarred ones (then most-recently-active first within each group)", () => {
@@ -283,7 +256,7 @@ describe("favoriting pins a conversation to the top of the list", () => {
     ]);
     expect(only("star-new", "star-mid", "star-old")).toEqual(["star-new", "star-mid", "star-old"]);
 
-    // Star the OLDEST — it jumps to the top despite being least recent.
+    // Starring the oldest moves it to the top despite being least recent.
     sessionStore.setStarred("star-old", true);
     expect(only("star-new", "star-mid", "star-old")).toEqual(["star-old", "star-new", "star-mid"]);
   });
@@ -296,7 +269,7 @@ describe("favoriting pins a conversation to the top of the list", () => {
     ]);
     sessionStore.setStarred("imm-c", true);
     sessionStore.setStarred("imm-b", true);
-    // Both starred -> above 'imm-a'; most-recently-active first among starred (b @2000 before c @1000).
+    // Both starred rows sort above imm-a, most recently active first.
     expect(only("imm-a", "imm-b", "imm-c")).toEqual(["imm-b", "imm-c", "imm-a"]);
   });
 
@@ -317,7 +290,7 @@ describe("favoriting pins a conversation to the top of the list", () => {
       { id: "poll-b", title: "B", createdAt: 1_000, lastActivityAt: 1_000 },
     ]);
     expect(only("poll-a", "poll-b")).toEqual(["poll-a", "poll-b"]);
-    // Next poll: the server reports b as starred (persisted / starred elsewhere).
+    // The next poll reports b as starred.
     sessionStore.mergeFromServer([
       { id: "poll-a", title: "A", createdAt: 3_000, lastActivityAt: 3_000 },
       { id: "poll-b", title: "B", createdAt: 1_000, lastActivityAt: 1_000, starred: true },
@@ -335,16 +308,15 @@ describe("ended subagents are pruned from the sidebar", () => {
     ]);
     expect(sessionStore.get().sessions.some((s) => s.id === "sub-1")).toBe(true);
 
-    // Next poll: the subagent finished + was end()ed server-side, so it's absent.
+    // The next poll omits the subagent because it ended.
     sessionStore.mergeFromServer([{ id: "parent-1", title: "Parent" }]);
     const ids = sessionStore.get().sessions.map((s) => s.id);
-    expect(ids).toContain("parent-1"); // parent stays
-    expect(ids).not.toContain("sub-1"); // ended subagent pruned
+    expect(ids).toContain("parent-1");
+    expect(ids).not.toContain("sub-1");
   });
 
   it("does NOT prune a top-level conversation missing from a single merge", () => {
-    // A local top-level conv with a real title must survive (only subagents prune
-    // on absence — a top-level one may just be filtered out of this scope).
+    // A top-level conversation may just be filtered out of this scope.
     sessionStore.mergeFromServer([{ id: "top-1", title: "Real chat" }]);
     sessionStore.mergeFromServer([{ id: "other", title: "Other" }]);
     expect(sessionStore.get().sessions.some((s) => s.id === "top-1")).toBe(true);
@@ -353,19 +325,14 @@ describe("ended subagents are pruned from the sidebar", () => {
 
 describe("a brand-new conversation survives the background merge", () => {
   it("does NOT drop the currently-selected 'New chat' the server hasn't seen yet", async () => {
-    // A real server conversation already exists (so the merge has 'truth' to
-    // reconcile against — the condition that used to trigger the phantom-drop).
+    // A real server conversation exists for the merge to reconcile against.
     sessionStore.mergeFromServer([{ id: "server-conv", title: "Existing" }]);
 
-    // The user clicks "New chat": a pristine, server-unknown, SELECTED session. The id
-    // stays local until the first send, so the merge will not know about it — which is
-    // exactly the case this guards.
+    // "New chat" creates a pristine, server-unknown, selected session.
     const fresh = sessionStore.newSession();
     expect(sessionStore.get().currentId).toBe(fresh);
 
-    // The 10s poll fires: the server list still doesn't include the new chat.
-    // The fresh conversation (pristine + unknown to the server) must NOT be
-    // dropped, and the selection must NOT jump to the existing conversation.
+    // A poll that does not include the new chat must neither drop it nor move the selection.
     sessionStore.mergeFromServer([{ id: "server-conv", title: "Existing" }]);
 
     expect(sessionStore.get().sessions.some((s) => s.id === fresh)).toBe(true);
@@ -373,14 +340,13 @@ describe("a brand-new conversation survives the background merge", () => {
   });
 
   it("still drops a pristine placeholder the user has LEFT (not selected)", () => {
-    // Two conversations: a real one and a pristine placeholder. Select the real
-    // one, so the pristine placeholder is NOT current — it's a genuine phantom.
+    // Selecting the real conversation leaves the pristine placeholder as a genuine phantom.
     const pristine = sessionStore.get().currentId; // the initial fresh "New chat"
     sessionStore.mergeFromServer([{ id: "real", title: "Real" }]);
     sessionStore.switchTo("real");
     expect(sessionStore.get().currentId).toBe("real");
 
-    // A later merge (server still doesn't know the untouched placeholder) drops it.
+    // A later merge that still does not know the placeholder drops it.
     sessionStore.mergeFromServer([{ id: "real", title: "Real" }]);
     expect(sessionStore.get().sessions.some((s) => s.id === pristine)).toBe(false);
   });
@@ -396,13 +362,13 @@ describe("user rename + starring", () => {
     expect(titleOf("c")).toBe("My name");
     expect(of("c")?.userTitled).toBe(true);
 
-    // The agent tries to set a new title — locked, so it's ignored.
+    // The agent's new title is ignored because the title is locked.
     sessionStore.setTitle("c", "Agent's new guess");
     expect(titleOf("c")).toBe("My name");
   });
 
   it("a server userTitled merge wins over a stale local title immediately", () => {
-    // Local thinks the title is the agent's; the server reports a user rename.
+    // The server reports a user rename over a local agent title.
     sessionStore.mergeFromServer([{ id: "c", title: "Agent guess" }]);
     sessionStore.mergeFromServer([{ id: "c", title: "Pinned by user", userTitled: true }]);
     expect(titleOf("c")).toBe("Pinned by user");
@@ -414,7 +380,7 @@ describe("user rename + starring", () => {
     expect(of("c")?.starred).toBeFalsy();
     sessionStore.setStarred("c", true);
     expect(of("c")?.starred).toBe(true);
-    // Server confirms it on the next merge.
+    // The server confirms it on the next merge.
     sessionStore.mergeFromServer([{ id: "c", title: "X", starred: true }]);
     expect(of("c")?.starred).toBe(true);
   });
@@ -437,9 +403,7 @@ describe("visibleSessions (Mine/All owner filter)", () => {
     seed();
     sessionStore.setCurrentUser({ id: "anonymous", anonymous: true });
     sessionStore.setScope("mine");
-    // Regression guard: 'anonymous' is truthy, so a `!currentUser` check would
-    // wrongly engage the strict filter and hide every unowned conversation. All
-    // three seeded convs (incl. the unowned one) must remain visible.
+    // The id "anonymous" is truthy, so the filter must guard on the flag and keep every conversation visible.
     const t = titles();
     expect(t).toContain("Alice");
     expect(t).toContain("Bob");
@@ -450,8 +414,7 @@ describe("visibleSessions (Mine/All owner filter)", () => {
     seed();
     sessionStore.setCurrentUser({ id: "alice", email: "alice@x.io", anonymous: false });
     sessionStore.setScope("mine");
-    // Only alice's own — bob's + every unowned conv (incl. the default "New chat")
-    // are hidden.
+    // Bob's and every unowned conversation are hidden.
     expect(titles()).toEqual(["Alice"]);
   });
 
@@ -470,7 +433,7 @@ describe("nestSubagents (sidebar hierarchy)", () => {
   const s = (id: string, parentId?: string): Session => ({ id, title: id, createdAt: 1, lastActivityAt: 1, parentId });
 
   it("with no activeId, expands every parent's children", () => {
-    // Flat input (arbitrary order); children of p1 + p2 interleaved.
+    // Flat input with the children of p1 and p2 interleaved.
     const flat = [s("p1"), s("p2"), s("c1a", "p1"), s("c2a", "p2"), s("c1b", "p1")];
     const rows = nestSubagents(flat);
     expect(rows.map((r) => r.session.id)).toEqual(["p1", "c1a", "c1b", "p2", "c2a"]);
@@ -479,24 +442,24 @@ describe("nestSubagents (sidebar hierarchy)", () => {
 
   it("AUTO-COLLAPSES a parent's children when neither the parent nor a child is active", () => {
     const flat = [s("p1"), s("c1a", "p1"), s("c1b", "p1"), s("p2"), s("c2a", "p2")];
-    // p2 is active -> p2's children expand; p1 is off the active branch -> collapsed.
+    // p2 is active, so its children expand and p1 collapses.
     const rows = nestSubagents(flat, "p2");
     expect(rows.map((r) => r.session.id)).toEqual(["p1", "p2", "c2a"]);
-    // The COLLAPSED parent (p1) carries its child count so the UI can show "▸ 2".
+    // The collapsed parent carries its child count.
     expect(rows.find((r) => r.session.id === "p1")?.childCount).toBe(2);
-    // p2 is active + expanded, so its children are visible (childCount 0).
+    // The expanded parent has no hidden children.
     expect(rows.find((r) => r.session.id === "p2")?.childCount).toBe(0);
   });
 
   it("expands a parent's children when a CHILD is the active conversation", () => {
     const flat = [s("p1"), s("c1a", "p1"), s("c1b", "p1"), s("p2"), s("c2a", "p2")];
-    // c1a (a child of p1) is active -> p1's branch expands, p2 collapses.
+    // c1a is a child of p1, so p1's branch expands and p2 collapses.
     const rows = nestSubagents(flat, "c1a");
     expect(rows.map((r) => r.session.id)).toEqual(["p1", "c1a", "c1b", "p2"]);
   });
 
   it("a child whose parent is NOT in the list renders as a top-level row", () => {
-    // The parent was filtered out (e.g. Mine hid it) — the orphaned child still shows.
+    // The parent was filtered out, so the orphaned child still shows.
     const rows = nestSubagents([s("orphan", "missing-parent")]);
     expect(rows.map((r) => r.session.id)).toEqual(["orphan"]);
     expect(rows[0].depth).toBe(0);
@@ -527,22 +490,18 @@ describe("splitSections (Starred / Recent — a conversation appears in exactly 
   });
 
   it("renders a DOUBLE-HELD conversation once, in Starred — the reported bug", () => {
-    // The list can hold the same conversation twice (a locally-keyed row whose server id
-    // has just been adopted, next to the server's own row). `starred` is a per-ROW flag,
-    // so starring one copy put it in Starred while its twin stayed in Recent — the
-    // conversation showed up in both sections at once.
+    // The list can hold the same conversation twice (a locally keyed row next to the server's own row), and `starred` is a per-row flag.
     const { starred, recent } = splitSections([
       row({ id: "local-key", serverId: "conv-1", starred: true }),
       row({ id: "conv-1", serverId: "conv-1" }),
       row({ id: "other" }),
     ]);
     expect(ids(starred)).toEqual(["local-key"]);
-    expect(ids(recent)).toEqual(["other"]); // NOT the twin
+    expect(ids(recent)).toEqual(["other"]);
   });
 
   it("puts the conversation in Starred even when the unstarred copy comes first", () => {
-    // Routing is by CONVERSATION (starred if ANY copy of it is), not by whichever row
-    // the walk happens to reach first.
+    // Routing is per conversation, not by whichever row the walk reaches first.
     const { starred, recent } = splitSections([
       row({ id: "conv-2", serverId: "conv-2" }),
       row({ id: "local-key-2", serverId: "conv-2", starred: true }),
@@ -576,10 +535,7 @@ describe("splitSections (Starred / Recent — a conversation appears in exactly 
 
 describe("a phantom local conversation never shadows its real server row", () => {
   it("prunes a never-created row the server does not list (once it is not the selection)", () => {
-    // A create whose response was lost (or a duplicate row left behind by an older
-    // build) leaves a row with a title but no server id. It has no history and no
-    // sandbox — it can only shadow the conversation it was meant to become, which is
-    // how one conversation ended up rendering in both sidebar sections.
+    // A row with a title but no server id can only shadow the conversation it was meant to become.
     const ghost = sessionStore.newSession();
     sessionStore.setTitle(ghost, "lost create");
     sessionStore.mergeFromServer([{ id: "phantom-real", title: "lost create" }]);
@@ -599,8 +555,7 @@ describe("a phantom local conversation never shadows its real server row", () =>
   });
 
   it("keeps a SERVER-created conversation that a single merge does not mention", () => {
-    // Absence only condemns a row the server never created; a real conversation missing
-    // from one merge may just be scoped out.
+    // A real conversation missing from one merge may just be scoped out.
     sessionStore.mergeFromServer([{ id: "phantom-kept", title: "Real chat" }]);
     sessionStore.mergeFromServer([{ id: "phantom-else", title: "Else" }]);
     expect(sessionStore.get().sessions.map((s) => s.id)).toContain("phantom-kept");
@@ -609,8 +564,7 @@ describe("a phantom local conversation never shadows its real server row", () =>
 
 describe("the SERVER owns conversation ids", () => {
   it("newSession() selects the new conversation SYNCHRONOUSLY (no server round-trip)", () => {
-    // Asking the server for the id here would leave the UI on the PREVIOUS conversation
-    // for the length of a network call, so a fast typist sends into the wrong thread.
+    // A server round-trip here would leave a fast typist sending into the previous conversation.
     const mint = vi.fn(async () => "must-not-be-called-yet");
     setConversationMinter(mint);
 
@@ -622,9 +576,7 @@ describe("the SERVER owns conversation ids", () => {
   });
 
   it("the server id is RECORDED on the first send — the stable key does not change", async () => {
-    // The key is what React, selection and the runtime are mounted on. Swapping it when the
-    // server id arrives tore down the run in flight (Stop stopped responding), so the
-    // server id is recorded ALONGSIDE the key instead of replacing it.
+    // The server id is recorded alongside the key everything is mounted on, not in place of it.
     sessionStore.newSession();
     const key = sessionStore.get().currentId;
     setConversationMinter(async () => "server-assigned-id");
@@ -650,9 +602,7 @@ describe("the SERVER owns conversation ids", () => {
   });
 
   it("a locally-seeded conversation gets a server id without changing its key", async () => {
-    // freshState() seeds a conversation at module load so the UI has something to render
-    // before any network call, and deleteSession() seeds a replacement the same way. Those
-    // keys are local placeholders the server has never heard of.
+    // freshState() and deleteSession() seed conversations whose keys are local placeholders.
     for (const s of [...sessionStore.get().sessions]) sessionStore.deleteSession(s.id);
     const key = sessionStore.get().currentId;
     expect(sessionStore.current().serverCreated).toBeFalsy();
@@ -662,7 +612,7 @@ describe("the SERVER owns conversation ids", () => {
     const id = await sessionStore.ensureCurrentCreated();
 
     expect(id).toBe("real-id");
-    expect(sessionStore.get().currentId).toBe(key); // unchanged — nothing is remounted
+    expect(sessionStore.get().currentId).toBe(key); // unchanged, so nothing is remounted
     expect(sessionStore.current().serverId).toBe("real-id");
   });
 
@@ -680,9 +630,7 @@ describe("the SERVER owns conversation ids", () => {
   });
 
   it("CONCURRENT ensureCurrentCreated() calls share ONE create", async () => {
-    // Every mount asks — a page load, a conversation switch, React StrictMode's double
-    // effect. Without de-duping, each overlapping call POSTs /conversations and leaves a
-    // stray empty conversation in the sidebar (5 rows where the test expected 2).
+    // Every mount asks, so overlapping calls must share one POST /conversations.
     for (const s of [...sessionStore.get().sessions]) sessionStore.deleteSession(s.id);
     let calls = 0;
     setConversationMinter(async () => {
@@ -705,10 +653,7 @@ describe("the SERVER owns conversation ids", () => {
   });
 
   it("a conversation rebuilt after a RELOAD addresses the server by its SERVER id", async () => {
-    // The Conversation map is module state, so a page reload rebuilds every object from the
-    // persisted session. A conversation created via the first send keeps its local key, so
-    // rebuilding from the key would address the server with a placeholder — the queue
-    // vanished on reload because of exactly this.
+    // A reload rebuilds every Conversation from the persisted session, whose key may be a local placeholder.
     for (const s of [...sessionStore.get().sessions]) sessionStore.deleteSession(s.id);
     setConversationMinter(async () => "real-server-id");
     await sessionStore.ensureCurrentCreated();
@@ -718,7 +663,7 @@ describe("the SERVER owns conversation ids", () => {
     expect(persisted.serverId).toBe("real-server-id");
     expect(key).not.toBe("real-server-id"); // the key stayed local
 
-    // Rebuild as a reload would, from the persisted record alone.
+    // Rebuild from the persisted record alone, as a reload would.
     const rebuilt = conversationFor(persisted);
     expect(rebuilt.serverId()).toBe("real-server-id");
     expect(rebuilt.key).toBe(key);
@@ -726,19 +671,17 @@ describe("the SERVER owns conversation ids", () => {
   });
 
   it("a merge does NOT duplicate a conversation created on its first send", async () => {
-    // The merge is keyed by SERVER id; a conversation created on its first send keeps its
-    // local key. Indexing by the key missed it and inserted a second row for the same
-    // conversation — every sidebar row rendered twice (1 -> 2, 2 -> 4 in the e2e).
+    // The merge is keyed by server id, while a conversation created on its first send keeps its local key.
     for (const s of [...sessionStore.get().sessions]) sessionStore.deleteSession(s.id);
     setConversationMinter(async () => "server-abc");
     await sessionStore.ensureCurrentCreated();
     const key = sessionStore.get().currentId;
 
-    // The poll now returns that conversation under its SERVER id.
+    // The poll returns that conversation under its server id.
     sessionStore.mergeFromServer([{ id: "server-abc", title: "From the server" }]);
 
     expect(sessionStore.get().sessions).toHaveLength(1);
-    // ...and the merge did not swap the stable key out from under the mounted runtime.
+    // The merge did not swap the stable key out from under the mounted runtime.
     expect(sessionStore.get().currentId).toBe(key);
     expect(sessionStore.current().serverId).toBe("server-abc");
     expect(sessionStore.current().title).toBe("From the server");
@@ -759,9 +702,7 @@ describe("the SERVER owns conversation ids", () => {
 
 describe("the local key must never be used as a server id", () => {
   it("a pending conversation exposes NO server id to address the server with", async () => {
-    // Guarding this in one component was not enough — five separate bugs came from a raw
-    // key reaching a consumer that assumed it was a server id. The invariant belongs here:
-    // an uncreated conversation has NOTHING that can be sent to the server.
+    // An uncreated conversation has nothing that can be sent to the server.
     for (const s of [...sessionStore.get().sessions]) sessionStore.deleteSession(s.id);
     const key = sessionStore.get().currentId;
     const conv = conversationFor(sessionStore.current());
@@ -769,7 +710,7 @@ describe("the local key must never be used as a server id", () => {
     expect(conv.serverId()).toBeUndefined();
     expect(conv.url("/events.integrity")).toBeUndefined();
     expect(conv.shareUrl("https://x")).toBeUndefined();
-    // The key exists for React/selection, and is NOT a server id.
+    // The key exists for React and selection, and is not a server id.
     expect(conv.key).toBe(key);
   });
 

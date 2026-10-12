@@ -1,47 +1,30 @@
 #!/usr/bin/env node
-// e2e-full-compare.mjs — diff an `e2e full (k3d)` run against the last one on
-// main, and render the verdict comment (see `e2e-full-collect` in ci.yml).
-//
-// The full suite is broadly flaky, not stably broken: three consecutive
-// nightlies failed 13, 7 and 12 specs with only partial overlap. A raw list of
-// this run's failures therefore carries almost no information — the reader
-// cannot tell the spec this PR broke from the nine that have been red since
-// August. What they need is the DIFF against main, which is what this prints.
+// e2e-full-compare.mjs — diff an `e2e full (k3d)` run against a window of recent
+// runs on main and render the verdict section (see `e2e-full-collect` in ci.yml).
+// The full suite is flaky night to night, so a raw failure list carries little
+// information; the diff against main is what a reader can act on.
 //
 // Usage:
 //   node scripts/e2e-full-compare.mjs <report.json> [options]
-//     --baseline <f>       a merged report from a recent full run on main.
-//                          REPEATABLE — the baseline is a window of runs, not one
-//                          (see compare() for why a single run is not enough).
-//     --baseline-ref <r>   how to name the newest of them, e.g. `main@abc1234`
-//     --run-url <url>      link back to this workflow run (traces/videos)
+//     --baseline <f>        a merged report from a recent full run on main (repeatable)
+//     --baseline-label <l>  column header for the nth --baseline (repeatable, positional)
+//     --baseline-ref <r>    how to name the newest of them, e.g. `main@abc1234`
+//     --run-url <url>       link back to this workflow run
 //     --expected-shards <n> how many shard reports the merge should have seen
-//     --baseline-label <l> column header for the nth --baseline (repeatable,
-//                          positional). Falls back to −N "runs ago".
 //
-// Output: the comment body on stdout — a per-test execution history and fail
-// rate, in the vocabulary a flaky-test dashboard already uses (new / broken /
-// flaky / fixed). With $GITHUB_OUTPUT set it also writes `new_failures` /
-// `fixed` / `still_failing` / `trustworthy`.
+// Output: the comment body on stdout; with $GITHUB_OUTPUT set it also writes
+// `new_failures` / `fixed` / `still_failing` / `trustworthy`.
 
 import { readFileSync, appendFileSync } from "node:fs";
 
 import { collectSpecs } from "./flake-focus-report.mjs";
 
 /**
- * Bucket this run's specs against a WINDOW of recent runs on the default branch.
- *
- * Not one baseline run — several. Two consecutive nightlies on main, with no
- * change between them beyond the tree itself, differ by ~7 specs in each
- * direction; against a single baseline every one of those reads as "new
- * failure". A verdict that cries wolf seven times a night is the disease this
- * comment is supposed to cure, so the bar is raised: a failure is NEW only if
- * every baseline run that executed that spec passed it. One green run in the
- * window is enough to say "this used to pass", and one red run is enough to say
- * "this was already flaky" — which is the claim a reader can actually act on.
- *
- * `retries: 0` is policy (playwright.config.ts) — a spec has exactly one result
- * per run, so "failed" needs no flake/retry reconciliation here.
+ * Bucket this run's specs against a window of recent runs on the default branch.
+ * A failure is new only if every baseline run that executed the spec passed it,
+ * and fixed only if every one failed it; one red run in the window makes it flaky.
+ * `retries: 0` is policy (playwright.config.ts), so a spec has exactly one result
+ * per run.
  */
 export function compare(current, baselines, opts = {}) {
   const runs = (Array.isArray(baselines) ? baselines : [baselines]).filter(
@@ -50,8 +33,8 @@ export function compare(current, baselines, opts = {}) {
   const cur = collectSpecs(current).filter((s) => s.runs > 0);
   const curByTitle = new Map(cur.map((s) => [s.fullTitle, s]));
 
-  // Per spec title, across the window: how many baseline runs ran it, and how
-  // many of those it failed in.
+  // Per spec title across the window: how many baseline runs ran it and how many
+  // it failed in.
   const runSpecs = runs.map((run) =>
     collectSpecs(run).filter((x) => x.runs > 0),
   );
@@ -62,9 +45,7 @@ export function compare(current, baselines, opts = {}) {
         ran: 0,
         failed: 0,
         spec: s,
-        // Per baseline run, oldest first: "pass" | "fail" | "absent". The ORDER
-        // is the evidence — `pass pass pass fail` and `pass fail fail fail` are
-        // different situations, and an aggregate rate cannot tell them apart.
+        // Per baseline run, oldest first: "pass" | "fail" | "absent".
         seq: Array(runSpecs.length).fill("absent"),
       };
       h.ran += 1;
@@ -74,12 +55,8 @@ export function compare(current, baselines, opts = {}) {
     }
   }
 
-  // A spec's baseline CLASS over the runs that ran it. Three states, not two:
-  // green (never failed), red (failed every time), flaky (in between). Only
-  // green→fail and red→pass are attributable to this change — collapsing flaky
-  // into either one is exactly how a verdict starts crying wolf.
-  // With no baseline at all there is no class to assign — "absent from the
-  // window" would be true of every spec and tell a reader nothing.
+  // Baseline class over the runs that ran it: green, red or flaky, or null with no
+  // baseline at all.
   const classOf = (h) =>
     runs.length === 0
       ? null
@@ -98,9 +75,8 @@ export function compare(current, baselines, opts = {}) {
   const currentFailures = cur.filter((s) => s.failed > 0).map(annotate);
   const hasBaseline = runs.length > 0;
 
-  // A short shard count means some specs are absent because their runner died,
-  // not because they passed. Set difference cannot tell those apart, so the
-  // comparison is void rather than merely incomplete — see the spec.
+  // Specs absent because their shard died are indistinguishable from passes, so
+  // the comparison is void.
   const shardReports = current?.meta?.shardReports;
   const expectedShards = opts.expectedShards ?? null;
   const missingShards =
@@ -119,19 +95,17 @@ export function compare(current, baselines, opts = {}) {
   const buckets = !trustworthy
     ? empty
     : {
-        // Green in EVERY baseline run that ran it — the only failures a reader
-        // should treat as this change's doing.
+        // Green in every baseline run that ran it.
         newFailures: currentFailures.filter((s) => s.baselineClass === "green"),
         stillFailing: currentFailures.filter(
           (s) => s.baselineClass === "red" || s.baselineClass === "flaky",
         ),
-        // Absent from the window entirely: new spec, renamed title, or newly
-        // added to full-specs.json. Not attributable to this change either way.
+        // Absent from the window entirely: a new spec, a renamed title or a newly
+        // allowlisted one.
         unknownToBaseline: currentFailures.filter(
           (s) => s.baselineClass === "absent",
         ),
-        // Red in every baseline run that ran it, green here. Anything weaker is
-        // just the flake landing on its good side today.
+        // Red in every baseline run that ran it, green here.
         fixed: [...history.values()]
           .filter(
             (h) =>
@@ -142,9 +116,8 @@ export function compare(current, baselines, opts = {}) {
           .map((h) => ({ ...h.spec, history: h })),
       };
 
-  // Every spec placed in exactly one baseline→current cell, so the transition
-  // table adds up and a reader can check it does. `notRunHere` is the one cell
-  // that is NOT a transition: the baseline ran the spec and this run did not.
+  // Every spec in exactly one baseline→current cell; `notRunHere` is the one
+  // non-transition cell.
   const tally = {
     green: 0,
     red: 0,
@@ -170,11 +143,8 @@ export function compare(current, baselines, opts = {}) {
     if (!history.has(s.fullTitle))
       tally[`absentTo${s.failed > 0 ? "Fail" : "Pass"}`] += 1;
 
-  // One row per test, carrying its own execution history. Trunk's vocabulary
-  // (new / broken / flaky / fixed) because it is what engineers already read on
-  // a flaky-test dashboard — and the history strip SHOWS the evidence instead of
-  // asserting a classification: `pass pass pass fail` and `pass fail fail fail`
-  // are different situations and no aggregate rate can tell them apart.
+  // One row per test with its own execution history, in the new / broken / flaky /
+  // fixed vocabulary.
   const statusOf = (h, here) => {
     if (!here) return "not-run";
     const ran = h?.ran ?? 0;
@@ -187,8 +157,8 @@ export function compare(current, baselines, opts = {}) {
             ? "broken"
             : "flaky";
     if (ran === 0) return "pass";
-    // Passed here, but it has failed in the window: NOT a fix unless it was red
-    // every single time. Anything weaker is the flake landing on its good side.
+    // Passed here but failed somewhere in the window is a fix only if it was red
+    // every time.
     return h.failed === ran ? "fixed" : h.failed > 0 ? "flaky-pass" : "pass";
   };
   const rows = [];
@@ -211,8 +181,7 @@ export function compare(current, baselines, opts = {}) {
       rate: ran ? Math.round((100 * failed) / ran) : null,
     });
   }
-  // Worst first: what this change broke, then what is permanently broken, then
-  // noise. A reader stops as soon as the status column stops being actionable.
+  // Worst first: what this change broke, then what is permanently broken, then noise.
   const RANK = {
     new: 0,
     "new-test": 1,
@@ -233,8 +202,7 @@ export function compare(current, baselines, opts = {}) {
   const statusCounts = {
     new: count("new", "new-test"),
     broken: count("broken"),
-    // Both sides of the coin: a known-flaky test that happened to pass here is
-    // still a flaky test, and hiding it understates the suite's instability.
+    // A known-flaky test that happened to pass is still flaky.
     flaky: count("flaky", "flaky-pass"),
     fixed: count("fixed"),
     notRun: count("not-run"),
@@ -254,10 +222,8 @@ export function compare(current, baselines, opts = {}) {
     rows,
     statusCounts,
     runLabels: opts.runLabels ?? null,
-    // The suite's own swing: how much the failure count moved between baseline
-    // runs with NO change between them. A "new failure" count at or under this
-    // is indistinguishable from the noise, and saying ❌ over it is the
-    // cry-wolf failure mode this comment exists to end.
+    // The suite's own swing between baseline runs; a new-failure count at or under
+    // it is noise.
     noiseFloor:
       runSpecs.length > 1
         ? Math.max(
@@ -265,10 +231,8 @@ export function compare(current, baselines, opts = {}) {
           ) -
           Math.min(...runSpecs.map((s) => s.filter((x) => x.failed > 0).length))
         : 0,
-    // Totals for the headline table. The baseline is summarised PER RUN — an
-    // average and a range — because that is what this run's single count is
-    // comparable to. A window aggregate ("21 specs failed at least once")
-    // against one run's 11 reads as a 10-spec improvement that nobody made.
+    // The baseline is summarised per run (average and range), which is what this
+    // run's single count is comparable to.
     totals: {
       baselineSpecs: history.size,
       perRunFailed: runSpecs.map(
@@ -294,9 +258,7 @@ const BADGE = {
   pass: "",
 };
 
-/** Column headers for the history strip: the caller's labels when it has them
- *  (dates read best), else "runs ago" — never nothing, or the columns are
- *  unreadable in the order that matters. */
+/** Column headers for the history strip: the caller's labels when it has them, else "runs ago". */
 function columns(cmp) {
   const n = cmp.baselineRuns;
   const given = cmp.runLabels;
@@ -304,9 +266,7 @@ function columns(cmp) {
   return [...Array.from({ length: n }, (_, i) => `−${n - i}`), "this run"];
 }
 
-/** The table. One row per test that a reader can act on: what this change broke,
- *  what is permanently broken, what is flaky, what it fixed. A known-flaky test
- *  that passed here is counted in the header and omitted here — it is not news. */
+/** One row per actionable test; a known-flaky test that passed here is counted in the header and omitted. */
 function historyTable(cmp) {
   const cols = columns(cmp);
   const shown = cmp.rows.filter(
@@ -325,14 +285,7 @@ function historyTable(cmp) {
   ].join("\n");
 }
 
-/**
- * The verdict, as ONE collapsed section: the whole result in the `<summary>`
- * line, the per-test evidence behind a click.
- *
- * Collapsed by default because this comment is one of several a PR carries, and
- * a reader scanning them wants a list of one-line verdicts, not five tables
- * unrolled down the page. Nothing is hidden that the summary does not name.
- */
+/** The verdict as one collapsed section: the whole result in the `<summary>` line, the per-test evidence behind a click. */
 export function renderMarkdown(cmp, opts = {}) {
   const { baselineRef, runUrl } = opts;
   const c = cmp.statusCounts;
@@ -349,8 +302,7 @@ export function renderMarkdown(cmp, opts = {}) {
   } else if (!cmp.hasBaseline) {
     summary = `⚠️ <b>e2e full (k3d)</b> — ${tally} · no baseline`;
   } else {
-    // ❌ only when the attributable count clears the suite's own swing: below it,
-    // this is the same ❌ the comment prints on a night when nothing changed.
+    // ❌ only when the attributable count clears the suite's own swing.
     const icon =
       c.new > cmp.noiseFloor
         ? "❌"
@@ -372,8 +324,7 @@ export function renderMarkdown(cmp, opts = {}) {
   if (cmp.trustworthy) {
     const table = historyTable(cmp);
     if (table) body.push(table);
-    // One baseline column cannot separate a regression from a flake, and the
-    // noise floor is 0 in that window — so ❌ above is unearned. Say so once.
+    // A single baseline column cannot separate a regression from a flake.
     if (cmp.baselineRuns === 1 && c.new > 0)
       body.push("> ⚠️ Single baseline run — a flake reads as new here.");
   }
@@ -384,8 +335,8 @@ export function renderMarkdown(cmp, opts = {}) {
       `${runUrl ? ` · [run](${runUrl})` : ""}${cmp.hasBaseline ? ` · baseline \`${baselineRef}\`` : ""}</sub>`,
   );
 
-  // The blank line after </summary> is load-bearing: without it GitHub renders
-  // the markdown inside as literal text.
+  // The blank line after </summary> is required or GitHub renders the markdown as
+  // literal text.
   return `<details><summary>${summary}</summary>\n\n${body.join("\n\n")}\n</details>`;
 }
 
@@ -402,7 +353,7 @@ function main(argv) {
     const i = argv.indexOf(`--${name}`);
     return i === -1 ? undefined : argv[i + 1];
   };
-  // The positional report path, skipping every flag AND its value.
+  // The positional report path, skipping every flag and its value.
   let reportPath;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i].startsWith("--")) {
@@ -427,15 +378,14 @@ function main(argv) {
     );
     return;
   }
-  // --baseline is repeatable: the window is several recent runs, not one.
+  // --baseline is repeatable: the window is several recent runs.
   const baselines = argv
     .map((a, i) => (a === "--baseline" ? argv[i + 1] : null))
     .filter(Boolean)
     .map(read)
     .filter(Boolean);
   const expected = opt("expected-shards");
-  // Repeatable and POSITIONAL: the nth --baseline-label names the nth --baseline,
-  // so the history columns read left to right in the order the runs happened.
+  // Positional: the nth --baseline-label names the nth --baseline.
   const runLabels = argv
     .map((a, i) => (a === "--baseline-label" ? argv[i + 1] : null))
     .filter(Boolean);

@@ -1,31 +1,18 @@
 /**
- * Tier 3 E2E — LONG multi-turn conversations stay fully consistent.
- *
- * Targets the general "the UI is unreliable over a long conversation" complaint: every turn must
- * render, nothing gets dropped, tool calls persist, and the whole transcript survives a reload with
- * the right counts. Uses the race-free `sendTurn` (count-based) so a slow turn never drops.
+ * Tier 3 E2E for long multi-turn conversations staying fully consistent: every turn must
+ * render, nothing gets dropped, tool calls persist, and the whole transcript survives a
+ * reload with the right counts.
  */
 
 import { test, expect } from "./fixtures.js";
 
 test.describe("long multi-turn conversation integrity", () => {
-  // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). On the full target EVERY turn —
-  // plain text included — is a real sandbox exec (the fake agent shells
-  // `echo <text>`), and the first turn additionally waits for the sandbox pod to be
-  // ready (5-25s cold; client-server-identity 9-12s under CI CPU pressure).
-  // Worst test here: 12 turns → boot 25s + 12 x ~8s warm exec ≈ 120s; the
-  // switch-away test adds a SECOND conversation boot (+25s). The 60s default is
-  // arithmetic-bound, not behaviour-bound. 240s = worst case with headroom, matching
-  // client-server-identity's two-boot budget. Per-turn waits stay at sendTurn's 45s.
+  // On the full target every turn is a real sandbox exec, the first waits for a cold pod,
+  // and the switch-away test adds a second conversation boot.
   test.setTimeout(240_000);
 
-  // The FIRST turn of a conversation is the only one that waits for a COLD sandbox pod
-  // (5-25s, longer when the CI node is out of CPU) before its exec even starts, so
-  // sendTurn's 45s default is a bet on the boot being quick rather than a measurement of
-  // the behaviour these tests are about. Observed on CI: the 12-turn test failed on a reply
-  // that never arrived inside 45s, with the thread still EMPTY and the message sitting in
-  // the queue — a boot that had not finished, not a dropped message. Later turns reuse the
-  // warm pod (~8s) and need no extra budget. The 240s ceiling above already covers this.
+  // The first turn of a conversation is the only one that waits for a cold sandbox pod
+  // before its exec starts.
   const FIRST_TURN_MS = 90_000;
 
   test("12 back-and-forth turns all render (no dropped user or assistant messages)", async ({ chat }) => {
@@ -33,7 +20,7 @@ test.describe("long multi-turn conversation integrity", () => {
     const N = 12;
     await chat.sendTurn("turn number 1", FIRST_TURN_MS);
     for (let i = 2; i <= N; i++) await chat.sendTurn(`turn number ${i}`);
-    // Every user turn AND every assistant reply is present — exact counts, no drops or dupes.
+    // Every user turn and every assistant reply is present, with exact counts.
     await expect(chat.userMessages()).toHaveCount(N, { timeout: 45_000 });
     await expect(chat.assistantMessages()).toHaveCount(N, { timeout: 45_000 });
     // The last turn's text is actually in the transcript (not a stale earlier render).
@@ -46,7 +33,7 @@ test.describe("long multi-turn conversation integrity", () => {
     await chat.sendTurn("!echo turn-1", FIRST_TURN_MS);
     for (let i = 2; i <= N; i++) await chat.sendTurn(`!echo turn-${i}`);
     await expect(chat.userMessages()).toHaveCount(N, { timeout: 45_000 });
-    // Each `!echo` turn ran a real sandbox command → a tool card per turn.
+    // Each `!echo` turn ran a real sandbox command, so there is a tool card per turn.
     await expect.poll(async () => chat.toolCalls().count(), { timeout: 45_000 }).toBeGreaterThanOrEqual(N);
   });
 
@@ -58,11 +45,11 @@ test.describe("long multi-turn conversation integrity", () => {
     await expect(chat.userMessages()).toHaveCount(N, { timeout: 45_000 });
 
     await page.reload();
-    // After a full reload the persisted log re-folds to EXACTLY the same transcript.
+    // After a full reload the persisted log re-folds to exactly the same transcript.
     await expect(chat.userMessages()).toHaveCount(N, { timeout: 45_000 });
     await expect(chat.assistantMessages()).toHaveCount(N, { timeout: 45_000 });
-    // The LAST turn (N=10) and the FIRST turn are both present. Use exact-text match: a substring
-    // "persist turn 1" also matches "persist turn 10", so assert on the full, unambiguous strings.
+    // Both the last and the first turn are present, matched exactly because "persist turn 1"
+    // is a substring of "persist turn 10".
     await expect(chat.userMessages().filter({ hasText: `persist turn ${N}` })).toHaveCount(1);
     await expect(chat.userMessages().getByText("persist turn 1", { exact: true })).toHaveCount(1);
   });
@@ -84,7 +71,7 @@ test.describe("long multi-turn conversation integrity", () => {
     await chat.open();
     for (let i = 1; i <= 4; i++) {
       await chat.sendTurn(`clean turn ${i}`, i === 1 ? FIRST_TURN_MS : undefined);
-      // Between turns the composer is idle: Send is available (NOT stuck showing Stop/working).
+      // Between turns the composer is idle, with Send available.
       await expect(page.locator(".aui-composer-send, [aria-label=\"Send message\"]").first()).toBeVisible({ timeout: 15_000 });
       await expect(page.locator('[data-testid="run-status-bar"]')).toHaveCount(0);
     }
@@ -93,23 +80,18 @@ test.describe("long multi-turn conversation integrity", () => {
   test("switching AWAY to a new conversation and BACK preserves the long one's transcript", async ({ chat, page }) => {
     await chat.open();
     const N = 8;
-    // A per-run nonce so the sidebar row can be found by ITS OWN title rather than by
-    // position. On the full target the sidebar lists a shared multi-replica fleet, so
-    // the long conversation is not reliably the last row.
+    // A per-run nonce so the sidebar row can be found by its own title rather than by
+    // position on the shared fleet.
     const nonce = `n${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
     await chat.sendTurn(`switchable ${nonce} 1`, FIRST_TURN_MS);
     for (let i = 2; i <= N; i++) await chat.sendTurn(`switchable ${nonce} ${i}`);
     await expect(chat.userMessages()).toHaveCount(N, { timeout: 45_000 });
 
-    // New conversation, one turn, then back to the first. 100s, not sendTurn's 45s
-    // default: this one turn funds a whole SECOND conversation boot on the full
-    // target (new agent-host assignment + a fresh sandbox pod) before its exec runs.
+    // New conversation, one turn, then back to the first; this turn funds a second
+    // conversation boot on the full target.
     await page.locator('[data-testid="new-session"]').click();
     await chat.sendTurn("a different conversation", 100_000);
-    // Back to the long one — BY TITLE, not `.last()`. The row order reflects the whole
-    // fleet (and its recency), so positional selection clicked an unrelated conversation
-    // and the assertion then read an empty thread (expected 8, received 0
-    // for the full 45s, with the transcript intact in the conversation it never opened).
+    // Back to the long one by title, since the row order reflects the whole fleet.
     const longRow = page
       .locator('[data-testid="session-item"]')
       .filter({ hasText: new RegExp(`switchable ${nonce}`, "i") })

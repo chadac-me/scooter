@@ -1,18 +1,8 @@
 /**
- * Tier 1 contract — the registry's writes also land on the conversations ROW, so the row can
- * become the source of truth for existence.
- *
- * The behaviour that matters here is not "it issues an UPDATE"; it is the three rules that make
- * the step additive:
- *   - the CR write keeps its exact semantics (it goes first, and its outcome is untouched)
- *   - a ROW failure never propagates, because a Postgres blip must not stop a conversation
- *     starting — the same reason a k8s blip does not
- *   - an ABSENT spec field is omitted, not nulled, so a re-register without a sandboxRef cannot
- *     erase the ref the router routes by
- *
- * Assignment reads (list/get) must still come from the CR: the controller writes host_pod and it
- * still writes only the CR, so reading the row would answer NULL for every conversation and empty
- * hydrate()'s ownership filter silently.
+ * The registry's writes also land on the conversations row. The CR write goes first with
+ * its semantics untouched, a row failure never propagates, and an absent spec field is
+ * omitted rather than nulled. Assignment reads still come from the CR, since the
+ * controller writes host_pod only there.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -23,7 +13,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { withConversationRows } from "../../src/session/pgConversationRegistry.js";
 import type { ConversationRecord, ConversationRegistry } from "../../src/session/conversationRegistry.js";
 
-/** Captures the statements issued, so the row half can be asserted without a Postgres. */
+/** A fake db capturing the statements issued. */
 function fakeDb(opts: { fail?: boolean } = {}): {
   db: NodePgDatabase;
   stmts: { text: string; values: unknown[] }[];
@@ -100,7 +90,7 @@ describe("the conversations row half of the registry", () => {
     await reg.register("conv-1", { model: "m" });
 
     expect(stmts).toHaveLength(0);
-    expect(cr.calls).toEqual(["register:conv-1"]); // the CR write still happens
+    expect(cr.calls).toEqual(["register:conv-1"]);
   });
 
   it("setPhase writes the phase column and the CR", async () => {
@@ -133,7 +123,7 @@ describe("the conversations row half of the registry", () => {
     await expect(reg.register("conv-1", { sandboxRef: "conv-abc" })).resolves.toBeUndefined();
     await expect(reg.setPhase("conv-1", "Assigned")).resolves.toBeUndefined();
     await expect(reg.remove("conv-1")).resolves.toBeUndefined();
-    // and the CR half still ran every time
+    // The CR half still ran every time.
     expect(cr.calls).toEqual(["register:conv-1", "setPhase:conv-1:Assigned", "remove:conv-1"]);
   });
 
@@ -159,7 +149,6 @@ describe("the conversations row half of the registry", () => {
 
     expect(await reg.list()).toEqual([record]);
     expect((await reg.get("conv-1"))?.hostPod).toBe("agent-host-2");
-    // Reading these from the row would answer NULL for every conversation today.
     expect(stmts).toHaveLength(0);
   });
 });

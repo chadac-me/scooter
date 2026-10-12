@@ -1,30 +1,21 @@
 /**
- * Tier 1 contract — create() must treat a 409 AlreadyExists on the Sandbox as REUSE
- * (adopt + resume the existing one), not an unhandled throw.
- *
- * WHY: a failed boot hydrate leaves the session map wrong → a prompt for an existing
- * conversation takes the CREATE path → createNamespacedCustomObject 409s. The old
- * code threw the 409 up to /agui, where the SSE 200 was already sent, so the client
- * got a truncated stream with no error and the conversation looked silently dead
- * (the hydrate-silent-drop outage). Adopting the existing Sandbox is the recovery.
+ * create() treats a 409 AlreadyExists on the Sandbox as reuse, adopting and resuming
+ * the existing one: a prompt for an existing conversation can take the create path
+ * after a failed boot hydrate.
  */
 
 import { describe, it, expect } from "vitest";
 
 import { createK8sProvisioner } from "../../src/session/k8sProvisioner.js";
 
-/** A fake k8s API where the Sandbox create can be told to 409, recording whether
- *  the provisioner then RESUMED (set operatingMode=Running) the existing Sandbox. */
+/** A fake k8s API whose Sandbox create can be told to 409, recording whether the provisioner then resumed the existing Sandbox. */
 function fakeKc(opts: { sandboxCreate409?: boolean } = {}) {
   const calls: string[] = [];
   const api = {
     createNamespacedServiceAccount: async () => ({}),
     createNamespacedConfigMap: async () => ({}),
     readNamespacedConfigMap: async () => { throw Object.assign(new Error("nf"), { code: 404 }); },
-    // create() READS the CR before creating: a cold Sandbox (made by setSize before the
-    // first turn) already carries its size, which must not be overwritten by the
-    // deployment default. In the 409 scenario the CR exists by definition — that is WHY
-    // the create 409s — so the fake must return one; 404 only in the fresh-create case.
+    // create() reads the CR first to keep a cold Sandbox's size, so the fake returns one exactly when the create will 409.
     getNamespacedCustomObject: async () => {
       if (!opts.sandboxCreate409) throw Object.assign(new Error("not found"), { code: 404 });
       return { spec: { podTemplate: { spec: { containers: [{ name: "sandbox", image: "img" }] } } } };
@@ -35,7 +26,7 @@ function fakeKc(opts: { sandboxCreate409?: boolean } = {}) {
       return {};
     },
     patchNamespacedCustomObject: async () => {
-      calls.push("patch:mode"); // setOperatingMode("Running") = resume
+      calls.push("patch:mode");
       return {};
     },
   };
@@ -48,11 +39,10 @@ const provisioner = (kc: never) =>
 describe("k8sProvisioner.create — 409 AlreadyExists = reuse", () => {
   it("adopts + resumes the existing Sandbox on a 409 (does NOT throw)", async () => {
     const { kc, calls } = fakeKc({ sandboxCreate409: true });
-    // Must resolve to the ref, not throw the 409.
     const ref = await provisioner(kc).create("conv1", "conv1");
     expect(ref.name).toBe("conv-conv1");
     expect(calls).toContain("create:sandbox");
-    expect(calls).toContain("patch:mode"); // resumed the adopted (maybe-suspended) Sandbox
+    expect(calls).toContain("patch:mode");
   });
 
   it("a fresh create (no 409) does NOT resume — operatingMode=Running already", async () => {
@@ -60,7 +50,7 @@ describe("k8sProvisioner.create — 409 AlreadyExists = reuse", () => {
     const ref = await provisioner(kc).create("conv1", "conv1");
     expect(ref.name).toBe("conv-conv1");
     expect(calls).toContain("create:sandbox");
-    expect(calls).not.toContain("patch:mode"); // fresh -> no adopt-resume
+    expect(calls).not.toContain("patch:mode");
   });
 
   it("a NON-409 create error still throws (don't mask a real failure as reuse)", async () => {

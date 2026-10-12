@@ -1,13 +1,9 @@
 /**
- * Standalone fake ACP agent (stdio binary) — a real `goose acp` stand-in.
- *
- * Speaks the actual ACP wire protocol over stdio via the official SDK's
- * AgentSideConnection, so the agent-host spawns it exactly like goose. It needs
- * no model provider: it echoes the user's prompt and streams a deterministic
- * turn (reasoning -> tool call -> result -> reply). Use it to click through the
- * UI and leave review notes without AWS/Bedrock.
- *
- *   node dist/fakeAgent.js        # the agent-host runs this when GOOSE_BIN=fake
+ * Standalone fake ACP agent (stdio binary), a `goose acp` stand-in that speaks the
+ * real ACP wire protocol via the SDK's AgentSideConnection, so the agent-host spawns
+ * it exactly like goose. It needs no model provider: it echoes the user's prompt and
+ * streams a deterministic turn (reasoning, tool call, result, reply). The agent-host
+ * runs `node dist/fakeAgent.js` when GOOSE_BIN=fake.
  */
 
 import { Readable, Writable } from "node:stream";
@@ -29,33 +25,20 @@ import {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** How long a `~subagent` child stays RUNNING before its turn ends. It must outlast the
- *  spec asserting on it (the host end()s a subagent as soon as it completes), and it is
- *  torn down by `cleanState` between tests, so err long. */
+/** How long a `~subagent` child stays running, which must outlast the spec asserting on it since the host end()s a subagent as soon as it completes. */
 const SUBAGENT_LIFETIME_S = 90;
 
-/** Wrap `s` so `sh -c` sees it as ONE literal argument, whatever it contains.
- *  Single quotes protect everything except a single quote itself, which is emitted as
- *  '\'' — close, escaped literal, reopen. */
+/** Wrap `s` so `sh -c` sees it as one literal argument, whatever it contains. */
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 class FakeAgent implements Agent {
   constructor(private conn: AgentSideConnection) {}
 
-  /** Sessions that have already received their first prompt — used to emit the
-   *  <title> marker only on the FIRST reply, like the real agent's first action. */
+  /** Sessions that have already received their first prompt, so the <title> marker is emitted only on the first reply. */
   private titled = new Set<string>();
-  // A monotonic tool-call id counter. Real ACP agents (goose) mint a UNIQUE id per
-  // tool call; reusing one id across turns makes the UI fold two distinct calls
-  // into one (and, via duplicate message ids, drops a later turn's reply on thread
-  // reset). So mirror real behavior and give each tool call a fresh id.
+  // Each tool call gets a fresh id, as real ACP agents mint one per call.
   private toolCallSeq = 0;
-  /** The scooter-env MCP endpoint newSession offers per session, with the HEADERS it was
-   *  offered alongside. Kept so the `~subagent` directive can call tools the way goose does.
-   *
-   *  The headers are not optional decoration: the endpoint takes its conversation from the
-   *  bearer conversation token in them (it used to be `?conv=` on the URL), so dropping
-   *  them means every tool call 401s. Why: issue #700. */
+  /** The scooter-env MCP endpoint newSession offers per session, with the headers carrying the bearer conversation token it needs. */
   private mcpUrl = new Map<string, string>();
   private mcpHeaders = new Map<string, Record<string, string>>();
 
@@ -74,8 +57,7 @@ class FakeAgent implements Agent {
     const env = offered.find((s) => s.name === "scooter-env" && typeof s.url === "string");
     if (env?.url) {
       this.mcpUrl.set(sessionId, env.url);
-      // `headers` is HttpHeader[] ({name,value}) per the ACP schema, which is what a real
-      // client receives and sends back.
+      // `headers` is HttpHeader[] ({name,value}) per the ACP schema.
       this.mcpHeaders.set(
         sessionId,
         Object.fromEntries((env.headers ?? []).map((h) => [h.name, h.value])),
@@ -84,9 +66,7 @@ class FakeAgent implements Agent {
     return { sessionId };
   }
 
-  /** Call one scooter-env MCP tool. No initialize handshake: the endpoint is STATELESS
-   *  (a fresh McpServer per request), so tools/call stands alone — goose's calls land on
-   *  a fresh server too. Must accept both content types; the reply may be an SSE frame. */
+  /** Call one scooter-env MCP tool with a standalone tools/call (the endpoint is stateless); the reply may be an SSE frame. */
   private async callTool(sessionId: string, name: string, args: unknown): Promise<string> {
     const url = this.mcpUrl.get(sessionId);
     if (!url) return "no scooter-env MCP endpoint was offered to this session";
@@ -127,20 +107,16 @@ class FakeAgent implements Agent {
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const sessionId = params.sessionId;
-    // The user's actual message is the LAST text block. On a revived session the
-    // bridge prepends a history-reinjection preamble as an EARLIER, separate block
-    // (real goose keeps the blocks distinct); joining them would break directive
-    // detection ("[preamble] ~model" doesn't startsWith "~model"). So read the last
-    // text block for the directive — the same distinction a real agent makes.
+    // The user's actual message is the last text block; a revived session prepends a
+    // history preamble as an earlier block.
     const textBlocks = params.prompt.filter((b) => b.type === "text").map((b) => b.text);
     const userText = (textBlocks.at(-1) ?? "").trim() || "(no text)";
 
     const u = (update: Parameters<AgentSideConnection["sessionUpdate"]>[0]["update"]) =>
       this.conn.sessionUpdate({ sessionId, update });
 
-    // A "?<prompt>" message is a test directive: present an option choice via the
-    // ACP permission round-trip (which the bridge surfaces as an AG-UI interrupt)
-    // and report the picked option. Exercises the agent-presents-options path.
+    // A "?<prompt>" message is a test directive: present an option choice via the ACP
+    // permission round-trip and report the picked option.
     if (userText.startsWith("?")) {
       const question = userText.slice(1).trim() || "Choose an option";
       const res = (await this.conn.requestPermission({
@@ -162,10 +138,7 @@ class FakeAgent implements Agent {
       return { stopReason: "end_turn" };
     }
 
-    // A "~model" message is a test directive: report the GOOSE_MODEL the agent
-    // process was launched with. Proves the per-conversation model selection
-    // reached the agent (a model switch relaunches goose with the new
-    // GOOSE_MODEL; here the fake agent just echoes its env).
+    // A "~model" message is a test directive: report the GOOSE_MODEL this process was launched with.
     if (userText.startsWith("~model")) {
       const reply = `model=${process.env.GOOSE_MODEL ?? "(default)"}`;
       for (const word of reply.split(" ")) {
@@ -175,13 +148,7 @@ class FakeAgent implements Agent {
       return { stopReason: "end_turn" };
     }
 
-    // A "~images" message is a test directive: report how many IMAGE content blocks
-    // reached the agent PROCESS in this prompt. Proves an attached image survived the
-    // whole pipe — composer attachment -> /agui body -> normalizeContent -> AssetStore
-    // -> bridge readAsset -> ACP image block. The image-drop regression (PR #448) made
-    // this 0 because the composer puts images in message.attachments[], not .content,
-    // so the client never sent them. Counts the ACP blocks the bridge built
-    // ({type:"image", data, mimeType}); mirrors the ~model "reached the process" proof.
+    // A "~images" message is a test directive: report how many image content blocks reached this prompt.
     if (userText.startsWith("~images")) {
       const count = params.prompt.filter((b) => b.type === "image").length;
       const reply = `images=${count}`;
@@ -192,10 +159,8 @@ class FakeAgent implements Agent {
       return { stopReason: "end_turn" };
     }
 
-    // A "~subagent <title>" message is a test directive: spawn a REAL subagent via the
-    // scooter-env MCP tool, exactly as goose does — the only way an e2e test can produce a
-    // parent/child conversation pair. The child SLEEPS rather than echoing because the host
-    // end()s a subagent the instant its run completes. See test/e2e/subagent.spec.ts.
+    // A "~subagent <title>" message is a test directive: spawn a real subagent via the
+    // scooter-env MCP tool, whose child sleeps because the host end()s it as soon as its run completes.
     if (userText.startsWith("~subagent")) {
       const title = userText.slice("~subagent".length).trim() || "research task";
       await u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Delegating…" } });
@@ -211,36 +176,23 @@ class FakeAgent implements Agent {
       return { stopReason: "end_turn" };
     }
 
-    // A "!<command>" message is a test directive: run <command> verbatim in the
-    // sandbox (real exec path) and report its output. Anything else gets a
-    // friendly echo. The ! mechanism is the e2e test harness — it lets a UI
-    // conversation drive arbitrary sandbox commands (incl. `agent-broker
-    // test/whoami` to verify broker/IRSA auth).
+    // A "!<command>" message is a test directive: run <command> verbatim in the sandbox
+    // and report its output; anything else gets an echo.
     const isCommand = userText.startsWith("!");
-    // QUOTE the echoed text: arbitrary user prose being spliced into a shell line
-    // can contain shell metacharacters that break `sh -c`. Single-quote and escape
-    // any embedded single quote ('\'' closes, escapes, reopens) so the text reaches
-    // echo as one literal argument. The "!<command>" directive is deliberately NOT
-    // quoted — running a command verbatim is the escape hatch.
+    // Quote the echoed prose so shell metacharacters reach echo as one literal argument;
+    // the "!<command>" directive is deliberately unquoted.
     const command = isCommand ? userText.slice(1).trim() : `echo ${shellQuote(userText)}`;
 
     // 1. a thought
     await u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning a response…" } });
     await sleep(300);
 
-    // 2. a REAL tool call: createTerminal -> bridge ACP client -> ExecBackend
-    // (local subprocess in fake mode; pod exec in cluster mode). We run the
-    // command through `sh -c` so it behaves like a shell line.
+    // 2. a real tool call through createTerminal, the bridge ACP client and the ExecBackend
     let cmdOutput = "";
     let exitCode = 0;
     const toolCallId = `call_${++this.toolCallSeq}`;
-    // MATCH REAL GOOSE's shell shape (see the goose-shell-terminal-handoff capture):
-    // the tool_call carries NO rawInput and NO command — goose runs the command via
-    // terminal/create and HANDS OFF a terminal ([{terminalId,type:"terminal"}]) as
-    // the tool_call_update content. The command text lives ONLY in the terminal/create
-    // call, so the agent-host must surface it from THERE (keyed by terminalId) — this
-    // sequence keeps the e2e honest by exercising exactly that path (an earlier fake
-    // put the command in rawInput, which real goose never sends, hiding the bug).
+    // Match real goose's shell shape: the tool_call carries no rawInput, the command runs
+    // via terminal/create, and the terminal is handed off as the tool_call_update content.
     await u({
       sessionUpdate: "tool_call",
       toolCallId,
@@ -256,7 +208,7 @@ class FakeAgent implements Agent {
         args: ["-c", command],
       });
       terminalId = term.id;
-      // Hand off the live terminal (the command now runs async in it) — NO rawInput.
+      // Hand off the live terminal, with no rawInput.
       await u({
         sessionUpdate: "tool_call_update",
         toolCallId,
@@ -272,7 +224,7 @@ class FakeAgent implements Agent {
       cmdOutput = `exec error: ${String(e)}`;
       exitCode = 1;
     }
-    // The REAL finish (post-terminal), carrying the command's output as content.
+    // The real finish, carrying the command's output as content.
     await u({
       sessionUpdate: "tool_call_update",
       toolCallId,
@@ -281,9 +233,7 @@ class FakeAgent implements Agent {
     } as never);
     await sleep(200);
 
-    // First reply in a session: emit a <title> marker as the agent's first
-    // action (the host extracts + strips it). Derived from the user's request so
-    // the title is meaningful + assertable in tests.
+    // The first reply in a session emits a <title> marker derived from the user's request.
     if (!this.titled.has(sessionId)) {
       this.titled.add(sessionId);
       const titleText = (isCommand ? command : userText).slice(0, 40).trim();

@@ -1,11 +1,8 @@
 /**
- * Broker auth headers (the agent-host's own SA token) — shared by every agent-host
- * -> broker CONTROL call (AWS approve/deny, and the sandbox lifecycle client). The
- * agent-host presents its projected SA token; the broker TokenReviews it and
- * authorizes it as a control caller (SANDBOX_CONTROL_SERVICE_ACCOUNTS).
- *
- * A MISSING token (ENOENT) is the local/dev case (no auth header); any OTHER read
- * error is surfaced — never send an unauthenticated request pretending it's fine.
+ * Broker auth headers (the agent-host's own projected SA token) for every agent-host ->
+ * broker control call; the broker TokenReviews it and authorizes it as a control caller.
+ * A missing token (ENOENT) is the local/dev case with no auth header; any other read
+ * error is surfaced.
  */
 
 export async function brokerAuthHeaders(): Promise<Record<string, string>> {

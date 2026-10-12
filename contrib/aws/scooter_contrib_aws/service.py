@@ -1,17 +1,7 @@
-"""Permission service — orchestrates the request lifecycle.
+"""Permission service: the request lifecycle behind the thin transport routes.
 
-The transport (routes) is thin; this holds the logic, testable against a fake
-IamProvisioner + a SQLite store. Wires policy guardrails + store + IamProvisioner
-+ the in-memory credential cache.
-
-Lifecycle (see models.RequestStatus):
-  request()  -> validate (3 layers) -> create inline policy eagerly -> store pending
-  approve()  -> create_dynamic_role -> cache creds -> active   (or error)
-  deny()     -> delete the eager policy -> denied
-  status()   -> the request + (if active & cached) its creds
-  refresh()  -> re-assume the live role -> fresh cached creds
-  revoke()   -> tear down role+policy -> revoked
-  sweep_expired() -> tear down roles past role_expires_at -> expired
+Wires the policy guardrails, the store, the IamProvisioner and the in-memory
+credential cache; see models.RequestStatus for the states a request moves through.
 """
 
 from __future__ import annotations
@@ -32,18 +22,13 @@ from .models import PermissionRequest, RequestStatus, RiskLevel, StsCredentials
 from .store import PermissionStore
 
 
-# Recorded as `approved_by` when a read-only request is auto-approved (no human).
+# Recorded as `approved_by` when a request is auto-approved without a human.
 AUTO_APPROVE_PRINCIPAL = "system:auto-approve-read-only"
 
-# Re-vend an STS token this many seconds BEFORE its expiry, so status() never hands
-# out a token that expires mid-call (covers clock skew + the call's own duration).
-_CREDS_REFRESH_SKEW = 300  # 5 min
+# Re-vend an STS token this many seconds before its expiry so status() never hands out one that expires mid-call.
+_CREDS_REFRESH_SKEW = 300
 
-# If sweep_expired can't tear down a role (IAM AccessDenied) but the request's creds
-# lapsed longer ago than this, force it to EXPIRED anyway — so a zombie whose teardown
-# is permanently failing stops appearing as 'active' (and can't be re-selected as a
-# stale credential source). The orphaned IAM role is reclaimed when teardown perms are
-# restored, or by manual reconciliation. See the aws-broker-stale-credentials report.
+# A request whose teardown keeps failing is forced to EXPIRED once its creds lapsed longer ago than this.
 _FORCE_EXPIRE_GRACE_HOURS = 2
 
 
@@ -52,12 +37,7 @@ def _now() -> str:
 
 
 def _aws_error_reasons(exc: Exception, *, context: str) -> list[str]:
-    """Turn an exception from the IAM/STS path into a verbose, fully-detailed list
-    of reasons — nothing hidden. For a botocore ClientError we surface the error
-    Code, the raw AWS Message, the failing operation, the HTTP status, the AWS
-    request id, and the invoked ARN when present; for anything else, the exception
-    type + str(). The `context` line (what we were trying to do + the likely
-    fix) is prepended so the agent gets both the diagnosis AND the raw AWS truth."""
+    """Turn an IAM/STS exception into a list of reasons, prefixed by `context`, with every AWS detail kept."""
     reasons = [context]
     err = getattr(exc, "response", None)
     if isinstance(err, dict):
@@ -93,16 +73,14 @@ def _aws_error_reasons(exc: Exception, *, context: str) -> list[str]:
 
 @dataclass
 class ServiceConfig:
-    """Durations (seconds) by risk + the role TTL (hours) + the broker principal."""
+    """Durations (seconds) by risk, the role TTL (hours) and the broker principal."""
 
-    duration_low: int = 3600       # 1h
-    duration_medium: int = 1800    # 30m
-    duration_high: int = 900       # 15m
+    duration_low: int = 3600
+    duration_medium: int = 1800
+    duration_high: int = 900
     role_ttl_hours: int = 12
-    broker_principal_arn: str = "" # the broker IRSA role ARN (dynamic-role trust)
-    # Which identity claim to authorize an approver by — must match how the FGA
-    # `approver` tuples are seeded (accounts.<a>.approvers, conventionally emails).
-    # The agent-host sends {id, email, name}; this picks one. "email" | "id" | "name".
+    broker_principal_arn: str = ""  # the broker IRSA role ARN the dynamic roles trust
+    # Which identity claim ("email" | "id" | "name") an approver is authorized by; must match how the FGA `approver` tuples are seeded.
     approver_claim: str = "email"
 
 
@@ -122,10 +100,8 @@ class PermissionService:
         iam: IamProvisioner,
         account_registry: dict[str, dict],
         config: ServiceConfig,
-        on_request=None,  # async (PermissionRequest) -> None; notify the host to
-                          # raise the approval interrupt. None = no notify.
-        authorizer: Authorizer | None = None,  # per-account approve/deny gate;
-                          # None -> NoopAuthorizer (FGA off -> allow, today's behavior).
+        on_request=None,  # async (PermissionRequest) -> None that asks the host to raise the approval interrupt
+        authorizer: Authorizer | None = None,  # per-account approve/deny gate; None means NoopAuthorizer
     ) -> None:
         self._store = store
         self._iam = iam
@@ -133,7 +109,7 @@ class PermissionService:
         self._config = config
         self._on_request = on_request
         self._authz: Authorizer = authorizer or NoopAuthorizer()
-        # request_id -> StsCredentials. In-memory only; never persisted.
+        # request_id -> StsCredentials, in-memory only.
         self._creds: dict[str, StsCredentials] = {}
 
     # --- account discovery -------------------------------------------------
@@ -144,13 +120,11 @@ class PermissionService:
                 continue
             out[name] = {
                 "account_id": acct.get("account_id"),
-                # Human-written summary of what this account is for, so the agent
-                # can pick the right one to request access to (empty if unset).
+                # Human-written summary the agent uses to pick the right account.
                 "description": acct.get("description", ""),
                 "allowed_policy": acct.get("allowed_policy"),
                 "allowed_managed_policies": acct.get("allowed_managed_policies", []),
-                # Lets the agent prefer an account where a read-only request needs
-                # no human (so it doesn't over-ask / wait needlessly).
+                # Lets the agent prefer an account where a read-only request needs no human.
                 "auto_approve_read_only": bool(acct.get("auto_approve_read_only", False)),
             }
         return out
@@ -192,12 +166,7 @@ class PermissionService:
             summary = policy.summarize_policy(policy_document)
 
         request_id = uuid.uuid4().hex[:12]
-        # NOTE: IAM provisioning (create the inline policy + role) is DEFERRED to
-        # approval (_provision), NOT done eagerly here. So the request is always
-        # stored PENDING and the human/agent SEES it, even when the account's broker
-        # IAM isn't set up yet — the provisioning error then surfaces on approve
-        # (and is fed back to the agent) instead of failing the request before it
-        # ever appears in the conversation.
+        # IAM provisioning is deferred to _provision so a request always appears as pending even when the account's broker IAM is not set up yet.
         req = PermissionRequest(
             request_id=request_id,
             conversation_id=conversation_id,
@@ -215,20 +184,10 @@ class PermissionService:
         )
         await self._store.insert(req)
 
-        # SUPERSEDE the approval QUEUE: cancel any older PENDING sibling for the same
-        # (conversation, account) now. A second request for an account you already have a
-        # pending request on shouldn't pile up a duplicate approval prompt or, once both are
-        # approved, leave two IAM roles where only one's creds are ever used (the zombie bug).
-        # A pending sibling has no IAM role yet, so this is a pure status flip — no teardown.
-        # An ACTIVE sibling is left alone here: it keeps working until THIS request is approved
-        # (_provision tears it down then), so expanding perms never opens an access gap.
+        # Cancel older pending siblings now; active ones keep working until this request is approved.
         await self._supersede_pending_siblings(req)
 
-        # OPT-IN read-only auto-approval: if the account enables it and the request
-        # is a pure read-only inline policy (no managed ARNs — those can grant
-        # writes), grant it immediately with a synthetic system approver instead of
-        # waiting for a human. Gated per-account (default off) so nothing is
-        # auto-granted unless the deployment explicitly opted in for that account.
+        # Per-account opt-in: a pure read-only inline policy (no managed ARNs, which can grant writes) is granted without a human.
         if (
             acct.get("auto_approve_read_only", False)
             and not managed_policy_arns
@@ -246,12 +205,7 @@ class PermissionService:
             )
             return await self._provision(req, approver=AUTO_APPROVE_PRINCIPAL)
 
-        # OPT-IN auto-approve TIER: a per-account glob superset (auto_allowed_policy +
-        # auto_allowed_managed_policies) of grants that need no human. Generalizes the
-        # read-only gate — e.g. "assuming deploy-* roles is pre-approved". Checked AFTER
-        # the 3 validation layers, so it can only auto-approve requests already within
-        # allowed_policy (auto ⊆ allowed is enforced by order, not a separate check).
-        # Default off (no auto tiers = nothing auto-approves).
+        # Per-account auto-approve tier, checked after validation so it can only grant requests already within allowed_policy.
         if policy.covered_by_auto_policy(
             policy_document,
             managed_policy_arns,
@@ -269,8 +223,7 @@ class PermissionService:
             )
             return await self._provision(req, approver=AUTO_APPROVE_PRINCIPAL)
 
-        # Otherwise notify the agent-host so it raises the approval interrupt
-        # (best-effort — a notify failure must not fail the request; user can poll).
+        # Best-effort notify so the agent-host raises the approval interrupt; a failure must not fail the request.
         if self._on_request is not None:
             try:
                 await self._on_request(req)
@@ -287,29 +240,18 @@ class PermissionService:
 
     # --- approver identity -------------------------------------------------
     def resolve_approver(self, approver, *, fallback: str) -> str:
-        """Turn the request body's `approver` into the string the FGA check +
-        approved_by record use. Accepts a full identity dict {id, email, name}
-        (the agent-host sends the answering user's identity) and picks the
-        configured claim (approver_claim: email|id|name); or a plain string
-        (legacy/dev), used as-is. Falls back to `fallback` (the SA-token
-        conversation id) when nothing usable is present."""
+        """Turn the request body's `approver` (an identity dict or a plain string) into the principal the FGA check and approved_by use."""
         if isinstance(approver, dict):
             claim = self._config.approver_claim or "email"
             return approver.get(claim) or approver.get("id") or fallback
         if isinstance(approver, str) and approver:
-            # Strip a legacy "user:" prefix if present.
             return approver[len("user:"):] if approver.startswith("user:") else approver
         return fallback
 
     # --- approve / deny (approver) ----------------------------------------
     async def _authorize_approver(self, approver: str, target_account: str) -> None:
-        """Enforce that `approver` may approve THIS account (OpenFGA). FGA off ->
-        NoopAuthorizer -> always allowed. Fails closed if FGA is unreachable."""
-        # user_object() wraps the bare principal as `user:<id>` — matching how
-        # seed_approver_tuples() grants the tuple (providers/aws.py) and the
-        # already-wrapped object side (aws_account_object). Without this, the check
-        # user `alice@x` never matches the seeded `user:alice@x`, so an authorized
-        # approver is WRONGLY denied under real OpenFGA (NoopAuthorizer hid it).
+        """Enforce that `approver` may approve this account, failing closed if FGA is unreachable."""
+        # user_object() wraps the bare principal as `user:<id>`, matching how seed_approver_tuples() writes the tuple.
         allowed = await self._authz.check(
             user=user_object(approver), relation="approver", obj=aws_account_object(target_account)
         )
@@ -317,19 +259,13 @@ class PermissionService:
             raise RequestError([f"'{approver}' is not authorized to approve account '{target_account}'"])
 
     async def _provision(self, req: PermissionRequest, approver: str) -> PermissionRequest:
-        """Provision the inline policy + dynamic role + creds for an approved request
-        and mark it ACTIVE. Shared by human approve() and read-only auto-approval —
-        `approver` is the recorded approved_by (a real user, or a synthetic system
-        principal). IAM provisioning (previously eager at request time) happens HERE,
-        so a provisioning failure surfaces on approval as a VERBOSE, actionable error
-        (fed back to the agent) instead of blocking the request from ever appearing."""
+        """Provision the inline policy, dynamic role and creds for an approved request and mark it active, recording `approver` as approved_by."""
         approved_at = _now()
         role_expires_at = (
             datetime.now(timezone.utc) + timedelta(hours=self._config.role_ttl_hours)
         ).isoformat()
         duration = self._duration_for(req.risk_level)
 
-        # 1. Create the inline policy (deferred from request time).
         policy_arn = req.iam_policy_arn
         try:
             if policy_arn is None and req.policy_document is not None:
@@ -339,7 +275,6 @@ class PermissionService:
                     policy_document=req.policy_document,
                 )
                 await self._store.update(req.request_id, iam_policy_arn=policy_arn)
-            # 2. Create the dynamic role + mint creds.
             role_arn, creds = self._iam.create_dynamic_role(
                 target_account=req.target_account,
                 request_id=req.request_id,
@@ -347,7 +282,7 @@ class PermissionService:
                 managed_policy_arns=req.managed_policy_arns,
                 duration_seconds=duration,
             )
-        except Exception as exc:  # provisioning failed -> error state, VERBOSE reason
+        except Exception as exc:
             reasons = _aws_error_reasons(
                 exc,
                 context=(
@@ -375,17 +310,13 @@ class PermissionService:
             credentials_issued_at=approved_at,
             expires_at=creds.expires_at,
         )
-        # This new grant is now live — SUPERSEDE any older active/approved sibling for the
-        # same (conversation, account) so exactly one grant is live and no orphaned IAM role
-        # lingers. Done AFTER the new one is ACTIVE (not at request time) so the agent never
-        # lost access while this was pending, and a denied request never reached here.
+        # Only now that the new grant is live is the older active sibling torn down, so the agent never loses access in between.
         await self._supersede_active_siblings(req)
         return await self._store.get(req.request_id)  # type: ignore[return-value]
 
     # --- supersede: keep one live grant per (conversation, account) --------
     async def _siblings(self, req: PermissionRequest) -> list[PermissionRequest]:
-        """Other requests in the SAME conversation + account as `req` (never `req` itself,
-        never a cross-conversation/account request)."""
+        """Other requests for the same conversation and account as `req`."""
         return [
             r
             for r in await self._store.list_for_conversation(req.conversation_id)
@@ -393,19 +324,13 @@ class PermissionService:
         ]
 
     async def _supersede_pending_siblings(self, req: PermissionRequest) -> None:
-        """Cancel older PENDING/APPROVED (not-yet-active) siblings when `req` is created.
-        No IAM role exists yet on a pending request, so this is a pure status flip →
-        SUPERSEDED. Dedupes the approval queue; keeps ACTIVE siblings alone (torn down only
-        when `req` itself goes active — see _supersede_active_siblings)."""
+        """Mark not-yet-active siblings SUPERSEDED, a pure status flip since they hold no IAM role yet."""
         for sib in await self._siblings(req):
             if sib.status in (RequestStatus.PENDING, RequestStatus.APPROVED):
                 await self._store.update(sib.request_id, status=RequestStatus.SUPERSEDED)
 
     async def _supersede_active_siblings(self, req: PermissionRequest) -> None:
-        """When `req` becomes ACTIVE, tear down + SUPERSEDE any older ACTIVE sibling so only
-        one grant is live per (conversation, account). Best-effort per sibling: a teardown
-        failure is logged but must NOT fail the new grant (the sweep/revoke retries the stale
-        role); the important invariant — the NEW request is active — already holds."""
+        """Tear down and supersede older active siblings so one grant is live per (conversation, account); a teardown failure is logged, never fails the new grant."""
         for sib in await self._siblings(req):
             if sib.status != RequestStatus.ACTIVE:
                 continue
@@ -448,10 +373,7 @@ class PermissionService:
         if req is None:
             raise RequestError([f"Unknown request '{request_id}'"])
         await self._authorize_approver(approver, req.target_account)
-        # Finding #19: if a policy was already provisioned, its teardown must
-        # SUCCEED before we record this request as terminal — else we orphan the
-        # IAM policy while the DB claims it's gone (state drift, lying audit trail).
-        # delete_dynamic_policy logs + returns False on a real failure; surface it.
+        # A provisioned policy must be torn down before the request goes terminal, or the DB claims it is gone while IAM still has it.
         if req.iam_policy_arn and not self._iam.delete_dynamic_policy(
             target_account=req.target_account, policy_arn=req.iam_policy_arn
         ):
@@ -465,23 +387,15 @@ class PermissionService:
         return await self._store.get(request_id)  # type: ignore[return-value]
 
     async def can_approve(self, *, request_id: str, approver: str) -> bool:
-        """Read-only: may `approver` approve THIS request's account? Powers the
-        UI's greyed-out Approve button (per-VIEWER — the interrupt is raised once
-        server-side but seen by many users). Resolves the account from the request
-        (never trusts a client-supplied alias) and runs the same OpenFGA `approver`
-        check as approve()/deny() — WITHOUT mutating. FGA off -> NoopAuthorizer ->
-        True. Fails CLOSED (False) if the request is unknown or FGA is unreachable."""
+        """Read-only form of the approve() authorization check for the UI's Approve button, failing closed when the request is unknown or FGA is unreachable."""
         req = await self._store.get(request_id)
         if req is None:
             return False
         try:
-            # Wrap the approver to `user:<id>` — same alignment as
-            # _authorize_approver() so the greyed-out button reflects the ACTUAL
-            # approve() authorization (not a false grey from a prefix mismatch).
             return await self._authz.check(
                 user=user_object(approver), relation="approver", obj=aws_account_object(req.target_account)
             )
-        except Exception:  # FGA unreachable -> fail closed (greyed button, not a false-allow)
+        except Exception:
             return False
 
     # --- retrieve / refresh / revoke (agent) -------------------------------
@@ -494,26 +408,10 @@ class PermissionService:
         if req.status != RequestStatus.ACTIVE:
             return req, None
         creds = self._creds.get(request_id)
-        # The dynamic ROLE lives for role_ttl_hours (default 12h), but a role-chained
-        # STS TOKEN is capped at ~1h (and by risk-level duration). So a cached token
-        # EXPIRES long before the request goes inactive — and status() is the path the
-        # in-sandbox credential_process hits on EVERY aws call. Returning the stale
-        # cached token here is why creds arrive already-expired (ExpiredTokenException,
-        # "refreshed credentials are still expired"). Auto-REFRESH when the token is
-        # expired/near-expiry (skew margin) while the role TTL is still valid, so the
-        # client transparently gets a live token; if the role TTL has passed, return
-        # none so the agent re-requests.
-        #
-        # RE-MINT ON A CACHE MISS TOO (creds is None), not only on a stale hit: the cache is a
-        # per-POD in-memory dict, so with the broker at replicas>1 behind a round-robin Service
-        # ~half of status() calls land on a pod that never provisioned/refreshed this grant (and
-        # after a rollout BOTH new pods start cold). Returning None there made the sandbox see
-        # "not granted" → 403 on an active grant. refresh() re-assumes the role from the DB
-        # (cache-independent), so any pod can vend any active grant on demand — stateless
-        # vending. See docs/scooter-bug-broker-creds-cache-not-shared-across-replicas.md.
+        # The STS token expires long before the role does and the cache is per pod, so a stale or missing token is re-minted from the DB while the role TTL holds.
         if creds is None or self._creds_stale(creds):
             if req.role_expires_at and req.role_expires_at <= _now():
-                return req, None  # role TTL gone — a refresh/re-assume can't help; re-request
+                return req, None  # the role TTL has passed, so the agent must re-request
             try:
                 _, creds = await self.refresh(request_id=request_id, conversation_id=conversation_id)
             except RequestError:
@@ -521,14 +419,13 @@ class PermissionService:
         return req, creds
 
     def _creds_stale(self, creds: StsCredentials) -> bool:
-        """True if the STS token is expired or within the refresh skew window — so we
-        proactively re-vend instead of handing out a token that will fail mid-call."""
+        """True if the STS token is expired or within the refresh skew window."""
         if not creds.expires_at:
             return False
         try:
             exp = datetime.fromisoformat(creds.expires_at)
         except ValueError:
-            return True  # unparseable expiry -> treat as stale, refresh
+            return True  # an unparseable expiry counts as stale
         if exp.tzinfo is None:
             exp = exp.replace(tzinfo=timezone.utc)
         return exp <= datetime.now(timezone.utc) + timedelta(seconds=_CREDS_REFRESH_SKEW)
@@ -553,13 +450,7 @@ class PermissionService:
         req = await self._store.get_for_conversation(request_id, conversation_id)
         if req is None:
             raise RequestError([f"Unknown request '{request_id}'"])
-        # Finding #6: the IAM role/policy teardown must SUCCEED before we record
-        # the request as REVOKED — otherwise a live dynamic role (with a trust
-        # policy letting the broker assume it) is orphaned while the DB says it's
-        # gone, and list_expired_active only re-sweeps ACTIVE/APPROVED, so a
-        # terminal status is never retried. On a teardown failure (the helper logs
-        # + returns False), keep the request non-terminal and raise so the caller
-        # sees it; the role stays selectable for the next sweep/revoke.
+        # The teardown must succeed before the request goes terminal, because a terminal status is never swept again.
         if req.iam_role_arn:
             torn_down = self._iam.delete_dynamic_role(
                 target_account=req.target_account, role_arn=req.iam_role_arn, policy_arn=req.iam_policy_arn,
@@ -582,20 +473,11 @@ class PermissionService:
     async def sweep_expired(self) -> list[str]:
         swept: list[str] = []
         for req in await self._store.list_expired_active(_now()):
-            # Finding #6: only mark EXPIRED when the teardown actually succeeded.
-            # On failure the helper logs + returns False; leave the request
-            # ACTIVE/APPROVED so the NEXT sweep retries it (list_expired_active
-            # re-selects it) instead of orphaning the live role behind a terminal
-            # status that's never revisited.
+            # Only a successful teardown marks the request EXPIRED; otherwise it stays non-terminal so the next sweep retries it.
             if req.iam_role_arn and not self._iam.delete_dynamic_role(
                 target_account=req.target_account, role_arn=req.iam_role_arn, policy_arn=req.iam_policy_arn,
             ):
-                # Teardown failed (e.g. IAM AccessDenied). Normally leave the request
-                # non-terminal so the NEXT sweep retries — BUT if its creds lapsed long
-                # ago, a permanently-failing teardown would keep it 'active' forever,
-                # and the credential helper could pick it as a stale source. Force it to
-                # EXPIRED past a grace window (the orphaned role is reclaimed later);
-                # only KEEP retrying while it's within grace.
+                # Past the grace window a permanently failing teardown is forced to EXPIRED so the request stops looking active.
                 if self._creds_expired_beyond_grace(req):
                     logger.warning(
                         "force-expiring request; IAM teardown failing but creds lapsed past grace "
@@ -628,8 +510,7 @@ class PermissionService:
         return swept
 
     def _creds_expired_beyond_grace(self, req: PermissionRequest) -> bool:
-        """True if this request's STS creds lapsed more than the force-expire grace
-        window ago — used to stop retrying teardown on a permanent-failure zombie."""
+        """True if this request's STS creds lapsed more than the force-expire grace window ago."""
         if not req.expires_at:
             return False
         try:
@@ -641,7 +522,7 @@ class PermissionService:
         return exp + timedelta(hours=_FORCE_EXPIRE_GRACE_HOURS) < datetime.now(timezone.utc)
 
     async def list_for_conversation(self, conversation_id: str) -> list[PermissionRequest]:
-        """The caller's own requests (isolation)."""
+        """The caller's own requests."""
         return await self._store.list_for_conversation(conversation_id)
 
     async def query_audit(self, **filters) -> list[PermissionRequest]:

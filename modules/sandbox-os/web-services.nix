@@ -1,15 +1,11 @@
-# webServices.<name> — declarative in-pod web services the platform
-# reverse-proxies at https://<host>/c/<id>/<name>/ (marimo, web VS Code, xterm…).
+# webServices.<name>: declarative in-pod web services the platform
+# reverse-proxies at https://<host>/c/<id>/<name>/.
 #
-# The option is the single source of truth for BOTH:
-#   1. the systemd unit `webservice-<name>` that runs the service, AND
-#   2. the discovery manifest /run/scooter/web-services.json the agent-host reads
-#      (via exec) to learn <name> -> in-pod port, so the proxy knows where to
-#      forward and the UI can list/start services.
-#
-# Explicit-start model: units are NOT wantedBy multi-user.target — the agent or the
-# user (UI Start button -> agent-host -> `systemctl start webservice-<name>` via
-# exec) starts them on demand. The proxy only routes. See docs/WEB_SERVICES_PROXY.md.
+# Each entry produces both the systemd unit `webservice-<name>` and an entry in
+# the discovery manifest /run/scooter/web-services.json the agent-host reads to
+# learn the in-pod port. Units are explicit-start, not wantedBy
+# multi-user.target; the agent or the UI starts them on demand. See
+# docs/WEB_SERVICES_PROXY.md.
 
 { config, lib, pkgs, ... }:
 
@@ -19,9 +15,7 @@ let
 
   unitName = name: "webservice-${name}";
 
-  # The discovery manifest (contract with the agent-host WebServiceRegistry):
-  #   { "services": [ { name, displayName, port, basePath, unit, stripBasePath,
-  #                     resources? }, ... ] }
+  # The discovery manifest the agent-host WebServiceRegistry reads.
   manifestJSON = builtins.toJSON {
     services = lib.mapAttrsToList (name: s: {
       inherit name;
@@ -31,8 +25,7 @@ let
       unit = unitName name;
       stripBasePath = s.stripBasePath;
     } // lib.optionalAttrs (s.resources != null) {
-      # Advisory requirement. Only the dimensions actually declared are emitted, so
-      # the consumer can tell "wants 8Gi, doesn't care about cpu" from "wants 0 cpu".
+      # Only the declared dimensions are emitted.
       resources = lib.filterAttrs (_: v: v != null) {
         inherit (s.resources) cpu memory gpu;
       };
@@ -40,16 +33,7 @@ let
   };
   manifestFile = pkgs.writeText "web-services.json" manifestJSON;
 
-  # scooter-service — start/stop/restart/status a declared web service WITHOUT a
-  # scooter-rebuild (the services are already declared; this just drives their
-  # systemd units). Reads the discovery manifest for name→unit + basePath, so a
-  # human or the agent can `scooter-service start marimo`. The units are
-  # explicit-start (not wantedBy multi-user.target), so this IS how they come up.
-  # Where the enabled/autostart set is persisted. On the WORKSPACE PVC (via the
-  # /workspace mount), so it survives suspend/resume — the pod is recreated on
-  # resume, dropping every explicit-start unit, and this file is how the boot
-  # restore oneshot knows what to bring back. Contract:
-  #   { "enabled": { "<name>": { "since": "<iso8601>", "autostart": true } } }
+  # The autostart set, on the workspace PVC so it survives suspend/resume.
   stateFile = "/workspace/.scooter/services.json";
 
   scooterService = pkgs.writeShellApplication {
@@ -60,31 +44,27 @@ let
       MANIFEST=/run/scooter/web-services.json
       STATE=${stateFile}
 
-      # --- persisted enabled-set (survives suspend/resume via the workspace PVC) ---
-      # Record/forget a service's autostart intent. Writes are atomic (tmp + mv) so a
-      # crash mid-write can't corrupt the file the boot oneshot reads.
-      state_write() {  # ARGS... = jq args (e.g. --arg n foo) then the filter, LAST
+      # --- persisted enabled-set ---
+      # Writes are atomic so a crash mid-write cannot corrupt the state file.
+      state_write() {  # args are jq args, filter last
         mkdir -p "$(dirname "$STATE")"
         cur='{"enabled":{}}'
         [ -s "$STATE" ] && cur=$(cat "$STATE")
         tmp=$(mktemp "$(dirname "$STATE")/.services.XXXXXX")
-        # All args flow straight through to jq (so --arg pairs + the trailing filter
-        # reach it intact). On jq failure DON'T clobber the state file — remove the
-        # empty tmp and return non-zero (the caller's `|| true` keeps the CLI happy,
-        # but we never leave an empty services.json the restore oneshot would choke on).
+        # On jq failure keep the existing state file rather than an empty one.
         if printf '%s' "$cur" | jq "$@" > "$tmp"; then
           mv -f "$tmp" "$STATE"
         else
           rm -f "$tmp"; return 1
         fi
       }
-      state_enable() {  # $1=name — mark autostart, stamp when
+      state_enable() {  # $1=name
         now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         # shellcheck disable=SC2016  # $n/$t are jq vars (via --arg), not shell
         state_write --arg n "$1" --arg t "$now" \
           '.enabled[$n] = {since: $t, autostart: true}'
       }
-      state_disable() {  # $1=name — drop it so a reboot won't restore it
+      state_disable() {  # $1=name
         # shellcheck disable=SC2016  # $n is a jq var (via --arg), not shell
         state_write --arg n "$1" 'del(.enabled[$n])'
       }
@@ -120,33 +100,26 @@ let
       case "$cmd" in
         list|"")
           have_manifest
-          # Build the whole table first, then emit ONCE — so a downstream `| grep -q`
-          # that closes the pipe early doesn't SIGPIPE a mid-loop printf (which, under
-          # `set -e -o pipefail`, would fail the command). read from a here-string, not
-          # a pipe, so the loop runs in THIS shell (no subshell).
+          # Emit the table once so an early-closing reader cannot SIGPIPE a
+          # mid-loop printf.
           out=$(printf '%-16s %-9s %s\n' NAME STATE URL)
           while IFS=$'\t' read -r n u b; do
             [ -n "$n" ] || continue
             out="$out"$'\n'"$(printf '%-16s %-9s %s' "$n" "$(state "$u")" "$b")"
           done <<< "$(jq -r '.services[] | "\(.name)\t\(.unit)\t\(.basePath)"' "$MANIFEST")"
-          # A downstream `| grep -q` may close the pipe before we finish writing →
-          # SIGPIPE (exit 141), which set -e would treat as failure. Tolerate it: the
-          # output is complete-or-consumed either way.
+          # Tolerate a reader closing the pipe early.
           printf '%s\n' "$out" || true
           ;;
         status)
           [ -n "$name" ] || { usage; exit 2; }
           u=$(resolve "$name")
-          echo "$name: $(state "$u")  unit=$u  url=$(base_of "$name")" || true  # tolerate `| grep -q` closing early
+          echo "$name: $(state "$u")  unit=$u  url=$(base_of "$name")" || true  # tolerate an early-closing reader
           ;;
         start|stop|restart)
           [ -n "$name" ] || { usage; exit 2; }
           u=$(resolve "$name")
           systemctl "$cmd" "$u"
-          # Persist the autostart intent BEFORE reporting, so the state file is the
-          # source of truth the boot restore oneshot reads on the next pod recreate.
-          # start/restart => remember (autostart); stop => forget. Best-effort: a
-          # state-write failure must not fail the systemctl action the user asked for.
+          # Best-effort: a state-write failure must not fail the systemctl action.
           case "$cmd" in
             start|restart) state_enable "$name" || true ;;
             stop)          state_disable "$name" || true ;;
@@ -155,12 +128,8 @@ let
           [ "$cmd" != "stop" ] && echo "url: $(base_of "$name")" || true
           ;;
         restore)
-          # Boot path: bring back every service the user/agent had running before the
-          # pod was recreated (suspend/resume). Reads the autostart set from the PVC
-          # state file and starts each unit that still exists in this generation's
-          # manifest (a service removed from the config is silently skipped). Tolerant:
-          # one service failing to start must not fail the whole restore (best-effort,
-          # like a fresh boot's wantedBy). No state => nothing to do (clean first boot).
+          # Starts every autostart service that still exists in this manifest,
+          # continuing past individual failures.
           [ -s "$STATE" ] || { echo "scooter-service: no persisted services to restore"; exit 0; }
           names=$(jq -r '.enabled | to_entries[] | select(.value.autostart == true) | .key' "$STATE" 2>/dev/null || true)
           [ -n "$names" ] || { echo "scooter-service: no autostart services"; exit 0; }
@@ -332,61 +301,37 @@ in
   };
 
   config = lib.mkIf (enabled != { }) {
-    # `scooter-service start|stop|... <name>` on PATH — start/stop declared services
-    # without a rebuild (a human via the sandbox shell, or the agent via its shell tool).
+    # Drives the declared services' units without a rebuild.
     environment.systemPackages = [ scooterService ];
 
-    # Open each enabled web service's port in the NixOS firewall. The image ships
-    # with the default firewall ON (networking.firewall.enable = true), whose
-    # nixos-fw chain DROPs all inbound TCP except loopback/established — so the
-    # agent-host's reverse proxy (podIP:port, pod-to-pod) hung/timed out even though
-    # the service answered on localhost inside the pod. Web services are declared
-    # specifically to be reachable by the proxy, so open exactly their ports (and
-    # nothing else — the firewall still guards every other port). See the bug report
-    # web-service-proxy-blocked-by-firewall.
+    # The firewall drops inbound TCP by default, so open exactly the service ports
+    # the proxy reaches pod-to-pod.
     networking.firewall.allowedTCPPorts = lib.mapAttrsToList (_: s: s.port) enabled;
 
-    # One systemd unit per enabled service. NOT wantedBy multi-user.target —
-    # explicit start. restartIfChanged=false so a live switch-to-configuration
-    # (scooter-apply-module) doesn't bounce a running service. The per-service
-    # extraConfig is recursively merged OVER the base (so it can override).
+    # One explicit-start unit per enabled service, with extraConfig merged over
+    # the base.
     systemd.services = lib.mapAttrs' (name: s:
       let
-        # CONVERSATION_ID (+ CONVERSATION_URL) reach the pod as CONTAINER env, which
-        # is on PID 1's environ but NOT in systemd's manager env — so a unit's
-        # `environment`/ExecStart never sees it, and the base path collapses to
-        # `/c//${name}` (double slash → 404). Same problem carry-over.nix solves for
-        # BROKER_URL. Fix once for every web service: an ExecStartPre reads them from
-        # /proc/1/environ into the unit's RuntimeDirectory env file, and EnvironmentFile
-        # sources it before ExecStart. `-` = optional (empty is harmless; the service's
-        # own `:-unknown` fallback still applies if truly unset).
+        # CONVERSATION_ID/URL are container env on PID 1 only, so an ExecStartPre
+        # copies them from /proc/1/environ into an env file the unit sources.
         convEnvScript = pkgs.writeShellScript "webservice-${name}-conv-env" ''
           set -eu
           out="''${RUNTIME_DIRECTORY%%:*}/conv.env"
           : > "$out"
           for k in CONVERSATION_ID CONVERSATION_URL; do
             v=$(tr '\0' '\n' < /proc/1/environ | sed -n "s/^$k=//p" | head -1 || true)
-            # `if` (not `[ ] && …`): an absent var (empty $v) is normal, not a failure —
-            # with `set -e`, a bare `[ -n "$v" ] && …` would abort the script (exit 1)
-            # whenever the var is unset, killing the service start.
+            # An absent var is normal and must not trip `set -e`.
             if [ -n "$v" ]; then printf '%s=%s\n' "$k" "$v" >> "$out"; fi
           done
         '';
         base = {
           description = "web service: ${s.displayName}";
           restartIfChanged = false;
-          # PATH must include the system profile so the service can exec LAZY-TOOL stubs
-          # (marimo / code-server live at /run/current-system/sw/bin, built on first use).
-          # A systemd unit does NOT inherit a login PATH — it gets systemd's minimal
-          # default — so without this `exec marimo` fails with "not found" (status 127).
-          # Prepend the system profile + wrappers ahead of that default.
+          # A unit gets systemd's minimal PATH, so add the system profile where the
+          # lazy-tool stubs live.
           path = [ "/run/current-system/sw" "/run/wrappers" ];
           serviceConfig = {
-            # Materialize CONVERSATION_ID/URL from PID 1's environ, then source it.
-            # The `+` prefix runs ExecStartPre as ROOT (full privileges), because
-            # /proc/1/environ is root-only (0400) — a DynamicUser couldn't read it.
-            # RuntimeDirectory is created before ExecStartPre and (with DynamicUser)
-            # is writable by the service user, so the root pre-step can write into it.
+            # The `+` runs the pre-step as root because /proc/1/environ is root-only.
             RuntimeDirectory = unitName name;
             ExecStartPre = "+${convEnvScript}";
             EnvironmentFile = "-/run/${unitName name}/conv.env";
@@ -400,20 +345,14 @@ in
       in
       lib.nameValuePair (unitName name) (lib.recursiveUpdate base s.extraConfig)
     ) enabled
-    # Boot restore: re-start every service the user had running before the pod was
-    # recreated (suspend/resume drops all explicit-start units). Reads the autostart
-    # set from the workspace-PVC state file and starts each unit. wantedBy
-    # multi-user.target so it runs on every boot; RemainAfterExit so its "success"
-    # is observable. After the web-service units are DEFINED (they're pulled in by
-    # the `systemctl start` it issues, not by an ordering dep). Best-effort: it exits
-    # 0 even if a service fails, so a single bad service can't wedge the boot.
+    # Boot oneshot that restarts every autostart service after the pod is
+    # recreated.
     // {
       scooter-service-restore = {
         description = "restore web services enabled before suspend (from ${stateFile})";
         wantedBy = [ "multi-user.target" ];
         after = [ "workspace.mount" "local-fs.target" ];
-        # The state file lives on the workspace PVC; if the mount is a real unit,
-        # wait for it. Harmless when /workspace is just a dir (no such unit).
+        # Waits for the workspace mount when it is a real unit.
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
@@ -422,9 +361,7 @@ in
       };
     };
 
-    # Render the discovery manifest at boot (tmpfiles → /run, so it's present
-    # before the agent-host reads it and survives nothing across restarts, which
-    # is fine — it's static config re-created each boot).
+    # Links the discovery manifest into /run at boot.
     systemd.tmpfiles.rules = [
       "d /run/scooter 0755 root root -"
       "L+ /run/scooter/web-services.json - - - - ${manifestFile}"

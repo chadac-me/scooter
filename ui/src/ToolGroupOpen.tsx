@@ -1,9 +1,7 @@
 /**
- * ToolGroup override — render consecutive tool calls EXPANDED by default, instead
- * of collapsed behind a "N tool calls" disclosure. So the provider message cards
- * (slack/github/…) and the shell commands are visible top-level, not hidden.
- *
- * Wired in App.tsx: <Thread components={{ ToolGroup: ToolGroupOpen, ... }} />.
+ * ToolGroup override that renders consecutive tool calls expanded by default, so
+ * the provider message cards and shell commands are visible top-level. Wired in
+ * App.tsx via <Thread components={{ ToolGroup: ToolGroupOpen }} />.
  */
 
 import type { PropsWithChildren } from "react";
@@ -15,8 +13,7 @@ import {
 } from "@/components/assistant-ui/tool-group";
 import type { ThreadGroupPart } from "@/components/assistant-ui/thread";
 
-// The `group` part carries indices + status; we only need to render its children
-// open, with the count trigger still available to collapse.
+// Render the group's children open, with the count trigger still available to collapse.
 export function ToolGroupOpen({ group, children }: PropsWithChildren<{ group: ThreadGroupPart }>) {
   return (
     <ToolGroupRoot variant="ghost" defaultOpen>

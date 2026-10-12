@@ -1,26 +1,15 @@
 /**
- * Tier 3 E2E — a composer image attachment reaches the agent PROCESS.
- *
- * The regression this guards (PR #448): @assistant-ui/core's composer sends the
- * outgoing message as `content: [{type:"text"}]` (text only) and puts each attached
- * image in a SEPARATE `message.attachments[]` — the image part lives in
- * `attachment.content`, never in `message.content`. The old `onNew` read only
- * `message.content`, so every upload was silently dropped BEFORE the /agui POST and
- * nothing ever reached goose. A UI-only unit test can't catch this (it depends on the
- * real composer wiring); only driving the actual composer does.
- *
- * Two independent proofs, end-to-end through the real (fake) stack:
- *   1. WIRE: the outgoing POST /agui body carries an image content part (the client
- *      actually serialized + sent it — the exact boundary the bug broke).
- *   2. PROCESS: the fake agent's `~images` directive reports images=1 — proof the
- *      image survived the whole pipe (composer -> /agui -> normalizeContent ->
- *      AssetStore -> bridge readAsset -> ACP image block -> agent process).
+ * Tier 3 E2E for a composer image attachment reaching the agent process. @assistant-ui's
+ * composer puts each attached image in a separate `message.attachments[]` rather than in
+ * `message.content`, so only driving the real composer proves the wiring. Two independent
+ * proofs: the outgoing POST /agui body carries an image content part, and the fake agent's
+ * `~images` directive reports images=1, proving the image survived the whole pipe to the
+ * agent process.
  */
 
 import { test, expect } from "./fixtures.js";
 
-// A minimal valid 1x1 transparent PNG. Tiny (well under the 5MB cap) and an allowed
-// MIME (image/png), so it passes the client downscale + the agent-host AssetStore.
+// A minimal valid 1x1 transparent PNG, under the size cap and an allowed MIME type.
 const PNG_1x1_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
@@ -31,8 +20,7 @@ test.describe("image upload", () => {
   }) => {
     await chat.open();
 
-    // Capture the outgoing POST /agui body (proof #1 — the wire). Same-origin in e2e
-    // (VITE_AGENT_HOST_URL empty), so the UI POSTs /agui through the vite proxy.
+    // Capture the outgoing POST /agui body (proof #1, the wire).
     let aguiBody: string | null = null;
     page.on("request", (req) => {
       if (req.method() === "POST" && req.url().endsWith("/agui")) {
@@ -40,9 +28,8 @@ test.describe("image upload", () => {
       }
     });
 
-    // Attach the image via the real composer. ComposerPrimitive.AddAttachment spawns a
-    // transient <input type=file> and calls .click() -> a native file chooser, which
-    // Playwright drives through the filechooser event.
+    // Attach the image via the real composer, whose native file chooser Playwright drives
+    // through the filechooser event.
     const fileChooserPromise = page.waitForEvent("filechooser");
     await page.getByLabel("Add Attachment").click();
     const fileChooser = await fileChooserPromise;
@@ -57,24 +44,22 @@ test.describe("image upload", () => {
       timeout: 15_000,
     });
 
-    // Send with the ~images directive: the fake agent replies with the count of IMAGE
-    // content blocks it received in the prompt. Fill + click Send explicitly (a staged
-    // attachment + Enter is less reliable than the button).
+    // Send with the ~images directive, clicking Send explicitly because a staged attachment
+    // plus Enter is less reliable.
     const input = page.getByRole("textbox", { name: "Message input" });
     await input.click();
     await input.fill("~images");
     await page.getByRole("button", { name: /send message/i }).click();
 
-    // The send must land in the VIEWED thread (the user message renders here).
+    // The send must land in the viewed thread.
     await expect(chat.userMessages().last()).toContainText("~images", { timeout: 20_000 });
 
-    // Proof #2 — reached the process: the image block made it all the way to the agent.
+    // Proof #2, the process: the image block made it all the way to the agent.
     await expect(chat.assistantMessages().last()).toContainText(/images=1/, {
       timeout: 45_000,
     });
 
-    // Proof #1 — the wire: the POST /agui body carried an image part. (Before the fix
-    // this was absent — content was text-only and attachments were never read.)
+    // Proof #1, the wire: the POST /agui body carried an image part.
     console.log("[image-upload] aguiBody:", aguiBody?.slice(0, 300));
     expect(aguiBody, "a POST /agui should have been observed").not.toBeNull();
     const parsed = JSON.parse(aguiBody!) as {

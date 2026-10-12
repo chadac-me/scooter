@@ -1,9 +1,4 @@
-"""AWS permissions broker — data model + lifecycle states.
-
-Ported from the OpenHands agent-token-broker, adapted to this repo's broker
-(identity comes from the per-conversation SA token, not a shared API key +
-session token). See docs/AWS_PERMISSIONS_BROKER.md.
-"""
+"""AWS permissions broker: data model and lifecycle states (see docs/AWS_PERMISSIONS_BROKER.md)."""
 
 from __future__ import annotations
 
@@ -13,15 +8,10 @@ from typing import Any
 
 
 class RequestStatus(str, enum.Enum):
-    """Permission-request lifecycle.
-
-    pending → approved → active → expired, with branches → denied, → revoked,
-    → superseded (replaced by a newer request for the same account), and
-    approved → error (IAM provisioning failed).
-    """
+    """Permission-request lifecycle: pending, approved, active, expired, with branches to denied, revoked, superseded and error."""
 
     PENDING = "pending"
-    APPROVED = "approved"   # approved; dynamic IAM role being created
+    APPROVED = "approved"   # dynamic IAM role being created
     ACTIVE = "active"       # role ready, STS credentials available
     EXPIRED = "expired"     # role TTL elapsed, role deleted
     DENIED = "denied"
@@ -38,14 +28,7 @@ class RiskLevel(str, enum.Enum):
 
 @dataclass
 class PermissionRequest:
-    """One agent permission request (the durable record).
-
-    `conversation_id` is the validated caller identity (from the SA token), not
-    a body field. `policy_document` is a free-form IAM policy and/or
-    `managed_policy_arns` is a list of AWS managed-policy ARNs (at least one
-    required). The IAM artifacts (role/policy ARNs) and STS expiry fill in as the
-    request advances.
-    """
+    """One agent permission request, the durable record; `conversation_id` is the validated caller identity, not a body field."""
 
     request_id: str                       # 12-char id
     conversation_id: str
@@ -63,26 +46,24 @@ class PermissionRequest:
 
     requested_at: str = ""
     approved_at: str | None = None
-    approved_by: str | None = None        # approver identity (email / SA / "user")
+    approved_by: str | None = None        # approver identity
     denied_at: str | None = None
     denied_by: str | None = None
     deny_reason: str | None = None
     revoked_at: str | None = None
 
-    # IAM artifacts.
     iam_role_arn: str | None = None
     iam_policy_arn: str | None = None
-    role_expires_at: str | None = None    # role TTL (refresh window)
+    role_expires_at: str | None = None    # role TTL, the refresh window
 
-    # STS credential expiry (the cred itself is never persisted).
+    # The STS credential itself is never persisted.
     credentials_issued_at: str | None = None
     expires_at: str | None = None
 
 
 @dataclass
 class StsCredentials:
-    """Ephemeral STS credentials vended to the agent. Held in memory only —
-    never written to the store."""
+    """Ephemeral STS credentials vended to the agent, held in memory only."""
 
     access_key_id: str
     secret_access_key: str
@@ -92,17 +73,7 @@ class StsCredentials:
 
 
 def approval_message(req: PermissionRequest) -> str:
-    """The prose a human reads when asked to approve this request.
-
-    Rendered HERE, not by the agent-host. The platform used to build this string
-    from `target_account` / `risk_level` / `policy_summary`, which meant it knew
-    what an AWS account was and that a "risk level" existed — and an integration
-    with a different vocabulary could not describe itself at all. Now the platform
-    relays an opaque message and this side owns what it says. Why: PR #651.
-
-    Used by BOTH the request-time notify and the pending-list view, so the window a
-    user sees after a rollout is worded identically to the one they lost.
-    """
+    """The prose a human reads when asked to approve this request, shared by the notify and the pending-list view so a rebuilt window is worded the same."""
     lines = [
         f"Scooter is requesting AWS access to {req.target_account} "
         f"(risk: {req.risk_level.value}).",

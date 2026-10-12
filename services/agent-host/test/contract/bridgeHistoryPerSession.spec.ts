@@ -1,19 +1,7 @@
 /**
- * Tier 1 contract — history reinjection is PER ACP SESSION, not per bridge.
- *
- * THE GAP (reported on the live BYO path): reviving a BYOC conversation didn't restore it —
- * the container's Claude started blank. Reinjection was keyed to a bridge-scoped boolean
- * (`historyInjected`), set on the bridge's FIRST prompt. That assumption breaks exactly where
- * BYO lives:
- *
- *   - a mid-conversation provider switch (container offline for run 1 → cloud floor gets the
- *     preamble; container back for run 2 → a BRAND-NEW session on the laptop gets NOTHING);
- *   - a container that has never seen the conversation at all (new laptop, new device);
- *   - a container restart between runs (fresh SDK session, same bridge).
- *
- * The unit that needs seeding is the ACP SESSION: any session's first prompt in this
- * conversation must carry the transcript, fed over the same wire as everything else. A session
- * that already saw it must not get it twice.
+ * History reinjection is per ACP session, not per bridge: any session's first prompt in
+ * a conversation carries the transcript (a provider switch or container restart creates
+ * a new session that needs it), and a session that already saw it never gets it twice.
  */
 
 import { describe, it, expect } from "vitest";
@@ -33,7 +21,7 @@ const BRIDGE_CONFIG = {
   sandbox: { name: "s", namespace: "ns" },
 };
 
-/** A fake agent whose client RECORDS the prompt content blocks it receives. */
+/** A fake agent whose client records the prompt content blocks it receives. */
 function recordingAgent(exec: ReturnType<typeof createSandboxExecBackend>) {
   const agent = createFakeAcpAgent();
   agent.setScript([
@@ -68,8 +56,8 @@ const priorLog: AguiEvent[] = [
 describe("history reinjection is per ACP session", () => {
   it("THE GAP: a provider switch mid-conversation seeds the NEW session too", async () => {
     const exec = createSandboxExecBackend(createFakeSandboxApi());
-    const floor = recordingAgent(exec);       // the cloud fallback (run 1: container offline)
-    const personalized = recordingAgent(exec); // the BYO container (run 2: it came online)
+    const floor = recordingAgent(exec);
+    const personalized = recordingAgent(exec);
 
     let containerOnline = false;
     const providers: AcpProvider[] = [
@@ -89,11 +77,9 @@ describe("history reinjection is per ACP session", () => {
     containerOnline = true;
     await bridge.prompt({ threadId: "t1", text: "second", source: "ui" });
     expect(personalized.prompts, "run 2 went to the container").toHaveLength(1);
-    // THE ASSERTION THAT FAILS TODAY: the container's brand-new session starts blank because
-    // the bridge already "did" its one injection into the floor's session.
     expect(personalized.prompts[0].some((b) => (b.text ?? "").includes("add a readme")),
       "the container's FIRST prompt must carry the transcript — it has never seen this conversation").toBe(true);
-    // ...and it must not duplicate the CURRENT turn into the preamble.
+    // The current turn must not be duplicated into the preamble.
     const preamble = personalized.prompts[0].map((b) => b.text ?? "").join("\n");
     expect((preamble.match(/second/g) ?? []).length).toBe(1);
   });

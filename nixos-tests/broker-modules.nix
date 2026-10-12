@@ -1,18 +1,11 @@
-# Composition test for broker-modules.nix — the deployment-DEFAULT module import.
-#
-# Pure EVAL (no VM): build a file:// tarball fixture of two `<name>.nix` files at the
-# root, evaluate broker-modules with SCOOTER_DEFAULT_MODULES_URL pointing at it, and
-# assert it imports BOTH. Also assert the fail-safe: with NO url configured it imports
-# nothing.
-#
-# The full in-pod build+switch is exercised in the Tier-2 cluster tier (real broker,
-# real network); this proves the fetch + import LOGIC fast and deterministically.
+# Pure eval (no VM) for broker-modules.nix, the deployment-default module import:
+# with SCOOTER_DEFAULT_MODULES_URL pointing at a file:// tarball of two `<name>.nix`
+# files it imports both, and with no url configured it imports nothing.
 
 { pkgs, lib, sandboxModule ? null }:
 
 let
-  # A fixture tarball: <name>.nix for two default modules at the tarball root, each a
-  # cheap marker (so the assert can name them by baseNameOf).
+  # A fixture tarball with two default modules at its root.
   fixture = pkgs.runCommand "broker-modules-fixture.tar.gz" { } ''
     mkdir m
     printf '%s' '{ ... }: { environment.etc."scooter-default-alpha".text = "a"; }' > m/alpha.nix
@@ -28,8 +21,7 @@ pkgs.runCommand "dev-env-broker-modules"
   export NIX_STORE_DIR=$TMPDIR/store
   export NIX_STATE_DIR=$TMPDIR/state
 
-  # (1) With the URL override -> imports both default modules. Inputs are a fixed store
-  # path + a file:// tarball, so the eval is deterministic and needs no network.
+  # (1) With the URL override, both default modules are imported.
   imported=$(SCOOTER_DEFAULT_MODULES_URL="file://${fixture}" \
     nix eval --impure --offline --extra-experimental-features 'nix-command flakes' --json --expr '
       let
@@ -41,7 +33,7 @@ pkgs.runCommand "dev-env-broker-modules"
   echo "$imported" | grep -q alpha.nix || { echo "FAIL: alpha.nix not imported"; exit 1; }
   echo "$imported" | grep -q beta.nix  || { echo "FAIL: beta.nix not imported"; exit 1; }
 
-  # (2) Fail-safe: no BROKER_URL and no override -> imports NOTHING (empty list).
+  # (2) With no BROKER_URL and no override, nothing is imported.
   empty=$(env -u BROKER_URL -u SCOOTER_DEFAULT_MODULES_URL \
     nix eval --impure --offline --extra-experimental-features 'nix-command flakes' --json --expr '
       let

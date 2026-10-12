@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
-# The conversation-token test vector is committed TWICE — once per service — because
-# the agent-host and broker nix derivations each build from their own source tree and
-# cannot share a path. Both suites verify the same token to catch wire-format drift
-# between the TypeScript signer and the Python verifier (issue #700), which only works
-# if the two copies are the same file.
-#
-# A drifted copy would make both suites pass while testing different formats — the
-# exact failure the cross-language vector exists to prevent.
+# The conversation-token test vector is committed once per service, because the
+# agent-host and broker nix derivations each build from their own source tree;
+# both suites verify the same token to catch wire-format drift between the
+# TypeScript signer and the Python verifier, which only works if the two copies
+# are the same file.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

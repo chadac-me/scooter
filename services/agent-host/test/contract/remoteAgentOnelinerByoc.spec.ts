@@ -1,14 +1,8 @@
 /**
- * Tier 1 contract — the setup one-liner pointing at the BYOC CONTROLLER (§L), not the webhooks
- * bridge.
- *
- * WHY THIS CHANGES SHAPE. The bridge URL was STATIC: one `wss://<host>/claude-bridge/connect` for
- * everyone, built once at startup. The controller path is PER-OWNER — `/byoc/ws/<session-id>` —
- * and only the controller can mint a session (`POST /byoc/sessions`). So `mint` becomes async and
- * does two steps: ask the controller for this owner's session, then build the URL around it.
- *
- * That ordering is the whole reason the bridge could not simply be deleted: removing it without
- * this leaves the Settings copy-paste flow handing out a dead URL.
+ * The setup one-liner points at the BYOC controller. The controller path is per-owner
+ * (`/byoc/ws/<session-id>`) and only the controller mints a session (`POST
+ * /byoc/sessions`), so `mint` asks the controller for the owner's session and builds the
+ * URL around it.
  */
 
 import { describe, it, expect } from "vitest";
@@ -49,8 +43,7 @@ describe("setup one-liner via the BYOC controller", () => {
   });
 
   it("mints PER OWNER — two users get different sessions, never a shared URL", async () => {
-    // The bridge URL was one static string for everyone; a per-owner session is what lets the
-    // controller route a prompt to the right container.
+    // A per-owner session is what lets the controller route a prompt to the right container.
     let n = 0;
     const impl = (async () =>
       new Response(JSON.stringify({ sessionId: `sess-${++n}` }), { status: 200 })) as unknown as typeof fetch;
@@ -76,7 +69,7 @@ describe("setup one-liner via the BYOC controller", () => {
     await ui.mint("alice");
     expect(calls[0].url).toContain("/byoc/sessions");
     expect(calls[0].method).toBe("POST");
-    // Without an identity the controller 401s (a session must bind to an owner, §L decision 2).
+    // Without an identity the controller 401s, since a session must bind to an owner.
     expect(calls[0].user).toBe("alice");
   });
 
@@ -102,9 +95,7 @@ describe("setup one-liner via the BYOC controller", () => {
   });
 
   it("a controller that cannot mint FAILS LOUD — never a dead copy-paste URL", async () => {
-    // Handing the user a one-liner that cannot connect is worse than an error: they run it, it
-    // retries forever, and nothing says why. (That is exactly the 4004 loop the shipped container
-    // sat in for 25h.)
+    // A one-liner that cannot connect retries forever with nothing saying why.
     const { impl } = controllerFetch("x", { status: 503 });
     const ui = createRemoteAgentUi({
       joinSecret: SECRET,

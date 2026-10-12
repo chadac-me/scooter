@@ -1,13 +1,8 @@
 /**
- * Tier 1 contract — GET /conversations/:id/events.integrity replays the FULL log,
- * including events whose fire-and-forget append is still in flight when the stream opens.
- *
- * The bug (first-hit on a suspended conversation): the user sends a message to a suspended
- * conversation, revive() rebuilds the bridge, the message is emitted + persisted via a
- * FIRE-AND-FORGET store.appendEvent(). Meanwhile the UI opens events.integrity, which reads
- * the persisted log with readEventsWithChecksum WITHOUT first flushing pending appends — so
- * the read races the write and misses the just-sent message. It "disappears" until a refresh
- * (by then the append has landed). The route must `await store.flush(id)` before replaying.
+ * GET /conversations/:id/events.integrity replays the full log, including events whose
+ * fire-and-forget append is still in flight when the stream opens, so the route flushes
+ * the store before replaying. A stream on a pod that does not own the conversation ends
+ * after the replay so the client reconnects through the router to the owner.
  */
 
 import { describe, it, expect } from "vitest";
@@ -28,7 +23,7 @@ const userMsg = (delta: string): AguiEvent => ({
   delta,
 });
 
-/** Minimal SessionManager stub: the integrity route only needs get()/ensureReadable(). */
+/** A SessionManager stub with only the get()/ensureReadable() the route needs. */
 function stubSessions(id: string): SessionManager {
   return {
     get: (x: string) => (x === id ? ({ id } as never) : undefined),
@@ -38,9 +33,7 @@ function stubSessions(id: string): SessionManager {
 
 const stubServer = { onPermission: () => {}, broadcast: () => {} } as never;
 
-/** Start the SSE integrity route SYNCHRONOUSLY (no awaits before handle, so the replay's
- *  file read races any still-pending fire-and-forget append), capture res.write frames, and
- *  return a controller to close it once replay is done. */
+/** Start the SSE integrity route synchronously so its replay races a pending append, capturing the written frames. */
 function startIntegrity(
   api: ReturnType<typeof createManagementApi>,
   id: string,
@@ -60,7 +53,7 @@ function startIntegrity(
     on: () => res,
     req,
   } as unknown as ServerResponse;
-  const matched = api.handle(req, res); // NO await — start synchronously to race the append
+  const matched = api.handle(req, res);
   return {
     done: matched.then(() => body),
     body: () => body,
@@ -81,22 +74,16 @@ describe("events.integrity — replays an in-flight (unflushed) append", () => {
         answerPermission: async () => {},
       });
 
-      // Simulate the revive path: the user's message is appended FIRE-AND-FORGET (not awaited),
-      // exactly as wireEventLog does (void store.appendEvent(...)). The write takes several
-      // awaits (ensureDir → seedChecksum → appendFile → onAppend), so it is STILL PENDING now.
+      // The user's message is appended fire-and-forget, as wireEventLog does, so the write is still pending.
       void store.appendEvent(id, userMsg("hello from the revived conversation"));
 
-      // Open the integrity stream in the SAME tick — its readEventsWithChecksum races the
-      // pending appendFile. Without an `await store.flush(id)` before the replay, the file read
-      // completes first (empty), onAppend hasn't fired yet, and the message is in NEITHER the
-      // replay NOR the live buffer → lost until the user refreshes. The flush fix closes this.
+      // Open the integrity stream in the same tick so its read races the pending append.
       const stream = startIntegrity(api, id);
-      // Let the handler run to `synced` (replay done) + the append settle, then close.
       await new Promise((r) => setTimeout(r, 50));
       stream.close();
       const body = await stream.done;
 
-      expect(body).toContain('"kind":"synced"'); // stream replayed cleanly
+      expect(body).toContain('"kind":"synced"');
       expect(body, "the just-appended message must be in the replay, not lost").toContain(
         "hello from the revived conversation",
       );
@@ -107,7 +94,7 @@ describe("events.integrity — replays an in-flight (unflushed) append", () => {
 });
 
 describe("events.integrity — ownership", () => {
-  /** Like startIntegrity, but also reports whether the handler ENDED the response. */
+  /** Like startIntegrity, but also reports whether the handler ended the response. */
   function startWithEnd(api: ReturnType<typeof createManagementApi>, id: string) {
     const req = new PassThrough() as unknown as IncomingMessage;
     (req as { method?: string }).method = "GET";
@@ -132,13 +119,7 @@ describe("events.integrity — ownership", () => {
   }
 
   it("ENDS the stream after replay when another pod owns the conversation", async () => {
-    // THE TIER-2 COIN FLIP. A stream opened before the controller assigned an owner
-    // lands on a random pod; live appends only reach the OWNER's local store, so on the
-    // non-owner the stream replayed history and then sat silent FOREVER — no tool card,
-    // no reply, "Working…" until the user refreshed. Verified by a three-way capture on
-    // k3d: router + owner streams complete, the non-owner stream utterly empty. Ending
-    // the stream hands the client's reconnect back to the router, which routes by
-    // hostIP once assignment exists.
+    // Live appends only reach the owner's local store, so a non-owner stream would sit silent after the replay.
     const root = mkdtempSync(join(tmpdir(), "integrity-owner-"));
     try {
       const store = createFileConversationStore(root);

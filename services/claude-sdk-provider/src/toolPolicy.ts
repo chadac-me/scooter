@@ -1,43 +1,17 @@
 /**
- * Which CLI built-ins the model may use, and what to say when it may not.
- *
- * THE BUG THIS FIXES: a built-in that is neither disabled nor allow-listed is
- * *callable but unwired*. With no permissionMode the CLI runs on "default"
- * ("prompts for dangerous operations"), and a prompt in a headless subprocess has
- * nobody to answer it — the turn stalls holding that prompt and readMessages throws
- * `[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use`.
- * The UI showed a bare exit 1.
- *
- * Omission was the default, and omission was the failure mode. So every built-in is
- * now explicitly aliased, allowed, or denied — and anything NOT named here is denied
- * too, which is what makes a tool added by a future CLI release safe rather than fatal.
- *
- * Enforcement is a PreToolUse hook, not canUseTool. Per the SDK docs, canUseTool is a
- * user-input callback that "never fires for auto-approved tools"; for logic that must
- * apply to every call the documented mechanism is PreToolUse, which runs before the
- * rest of the permission flow.
- * See https://code.claude.com/docs/en/agent-sdk/user-input
+ * Which CLI built-ins the model may use, and what to say when it may not. Every
+ * built-in is explicitly aliased, allowed or denied, and anything not named is denied
+ * too, so a tool added by a future CLI release cannot stall a headless turn on a
+ * permission prompt. Enforcement is the PreToolUse hook, which runs for every call.
  */
 
-/** Built-ins that run IN THE SANDBOX via the aliased MCP tools (see sandboxMcp.ts). */
+/** Built-ins that run in the sandbox via the aliased MCP tools (see sandboxMcp.ts). */
 export const ALIASED_BUILTINS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"] as const;
 
-/** Built-ins that are safe as-is: no sandbox access, no side effects we care about.
- *  ToolSearch is load-bearing: the scooter-env MCP tools are DEFERRED, so denying it
- *  leaves the model unable to enumerate the tools it was given. */
-// Skill: the model invokes a discovered .claude/skills entry with it. WITHOUT it
-// here, decideTool's deny-by-default rejects the call and the model is told
-// "Skill is not available in this environment" -- so a correctly discovered,
-// correctly described skill is still unreachable. Observed live: the model tried
-// Skill, was denied, and fell back to `gh pr create`.
+/** Built-ins that are safe as-is, where ToolSearch enumerates the deferred scooter-env tools and Skill invokes a discovered .claude/skills entry. */
 export const ALLOWED_BUILTINS = ["TodoWrite", "ToolSearch", "Skill"] as const;
 
-/**
- * Built-ins we deliberately do not support, and what to use instead. The message is
- * shown to the MODEL, which "may adjust its approach" (SDK docs), so it reads as an
- * instruction rather than an error report — the model retries on the right tool
- * instead of stalling.
- */
+/** Built-ins that are not supported, with the instruction the model sees so it retries on the right tool. */
 export const TOOL_REDIRECTS: Record<string, string> = {
   Task:
     "The Task tool is not available here. Use the scooter-env `spawn_subagent` tool " +
@@ -47,12 +21,7 @@ export const TOOL_REDIRECTS: Record<string, string> = {
     "There is no interactive question channel here — the user reads this conversation " +
     "asynchronously. State the question and the options in your REPLY, say which option " +
     "you are proceeding with and why, and continue. Do not block waiting for an answer.",
-  // Search comes from a SEARCH CONTRIB over the broker's MCP server
-  // (`scooter-broker`), not from scooter-env, and a deployment with no search key has
-  // no such tool at all — so the message describes the tool by its SHAPE rather than
-  // sending the model after one exact name. Each provider names its own
-  // (`brave_web_search`, `kagi_web_search`), and a deployment may wire several.
-  // Why: issue #700, review of PR #707.
+  // Search comes from a search contrib over the broker's MCP server and each provider names its own tool, so the message describes the tool by shape.
   WebSearch:
     "The WebSearch tool is not available here. Use the `*_web_search` tool in your " +
     "tool list instead (e.g. `brave_web_search`) — and if several are listed, pick " +
@@ -71,19 +40,9 @@ export type ToolDecision =
   | { allow: true }
   | { allow: false; reason: string };
 
-/**
- * Decide whether `toolName` may run.
- *
- * DENY-BY-DEFAULT. An unrecognised name is refused with a generic reason rather than
- * being allowed to prompt — that is the whole point: a built-in shipped by a newer CLI
- * lands here and is denied cleanly instead of hanging the turn.
- *
- * `extraAllowed` carries the dynamically-named MCP tools (the sandbox aliases and any
- * `mcp__*` servers), which are not knowable at module scope.
- */
+/** Decide whether `toolName` may run, denying unrecognised names; `extraAllowed` carries the dynamically-named MCP tools. */
 export function decideTool(toolName: string, extraAllowed: readonly string[] = []): ToolDecision {
-  // MCP tools are ours by construction: the sandbox server and the scooter-env /
-  // BYOC-tunnelled servers. They are gated by the bridge's own permission flow.
+  // MCP tools are ours by construction and are gated by the bridge's own permission flow.
   if (toolName.startsWith("mcp__")) return { allow: true };
   if ((ALLOWED_BUILTINS as readonly string[]).includes(toolName)) return { allow: true };
   if (extraAllowed.includes(toolName)) return { allow: true };
@@ -91,9 +50,7 @@ export function decideTool(toolName: string, extraAllowed: readonly string[] = [
   const redirect = TOOL_REDIRECTS[toolName];
   if (redirect) return { allow: false, reason: redirect };
 
-  // An ALIASED built-in reaching here means the alias did not take effect — the model
-  // asked for the local tool rather than the sandbox one. Denying is right (it would
-  // run in the agent-host pod, not the sandbox), and saying so beats a generic refusal.
+  // An aliased built-in reaching here means the model asked for the local tool rather than the sandbox one.
   if ((ALIASED_BUILTINS as readonly string[]).includes(toolName)) {
     return {
       allow: false,

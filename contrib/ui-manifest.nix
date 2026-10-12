@@ -1,23 +1,12 @@
 # Generates the UI's contrib manifest: the metadata every enabled contrib
-# contributes to the frontend, as ONE JSON document the UI fetches at RUNTIME.
-#
-# Runtime, not compiled in, for the same reason /telemetry/config.json is: the UI
-# image is built once and deployed to clusters whose contrib set differs, so a
-# deployment changing that set must not mean recompiling the bundle. nginx serves
-# it at /contrib/manifest.json from the UI image (pkgs/ui-image). Overriding it per
-# deployment needs no platform.nix option: a contrib is a module, so it can mkIf a
-# ConfigMap into the platform render itself.
-#
-# That is only possible because an icon is DATA here — a viewBox plus a single
-# path, read out of the contrib's own .svg — rather than a React component. A
-# component could only be resolved from a runtime name by bundling a whole
-# react-icons pack (~4.9 MB). Why: PR #601.
+# contributes to the frontend, as one JSON document nginx serves at
+# /contrib/manifest.json and the UI fetches at runtime, so a deployment can
+# change its contrib set without recompiling the bundle. An icon is data here (a
+# viewBox plus a single path read from the contrib's .svg), not a component.
 { lib, writeText }:
 
 let
-  # Simple Icons ship one path per mark, so two attributes are the whole icon.
-  # A throw here rather than a broken glyph in the browser: the contrib's SVG is
-  # a repo file, so a malformed one is an author error, catchable at eval.
+  # A malformed SVG is an author error, so it throws at eval rather than rendering a broken glyph.
   iconData = name: file:
     let
       svg = builtins.readFile file;
@@ -42,9 +31,7 @@ let
     })
     sourced;
 
-  # Keyed by the tool NAME (the stable identity the UI normalizes an incoming ACP
-  # tool call down to). `provider` is the contrib name, so the card picks up that
-  # contrib's source row.
+  # Keyed by the tool name the UI normalizes an incoming ACP tool call down to; `provider` selects the contrib's source row.
   toolCards = lib.listToAttrs (lib.concatLists (lib.mapAttrsToList
     (name: c: lib.mapAttrsToList
       (tool: t: lib.nameValuePair tool { provider = name; inherit (t) argKey action; })
@@ -60,17 +47,7 @@ let
 
   linkProviders = lib.attrNames (lib.filterAttrs (_: c: c.ui.source.linkProvider) sourced);
 
-  # How each contrib's approval is gated: which option to grey, and what to say when
-  # it is. Read off the contribs THIS manifest was built from — an independent
-  # evalModules here would ignore `withModules`, so the CI set (which enables echo)
-  # would silently render a manifest without echo's row.
-  #
-  # NOT gated on `ui.enable`: a contrib may raise approvals while contributing no icon
-  # or tool cards, and greying an option is a correctness concern rather than branding.
-  #
-  # Only the presentation half lives here. Where the contrib's verbs are on the broker
-  # is deployment config, declared by its platform module (scooter.approvals) —
-  # a browser that knew a broker path would be a browser that could be pointed at one.
+  # The presentation half of each contrib's approval gate, not gated on `ui.enable` because a contrib may raise approvals while contributing no icon.
   approvals = lib.mapAttrs
     (_: c: { inherit (c.approvals) gatedOption blockedTitle blockedHint; })
     (lib.filterAttrs (_: c: c.approvals != null) contribs);

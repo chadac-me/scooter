@@ -1,13 +1,7 @@
 """The structured-logging formatter: shape, extras merging, and error capture.
 
-These guard the properties the convention actually depends on — a constant `msg`
-with values as fields, a `conversation_id` spelled exactly that way, and a line
-that survives values json.dumps would choke on.
-
-They run parameterized over more than one service name because the whole point
-of this module living in `scooter_lib` is that `service` and the `component`
-prefix are parameters: a test that only ever says "webhooks" would not catch a
-constant re-hardcoded in the formatter.
+Parameterized over more than one service name, since `service` and the `component`
+prefix are parameters of the formatter.
 """
 
 import json
@@ -50,7 +44,7 @@ def _emit(record, service="webhooks") -> dict:
 
 @pytest.fixture(autouse=True)
 def _clean_root_handlers():
-    """configure_logging touches the root logger; don't leak that between tests."""
+    """configure_logging touches the root logger, so restore it between tests."""
     root = logging.getLogger()
     before = list(root.handlers)
     level = root.level
@@ -88,13 +82,13 @@ def test_component_comes_from_extra():
 @pytest.mark.parametrize(
     "service,name,expected",
     [
-        # The prefix stripped is the SERVICE's own package, not a constant.
+        # The prefix stripped is the service's own package.
         ("webhooks", "webhooks.responses.jira", "responses.jira"),
         ("broker", "broker.providers.aws", "providers.aws"),
         ("scheduler", "scheduler.spawn", "spawn"),
         # A third-party record keeps its own name whatever the service is.
         ("broker", "uvicorn.error", "uvicorn.error"),
-        # ...and so does another service's logger: only OUR prefix comes off.
+        # Only our own prefix comes off another service's logger.
         ("broker", "webhooks.responses.jira", "webhooks.responses.jira"),
     ],
 )
@@ -105,15 +99,13 @@ def test_component_falls_back_to_the_logger_name_minus_the_service_package(
 
 
 def test_component_prefix_can_be_overridden_for_a_contrib():
-    # A contrib's modules are not under the service's package, so it names its own.
     formatter = JsonFormatter("broker", component_prefix="acme_provider.")
     out = json.loads(formatter.format(_record(name="acme_provider.transports.x")))
     assert out["component"] == "transports.x"
 
 
 def test_level_is_the_records_severity():
-    # warn/error, NOT Python's WARNING/CRITICAL. The level VALUE has to match the other
-    # services or the natural cross-service query (level="warn") silently misses this one.
+    # The level value matches the other services, not Python's WARNING/CRITICAL.
     assert _emit(_record(level=logging.ERROR))["level"] == "error"
     assert _emit(_record(level=logging.WARNING))["level"] == "warn"
     assert _emit(_record(level=logging.CRITICAL))["level"] == "error"
@@ -137,13 +129,10 @@ def test_extras_are_merged_as_top_level_fields():
 
 
 def test_extras_cannot_clobber_the_envelope():
-    # A field named `level` or `service` in an extra must NOT rewrite the
-    # severity or the service of the line.
     out = _emit(_record(level=logging.ERROR, extra={"level": "debug", "service": "not-webhooks"}))
     assert out["level"] == "error"
     assert out["service"] == "webhooks"
-    # ...and the caller's values are RENAMED, not dropped. Dropping loses data silently:
-    # the caller passed them deliberately and gets no indication they vanished.
+    # The caller's values are renamed, not dropped.
     assert out["field_level"] == "debug"
     assert out["field_service"] == "not-webhooks"
 
@@ -179,8 +168,6 @@ def test_an_unserializable_value_does_not_lose_the_line():
 
 
 def test_a_circular_value_does_not_lose_the_line():
-    # The depth guard earns its keep here: a naive recursive coercion blows the
-    # stack and takes the whole line with it.
     loop: dict = {}
     loop["self"] = loop
     out = _emit(_record("thing happened", extra={"loop": loop}))
@@ -218,7 +205,7 @@ def test_an_explicit_error_extra_wins_over_exc_info_but_still_gets_the_stack():
 
 
 def test_stack_info_lands_in_its_own_field():
-    # stack_info is the CALL site, a different question from the traceback.
+    # stack_info is the call site, a different question from the traceback.
     out = _emit(_record(stack_info="Stack (most recent call last):\n  <call site>"))
     assert "<call site>" in out["stack"]
     assert "error" not in out
@@ -237,18 +224,16 @@ def test_format_error_of_none_is_empty():
 
 
 def test_format_error_falls_back_to_repr_for_empty_httpx_errors():
-    # THE reason this helper exists: several httpx transport exceptions
-    # stringify to "", so f"failed: {e}" renders an unattributable line.
+    # Several httpx transport exceptions stringify to "".
     e = httpx.ConnectError("")
     assert str(e) == ""
     out = format_error(e)
     assert out["type"] == "ConnectError"
-    assert out["message"]  # NOT empty
+    assert out["message"]
 
 
 def test_format_error_lifts_the_status_off_an_http_status_error():
-    # httpx hangs the Response off the exception rather than carrying a status
-    # itself — the most common error shape in the webhooks service.
+    # httpx hangs the Response off the exception rather than carrying a status itself.
     request = httpx.Request("GET", "https://example.test/x")
     e = httpx.HTTPStatusError("503", request=request, response=httpx.Response(503, request=request))
     out = format_error(e)
@@ -263,8 +248,7 @@ def test_format_error_lifts_a_code():
 
 
 def test_format_error_lifts_a_botocore_client_error_shape():
-    # botocore buries the code in response["Error"]["Code"]; without this the
-    # AccessDenied-vs-NoSuchEntity distinction is only a substring of prose.
+    # botocore buries the code in response["Error"]["Code"].
     class ClientError(Exception):
         response = {
             "Error": {"Code": "AccessDenied", "Message": "nope"},
@@ -297,7 +281,7 @@ def test_format_error_survives_a_cyclic_cause_chain():
     b = ValueError("b")
     a.__cause__ = b
     b.__cause__ = a
-    out = format_error(a)  # must terminate rather than recurse forever
+    out = format_error(a)
     assert out["type"] == "ValueError"
 
 
@@ -383,8 +367,7 @@ def test_configure_logging_does_not_stack_handlers(monkeypatch):
 
 
 def test_configure_logging_leaves_a_foreign_handler_alone(monkeypatch):
-    # pytest's caplog is a StreamHandler SUBCLASS; nuking every root handler
-    # (what one of the copies this replaced did) silently kills test capture.
+    # pytest's caplog is a StreamHandler subclass, so removing every root handler would kill test capture.
     class ForeignHandler(logging.StreamHandler):
         pass
 

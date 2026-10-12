@@ -1,14 +1,7 @@
 /**
- * BYOC controller entrypoint — binds the pure HTTP surface (server.ts) to node:http, and the
- * container sockets to `ws`.
- *
- * Deliberately thin: routing, auth, and relay semantics all live in tested modules, and everything
- * here is the part that genuinely needs a socket. See todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §L/§M.
- *
- * SINGLE REPLICA (§L decision 3). One process owns every container socket, so there is no
- * cross-replica socket problem at all. A restart drops the sockets and the containers reconnect on
- * their own (`--restart always` + backoff). Do not scale this without revisiting §L — multi-replica
- * reintroduces exactly the "which pod holds the socket" bug this design exists to delete.
+ * BYOC controller entrypoint, binding the pure HTTP surface (server.ts) to node:http and
+ * the container sockets to `ws`. It runs as a single replica: one process owns every
+ * container socket, a restart drops them, and the containers reconnect on their own.
  */
 
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -28,9 +21,7 @@ import {
 
 const PORT = Number(process.env.PORT ?? 8080);
 const SECRET = process.env.BYOC_JOIN_SECRET ?? "";
-// Assemble the DSN from parts, the way webhooks/broker/scheduler do: the platform's postgres-init
-// provisions a db + role and writes only a `password` secret, never a full DSN. DATABASE_URL is
-// still honoured so a local run can point at anything.
+// Assemble the DSN from parts, since postgres-init writes only a `password` secret; DATABASE_URL is still honoured.
 const DSN =
   process.env.DATABASE_URL ??
   (process.env.DB_HOST
@@ -44,17 +35,13 @@ if (!SECRET) {
   process.exit(1);
 }
 
-// Durable owner->session mapping when a DSN is configured; in-memory otherwise (local dev). The
-// SOCKET is always in-memory either way — see sessionRegistry's header for why that split is
-// deliberate rather than a limitation.
+// Durable owner->session mapping when a DSN is configured, in-memory otherwise; the socket is always in-memory.
 const store = DSN ? createPgSessionStore({ dsn: DSN }) : createMemorySessionStore();
 if (!DSN) console.warn("[byoc] no DATABASE_URL — owner->session mapping will NOT survive a restart");
 
 const registry = createSessionRegistry({ store, secret: SECRET });
 const relay = createRunRelay({ registry });
-// Device identities (§P) — what lets a laptop reconnect after sleeping without a fresh
-// 10-minute join token. Without this the controller answers /byoc/devices with
-// "device auth not enabled", which is exactly what a live registration attempt hit.
+// Device identities let a laptop reconnect without a fresh join token.
 const deviceStore = DSN ? createPgDeviceStore({ dsn: DSN }) : createMemoryDeviceStore();
 const devices = createDeviceAuth({ store: deviceStore, secret: SECRET });
 
@@ -71,11 +58,9 @@ const readBody = async (req: IncomingMessage): Promise<unknown> => {
   }
 };
 
-/** The identity the authed surface passes down. In-cluster callers (agent-hosts) have none, and the
- *  mint route is the only one that requires it. */
+/** The identity the authed surface passes down; in-cluster callers have none. */
 const userFrom = (req: IncomingMessage): { id: string } | undefined => {
-  // Set by the ingress auth proxy (same headers the agent-host trusts). Absent on the
-  // unauthenticated /byoc/ ingress, which is exactly why mint is not served there.
+  // Set by the ingress auth proxy and absent on the unauthenticated /byoc/ ingress.
   const id = (req.headers["x-auth-request-user"] ?? req.headers["x-forwarded-user"]) as string | undefined;
   return id ? { id } : undefined;
 };
@@ -100,17 +85,9 @@ const http = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
         });
-        // FLUSH THE HEAD IMMEDIATELY. Node buffers the response head until the first write, so
-        // a stream that stays quiet (the INBOUND tunnel stream is quiet until the container
-        // makes an MCP call — possibly minutes) never sends headers at all. Node's fetch
-        // (undici) aborts on its headers timeout, which surfaced as
-        // `[tunnel] inbound stream dropped (reconnecting): TypeError: fetch failed` in a loop:
-        // the agent-host could never hold the stream open, so container-initiated MCP calls
-        // were never served and every BYO tool call timed out. An SSE comment is the standard
-        // way to open the stream without emitting a frame.
+        // Flush the head with an SSE comment, since Node buffers it until the first write and a quiet stream would trip the client's headers timeout.
         res.write(": open\n\n");
-        // Stop pumping if the agent-host goes away mid-run (pod evicted, rollout), or the relay
-        // would write into a dead response for the rest of the run.
+        // Stop pumping if the agent-host goes away mid-run.
         let clientGone = false;
         res.on("close", () => { clientGone = true; });
         for await (const frame of result.stream) {
@@ -125,8 +102,7 @@ const http = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
       res.end(result.json === undefined ? "" : JSON.stringify(result.json));
     } catch (err) {
       console.error("[byoc] request failed:", err);
-      // A thrown handler must not take the process down: this is the one service holding every
-      // user's container socket, so an unhandled error would disconnect the whole fleet.
+      // A thrown handler must not take down the one process holding every container socket.
       if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "internal error" }));
     }
@@ -144,14 +120,9 @@ http.on("upgrade", (req, socket, head) => {
     return;
   }
   const sessionId = decodeURIComponent(m[1]);
-  // The token rides as a query param: a browser-less container cannot set an Authorization header
-  // through every proxy, and this path is unauthenticated at the ingress by design (§L Q3). The
-  // token is short-lived and single-purpose, and the check below is the real gate.
+  // The token rides as a query param because the check below, not the ingress, is the gate.
   const token = url.searchParams.get("token") ?? "";
-  // TWO ways in (§P). A REGISTERED container signs a server-issued nonce and needs no token — that
-  // is what survives a laptop sleeping past the join token's 10-minute life. A first-time container
-  // still presents the join token. Credentials ride the URL because authorization happens at the
-  // UPGRADE, before any application message exists.
+  // A registered container signs a server-issued nonce and needs no token; a first-time container presents the join token.
   const deviceId = url.searchParams.get("deviceId");
   const nonce = url.searchParams.get("nonce");
   const signature = url.searchParams.get("signature");
@@ -165,14 +136,9 @@ http.on("upgrade", (req, socket, head) => {
       `[byoc] upgrade rejected for session ${sessionId} ` +
         `(${deviceId ? `device ${deviceId}` : "join token"}): ${authorized.reason}`,
     );
-    // Record the failure so the SETTINGS UI can show it (via /byoc/status). Owner is
-    // best-effort: a device id maps through the store; an invalid token's claims are decoded
-    // UNVERIFIED — fine for a diagnostic label, never for authorization.
+    // Record the failure so the Settings UI can show it via /byoc/status.
     void api.noteAuthFailure({ deviceId, token, reason: authorized.reason });
-    // Reject by COMPLETING the upgrade and closing with a code + reason: a raw 401 socket
-    // write reaches the ws client as a generic error with no explanation, and the container
-    // fast-loops in silence. Through a real close frame, the reason lands in its log and it
-    // backs off to the slow auth-retry cadence.
+    // Reject by completing the upgrade and closing with a code and reason, so the container logs the cause and backs off to the slow auth-retry cadence.
     wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
       ws.close(4001, `auth rejected: ${authorized.reason}`);
     });
@@ -180,44 +146,32 @@ http.on("upgrade", (req, socket, head) => {
   }
 
   wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-    // Build the adapter ONCE and keep the reference: detachIfCurrent compares by IDENTITY, so
-    // passing a freshly-built object on close would never match the stored socket and the
-    // superseded-close guard would silently do nothing.
+    // Build the adapter once and keep the reference, because detachIfCurrent compares by identity.
     const containerSocket = {
       send: (data: string) => ws.send(data),
       close: (code?: number, reason?: string) => (code ? ws.close(code, reason) : ws.close()),
     };
-    // A device-authenticated container has NO join token to re-verify — attaching by the OWNER the
-    // signature already proved is the whole point of §P 
-    // (a stale URL session id re-attaches to the owner's current session; see the registry).
-    // First-time containers use the token path.
+    // A device-authenticated container attaches by the owner the signature proved; a first-time container uses the token path.
     const attached = deviceId
       ? registry.attachAuthenticated(sessionId, authorized.owner, containerSocket)
       : registry.attach(sessionId, token, containerSocket);
     if (!attached.ok) {
-      // Close with a CODE + REASON. A bare close() surfaces client-side as the opaque
-      // `disconnected (code 1005)` — the container retried forever with nothing in either log
-      // saying why. 4001 = this application's "attach rejected"; the reason names the cause.
+      // Close with a code and reason so the container can log why.
       // eslint-disable-next-line no-console
       console.warn(`[byoc] attach rejected: session=${sessionId} owner=${authorized.owner}: ${attached.reason}`);
       ws.close(4001, `attach rejected: ${attached.reason}`);
       return;
     }
-    // The session ACTUALLY attached — for a device re-attach this can differ from the URL's id.
-    // Every relay wire-up below must use it, or frames route to a dead session.
+    // The session actually attached can differ from the URL's id on a device re-attach, and every relay wire-up below must use it.
     const liveSessionId = attached.sessionId;
     console.log(`[byoc] container attached: session=${liveSessionId} owner=${authorized.owner}`);
-    // CONFIRM the attach to the container. The client waits for exactly this frame to log
-    // "registered as owner … — ready"; without it a fully-authenticated container looks, from
-    // the laptop, like it never finished authenticating (observed live: the only evidence of a
-    // healthy attach was on the SERVER, and the user read the silent client as an auth failure).
+    // Confirm the attach, which the client waits for before logging ready.
     ws.send(JSON.stringify({ type: "connected", payload: { owner: authorized.owner, sessionId: liveSessionId } }));
 
     ws.on("message", (data) => relay.onContainerFrame(liveSessionId, data.toString()));
     ws.on("close", () => {
       console.log(`[byoc] container gone: session=${liveSessionId}`);
-      // Order matters: end the in-flight runs FIRST (so their streams terminate with an error ack
-      // rather than hanging), then release the socket.
+      // End the in-flight runs first so their streams terminate with an error ack, then release the socket.
       relay.onContainerGone(liveSessionId);
       registry.detachIfCurrent(liveSessionId, containerSocket);
     });

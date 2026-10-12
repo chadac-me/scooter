@@ -1,21 +1,8 @@
 /**
- * Hybrid AssetStore — metadata in Postgres, bytes on dedicated PVC.
- *
- * METADATA (conversation_assets table):
- *  - conversation_id, asset_id, mime_type, size_bytes, sha256_hash, created_at
- *  - Queryable, transactional, part of conversation lifecycle
- *  - DELETE from metadata triggers GC of orphaned bytes (future job)
- *
- * BYTES (dedicated PVC at /var/lib/agent-assets):
- *  - Raw image data, keyed by asset_id
- *  - Content-addressed (SHA-256), so identical uploads dedupe
- *  - No metadata duplication, just the blobs
- *
- * WHY:
- *  - Referential integrity (metadata tied to conversation)
- *  - Efficient queries (find all assets, total size, orphans)
- *  - Efficient storage (PVC for blobs, DB for structure)
- *  - Simple GC (delete metadata → cleanup job removes orphaned bytes)
+ * Hybrid AssetStore: metadata in Postgres (conversation_assets: conversation_id,
+ * asset_id, mime_type, size_bytes, sha256_hash, created_at), bytes on a dedicated PVC
+ * keyed by content-addressed asset_id so identical uploads dedupe. Deleting the
+ * metadata is what frees the bytes for a GC job.
  */
 
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
@@ -35,7 +22,7 @@ import { AssetError, ALLOWED_IMAGE_MIME, DEFAULT_ASSET_MAX_BYTES } from "./asset
 const log = logger("hybridAssetStore");
 const { conversationAssets } = agent_host;
 
-/** file extension for a stored blob, from its MIME (for a tidy on-disk name). */
+/** File extension for a stored blob, from its MIME. */
 function extFor(mime: string): string {
   return ({ "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" })[mime] ?? "bin";
 }
@@ -45,11 +32,11 @@ export interface HybridAssetStoreOpts {
   dsn: string;
   /** Override the database handle (tests). */
   db?: NodePgDatabase;
-  /** Root dir for asset BYTES (dedicated PVC, e.g. /var/lib/agent-assets). */
+  /** Root dir for asset bytes (a dedicated PVC, e.g. /var/lib/agent-assets). */
   bytesRoot: string;
-  /** Per-image byte cap. Default DEFAULT_ASSET_MAX_BYTES (5MB). */
+  /** Per-image byte cap; default DEFAULT_ASSET_MAX_BYTES. */
   maxBytes?: number;
-  /** Allowed MIME types. Default ALLOWED_IMAGE_MIME. */
+  /** Allowed MIME types; default ALLOWED_IMAGE_MIME. */
   allowedMime?: Set<string>;
 }
 
@@ -59,9 +46,8 @@ export function createHybridAssetStore(opts: HybridAssetStoreOpts): AssetStore {
   const ownPool = opts.db ? undefined : createPgPool("assetStore", { connectionString: opts.dsn, max: 2 });
   const db: NodePgDatabase = opts.db ?? drizzle(ownPool!);
 
-  // Bytes are stored flat in the root dir, keyed by asset_id (content-addressed).
-  // NOT per-conversation subdirs: asset_id is globally unique (SHA-256), and flat
-  // is simpler for GC (walk the dir, check each id against the metadata table).
+  // Bytes are stored flat in the root dir keyed by the globally unique asset_id, which keeps GC a
+  // simple directory walk.
   const bytesPath = (assetId: string) => join(opts.bytesRoot, assetId);
 
   const urlFor = (id: SessionId, assetId: string) =>
@@ -79,11 +65,11 @@ export function createHybridAssetStore(opts: HybridAssetStoreOpts): AssetStore {
         throw new AssetError("too-large", `image is ${data.length} bytes (max ${maxBytes})`);
       }
 
-      // Content-addressed id (dedupes identical uploads across conversations).
+      // Content-addressed id, so identical uploads dedupe across conversations.
       const hash = createHash("sha256").update(data).digest("hex");
       const assetId = `${hash.slice(0, 32)}.${extFor(mimeType)}`;
 
-      // Write bytes to PVC (idempotent: if the file exists, same content).
+      // Idempotent: an existing file has the same content.
       await mkdir(opts.bytesRoot, { recursive: true });
       const path = bytesPath(assetId);
       if (!existsSync(path)) {
@@ -91,9 +77,8 @@ export function createHybridAssetStore(opts: HybridAssetStoreOpts): AssetStore {
         log.debug("wrote asset bytes", { assetId, bytes: data.length });
       }
 
-      // Write metadata to Postgres (ON CONFLICT DO NOTHING: same conversation pasting
-      // the same image twice is idempotent; different conversations referencing the
-      // same asset_id is the dedup at work).
+      // ON CONFLICT DO NOTHING: re-pasting the same image is idempotent, and another conversation
+      // referencing the same asset_id is the dedup at work.
       await db
         .insert(conversationAssets)
         .values({
@@ -113,11 +98,10 @@ export function createHybridAssetStore(opts: HybridAssetStoreOpts): AssetStore {
     },
 
     async read(conversationId, assetId) {
-      // Guard against path traversal — an assetId is a bare hash.ext, no separators.
+      // Guard against path traversal: an assetId is a bare hash.ext.
       if (assetId.includes("/") || assetId.includes("..")) return null;
 
-      // Check metadata exists for this conversation (authorization: only assets
-      // belonging to this conversation are readable).
+      // Only assets belonging to this conversation are readable.
       const row = await db
         .select({ mimeType: conversationAssets.mimeType })
         .from(conversationAssets)
@@ -127,7 +111,6 @@ export function createHybridAssetStore(opts: HybridAssetStoreOpts): AssetStore {
 
       if (!row) return null;
 
-      // Read bytes from PVC.
       const path = bytesPath(assetId);
       if (!existsSync(path)) {
         log.warn("asset metadata exists but bytes missing (orphaned metadata?)", { conversationId, assetId });
@@ -139,8 +122,7 @@ export function createHybridAssetStore(opts: HybridAssetStoreOpts): AssetStore {
     },
 
     async clear(conversationId) {
-      // Delete metadata rows for this conversation. Orphaned bytes (asset_id on disk
-      // with no referencing metadata) are cleaned by a separate GC job (future).
+      // Orphaned bytes are left for a separate GC job.
       await db.delete(conversationAssets).where(eq(conversationAssets.conversationId, conversationId)).catch((e) => {
         log.error("failed to clear asset metadata", { conversationId, error: e });
       });

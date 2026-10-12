@@ -1,10 +1,7 @@
-# Deployment-INJECTED CLI tools: a stub that builds `path:<dir>#<attr>` from a
-# flake directory MOUNTED INTO THE POD (a deployment's `.scooter/` ConfigMap) on
-# first call. See docs/SCOOTER_DIR_INJECTION.md.
-#
-# Separate from modules/sandbox-os/stubs.nix because a nix-stubs shim needs the
-# package at IMAGE BUILD time to bake its recipe, and an injected flake only
-# exists at runtime. Resolution therefore has to be deferred. See PR #502.
+# Deployment-injected CLI tools: a stub that builds `path:<dir>#<attr>` from a
+# flake directory mounted into the pod on first call. Separate from stubs.nix
+# because a nix-stubs shim needs the package at image build time, and an injected
+# flake only exists at runtime.
 
 { config, lib, pkgs, ... }:
 

@@ -1,7 +1,7 @@
 /**
- * Tier 1 contract — the PVC AssetStore (multimodal images, stage 1). Stores image
- * bytes once, hands back a small assetId + url; enforces the size cap + MIME
- * allow-list; isolates per conversation; guards path traversal.
+ * The PVC AssetStore stores image bytes once and hands back an assetId and url; it
+ * enforces the size cap and MIME allow-list, isolates per conversation, and guards
+ * path traversal.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 import { createPvcAssetStore, AssetError, type AssetStore } from "../../src/session/assetStore.js";
 
-const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]); // "PNG" magic + junk
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]); // the PNG magic plus junk
 
 describe("PVC AssetStore", () => {
   let root: string;
@@ -60,7 +60,7 @@ describe("PVC AssetStore", () => {
 
   it("isolates assets per conversation", async () => {
     const { assetId } = await store.put("c1", { data: PNG, mimeType: "image/png" });
-    expect(await store.read("c2", assetId)).toBeNull(); // not visible from another conversation
+    expect(await store.read("c2", assetId)).toBeNull();
     expect(await store.read("c1", assetId)).not.toBeNull();
   });
 

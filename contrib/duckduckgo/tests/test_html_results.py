@@ -1,11 +1,4 @@
-"""Reading hits off DuckDuckGo's HTML page (scooter_contrib_duckduckgo/html_results.py).
-
-Fixtures are trimmed copies of the real page's shape. The assertions worth having are
-the ones about what the agent is handed — a followable url, no ads — and the three-way
-classification of a page with no hits, which is where the bug this stack removed lived:
-the old tool reported a non-answer as an empty web, so an agent concluded the web had
-nothing rather than that search was broken.
-"""
+"""Reading hits off DuckDuckGo's HTML page, with fixtures trimmed from the real page's shape."""
 
 from __future__ import annotations
 
@@ -34,8 +27,7 @@ REDIRECT = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fkagi.com%2Fapi&amp;rut=abc123
 
 
 def test_a_redirect_wrapped_hit_is_unwrapped_to_its_real_url():
-    """The href DDG writes points at DDG. Handing that to the agent would send
-    `web_fetch` through a tracking redirect instead of to the page it asked for."""
+    """The href DDG writes points at a DDG tracking redirect."""
     hits = hits_from_html(_page(_result(REDIRECT, "Kagi API", "The API docs.")))
     assert [(h.title, h.url, h.snippet) for h in hits] == [
         ("Kagi API", "https://kagi.com/api", "The API docs.")
@@ -48,8 +40,7 @@ def test_a_direct_href_is_taken_as_written():
 
 
 def test_a_sponsored_link_is_dropped():
-    """Ads carry `result__a` like any other hit, so the /y.js path is what tells them
-    apart. The agent asked the web a question, not a marketplace."""
+    """Ads carry `result__a` like any other hit, so the /y.js path is what tells them apart."""
     page = _page(
         _result("//duckduckgo.com/y.js?ad_provider=bing&u3=https%3A%2F%2Fad.test", "Buy"),
         _result("https://real.test/", "Real"),
@@ -58,8 +49,7 @@ def test_a_sponsored_link_is_dropped():
 
 
 def test_markup_inside_a_title_becomes_plain_text():
-    """DDG bolds the query terms. `<b>` tags in a title would read as markup to the
-    model and waste tokens either way."""
+    """DDG bolds the query terms."""
     hits = hits_from_html(_page(_result("https://x.test/", "the <b>kagi</b> api")))
     assert hits[0].title == "the kagi api"
 
@@ -81,8 +71,7 @@ def test_the_result_list_is_capped_like_every_other_provider():
 
 
 def test_a_result_with_no_snippet_keeps_the_others_snippets():
-    """The parser attaches a snippet to the open row, so a result without one must not
-    inherit the next result's."""
+    """A result without a snippet must not inherit the next result's."""
     page = _page(
         _result("https://a.test/", "A"),
         _result("https://b.test/", "B", "B's summary"),
@@ -107,13 +96,10 @@ def test_the_bot_check_page_is_BLOCKED():
 
 
 def test_anything_else_is_UNRECOGNIZED_and_therefore_a_failure():
-    """The default must be failure, not emptiness: a page we cannot read is evidence
-    about this scraper, not about the web. This is the inverse of the bug in PR #698."""
+    """A page we cannot read is evidence about this scraper, not about the web."""
     assert classify("<html><body><h1>Welcome to your WiFi portal</h1></body></html>") == "unrecognized"
 
 
 def test_blocked_OUTRANKS_no_results():
-    """The two mistakes are not symmetric. Calling a block "empty" tells the agent the
-    web had nothing — the #698 failure exactly — while calling an empty result set a
-    failure only makes it report a problem it could have ignored."""
+    """Calling a block "empty" tells the agent the web had nothing, the worse mistake."""
     assert classify('<div class="no-results">No results.</div><script src="anomaly.js">') == "blocked"

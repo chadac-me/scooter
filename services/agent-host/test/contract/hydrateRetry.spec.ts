@@ -1,16 +1,14 @@
 /**
- * Tier 1 contract test — the startup hydrate retry budget.
- *
- * Startup refuses to serve on a stale view, so a hydrate that never succeeds MUST still
- * exit. The budget is what separates "the dependency is cold" from "the dependency is
- * broken", and it is wall-clock: see hydrateWithRetry.
+ * The startup hydrate retry budget. Startup refuses to serve on a stale view, so a
+ * hydrate that never succeeds must still exit; the wall-clock budget separates a cold
+ * dependency from a broken one.
  */
 
 import { describe, it, expect, vi } from "vitest";
 
 import { hydrateWithRetry, HYDRATE_BUDGET_MS } from "../../src/index.js";
 
-/** A logger that records instead of printing (errorWith takes the error as arg 2). */
+/** A logger that records instead of printing. */
 const recorder = () => {
   const warns: Record<string, unknown>[] = [];
   const errors: Record<string, unknown>[] = [];
@@ -25,7 +23,7 @@ const recorder = () => {
   };
 };
 
-/** Virtual clock: sleep() advances `now` instead of waiting, so a 60s budget is instant. */
+/** A virtual clock whose sleep() advances `now` instead of waiting. */
 const virtualClock = () => {
   let t = 0;
   return {
@@ -50,10 +48,7 @@ describe("hydrateWithRetry", () => {
   });
 
   it("OUTLASTS a dependency that is cold for 20s — the case that crashed agent-host at every cold bring-up", async () => {
-    // The regression: Postgres accepted connections ~20s after the pod started, and the old
-    // budget (5 attempts, 250ms doubling = 3.75s of wall clock) expired first. So a NORMAL
-    // cold bring-up logged `fatal` and depended on the kubelet restart to come up — which
-    // made restarts=1 routine and therefore useless as a signal that something had crashed.
+    // Postgres accepts connections roughly 20s after the pod starts on a cold bring-up.
     const { log, errors } = recorder();
     const clock = virtualClock();
     const COLD_UNTIL_MS = 20_000;
@@ -64,12 +59,10 @@ describe("hydrateWithRetry", () => {
     await expect(hydrateWithRetry(hydrate, log, { now: clock.now, sleep: clock.sleep }))
       .resolves.toBeUndefined();
 
-    expect(errors).toHaveLength(0); // never reached the fatal path
+    expect(errors).toHaveLength(0);
     expect(clock.elapsed()).toBeGreaterThanOrEqual(COLD_UNTIL_MS);
 
-    // NEGATIVE CONTROL, so this test cannot pass for the wrong reason: the same cold
-    // dependency against the old 3.75s budget must still fail. Without this, a regression
-    // that shrank the budget back would leave the assertions above satisfied by luck.
+    // Negative control: the same cold dependency against a 3.75s budget must still fail.
     const old = virtualClock();
     const coldAgain = vi.fn(async () => {
       if (old.now() < COLD_UNTIL_MS) throw new Error("ECONNREFUSED");
@@ -94,14 +87,12 @@ describe("hydrateWithRetry", () => {
 
     expect(errors).toHaveLength(1);
     expect(errors[0].budget_ms).toBe(HYDRATE_BUDGET_MS);
-    // Bounded by the budget: refusing to serve is only correct if it actually happens.
+    // Bounded by the budget.
     expect(clock.elapsed()).toBeLessThan(HYDRATE_BUDGET_MS);
   });
 
   it("caps the backoff so the budget buys attempts rather than sleep", async () => {
-    // An uncapped 250ms·2^n curve reaches 64s on attempt 9, so the budget would be spent
-    // almost entirely inside one sleep: few attempts, and the last one landing nowhere near
-    // the deadline.
+    // An uncapped doubling curve would spend the budget almost entirely inside one sleep.
     const { log, warns } = recorder();
     const clock = virtualClock();
     const hydrate = vi.fn().mockRejectedValue(new Error("nope"));

@@ -1,22 +1,15 @@
 { pkgs, lib, n2c, ui, contribManifest ? null, ... }:
 
 # OCI image for the conversation UI: nginx serving the static assistant-ui build
-# and reverse-proxying the agent-host API (and the broker's /s/ shares) on the
-# same origin.
+# and reverse-proxying the agent-host API and the broker's /s/ shares on the same
+# origin.
 #
-# The browser loads the SPA from /, and its AG-UI client calls relative paths
-# (/agui SSE, /sessions, /conversations, /models, /whoami, /scheduled-tasks) —
-# nginx forwards those to the agent-host Service. AGENT_HOST_URL is templated in
-# at container start. Every agent-host API prefix the UI calls needs a `location`
-# here; a missing one falls through to the SPA handler (GET→index.html, write→405).
-#
-# /s/<uuid>/ (published static shares) is forwarded to the BROKER instead, keeping
-# the broker cluster-internal — it must never be exposed at the ingress. BROKER_URL
-# is templated in the same way.
+# AGENT_HOST_URL and BROKER_URL are templated in at container start. Every
+# agent-host API prefix the UI calls needs a `location` here, because a missing
+# one falls through to the SPA handler (GET returns index.html, writes 405).
 
 let
-  # nginx needs these dirs writable at runtime + a passwd with the worker user
-  # (it getpwnam("nobody")s on start; the minimal image has no /etc/passwd).
+  # Runtime-writable dirs plus the passwd entries nginx looks up on start.
   nginxDirs = pkgs.runCommand "ui-nginx-dirs" { } ''
     mkdir -p $out/var/log/nginx $out/var/cache/nginx $out/tmp $out/var/run $out/etc
     chmod 1777 $out/tmp
@@ -26,8 +19,7 @@ let
     echo 'nogroup:x:65534:' >> $out/etc/group
   '';
 
-  # nginx.conf with the agent-host placeholders (derived from ${AGENT_HOST_URL}) and the
-  # broker/collector URLs substituted at start.
+  # nginx.conf with the upstream placeholders substituted at start.
   nginxConfTemplate = pkgs.writeText "nginx.conf.template" ''
     worker_processes auto;
     error_log /dev/stderr warn;
@@ -38,18 +30,15 @@ let
       default_type application/octet-stream;
       access_log /dev/stdout;
       sendfile on;
-      # SSE needs buffering off + long read timeouts (agent runs are slow).
+      # SSE needs buffering off and long read timeouts.
       proxy_http_version 1.1;
       proxy_read_timeout 3600s;
       proxy_buffering off;
-      # WebSocket upgrade passthrough for the /c/ web-service proxy (marimo kernel,
-      # xterm PTY, vscode RPC): "upgrade" when the client requests it, else "".
+      # WebSocket upgrade passthrough for the proxied web services.
       map $http_upgrade $connection_upgrade { default upgrade; "" ""; }
 
-      # Keep-alive pool to the agent-host. `proxy_set_header Connection ""` alone does
-      # NOT pool: nginx only reuses an upstream connection that came from an upstream{}
-      # group with `keepalive`, so every proxied request opened and closed its own socket
-      # and the UI's /conversations polling exhausted ephemeral ports. Why: PR #553.
+      # nginx only pools upstream connections from an upstream{} group with
+      # `keepalive`.
       upstream agent_host {
         server ''${AGENT_HOST_SERVER};
         keepalive 32;
@@ -62,10 +51,8 @@ let
         root ${ui};
         index index.html;
 
-        # Agent-host API — same-origin reverse proxy. /agui and /conversations
-        # carry SSE (POST /agui, GET /conversations/:id/events[.integrity]), so
-        # they MUST disable buffering and use HTTP/1.1 keep-alive or events would
-        # be batched/withheld and the live UI stream would stall.
+        # /agui and /conversations carry SSE, so they disable buffering and use
+        # HTTP/1.1 keep-alive.
         location /agui {
           proxy_pass ''${AGENT_HOST_PROXY};
           proxy_set_header Host $host;
@@ -82,45 +69,29 @@ let
           proxy_buffering off;
           proxy_read_timeout 3600s;
         }
-        # BROWSER TELEMETRY. The UI posts OTLP/HTTP here; nginx forwards it to the
-        # cluster's Alloy collector, which ships traces to Grafana Cloud Tempo.
-        #
-        # Proxied SAME-ORIGIN rather than sent to the collector directly, because
-        # that is what keeps this behind the ingress auth: the browser holds no
-        # telemetry credential, and a vendor change (Grafana -> Datadog) is a
-        # collector-side config change with no UI rebuild.
-        #
-        # Buffering ON (unlike /agui): these are small batched POSTs, not a
-        # stream. When OTEL_COLLECTOR_URL is unset this returns 204 and discards
-        # the payload, so a deployment without a collector is not an error.
+        # Browser telemetry, proxied same-origin so it stays behind the ingress
+        # auth; with no collector configured it returns 204.
         location /telemetry/ {
           proxy_pass ''${OTEL_COLLECTOR_URL}/;
           proxy_set_header Host $host;
-          # Telemetry must never delay or break the page: fail fast and stay quiet.
+          # Telemetry must never delay the page, so fail fast.
           proxy_connect_timeout 2s;
           proxy_read_timeout 5s;
           proxy_intercept_errors on;
           error_page 500 502 503 504 = @telemetry_sink;
         }
-        # Swallow collector failures (and stand in when none is configured) so the
-        # browser sees success and does not retry into a hole.
+        # Swallows collector failures so the browser does not retry.
         location @telemetry_sink { return 204; }
 
-        # RUNTIME telemetry config. The UI image is built ONCE and deployed to clusters
-        # that may or may not have a collector, so this cannot be a build-time VITE_ flag
-        # baked into the bundle. The UI fetches this on load and stays inert unless
-        # enabled is true. Must be matched BEFORE `location /telemetry/` above would
-        # proxy it to the collector — nginx prefers an exact match, so `= ` does that.
+        # Runtime telemetry config the UI fetches on load; the exact match beats
+        # `location /telemetry/`.
         location = /telemetry/config.json {
           default_type application/json;
           return 200 '{"enabled":''${TELEMETRY_ENABLED},"sampleRatio":''${TELEMETRY_SAMPLE_RATIO}}';
         }
 
-        # The enabled contribs' UI metadata, fetched at load. A separate FILE, not
-        # part of the bundle: changing a deployment's contrib set then relinks this
-        # layer instead of re-running vite. Exact match so it beats the SPA handler,
-        # which would answer index.html and make a missing manifest look like a
-        # parse error rather than "no contribs". Why: PR #601.
+        # The enabled contribs' UI metadata, fetched at load; the exact match beats
+        # the SPA handler.
         location = /contrib/manifest.json {
           default_type application/json;
           ${if contribManifest == null
@@ -128,31 +99,19 @@ let
             else "alias ${contribManifest};"}
         }
 
-        # `Connection ""` on every agent-host location, not just the SSE ones: it clears
-        # the hop-by-hop `close` nginx would otherwise send, which is what lets the
-        # upstream{} pool above actually reuse the connection.
+        # `Connection ""` clears the hop-by-hop `close` so the upstream{} pool can
+        # reuse the connection.
         location /sessions      { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
         location /models        { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
-        # The caller's identity (used by the UI for the Mine/All filter + the user
-        # badge). MUST be proxied — otherwise it falls through to `location /` and
-        # returns index.html instead of the JSON, and the badge/filter break. The
-        # ingress-injected identity headers (x-auth-* or x-amzn-oidc-*) pass through
-        # by default (only Host is overridden).
+        # The caller's identity; the ingress-injected identity headers pass through.
         location /whoami        { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
-        # Scheduled-tasks CRUD (the Settings page). MUST be proxied — otherwise it
-        # falls through to `location /`, where GET returns index.html (200) and any
-        # POST/PATCH/DELETE hits the static handler and 405s. (This is the /whoami
-        # bug class: an agent-host API path missing a proxy location.)
+        # Scheduled-tasks CRUD for the Settings page.
         location /scheduled-tasks { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
-        # The settings Users page lists learned users (/users); also covers the
-        # webhooks reverse lookup (/users/by-email). Same proxy-or-405 rule as above.
+        # The Users page listing and the webhooks reverse lookup (/users/by-email).
         location /users         { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
 
-        # Bring-your-own-Claude (Increment 2): /remote-agent/status + /remote-agent/join-token are
-        # JSON (Settings section), and /remote-agent/connect is a persistent WebSocket the user's
-        # container dials in on — so this needs the WS-upgrade headers + no buffering + a long read
-        # timeout (like /c/). Same proxy-or-405 rule: without this location, /remote-agent/* falls
-        # through to `location /` (SPA HTML on GET, 405 on the POST).
+        # /remote-agent/connect is a persistent WebSocket the user's container
+        # dials, so this needs the upgrade headers and no buffering.
         location /remote-agent {
           proxy_pass ''${AGENT_HOST_PROXY};
           proxy_set_header Host $host;
@@ -163,10 +122,8 @@ let
           proxy_read_timeout 3600s;
         }
 
-        # Web-service reverse proxy: /c/<id>/<service>/... -> the agent-host, which
-        # resolves the conversation's pod and forwards to the in-pod service. Needs
-        # WebSocket upgrade (marimo kernel / xterm PTY / vscode RPC) and no
-        # buffering. The agent-host owns id->pod resolution + the (existing) auth.
+        # Web-service proxy: /c/<id>/<service>/... goes to the agent-host, which
+        # resolves the pod and forwards with WebSocket upgrade.
         location /c/ {
           proxy_pass ''${AGENT_HOST_PROXY};
           proxy_set_header Host $host;
@@ -175,59 +132,44 @@ let
           proxy_set_header Connection $connection_upgrade;
           proxy_buffering off;
           proxy_read_timeout 3600s;
-          # ROLLOUT UX: while agent-host is rolling there is nothing to dial, and the
-          # failure escaped as nginx's bare 502 page in the user's service tab. These are
-          # NGINX-GENERATED errors only (dial refused / upstream gone) — deliberately no
-          # proxy_intercept_errors, so a legitimate 5xx BODY from an in-pod service still
-          # reaches the client untouched. The page below self-retries.
+          # Only nginx-generated errors are caught (no proxy_intercept_errors), so
+          # an in-pod service's own 5xx body still reaches the client.
           error_page 502 503 504 = @service_retry;
         }
 
-        # A branded, self-retrying unavailability page for the web-service proxy. 503 +
-        # Retry-After is the honest status (the service exists; its backend is rolling);
-        # the meta refresh makes a user-facing tab recover on its own, and a
-        # programmatic caller sees a clean 503 instead of an HTML 502.
+        # A self-retrying 503 page shown while the agent-host is rolling.
         location @service_retry {
           default_type text/html;
           add_header Retry-After 3 always;
           return 503 '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3"><title>Scooter</title><style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#111;color:#eee}div{text-align:center}p{color:#999}</style></head><body><div><h1>Scooter is updating</h1><p>This service is briefly unavailable while the platform redeploys.<br>Retrying automatically&hellip;</p></div></body></html>';
         }
 
-        # Static shares (broker.shares): /s/<uuid>/... -> the broker, which serves
-        # the published bundle from its Postgres store. Proxied SAME-ORIGIN so the
-        # broker stays cluster-internal (it vends credentials + brokers provider
-        # APIs — it must never be exposed at the ingress) and so ShareEmbed's
-        # relative /s/ iframe resolves. The broker serves /s/ UNAUTHENTICATED by
-        # design (the UUID is the capability), and it 404s when shares is disabled,
-        # so this location is always safe to ship. Buffering ON (static assets, not
-        # a stream); the broker sets its own Content-Type + frame-ancestors CSP,
-        # which pass through since only Host is overridden. Why: PR for shares
-        # serving path.
+        # Static shares go to the broker, proxied same-origin so the broker stays
+        # cluster-internal; the UUID is the capability and the broker 404s when
+        # shares is disabled.
         location /s/ {
           proxy_pass ''${BROKER_URL};
           proxy_set_header Host $host;
           proxy_buffering on;
         }
 
-        # SPA: serve the app, fall back to index.html for client routes.
+        # SPA fallback to index.html for client routes.
         location / { try_files $uri $uri/ /index.html; }
       }
     }
   '';
 
-  # Entry script: derive the agent-host placeholders from AGENT_HOST_URL, substitute
-  # them into the conf, then exec nginx.
+  # Derives the placeholders from the env, substitutes them into the conf, then
+  # execs nginx.
   entrypoint = pkgs.writeShellScript "ui-entrypoint" ''
     set -e
     : "''${AGENT_HOST_URL:=http://agent-host:8080}"
-    # Split AGENT_HOST_URL into what upstream{} and proxy_pass each need: an upstream
-    # `server` takes a bare host:port (no scheme), and only a named upstream group can
-    # pool connections. Keeping AGENT_HOST_URL as the deployment's single knob.
+    # An upstream `server` takes a bare host:port, so split the scheme off.
     agent_host_scheme="''${AGENT_HOST_URL%%://*}"
     agent_host_authority="''${AGENT_HOST_URL#*://}"
     if [ "$agent_host_scheme" = "$AGENT_HOST_URL" ]; then agent_host_scheme=http; fi
     agent_host_authority="''${agent_host_authority%%/*}"
-    # An upstream `server` with no port defaults to 80 even for https, so be explicit.
+    # An upstream `server` with no port defaults to 80 even for https.
     case "$agent_host_authority" in
       *:[0-9]*) ;;
       *) if [ "$agent_host_scheme" = https ]; then agent_host_authority="$agent_host_authority:443"; else agent_host_authority="$agent_host_authority:80"; fi ;;
@@ -235,19 +177,11 @@ let
     AGENT_HOST_SERVER="$agent_host_authority"
     AGENT_HOST_PROXY="$agent_host_scheme://agent_host"
     export AGENT_HOST_SERVER AGENT_HOST_PROXY
-    # Where nginx forwards /s/ (static shares). Defaults to the in-namespace broker
-    # Service; the deployment overrides it with the fully-qualified svc address.
+    # Where nginx forwards /s/.
     : "''${BROKER_URL:=http://agent-broker:8080}"
-    # Telemetry is ON only when a collector was ACTUALLY configured. Decide BEFORE the
-    # placeholder default below is applied, or every deployment would look configured.
-    #
-    # The kubenix module asserts this at eval (browserTelemetry.enable requires a
-    # collectorUrl), so a missing URL here means the image is running outside that module
-    # — dev, or a hand-rolled deploy. Degrade quietly rather than fail: the UI just never
-    # turns telemetry on, and /telemetry/ 204s anything that reaches it anyway.
+    # Decide telemetry before the placeholder default below is applied.
     if [ -n "''${OTEL_COLLECTOR_URL:-}" ]; then TELEMETRY_ENABLED=true; else TELEMETRY_ENABLED=false; fi
-    # Unreachable loopback so the proxy fails fast into @telemetry_sink's 204 rather than
-    # hanging or 502ing if something posts to /telemetry/ regardless.
+    # An unreachable loopback so the proxy fails fast into @telemetry_sink.
     : "''${OTEL_COLLECTOR_URL:=http://127.0.0.1:1}"
     : "''${TELEMETRY_SAMPLE_RATIO:=1}"
     export TELEMETRY_ENABLED TELEMETRY_SAMPLE_RATIO
@@ -258,8 +192,7 @@ let
   image = n2c.buildImage {
     name = "agent-sandbox-ui";
     tag = "latest";
-    # Split nginx (stable) from the static build (changes on every UI edit) so a
-    # UI change only re-pushes the small dist layer, not nginx + its deps.
+    # Keeps nginx and the static build in separate layers.
     maxLayers = 25;
     copyToRoot = [
       (pkgs.buildEnv {
@@ -273,9 +206,9 @@ let
       Entrypoint = [ "${entrypoint}" ];
       Env = [
         "AGENT_HOST_URL=http://agent-host:8080"
-        # /s/ static-share proxy target; the deployment overrides with the FQ svc.
+        # The /s/ proxy target.
         "BROKER_URL=http://agent-broker:8080"
-        # Unset by default: no collector => /telemetry/ 204s and discards.
+        # Unset means /telemetry/ 204s and discards.
         "OTEL_COLLECTOR_URL="
       ];
       ExposedPorts = { "8080/tcp" = { }; };

@@ -1,18 +1,8 @@
-# ONE-TIME migration: legacy per-pod RWO conversation state → the shared history mirror.
-#
-# The rollout-drain work moved agent-host storage from a per-pod RWO PVC
-# (`state-agent-host-<n>`, StatefulSet era) to an emptyDir hot cache + a shared RWX mirror
-# (`agent-host-history`). A user upgrading in place has all their conversation history on the
-# OLD RWO PVCs; after the switch to emptyDir those pods start empty and the mirror is new/empty,
-# so the legacy conversations are STRANDED (not on the mirror → never revivable → invisible +
-# unreachable). This renders a one-shot Job that copies each legacy PVC's `conversations/` tree
-# into the mirror's `conversations/` (identical on-disk format, just a different volume).
-#
-# EPHEMERAL: run it once during the cutover (agent-host scaled to 0 so nothing writes the old
-# PVCs mid-copy), verify, then set the flag back off (and later delete the old PVCs). It is
-# idempotent (cp -an = no-clobber), so a re-run only copies what's missing.
-#
-# See todo/docs/LEGACY_CONVERSATION_MIGRATION.md.
+# One-time migration of legacy per-pod RWO conversation state (`state-agent-host-<n>`)
+# into the shared history mirror (`agent-host-history`), as a one-shot Job that
+# copies each legacy PVC's `conversations/` tree. Run it once during the cutover
+# with agent-host scaled to 0, then turn the flag back off; a re-run only copies
+# what is missing.
 
 { config, lib, ... }:
 
@@ -21,12 +11,8 @@ let
   mcfg = cfg.legacyStateMigration;
   ns = cfg.namespace;
 
-  # Mount each legacy RWO PVC read-only at /legacy/<pvc>, and the shared mirror rw at /mirror.
-  # For each, copy conversations/* into the mirror (no-clobber so a conv already on the mirror —
-  # e.g. one that went live during a partial migration — is never overwritten with older data).
-  # NOTE: busybox `cp` does NOT support the GNU `cp -a src/. dst/` contents-copy idiom (it
-  # silently no-ops), so copy each conversation DIR by glob. -a preserves; we skip a conversation
-  # already on the mirror (no-clobber) by testing existence first (busybox `cp -n` is unreliable).
+  # Copy each conversation dir by glob (busybox `cp` lacks the GNU contents-copy
+  # idiom), skipping any already on the mirror by testing existence first.
   copyScript = ''
     set -eu
     mkdir -p /mirror/conversations
@@ -41,7 +27,7 @@ let
         [ -d "$conv" ] || continue
         name=$(basename "$conv")
         if [ -e "/mirror/conversations/$name" ]; then
-          skipped=$((skipped + 1)) # already on the mirror (e.g. it went live during migration)
+          skipped=$((skipped + 1)) # already on the mirror
         else
           cp -a "$conv" /mirror/conversations/
           copied=$((copied + 1))
@@ -80,7 +66,7 @@ in
         backoffLimit = 2;
         template.spec = {
           restartPolicy = "OnFailure";
-          # fsGroup 0 so the copy can read the RWO PVCs (owned root:root, like the state PVC was).
+          # fsGroup 0 so the copy can read the root-owned legacy PVCs.
           securityContext = { fsGroup = 0; fsGroupChangePolicy = "OnRootMismatch"; };
           containers.copy = {
             name = "copy";

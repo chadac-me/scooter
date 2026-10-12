@@ -1,7 +1,4 @@
-"""The broker's explicit /link endpoints — the agent-facing complement to the
-auto-link injector. An agent (via `agent-broker link ...`) can attach a link the
-injector missed and list what's currently linked. The conversation is always
-taken from the caller's SA token, never a request field."""
+"""The broker's explicit /link endpoints, where the conversation is always taken from the caller's SA token."""
 
 from __future__ import annotations
 
@@ -44,7 +41,7 @@ def test_post_link_forwards_to_agent_host(monkeypatch):
 
     assert resp.status_code == 201
     assert resp.json() == {"status": "linked"}
-    # conversation comes from the token, not the body
+    # The conversation comes from the token, not the body.
     assert captured["conv"] == "conv-link1"
     assert captured["link"].url == "https://x/pull/1"
     assert captured["link"].resource_type == "pr"
@@ -106,7 +103,7 @@ def test_get_link_maps_agent_host_error_to_502(monkeypatch):
 
 
 def test_link_endpoints_require_auth():
-    # No dependency override -> real authenticate rejects an unauthenticated caller.
+    # Without the dependency override the real authenticate runs.
     app = create_app()
     client = TestClient(app)
     assert client.get("/link").status_code in (401, 403)

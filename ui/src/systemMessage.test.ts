@@ -1,8 +1,8 @@
 /**
- * Unit test — parseSystemMessage: the discriminator + parser for a spliced-in
- * SYSTEM event (rendered inline in the thread as a collapsed chip). A message is a
- * system event iff its id starts with `sys:` AND its text starts with the marker;
- * the source is the first line, the body is the rest.
+ * parseSystemMessage: the discriminator and parser for a spliced-in SYSTEM event
+ * (rendered inline in the thread as a collapsed chip). A message is a system event
+ * iff its id starts with `sys:` and its text starts with the marker; the source is
+ * the first line, the body is the rest.
  */
 
 import { describe, it, expect } from "vitest";

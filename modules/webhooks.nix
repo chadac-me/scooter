@@ -1,12 +1,10 @@
-# Webhooks — Deployment + Service + (optional) Ingress.
+# Webhooks: Deployment, Service and optional Ingress.
 #
 # Receives provider webhooks (GitHub/GitLab/Jira/Slack) and spawns agent
-# conversations via the agent-host /agui. Must be publicly reachable for
-# providers to call it → a Traefik ingress (gated; in-cluster tests don't need
-# it). Providers authenticate by SIGNATURE (HMAC), so the ingress is
-# deliberately UNAUTHENTICATED — do NOT attach a basic-auth middleware or
-# GitHub/Slack deliveries would be rejected before signature checks run.
-# See docs/WEBHOOKS.md + services/webhooks/.
+# conversations via the agent-host /agui. Providers authenticate by HMAC
+# signature, so the ingress stays unauthenticated; an auth middleware in front
+# of it would reject deliveries before the signature check runs. See
+# docs/WEBHOOKS.md and services/webhooks/.
 
 { config, lib, ... }:
 
@@ -89,15 +87,10 @@ in
         relaying human content without a mention.
       '';
     };
-    # The agent comments through the BROKER's GitHub App; the same App backs this
-    # service, so `GET /app` here names the author to filter (see handlers/
-    # github.py `_is_self_authored`). Point this at the broker's key Secret —
-    # contribs.github.privateKeySecret, same namespace.
-    #
-    # TODO: hoist shared App credentials (id + key Secret) into one place in the
-    # kubenix catalog that broker and webhooks both reference, instead of each
-    # service re-declaring them and the deployment keeping the two in sync by
-    # hand. Why: PR #530.
+    # The broker's GitHub App also backs this service, so `GET /app` names the
+    # author to filter, and this points at the broker's key Secret
+    # (contribs.github.privateKeySecret) until the shared App credentials are
+    # hoisted into one place.
     githubApp = {
       appId = mkOption {
         type = types.str;
@@ -127,15 +120,8 @@ in
       description = "Root log level (LOG_LEVEL) — DEBUG for verbose tracing.";
     };
 
-    # The public UI base URL, so a webhook-created conversation's "View
-    # conversation" link (posted back to Slack/GitHub/GitLab/Jira) is a real,
-    # directly-visitable deep-link (<managerUrl>/?thread=<id>). Defaults to
-    # https://<chat ingress.host> WHENEVER the host is set — NOT gated on
-    # ingress.enable: the host IS the public URL even when scooter doesn't render its
-    # own Ingress (e.g. an oauth2-proxy reverse-proxy fronts the host instead). Gating
-    # on ingress.enable left AGENT_MANAGER_URL empty in exactly that setup, so the
-    # Slack/GitHub link degraded to a bare conversation id. Override for a different UI
-    # hostname; empty (no host) -> the link degrades to the raw id.
+    # Defaults from the chat host whenever it is set, regardless of
+    # ingress.enable, since the host is the public URL either way.
     managerUrl = mkOption {
       type = types.str;
       default = if cfg.ingress.host != "" then "https://${cfg.ingress.host}" else "";
@@ -144,24 +130,15 @@ in
     };
 
     # --- Provider secrets ---------------------------------------------------
-    # A Secret supplying GITHUB_WEBHOOK_SECRET / SLACK_SIGNING_SECRET /
-    # SLACK_BOT_TOKEN (+ optionally GITHUB_TOKEN). envFrom-mounted, so the keys
-    # must match those env var names (case-insensitive). Empty = none mounted.
+    # envFrom-mounted, so the keys must match the env var names.
     secretName = mkOption {
       type = types.str;
       default = "";
       description = "Name of a Secret (same namespace) envFrom-mounted for provider creds.";
     };
 
-    # Durable mapping store: the PR/Slack <-> conversation map MUST survive a pod
-    # restart (else follow-up comments spawn a new conversation instead of resuming).
-    # It now lives in the shared platform Postgres (scooter.postgres, always on)
-    # — webhooks' own `webhooks` db + auto-provisioned role. No per-module knobs here.
-
-    # The webhooks receiver's own generic Ingress — SEPARATE from the chat ingress
-    # and UNAUTHENTICATED (GitHub/Slack/… can't send an identity header; the
-    # handlers verify provider signatures themselves). Controller-specific config
-    # (cert, scheme, external-dns, …) comes from `annotations` — NO auth here.
+    # The receiver's own Ingress, separate from the chat ingress and
+    # unauthenticated.
     ingress = {
       enable = mkOption {
         type = types.bool;
@@ -201,14 +178,12 @@ in
     };
   };
 
-  # mkMerge: the table declarations are UNCONDITIONAL (see modules/db-spec.nix) —
-  # the tables exist in lib/sql whether or not this deployment runs the service —
-  # while everything else stays gated on `enable`. The gated body keeps its own
-  # indentation so this wrapper is the whole diff.
+  # The table declarations are unconditional (see modules/db-spec.nix); everything
+  # else is gated on `enable`.
   config = lib.mkMerge [
 
-  # The tables the `webhooks` database holds (scooter.db, #606). owners.toml,
-  # the migrator's database list and the postgres GRANTs are all generated from this.
+  # The tables the `webhooks` database holds, from which owners.toml, the
+  # migrator's database list and the postgres GRANTs are generated.
   {
     scooter.db.webhooks = {
       owner = "webhooks";
@@ -228,9 +203,7 @@ in
     };
   }
   (lib.mkIf wcfg.enable {
-    # mkMerge (NOT `//`): the postgres block reuses the `deployments`/`services`
-    # keys, and a shallow `//` would CLOBBER the app's deployment/service with the
-    # DB's. mkMerge deep-merges so both survive.
+    # Deep-merged so the ingress block's additions coexist with the Deployment.
     kubernetes.resources = lib.mkMerge [
     {
       serviceAccounts.agent-webhooks = {
@@ -240,8 +213,7 @@ in
       deployments.agent-webhooks = {
         metadata = { name = "agent-webhooks"; namespace = cfg.namespace; };
         spec = {
-          # Stateless (Postgres-backed conversation map; handlers spawn on POST) —
-          # 2 replicas by default so consolidation can't drop inbound webhooks.
+          # Stateless; the conversation map lives in Postgres.
           replicas = cfg.statelessReplicas;
           selector.matchLabels.app = "agent-webhooks";
           template = {
@@ -253,7 +225,6 @@ in
                 image = wcfg.image;
                 imagePullPolicy = cfg.pullPolicy;
                 command = [ "agent-webhooks" ];
-                # A lightweight webhook intake service.
                 resources = lib.mkDefault {
                   requests = { cpu = "50m"; memory = "128Mi"; };
                   limits = { memory = "512Mi"; };
@@ -285,28 +256,22 @@ in
                   { name = "LOG_LEVEL"; value = wcfg.logLevel; }
                   { name = "AGENT_MANAGER_URL"; value = wcfg.managerUrl; }
                 ] ++ [
-                  # Durable store: the shared platform Postgres (scooter.postgres,
-                  # always on). Webhooks' OWN `webhooks` db + auto-provisioned role
-                  # (agent-pg-webhooks). DSN assembled app-side from these parts.
+                  # The service's own `webhooks` db in the shared Postgres.
                   { name = "DB_HOST"; value = cfg.postgres.host; }
                   { name = "DB_PORT"; value = toString cfg.postgres.port; }
                   { name = "DB_NAME"; value = "webhooks"; }
                   { name = "DB_USER"; value = "webhooks"; }
                   { name = "DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-webhooks"; key = "password"; }; }
                 ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; };
-                # (REMOTE_AGENT_JOIN_SECRET was here for the retired /claude-bridge front door,
-                # which verified join tokens before proxying. BYO now connects to the BYOC
-                # controller, which holds that secret itself — webhooks no longer needs it.)
-                # Provider signing secrets / tokens come from a Secret whose keys
-                # match the GITHUB_WEBHOOK_SECRET / SLACK_* env var names.
+                # Provider signing secrets come from a Secret whose keys match the
+                # env var names.
                 envFrom = lib.optionals (wcfg.secretName != "") [
                   { secretRef.name = wcfg.secretName; }
                 ];
                 volumeMounts = [
                   { name = "data"; mountPath = "/data"; }
-                  # Projected SA token (audience agent-host) we present to /agui so the
-                  # agent-host can verify us (TokenReview) as the trusted caller and
-                  # honor a webhook-resolved conversation `owner`.
+                  # Projected SA token presented to /agui so the agent-host honors a
+                  # webhook-resolved `owner`.
                   { name = "agent-host-token"; mountPath = "/var/run/secrets/agent-host"; readOnly = true; }
                 ];
                 readinessProbe.httpGet = { path = "/health"; port = "http"; };
@@ -335,10 +300,8 @@ in
       };
     }
     (lib.mkIf wcfg.ingress.enable {
-      # The webhooks Ingress — a generic networking.k8s.io/v1 Ingress, UNAUTH
-      # (providers sign their requests; the handlers verify). Controller +
-      # cert/scheme/external-dns config come from `annotations` (NO auth), so any
-      # controller (ALB, nginx, traefik) works. /webhooks -> agent-webhooks:8080.
+      # A generic unauthenticated Ingress; controller config comes from
+      # `annotations`.
       ingresses.agent-webhooks = {
         metadata = {
           name = "agent-webhooks";
@@ -349,10 +312,7 @@ in
           ingressClassName = lib.mkIf (wcfg.ingress.className != "") wcfg.ingress.className;
           rules = [{
             host = wcfg.ingress.host;
-            # /webhooks -> provider intake (signature-verified). Deliberately UNAUTH at the
-            # ingress: providers cannot send an identity header, so the handlers verify signatures
-            # themselves. (The BYO-Claude /claude-bridge front door used to live here too; BYO now
-            # connects to the BYOC controller's own ingress — see modules/byoc.nix.)
+            # The signature-verified provider intake.
             http.paths = map (path: {
               inherit path;
               pathType = "Prefix";
@@ -370,8 +330,7 @@ in
     })
     ];
 
-    # Register with the shared Postgres: the provisioning Job creates the `webhooks`
-    # database + a `webhooks` role that owns it (secret agent-pg-webhooks).
+    # The provisioning Job creates the `webhooks` database and its owner role.
     scooter.postgres.consumers.webhooks = { db = "webhooks"; user = "webhooks"; };
   })
   ];

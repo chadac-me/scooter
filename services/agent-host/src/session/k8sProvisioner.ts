@@ -1,16 +1,10 @@
 /**
- * Production SandboxProvisioner — creates the cold per-conversation Sandbox via
- * the agent-sandbox CRD, mirroring modules/conversation.nix.
- *
- * Per conversation:
- *   - ServiceAccount sandbox-{id}     (unique broker identity)
- *   - Sandbox conv-{id}               (SA + workspace PVC + broker token volume)
- * Suspend/resume flip spec.operatingMode ("Suspended"/"Running") on the v1beta1
- * Sandbox (controller drops/recreates the Pod, keeps PVCs). Destroy deletes the
- * Sandbox + SA.
- *
- * The conversation-state PVC (Goose state + event log) is mounted by the
- * agent-host itself and is managed separately (see ConversationStore).
+ * Production SandboxProvisioner: creates the cold per-conversation Sandbox via the
+ * agent-sandbox CRD, mirroring modules/conversation.nix. Each conversation gets a
+ * ServiceAccount sandbox-{id} (its broker identity) and a Sandbox conv-{id} (SA +
+ * workspace PVC + broker token volume); suspend/resume flip spec.operatingMode and
+ * destroy deletes the Sandbox and SA. The conversation-state PVC is mounted by the
+ * agent-host itself and managed by the ConversationStore.
  */
 
 import { existsSync } from "node:fs";
@@ -41,37 +35,29 @@ import {
 
 const log = logger("k8sProvisioner");
 
-/** Delete-error policy (findings #7/#8): a 404 means the object is already gone
- *  (the delete's goal — fine to ignore); EVERY other error means the delete did
- *  NOT happen and must propagate, else we leak the Sandbox/SA/PVC silently.
- *  Throws the original error for non-404; returns void for 404. */
+/** Delete-error policy: a 404 means the object is already gone and is ignored; every other error
+ *  means the delete did not happen and is rethrown. */
 export function ignoreDeleteNotFound(e: { code?: number }): void {
   if (e?.code !== 404) throw e;
 }
 
 const GROUP = "agents.x-k8s.io";
-// agent-sandbox v0.5.x serves v1beta1 (v1alpha1 deprecated in v0.5.0). Suspend/resume
-// is `spec.operatingMode` ("Running"/"Suspended") — the controller drops/recreates the
-// Pod and keeps the PVCs. (v1alpha1 used `spec.replicas` 0/1; that field is gone.)
+// agent-sandbox v0.5.x serves v1beta1, where suspend/resume is `spec.operatingMode`.
 const VERSION = "v1beta1";
 const PLURAL = "sandboxes";
 const SANDBOX_NAME_LABEL = "agents.x-k8s.io/sandbox-name";
-/** How long to wait for a cycled sandbox's pod to actually disappear, and how often
- *  to look. See runOnCurrentImage (issue #560). */
 /** The ConfigMap key holding the consumer manifest-overlay payload. */
 const OVERLAY_KEY = "overlay.yaml";
-/** The enabled contribs' sandbox-pod parts (env/volumes/mounts), in the SAME
- *  ConfigMap and the same overlay shape — a contrib needs no second mechanism to
- *  reach the pod. Merged UNDER the consumer's key, so a deployment still wins a
- *  name collision. Rendered by modules/platform.nix. */
+/** The enabled contribs' sandbox-pod parts, in the same ConfigMap and overlay shape, merged under
+ *  the consumer's key so a deployment wins a name collision. */
 const CONTRIB_OVERLAY_KEY = "contrib.yaml";
 
+/** How long to wait for a cycled sandbox's pod to disappear, and how often to look. */
 const POD_GONE_TIMEOUT_MS = 60_000;
 const POD_GONE_POLL_MS = 1_500;
 
-/** The tag portion of an OCI ref — the part after the LAST ':' that isn't a registry
- *  port. Mirrors the kubenix `lib.last (splitString ":" ...)` AND the controller's
- *  `_tag_of`, so all three agree on the pool version key. No tag → "". */
+/** The tag portion of an OCI ref (the part after the last ':' that is not a registry port), or ""
+ *  when untagged; agrees with the kubenix and controller derivations of the pool version key. */
 export function imageTagOf(imageRef: string): string {
   if (!imageRef) return "";
   const ref = imageRef.split("@", 1)[0]; // strip any digest
@@ -87,90 +73,62 @@ export interface K8sProvisionerOptions {
   sandboxImage: string;
   /** Workspace PVC size, e.g. "10Gi". */
   workspaceStorage?: string;
-  /** Mount a writable PVC upper for the local-overlay Nix store (the agent's
-   *  runtime re-converge + in-pod builds land here). The sandbox image always has the
-   *  overlay store on, so this defaults ON — the PVC persists runtime builds across
-   *  suspend/resume; it MUST be disk-backed (a PVC), never tmpfs (a RAM upper charges
-   *  every runtime closure to pod memory). Off ⇒ an ephemeral emptyDir upper. */
+  /** Mount a disk-backed PVC as the writable upper of the local-overlay Nix store so runtime builds
+   *  persist across suspend/resume; off means an ephemeral emptyDir upper. */
   overlayStore?: boolean;
-  /** Overlay-store upper PVC size, e.g. "20Gi" (module rebuild closures are
-   *  hundreds of MB). Only used when overlayStore is true. */
+  /** Overlay-store upper PVC size, e.g. "20Gi"; only used when overlayStore is true. */
   overlayStorage?: string;
-  /** Resource requests/limits for the sandbox container. Without these the
-   *  scheduler treats a sandbox as ~free and packs many onto one node; a burst of
-   *  in-pod nix builds then overwhelms the container runtime and the kubelet's PLEG
-   *  stalls the whole node (the node-death we hit). Default: requests == limits on
-   *  cpu (2) AND memory (4Gi) => Guaranteed QoS, so the scheduler reserves the full
-   *  amount per pod and a runaway sandbox is HARD-capped there (throttled at 2 cpu,
-   *  OOM-killed past 4Gi) instead of bursting into and starving its neighbours.
-   *  Deployment-overridable; the agent can also resize its own sandbox on demand. */
+  /** Resource requests/limits for the sandbox container; the default is requests == limits on cpu
+   *  (2) and memory (4Gi) for Guaranteed QoS, so a runaway sandbox is hard-capped rather than
+   *  starving its neighbours. */
   sandboxResources?: RenderedResources;
-  /** The deployment's named size catalog as JSON (SANDBOX_SIZES_JSON):
-   *  name -> {cpu, memory, gpu?, hint?}. Empty/absent = no presets, and the agent/UI
-   *  fall back to setting raw resources. */
+  /** The deployment's named size catalog as JSON (SANDBOX_SIZES_JSON), name -> {cpu, memory, gpu?,
+   *  hint?}; empty means no presets. */
   sizePresetsJson?: string;
-  /** Which preset is the default (SANDBOX_DEFAULT_SIZE_NAME). Shown in the UI; the
-   *  rendered default itself arrives as sandboxResources. */
+  /** Which preset is the default (SANDBOX_DEFAULT_SIZE_NAME), shown in the UI; the rendered default
+   *  itself arrives as sandboxResources. */
   defaultSizeName?: string;
   /** Broker token audience (projected SA token). */
   brokerAudience?: string;
-  /** Run the sandbox container as a systemd-PID-1 NixOS dev environment: a
-   *  privileged securityContext + tmpfs on /run + /tmp (what systemd needs).
-   *  Set when sandboxImage is the agent-sandbox-os image. Default false keeps the
-   *  legacy generic image behavior. */
+  /** Run the sandbox container as a systemd-PID-1 NixOS dev environment (tmpfs on /run and /tmp);
+   *  set when sandboxImage is the agent-sandbox-os image. */
   systemdImage?: boolean;
-  /** imagePullPolicy for the per-conversation sandbox pod (SANDBOX_PULL_POLICY).
-   *  Default "Always" (registry-backed). Use "IfNotPresent"/"Never" on a
-   *  side-loaded local cluster where "Always" fails ImagePullBackOff. */
+  /** imagePullPolicy for the sandbox pod (SANDBOX_PULL_POLICY); default "Always", with
+   *  "IfNotPresent"/"Never" for a side-loaded local cluster. */
   sandboxPullPolicy?: "Always" | "IfNotPresent" | "Never";
-  /** A deployment's `.scooter` ConfigMap (its own injected Nix tools) to mount at
-   *  /etc/agent-sandbox/scooter, where injectedTools builds them. The
-   *  CONTENT is deployment-specific (this platform doesn't know what's in it). */
+  /** A deployment's `.scooter` ConfigMap (its own injected Nix tools), mounted at
+   *  /etc/agent-sandbox/scooter. */
   scooterConfigMap?: string;
-  /** Name of the ConfigMap holding a consumer Sandbox-manifest overlay — a patch
-   *  deep-merged onto the generated Sandbox (nodeSelector, tolerations, extra env,
-   *  …). Undefined = no overlay. The PAYLOAD is read lazily at create time, not
-   *  cached here, so a ConfigMap edit lands on the next conversation without a
-   *  restart. Wired from SANDBOX_MANIFEST_OVERLAY_CONFIGMAP. */
+  /** Name of the ConfigMap holding a consumer Sandbox-manifest overlay
+   *  (SANDBOX_MANIFEST_OVERLAY_CONFIGMAP), read at every create so an edit lands on the next
+   *  conversation; undefined = no overlay. */
   manifestOverlayConfigMap?: string;
-  /** A deployment's config-FILES ConfigMap (filename -> contents), mounted as a
-   *  flat dir at /etc/agent-sandbox/config. File-based (vs SCOOTER_ENV) so multi-
-   *  line config survives the sandbox CRD controller's env-var newline corruption. */
+  /** A deployment's config-files ConfigMap (filename -> contents), mounted as a flat dir at
+   *  /etc/agent-sandbox/config. */
   configFilesConfigMap?: string;
-  /** Additional projected SA token audiences a deployment's tools authenticate
-   *  with — each mounted at /var/run/secrets/<audience>/token. The audiences are
-   *  DEPLOYMENT-supplied (this platform doesn't hardcode any). */
+  /** Additional deployment-supplied projected SA token audiences, each mounted at
+   *  /var/run/secrets/<audience>/token. */
   extraTokenAudiences?: string[];
-  /** Additional environment variables a deployment's tools need (e.g. a service
-   *  URL). DEPLOYMENT-supplied; this platform sets none of its own here. */
+  /** Additional deployment-supplied environment variables for the sandbox. */
   extraEnv?: Array<{ name: string; value: string }>;
-  /** Public base URL of the chat UI (e.g. https://scooter.example.com). When set,
-   *  each sandbox gets CONVERSATION_URL = <publicUrl>/?thread=<id> — a ready
-   *  shareable link to THIS conversation, so the agent can point a human at it
-   *  (e.g. "approve my AWS request here") without knowing the deployment host. */
+  /** Public base URL of the chat UI; when set each sandbox gets CONVERSATION_URL =
+   *  <publicUrl>/?thread=<id>, a shareable link to its own conversation. */
   publicUrl?: string;
-  /** RuntimeClass for the systemd sandbox pod (e.g. "crun"). The systemd image runs
-   *  systemd as PID 1, which needs a writable cgroup subtree to build its hierarchy.
-   *  A cgroup-delegating runtime like crun provides that WITHOUT `privileged` (and so
-   *  keeps the pod in its own private cgroup namespace, instead of the host one that
-   *  privileged forces — which was destabilizing the node / killing the host session).
-   *  Unset => the cluster default runtime (fine on nodes whose default already
-   *  delegates the cgroup; set crun explicitly where it doesn't). Ignored for the
-   *  legacy generic image (it isn't systemd-PID-1). */
+  /** RuntimeClass for the systemd sandbox pod (e.g. "crun"): a cgroup-delegating runtime gives
+   *  systemd PID 1 a writable cgroup subtree without `privileged`; unset means the cluster default,
+   *  and it is ignored for the generic image. */
   sandboxRuntimeClass?: string;
   kubeConfig?: KubeConfig;
 }
 
-/** The size half of the provisioner: read/write a conversation's size, and list the
- *  deployment's presets. Distinct from the lifecycle interface because it keys by the
- *  SHORT conversation id (the one used for resource NAMES), not a SandboxRef. */
+/** The size half of the provisioner (read/write a conversation's size, list the presets), keyed by
+ *  the short conversation id rather than a SandboxRef. */
 export interface SandboxSizeClient {
-  /** The conversation's size, read off its Sandbox CR. undefined = no Sandbox yet, or
-   *  it carries no resources block. */
+  /** The conversation's size read off its Sandbox CR; undefined when there is no Sandbox or no
+   *  resources block. */
   getSize(id: string): Promise<SandboxResources | undefined>;
-  /** Write the size — a preset name ({size: "large"}) or raw resources. Applied on the
-   *  next sandbox restart. `threadId` is only used when there is no Sandbox yet and one
-   *  has to be created cold (it builds CONVERSATION_URL). */
+  /** Write the size (a preset name or raw resources), applied on the next sandbox restart;
+   *  `threadId` is only needed when the Sandbox has to be created cold. */
   setSize(id: string, spec: SandboxResources | { size: string }, threadId?: string): Promise<void>;
   /** The deployment's named presets and which one is the default. */
   getSizes(): { sizes: Record<string, SandboxSizePreset>; default: string | null };
@@ -185,44 +143,32 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
   const ns = opts.namespace;
   const audience = opts.brokerAudience ?? "agent-broker";
   const storage = opts.workspaceStorage ?? "10Gi";
-  // Sandbox container resources (see the option doc): default is the "medium" preset
-  // (2 CPU / 4Gi, requests == limits => Guaranteed QoS), so one runaway sandbox is
-  // hard-capped and can't starve its neighbours. Deployment-overridable via presets
-  // (the sandboxSizes preset marked `default = true`); the agent can also resize its
-  // own sandbox via the tool.
+  // Default is the "medium" preset (2 CPU / 4Gi, requests == limits for Guaranteed QoS).
   const sandboxResources = opts.sandboxResources ?? {
     requests: { cpu: "2", memory: "4Gi" },
     limits: { cpu: "2", memory: "4Gi" },
   };
 
-  // The deployment's named size catalog (SANDBOX_SIZES_JSON) + which preset is the
-  // default. The agent and the UI read these to offer sizes by name.
+  // The deployment's named size catalog and its default, offered by name to the agent and UI.
   const presets = parsePresets(opts.sizePresetsJson);
 
   const sandboxName = (id: string) => `conv-${id}`;
-  /** Inverse of sandboxName — recover the conversation id from a Sandbox ref. */
+  /** Inverse of sandboxName: recover the conversation id from a Sandbox name. */
   const convIdOf = (name: string) => (name.startsWith("conv-") ? name.slice("conv-".length) : name);
   const saName = (id: string) => `sandbox-${id}`;
-  // Reap-only: nothing creates this CM, but clusters still carry one per live
-  // conversation. destroy() drains them. Drop this once none remain.
+  // Reap-only: destroy() deletes this ConfigMap where a cluster still carries one.
   const moduleCmName = (id: string) => `conv-${id}-module`;
 
 
-  // A ref's namespace may be EMPTY: hydrateEntry() (manager.ts) hands out a
-  // placeholder ref { name, namespace: "" } for a conversation whose Sandbox is
-  // absent from reconcile (GC'd / suspended-and-gone). A k8s namespaced call with
-  // namespace:"" is sent at the CLUSTER scope, which the namespaced Role can't
-  // authorize → a 403 "cannot patch sandboxes at the cluster scope" that floods
-  // every idle sweep. The provisioner only ever manages Sandboxes in its own `ns`,
-  // so an empty ref namespace ALWAYS means `ns` — normalize it here. (If the
-  // Sandbox is genuinely gone, the call then 404s in-namespace, which suspend()'s
-  // callers already tolerate — far better than a cluster-scope auth failure.)
+  // A placeholder ref from hydrateEntry() has an empty namespace, which k8s would send at the
+  // cluster scope (a 403); the provisioner only manages Sandboxes in `ns`, so an empty namespace
+  // always means `ns`.
   const refNs = (ref: SandboxRef) => ref.namespace || ns;
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  // v1beta1: operatingMode "Suspended" = pod dropped (PVCs kept), "Running" = pod up.
-  // A plain-object body negotiates application/merge-patch+json.
+  // operatingMode "Suspended" drops the pod and keeps the PVCs; a plain-object body negotiates
+  // application/merge-patch+json.
   const setOperatingMode = async (ref: SandboxRef, operatingMode: "Running" | "Suspended") => {
     await custom.patchNamespacedCustomObject(
       {
@@ -238,13 +184,11 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
   };
 
   // --- image skew ---------------------------------------------------------
-  // Nothing re-renders a Sandbox CR, so an upgrade leaves live ones on the image they
-  // were born with. EVERY path to Running must reconcile it. Mirrored in
-  // Why: PR #565.
+  // Nothing re-renders a Sandbox CR, so every path to Running reconciles the image an upgrade left
+  // stale.
 
-  /** The sandbox container's image when it differs from the deployment's current one
-   *  (i.e. the stale ref being replaced), else undefined. An unset image on either
-   *  side is not skew — there is nothing to reconcile toward. */
+  /** The sandbox container's image when it differs from the deployment's current one, else
+   *  undefined; an unset image on either side is not skew. */
   const staleImage = (containers: Array<{ image?: string }>): string | undefined => {
     const have = containers[0]?.image;
     return have && opts.sandboxImage && have !== opts.sandboxImage ? have : undefined;
@@ -265,19 +209,9 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     }
   };
 
-  /** Reconcile `ref`'s image onto the deployment's current one, cycling the pod if it
-   *  is already up on a stale one. Throws only a 404 (the Sandbox is GONE — the caller
-   *  recreates it); any other failure is logged and swallowed, because reconciling the
-   *  image must never be what stops a conversation from resuming. */
   /**
-   * Read + parse the consumer manifest-overlay ConfigMap on EVERY create — no caching,
-   * so a ConfigMap edit takes effect on the next conversation without an agent-host
-   * restart (the extra GET per create is cheap next to the Sandbox create).
-   *
-   * Absent ConfigMap (404) -> no overlay, rather than blocking conversation creation.
-   * A MALFORMED payload throws (OverlayError): a silently-dropped overlay looks to a
-   * deployment like it "didn't take", and the nodeSelector it usually carries is the
-   * difference between scheduling correctly and scheduling anywhere.
+   * Read and parse the consumer manifest-overlay ConfigMap on every create (no caching),
+   * treating an absent ConfigMap as no overlay and a malformed payload as an OverlayError.
    */
   const loadManifestOverlay = async (): Promise<Record<string, unknown> | undefined> => {
     const cmName = opts.manifestOverlayConfigMap;
@@ -293,9 +227,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       });
       return undefined;
     }
-    // Contrib parts first, the consumer's patch merged on top: same strategic merge
-    // the consumer overlay already gets, so a deployment overrides a contrib's env or
-    // volume by NAME rather than by relying on k8s last-duplicate-wins.
+    // Contrib parts first, the consumer's patch merged on top, so a deployment overrides a
+    // contrib's env or volume by name.
     const merged = deepMerge(
       parseOverlay(cm.data?.[CONTRIB_OVERLAY_KEY]),
       parseOverlay(cm.data?.[OVERLAY_KEY]),
@@ -303,6 +236,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     return Object.keys(merged).length > 0 ? merged : undefined;
   };
 
+  /** Reconcile `ref`'s image onto the deployment's current one, cycling the pod if it is up on a
+   *  stale one; throws only a 404, and any other failure is logged and swallowed. */
   const reconcileImage = async (ref: SandboxRef): Promise<void> => {
     const sb = (await custom.getNamespacedCustomObject({
       group: GROUP,
@@ -339,14 +274,13 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         setHeaderOptions("Content-Type", PatchStrategy.MergePatch),
       );
       if (wasRunning) {
-        // A template patch does not restart a running pod. Wait for the pod to GO
-        // before resuming: the controller coalesces an immediate flip-back into no
-        // restart at all. Why: PR #565.
+        // A template patch does not restart a running pod, and the controller coalesces an
+        // immediate flip-back into no restart, so wait for the pod to go before resuming.
         await setOperatingMode(ref, "Suspended");
         const deadline = Date.now() + POD_GONE_TIMEOUT_MS;
         while (!(await podGone(ref).catch(() => false))) {
           if (Date.now() > deadline) {
-            // Not fatal — failing here would take the conversation down. PR #565.
+            // Not fatal, since failing here would take the conversation down.
             log.warn("sandbox pod did not terminate before the deadline; resuming anyway", {
               sandbox: ref.name,
               timeout_ms: POD_GONE_TIMEOUT_MS,
@@ -359,13 +293,12 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     }
   };
 
-  /** Bring `ref` to Running on the deployment's CURRENT sandbox image. One call is
-   *  enough to adopt a new image — no caller has to cycle the sandbox itself. */
+  /** Bring `ref` to Running on the deployment's current sandbox image. */
   const runOnCurrentImage = async (ref: SandboxRef): Promise<void> => {
     try {
       await reconcileImage(ref);
     } catch (e) {
-      // A 404 means the Sandbox is gone — resume()'s recreate path owns that.
+      // A 404 means the Sandbox is gone; resume()'s recreate path owns that.
       if ((e as { code?: number })?.code === 404) throw e;
       log.warn("could not reconcile the sandbox image; running it as-is", {
         sandbox: ref.name,
@@ -375,9 +308,9 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     await setOperatingMode(ref, "Running");
   };
 
-  /** Render the Sandbox manifest for a conversation. `operatingMode: "Suspended"` makes
-   *  it COLD — the CR (and its PVCs) exist with no pod, which is how a size set before
-   *  the first turn gets somewhere durable to live. */
+  /** Render the Sandbox manifest for a conversation; `operatingMode: "Suspended"` makes it cold
+   *  (the CR and PVCs exist with no pod), which gives a size set before the first turn somewhere
+   *  durable to live. */
   const manifestFor = async (
     id: string,
     urlThread: string,
@@ -391,15 +324,13 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         scooterConfigMap: opts.scooterConfigMap,
         configFilesConfigMap: opts.configFilesConfigMap,
         extraTokenAudiences: opts.extraTokenAudiences ?? [],
-        // A ready shareable link to THIS conversation (when a public URL is
-        // configured), so the agent can point a human at its own conversation.
+        // A shareable link to this conversation, when a public URL is configured.
         extraEnv: [
           ...(opts.publicUrl
             ? [{ name: "CONVERSATION_URL", value: `${opts.publicUrl.replace(/\/$/, "")}/?thread=${encodeURIComponent(urlThread)}` }]
             : []),
-          // The full threadId (what the browser deep-links on and the proxy path uses)
-          // — web services read it to serve under /c/$CONVERSATION_ID/<name> (marimo
-          // --base-url etc.). Always set, even without publicUrl.
+          // The full threadId, which web services read to serve under /c/$CONVERSATION_ID/<name>;
+          // always set.
           { name: "CONVERSATION_ID", value: urlThread },
           ...(opts.extraEnv ?? []),
         ],
@@ -415,9 +346,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     return m;
   };
 
-  /** Read the container `resources` block off a Sandbox CR. undefined when the CR is
-   *  gone (404) or carries no block. Any other API error propagates — a 403 read must
-   *  not be mistaken for "no size set" and silently reset the pod to the default. */
+  /** The container `resources` block off a Sandbox CR, undefined when the CR is gone or carries no
+   *  block; any other API error propagates so a 403 is not mistaken for "no size set". */
   const readSize = async (id: string): Promise<RenderedResources | undefined> => {
     try {
       const sb = (await custom.getNamespacedCustomObject({
@@ -430,19 +360,17 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     }
   };
 
-  /** The size a (re)created Sandbox should come up at: the CR's own block if it has one
-   *  (it is the source of truth and outlives the pod), else the deployment default. */
+  /** The size a (re)created Sandbox comes up at: the CR's own block if it has one, else the
+   *  deployment default. */
   const desiredSize = async (id: string): Promise<RenderedResources | undefined> =>
     (await readSize(id)) ?? sandboxResources;
 
   return {
     async create(id: string, threadId?: string): Promise<SandboxRef> {
-      // The URL deep-links on the FULL conversation id (threadId), NOT the short
-      // DNS-safe hash used for resource names — else the shared link resolves to a
-      // different (empty) conversation and permission prompts land in the wrong place.
+      // The URL deep-links on the full conversation id, not the short hash used for resource names.
       const urlThread = threadId ?? id;
-      // 1. per-conversation ServiceAccount (broker identity). Idempotent:
-      // tolerate an SA left behind by a prior run (AlreadyExists / 409).
+      // 1. the per-conversation ServiceAccount (broker identity); a 409 from a prior run is
+      // tolerated
       await core
         .createNamespacedServiceAccount({
           namespace: ns,
@@ -464,23 +392,14 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
           body: await manifestFor(id, urlThread, await desiredSize(id)),
         })
         .catch((e: { code?: number }) => {
-          // 409 AlreadyExists = the Sandbox is already there. This is the recovery
-          // for a WRONG hydrate map (a boot reconcile failed → this conversation
-          // wasn't seen → we took the create path for a Sandbox that exists). Treat
-          // it as REUSE: adopt the existing Sandbox rather than throw the 409 up to
-          // /agui (where it became a silent no-run — the hydrate-silent-drop bug).
+          // 409 AlreadyExists: adopt the existing Sandbox rather than fail the conversation.
           if (e?.code !== 409) throw e;
           alreadyExisted = true;
         });
 
-      // If it already existed it may be SUSPENDED (operatingMode=Suspended) — ensure
-      // it's Running so the run can actually execute. setOperatingMode("Running") is
-      // idempotent (a running Sandbox stays running); a create-from-fresh is already
-      // Running.
+      // An adopted Sandbox may be suspended and may carry a stale image, so bring it to Running on
+      // the current image.
       if (alreadyExisted) {
-        // An ADOPTED Sandbox was rendered by whatever platform version created the
-        // conversation — reconcile its image before running it, else a post-upgrade
-        // conversation keeps booting the old sandbox image (issue #560).
         await runOnCurrentImage({ name, namespace: ns }).catch((e) => {
           log.warn("adopted an existing Sandbox but resume failed (may already be running)", {
             sandbox: name,
@@ -493,21 +412,16 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     },
 
     async suspend(ref: SandboxRef): Promise<void> {
-      // A Sandbox that's already GONE (GC'd / never re-created after a restart)
-      // is, for suspend's purposes, already suspended — there is nothing to drop.
-      // Swallow the 404 so the idle sweep marks the conversation suspended and
-      // stops re-attempting every tick (a stale hydrated entry would otherwise
-      // churn the same failing patch forever). Any other error still propagates.
+      // A Sandbox that is already gone counts as suspended, so the 404 is swallowed and the idle
+      // sweep stops retrying; any other error propagates.
       await setOperatingMode(ref, "Suspended").catch(ignoreDeleteNotFound);
     },
 
     async resume(ref: SandboxRef, threadId?: string): Promise<SandboxRef> {
-      // A Sandbox that is GONE cannot be resumed — there is nothing to patch. Recreate it
-      // rather than surface a raw 404: the conversation's work lives on the workspace PVC,
-      // which outlives the Sandbox. Mirrors suspend()'s 404 tolerance. PR #404.
+      // A Sandbox that is gone cannot be patched, so recreate it: the conversation's work lives on
+      // the workspace PVC, which outlives the Sandbox.
       try {
-        // Reconciles the image on the way up, so ONE suspend/resume is enough to
-        // adopt a new platform version's sandbox image (issue #560).
+        // Reconciles the image on the way up, so one suspend/resume adopts a new sandbox image.
         await runOnCurrentImage(ref);
       } catch (e) {
         if ((e as { code?: number })?.code !== 404) throw e;
@@ -518,10 +432,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     },
 
     async reconcile(): Promise<Array<{ ref: SandboxRef; running: boolean }>> {
-      // List every per-conversation Sandbox in the namespace and report whether it's
-      // desired-Running (operatingMode). hydrate() uses this to avoid leaking pods
-      // across an agent-host restart. operatingMode is omitempty and defaults to
-      // Running server-side (a create-from-fresh sets it), so an absent value = Running.
+      // operatingMode is omitempty and defaults to Running server-side, so an absent value means
+      // Running.
       const list = (await custom.listNamespacedCustomObject({
         group: GROUP,
         version: VERSION,
@@ -539,15 +451,10 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
 
     async destroy(ref: SandboxRef): Promise<void> {
       const id = ref.name.replace(/^conv-/, "");
-      // Findings #7/#8: a bare .catch(() => {}) here swallowed EVERY delete error.
-      // A 404 means the object is already gone — exactly the delete's goal — so
-      // ignore that; but any OTHER failure (403/409/5xx/timeout) means the delete
-      // did NOT happen, and silently swallowing it leaks the Sandbox CR + pod +
-      // workspace PVC (#7) or the per-conversation ServiceAccount = the broker
-      // identity (#8). Rethrow so end() doesn't report a clean teardown that
-      // actually left live resources behind.
-      // Same empty-namespace hazard as setReplicas: a placeholder ref would send
-      // these deletes to the cluster scope (403). Normalize to the provisioner ns.
+      // A 404 means the object is already gone; any other failure is rethrown so end() does not
+      // report a clean teardown that leaked resources.
+      // A placeholder ref would send these deletes to the cluster scope (403), so normalize to the
+      // provisioner namespace.
       const dns = refNs(ref);
       await custom
         .deleteNamespacedCustomObject({
@@ -566,12 +473,9 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         .catch(ignoreDeleteNotFound);
     },
 
-    // --- size: the Sandbox CR IS the store -----------------------------------
-    // There is no size table. A conversation's size lives in the CR's container
-    // `resources` block, which outlives the pod (suspend keeps the CR) and is what a
-    // (re)start comes up with. Patching it does NOT roll a running pod — that is why
-    // reconcileImage has to suspend/await/resume explicitly (#565) — so a size change
-    // takes effect on the next restart, which is what the UI tells the user.
+    // --- size: the Sandbox CR is the store -----------------------------------
+    // A conversation's size lives in the CR's container `resources` block, which outlives the pod;
+    // patching it does not roll a running pod, so a size change takes effect on the next restart.
 
     async getSize(id: string): Promise<SandboxResources | undefined> {
       const block = await readSize(id);
@@ -581,8 +485,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     },
 
     async setSize(id: string, spec: SandboxResources | { size: string }, threadId?: string): Promise<void> {
-      // A preset NAME resolves against the deployment catalog; raw resources are
-      // validated as given. Both end up as the same friendly shape.
+      // A preset name resolves against the deployment catalog; raw resources are validated as
+      // given.
       let friendly: SandboxResources;
       if ("size" in spec) {
         const preset = presets[spec.size];
@@ -602,12 +506,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
             group: GROUP, version: VERSION, namespace: ns, plural: PLURAL, name: sandboxName(id),
             body: { spec: { podTemplate: { spec: { containers: [{ ...containers[0], resources }, ...containers.slice(1)] } } } },
           },
-          // REQUIRED. The client defaults patchNamespacedCustomObject to
-          // `application/json-patch+json`, which expects an ARRAY of ops — so sending
-          // this object got a 400 from the API server ("cannot unmarshal object into
-          // Go value of type []handlers.jsonPatchOp") and EVERY resize failed: the
-          // UI's Sandbox tab, the agent's own resize tool, and the size picker alike.
-          // The other two patch sites in this file always passed it; this one did not.
+          // Required: the client defaults to application/json-patch+json, which expects an array of
+          // ops.
           setHeaderOptions("Content-Type", PatchStrategy.MergePatch),
         );
 
@@ -618,10 +518,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         });
       } catch (e) {
         if ((e as { code?: number })?.code !== 404) throw e;
-        // No Sandbox yet — a size picked before the first turn, or after the pod was
-        // destroyed. Create it COLD (Suspended: the CR + PVCs exist, no pod runs) so
-        // the size has somewhere durable to live. Without this, sizing a brand-new
-        // conversation would silently do nothing.
+        // No Sandbox yet (a size picked before the first turn, or after the pod was destroyed):
+        // create it cold so the size has somewhere durable to live.
         log.info("sizing a conversation with no Sandbox; creating it cold", { sandbox: sandboxName(id) });
         await core
           .createNamespacedServiceAccount({ namespace: ns, body: { metadata: { name: saName(id), namespace: ns } } })
@@ -646,7 +544,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
   };
 }
 
-/** The Sandbox CR body — mirror of modules/conversation.nix. */
+/** The Sandbox CR body, a mirror of modules/conversation.nix. */
 export function sandboxManifest(
   id: string,
   name: string,
@@ -663,37 +561,30 @@ export function sandboxManifest(
     extraEnv?: Array<{ name: string; value: string }>;
     overlayStore?: boolean;
     overlayStorage?: string;
-    /** imagePullPolicy for the sandbox container. Defaults to "Always" (a
-     *  registry-backed cluster picks up a re-pushed :latest). Set "IfNotPresent"
-     *  / "Never" for a side-loaded local cluster (kind/k3s) where the image only
-     *  exists in the node's containerd and there's no registry to pull from —
-     *  "Always" there fails with ImagePullBackOff. Wired from SANDBOX_PULL_POLICY. */
+    /** imagePullPolicy for the sandbox container; default "Always", with "IfNotPresent"/"Never" for
+     *  a side-loaded local cluster that has no registry to pull from. */
     pullPolicy?: "Always" | "IfNotPresent" | "Never";
-    /** RuntimeClass for the systemd sandbox pod (e.g. "crun") — a cgroup-delegating
-     *  runtime so systemd PID 1 gets a writable cgroup subtree without `privileged`.
-     *  See K8sProvisionerOptions.sandboxRuntimeClass. */
+    /** RuntimeClass for the systemd sandbox pod (e.g. "crun"), a cgroup-delegating runtime so
+     *  systemd PID 1 gets a writable cgroup subtree without `privileged`. */
     sandboxRuntimeClass?: string;
-    /** The ALREADY-RENDERED k8s resources block. Arbitrary keys per side, because a
-     *  GPU renders under its extended-resource name (nvidia.com/gpu) — see
-     *  session/resources.ts renderResources. */
+    /** The already-rendered k8s resources block, with arbitrary keys per side because a GPU renders
+     *  under its extended-resource name. */
     resources?: {
       requests?: Record<string, string>;
       limits?: Record<string, string>;
     };
-    /** A consumer manifest overlay (parsed) — deep-merged onto the generated Sandbox
-     *  with Scooter's protected fields re-asserted. See session/sandboxOverlay.ts. */
+    /** A parsed consumer manifest overlay, deep-merged onto the generated Sandbox with Scooter's
+     *  protected fields re-asserted (sandboxOverlay.ts). */
     overlay?: Record<string, unknown>;
   } = {},
 ): object {
   const scooter = deploy.scooterConfigMap;
-  // Deployment config files (filename -> contents) mounted as a flat dir. See the
-  // deploy option type. Byte-for-byte via the kubelet, so multi-line config is safe.
+  // Deployment config files mounted as a flat dir, byte-for-byte via the kubelet.
   const configFilesCm = deploy.configFilesConfigMap;
   const configFilesMountPath = "/etc/agent-sandbox/config";
   const extraAudiences = deploy.extraTokenAudiences ?? [];
   const extraEnv = deploy.extraEnv ?? [];
-  // Overlay-store writable upper: a disk-backed PVC at the module's upperPath
-  // (/nix/.scooter-rw). Only when the overlay-store image is in use.
+  // The overlay store's writable upper: a disk-backed PVC at /nix/.scooter-rw.
   const overlayStore = deploy.overlayStore ?? false;
   const overlayStorage = deploy.overlayStorage ?? "20Gi";
   const base = {
@@ -707,12 +598,8 @@ export function sandboxManifest(
         spec: {
           serviceAccountName: sa,
           automountServiceAccountToken: false,
-          // Cgroup-delegating runtime (e.g. crun) for the systemd sandbox: gives
-          // systemd PID 1 a writable cgroup subtree in the pod's OWN (private)
-          // cgroup namespace, so it doesn't need `privileged` (which would force
-          // the host cgroup namespace and let the sandbox's systemd churn the host
-          // /kubepods.slice tree — the node-destabilizing / host-logout bug). Only
-          // for the systemd image, only when configured; else the cluster default.
+          // A cgroup-delegating runtime gives systemd PID 1 a writable cgroup subtree in the pod's
+          // own cgroup namespace, so the pod does not need `privileged`.
           ...(systemdImage && deploy.sandboxRuntimeClass
             ? { runtimeClassName: deploy.sandboxRuntimeClass }
             : {}),
@@ -720,25 +607,15 @@ export function sandboxManifest(
             {
               name: "sandbox",
               image,
-              // Default "Always" so a re-pushed :latest is picked up on a
-              // registry-backed cluster; overridable via SANDBOX_PULL_POLICY for
-              // side-loaded local clusters (kind/k3s) where "Always" would fail
-              // ImagePullBackOff (no registry — the image is only in containerd).
+              // Default "Always" so a re-pushed :latest is picked up; overridable for side-loaded
+              // local clusters.
               imagePullPolicy: deploy.pullPolicy ?? "Always",
-              // Requests spread sandboxes across nodes; the memory limit stops a
-              // runaway build from OOM-ing the node. Omitted keys (e.g. no cpu limit)
-              // simply aren't emitted.
+              // Requests spread sandboxes across nodes and the memory limit stops a runaway build
+              // from OOM-ing the node.
               ...(deploy.resources ? { resources: deploy.resources } : {}),
-              // The systemd sandbox runs NON-privileged (see runtimeClassName above:
-              // a cgroup-delegating runtime gives systemd PID 1 its writable cgroup
-              // subtree in the pod's own private cgroup namespace — privileged would
-              // force the HOST cgroup namespace and let the sandbox churn the host
-              // /kubepods.slice tree, destabilizing the node / killing the host
-              // session). It DOES need CAP_SYS_ADMIN, though: NixOS stage-2's
-              // `specialfs` activation snippet mounts /proc, /dev, /run at boot (and,
-              // with overlayStore on, remounts /nix/store) — all mount(2), which needs
-              // SYS_ADMIN. Under crun this cap does NOT re-introduce the host cgroup ns
-              // (the runtime sets the cgroup ns, not the cap), so isolation holds.
+              // The systemd sandbox runs non-privileged but needs CAP_SYS_ADMIN for the mount(2)
+              // calls in NixOS stage-2 activation; under crun the cap does not re-introduce the
+              // host cgroup namespace.
               ...(systemdImage
                 ? { securityContext: { capabilities: { add: ["SYS_ADMIN"] } } }
                 : {}),
@@ -752,23 +629,20 @@ export function sandboxManifest(
                       { name: "tmp", mountPath: "/tmp" },
                     ]
                   : []),
-                // A deployment's injected .scooter tools (content is theirs).
+                // A deployment's injected .scooter tools.
                 ...(scooter
                   ? [{ name: "scooter-tools", mountPath: "/etc/agent-sandbox/scooter", readOnly: true }]
                   : []),
-                // Deployment-named extra SA tokens (this platform names none).
+                // Deployment-named extra SA tokens.
                 ...extraAudiences.map((aud) => ({
                   name: `tok-${aud}`,
                   mountPath: `/var/run/secrets/${aud}`,
                   readOnly: true,
                 })),
-                // The local-overlay store's writable upper (disk-backed PVC). The
-                // image's overlay-store-setup mounts the overlay onto /nix/store
-                // using this as the upperdir; runtime nix builds (re-converge,
-                // in-pod installs) land here and persist across suspend/resume.
+                // The overlay store's writable upper, which the image mounts as the upperdir of
+                // /nix/store so runtime builds persist across suspend/resume.
                 ...(overlayStore ? [{ name: "scooter-rw", mountPath: "/nix/.scooter-rw" }] : []),
-                // Deployment config files (filename -> contents) as a flat read-only
-                // dir. File-based so multi-line config survives the CRD controller.
+                // Deployment config files as a flat read-only dir.
                 ...(configFilesCm
                   ? [{ name: "deploy-config", mountPath: configFilesMountPath, readOnly: true }]
                   : []),
@@ -779,23 +653,16 @@ export function sandboxManifest(
                   value: `http://agent-broker.${namespace}.svc.cluster.local:8080`,
                 },
                 { name: "BROKER_TOKEN_PATH", value: "/var/run/secrets/broker/token" },
-                // git config --global (entrypoint) + the agent's exec'd git
-                // commands must agree on $HOME so the broker credential helper is
-                // configured for both. The image has no /etc/passwd, so HOME
-                // would default to "/" (often read-only) — pin it to the
-                // writable workspace volume.
+                // The image has no /etc/passwd, so pin HOME to the writable workspace so git config
+                // and the agent's git commands agree.
                 { name: "HOME", value: "/workspace" },
-                // git host -> broker provider map for git-credential-broker.
-                // github.com/gitlab.com are the built-in defaults; test-git.local
-                // -> test lets the cluster e2e exercise the path via the test
-                // provider (harmless in prod — that provider is gated off).
+                // git host -> broker provider map for git-credential-broker; test-git.local lets
+                // the cluster e2e exercise the path via the gated-off test provider.
                 {
                   name: "GIT_BROKER_HOST_MAP",
                   value: "github.com=github,gitlab.com=gitlab,test-git.local=test",
                 },
-                // Deployment-supplied env (e.g. a service URL). Platform-neutral.
-                // CONVERSATION_ID is injected by the caller via extraEnv (with the
-                // full threadId for deep-link correctness).
+                // Deployment-supplied env, including the CONVERSATION_ID the caller injects.
                 ...extraEnv,
               ],
             },
@@ -834,8 +701,7 @@ export function sandboxManifest(
             resources: { requests: { storage } },
           },
         },
-        // The overlay-store upper PVC (disk-backed; persists runtime builds across
-        // suspend/resume). ALWAYS emitted — one uniform Sandbox shape. PR #403.
+        // The overlay-store upper PVC, persisting runtime builds across suspend/resume.
         ...(overlayStore
           ? [
               {
@@ -850,16 +716,15 @@ export function sandboxManifest(
       ],
     },
   };
-  // The consumer overlay is applied LAST (deep-merge, then Scooter's protected fields
-  // re-asserted). No overlay -> `base` unchanged. See sandboxOverlay.ts for the merge
-  // semantics and the protected set.
+  // The consumer overlay is applied last: deep-merge, then Scooter's protected fields re-asserted
+  // (sandboxOverlay.ts).
   return deploy.overlay ? applyOverlay(base as Record<string, unknown>, deploy.overlay) : base;
 }
 
 function defaultKubeConfig(): KubeConfig {
   const kc = new KubeConfig();
-  // In-cluster only when the projected SA token is actually present; otherwise
-  // loadFromCluster() yields a broken config (invalid URL) instead of throwing.
+  // In-cluster only when the projected SA token is present, since loadFromCluster() otherwise
+  // yields a broken config instead of throwing.
   if (existsSync("/var/run/secrets/kubernetes.io/serviceaccount/token")) {
     kc.loadFromCluster();
   } else {

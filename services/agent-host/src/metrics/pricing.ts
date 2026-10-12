@@ -1,41 +1,33 @@
 /**
- * Cost derivation: token usage × a per-model price table.
- *
- * The price table is deployer-supplied config (a JSON ConfigMap; see
- * modules/platform.nix `observability.pricing`). Prices are USD per 1,000,000
- * tokens, split by token kind so cached reads/writes can be priced differently
- * from fresh input/output (providers charge these at different rates).
- *
- * DESIGN STAGE: signatures + types only. No implementation.
+ * Cost derivation: token usage times a per-model price table, supplied by the
+ * deployer (modules/platform.nix `observability.pricing`) in USD per million tokens
+ * and split by token kind so cached reads/writes can be priced differently.
  */
 
-/** Per-model prices, USD per 1e6 tokens. Missing fields default to 0. */
+/** Per-model prices in USD per million tokens; missing fields default to 0. */
 export interface ModelPrice {
-  /** USD per 1M fresh input (prompt) tokens. */
+  /** USD per 1M fresh input tokens. */
   inputPerMillion: number;
-  /** USD per 1M output (completion) tokens. */
+  /** USD per 1M output tokens. */
   outputPerMillion: number;
-  /** USD per 1M cached-read input tokens (cheaper than fresh input). Optional. */
+  /** USD per 1M cached-read input tokens. */
   cachedReadPerMillion?: number;
-  /** USD per 1M cache-write tokens. Optional. */
+  /** USD per 1M cache-write tokens. */
   cachedWritePerMillion?: number;
 }
 
-/** The full price table: model id -> prices. The model id matches GOOSE_MODEL /
- *  the conversation's resolved model (e.g. "us.anthropic.claude-opus-4-7"). */
+/** The full price table, keyed by the conversation's resolved model id. */
 export type PriceTable = Record<string, ModelPrice>;
 
-/** A single run's token usage (from goose's session DB). All counts are deltas
- *  attributable to ONE run unless noted. Fields are optional so a partial/older
- *  goose schema still yields a best-effort cost. */
+/** A single run's token usage; fields are optional so a partial goose schema still yields a best-effort cost. */
 export interface TokenUsage {
   inputTokens?: number;
   outputTokens?: number;
   cachedReadTokens?: number;
   cachedWriteTokens?: number;
-  /** thought/reasoning tokens, if the provider reports them separately. */
+  /** Thought/reasoning tokens, if the provider reports them separately. */
   thoughtTokens?: number;
-  /** total, if the source gives a total but not the split. */
+  /** Total, if the source gives a total but not the split. */
   totalTokens?: number;
 }
 
@@ -47,17 +39,11 @@ export interface CostBreakdown {
   cachedReadCost: number;
   cachedWriteCost: number;
   totalCost: number;
-  /** False when the model wasn't in the price table (cost is 0, surfaced so a
-   *  caller can warn / skip the cost metric rather than report a misleading 0). */
+  /** False when the model was not in the price table, so a caller can skip the cost metric rather than report a misleading 0. */
   priced: boolean;
 }
 
-/**
- * Parse a price table from the raw JSON the ConfigMap provides. Throws on
- * malformed JSON; tolerates extra/missing per-model fields (missing -> 0).
- * An empty/absent table is valid (yields a table that prices everything at 0,
- * `priced: false`).
- */
+/** Parse a price table from raw JSON, throwing on malformed JSON and defaulting missing per-model fields to 0. */
 export function parsePriceTable(json: string): PriceTable {
   const raw = JSON.parse(json) as Record<string, Partial<ModelPrice>>;
   const out: PriceTable = {};
@@ -72,11 +58,7 @@ export function parsePriceTable(json: string): PriceTable {
   return out;
 }
 
-/**
- * Compute the USD cost of a run from its token usage and the price table.
- * If `model` is absent from the table, returns a zeroed breakdown with
- * `priced: false` (so cost isn't silently reported as a real $0).
- */
+/** Compute the USD cost of a run, or a zeroed breakdown with `priced: false` when `model` is not in the table. */
 export function computeCost(model: string, usage: TokenUsage, prices: PriceTable): CostBreakdown {
   const price = prices[model];
   const perM = (tokens: number | undefined, rate: number | undefined): number =>

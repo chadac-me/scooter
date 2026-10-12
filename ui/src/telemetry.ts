@@ -1,27 +1,9 @@
 /**
- * Browser telemetry (RUM) — OTLP traces from the UI.
- *
- * WHY THIS EXISTS. The failures that matter most in this UI happen entirely in the
- * browser and never reach a pod log: a render stream reconnecting to the wrong
- * conversation, a runtime remounting mid-run and dropping an in-flight run's state, a
- * request storm against an id the server never issued. Debugging those has meant driving a
- * real browser locally and inferring what happened; none of that is available for a
- * deployment.
- *
- * WHERE IT GOES. Spans are POSTed to `/telemetry/v1/traces` — SAME ORIGIN. The UI's nginx
- * forwards that to the cluster's collector. Three consequences, all deliberate:
- *
- *   - the browser holds no telemetry credential (nothing to leak, nothing to abuse),
- *   - the traffic stays behind the ingress auth, so spans are attributable,
- *   - switching vendor (Grafana Cloud, Datadog, ...) is a collector-side change; the UI
- *     does not know or care who receives this.
- *
- * With no collector configured the route returns 204 and discards, so this is safe to
- * leave compiled in — see `pkgs/ui-image/default.nix`.
- *
- * PRIVACY. Message content NEVER leaves the browser through this path. Attributes are ids,
- * counts, durations, and error classes. When adding a span, that rule is the constraint —
- * a conversation id is fine, its transcript is not.
+ * Browser telemetry: OTLP traces from the UI, POSTed same-origin to `/telemetry/v1/traces`
+ * where the UI's nginx forwards them to the cluster's collector (see
+ * `pkgs/ui-image/default.nix`), so the browser holds no credential and the traffic stays
+ * behind the ingress auth. Message content never leaves the browser through this path;
+ * attributes are ids, counts, durations and error classes.
  */
 
 import { context, trace, type Span, type Tracer } from "@opentelemetry/api";
@@ -37,30 +19,24 @@ import {
 } from "@opentelemetry/sdk-trace-web";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
 
-/** Where nginx proxies browser telemetry. Same-origin by construction. */
+/** Where nginx proxies browser telemetry, same-origin by construction. */
 const ENDPOINT = "/telemetry/v1/traces";
 
-/** Attribute names. Stable strings, because dashboards and queries key on them.
- *
- *  Note there are TWO conversation identifiers and both matter. A conversation exists in
- *  the UI before the server assigns its id, so the interesting window — creation, the
- *  first send, the stream opening — spans both. Recording only one breaks the trace at
- *  exactly the point the bugs live. */
+/** Attribute names, stable because dashboards and queries key on them; both conversation identifiers matter since the creation window spans them. */
 export const ATTR = {
-  /** Stable local key. Present for the conversation's whole life. */
+  /** Stable local key, present for the conversation's whole life. */
   conversationKey: "scooter.conversation.key",
-  /** The SERVER's id. Absent until the conversation has been created. */
+  /** The server's id, absent until the conversation has been created. */
   conversationId: "scooter.conversation.id",
   runId: "scooter.run.id",
-  /** Why a stream closed / reopened — the field that would have named the restart bug. */
+  /** Why a stream closed or reopened. */
   reason: "scooter.reason",
 } as const;
 
 /** Matches a conversation id in a request URL. */
 const CONV_URL_RE = /\/conversations\/([0-9a-f-]{36})/;
 
-/** Bucket a request into a low-cardinality kind, so traces group by WHAT the request
- *  was rather than by conversation id. */
+/** Bucket a request into a low-cardinality kind so traces group by what the request was. */
 function classifyRoute(url: string): string {
   const path = url.replace(/^https?:\/\/[^/]+/, "").replace(/\?.*$/, "");
   if (path.endsWith("/messages")) return "send-message";
@@ -75,24 +51,9 @@ function classifyRoute(url: string): string {
 
 let tracer: Tracer | undefined;
 
-/**
- * Fetch the deployment's telemetry config and start if it is enabled.
- *
- * RUNTIME, not build time. The UI image is built once and deployed to clusters that may or
- * may not have a collector, so a VITE_* flag baked into the bundle cannot express that.
- * nginx serves /telemetry/config.json from its own environment.
- *
- * Never throws and never blocks startup: a missing or malformed config just leaves
- * telemetry off.
- */
+/** Fetch the deployment's telemetry config (served by nginx at runtime, since the image is built once) and start if enabled; never throws. */
 export async function initTelemetryFromServer(): Promise<void> {
-  // LOCAL DEBUGGING. With no collector — dev, or an e2e run — spans go to the browser
-  // console instead, one line each. Playwright forwards those to the test output, so a
-  // failing spec shows the same conversation lifecycle the deployed traces do, without
-  // standing up Tempo. Grep is a perfectly good query language for one test's worth.
-  //
-  // VITE_TELEMETRY_CONSOLE=1 turns it on; it is never on by default, because a chat UI
-  // emits enough spans to bury real console errors.
+  // VITE_TELEMETRY_CONSOLE=1 prints spans to the browser console instead, which Playwright forwards into the test output.
   if (import.meta.env.VITE_TELEMETRY_CONSOLE === "1") {
     initTelemetry({ enabled: true, exporter: "console" });
     return;
@@ -104,20 +65,16 @@ export async function initTelemetryFromServer(): Promise<void> {
     if (!cfg.enabled) return;
     initTelemetry({ enabled: true, sampleRatio: cfg.sampleRatio, version: cfg.version });
   } catch {
-    /* no config, no telemetry — not an error */
+    /* no config means no telemetry */
   }
 }
 
-/**
- * Start telemetry. No-op unless enabled, and never throws — a telemetry failure must not
- * take down the app it is meant to observe.
- */
+/** Start telemetry; a no-op unless enabled, and never throws. */
 export function initTelemetry(opts: {
   enabled: boolean;
   sampleRatio?: number;
   version?: string;
-  /** "console" prints each span as a line instead of exporting OTLP — for local runs
-   *  where there is no collector. */
+  /** "console" prints each span as a line instead of exporting OTLP. */
   exporter?: "otlp" | "console";
 }): void {
   if (!opts.enabled || tracer) return;
@@ -127,14 +84,11 @@ export function initTelemetry(opts: {
         [ATTR_SERVICE_NAME]: "scooter-ui",
         [ATTR_SERVICE_VERSION]: opts.version ?? "dev",
       }),
-      // Head sampling: a chat UI with a live event stream can produce a lot of spans.
+      // Head sampling, since a live event stream produces many spans.
       sampler: new TraceIdRatioBasedSampler(opts.sampleRatio ?? 1),
       spanProcessors: opts.exporter === "console"
         ? [
-            // ONE LINE per span, not OTel's multi-line dump: a failing test's output
-            // should be greppable ("grep scooter.span" / "grep conversation.id_assigned")
-            // rather than something to scroll. Simple, not batched — a span that never
-            // flushes because the tab closed is exactly the one worth seeing.
+            // One greppable line per span, unbatched so a span is not lost when the tab closes.
             new SimpleSpanProcessor({
               export: (spans, cb) => {
                 for (const sp of spans) {
@@ -151,8 +105,7 @@ export function initTelemetry(opts: {
           ]
         : [
         new BatchSpanProcessor(new OTLPTraceExporter({ url: ENDPOINT }), {
-          // Small batches, short delay: a browser tab can close at any moment, and an
-          // unexported span is a lost span.
+          // Small batches and a short delay, because a tab can close at any moment.
           scheduledDelayMillis: 5_000,
           maxExportBatchSize: 64,
         }),
@@ -163,15 +116,11 @@ export function initTelemetry(opts: {
     registerInstrumentations({
       instrumentations: [
         new FetchInstrumentation({
-          // Do NOT trace the telemetry POST itself — it would generate a span per export,
-          // which generates another export, and so on.
+          // Tracing the telemetry POST itself would export a span per export forever.
           ignoreUrls: [new RegExp(`${ENDPOINT}`)],
-          // Propagate trace context to our own backend ONLY. Sending traceparent to a
-          // third party would leak trace ids and trip their CORS preflight.
+          // Trace context goes to our own backend only, since a third party would trip CORS and see trace ids.
           propagateTraceHeaderCorsUrls: [new RegExp(`^${location.origin}`)],
-          // Tag every request with its conversation and outcome, so a "my message went
-          // nowhere" report is a query rather than a guess: the send POST, its status,
-          // and the stream's own spans all carry the same conversation id.
+          // Tag every request with its conversation and outcome.
           applyCustomAttributesOnSpan: (span, request, result) => {
             const url =
               typeof request === "string" ? request : ((request as Request).url ?? String(request));
@@ -193,12 +142,11 @@ export function initTelemetry(opts: {
 
     tracer = provider.getTracer("scooter-ui");
   } catch {
-    // Telemetry is best-effort by definition. Leave `tracer` undefined so every
-    // record()/startSpan() below becomes a no-op.
+    // An undefined `tracer` makes every record()/startSpan() a no-op.
   }
 }
 
-/** Record a point-in-time event as a zero-duration span. Safe before init (no-op). */
+/** Record a point-in-time event as a zero-duration span, a no-op before init. */
 export function record(name: string, attrs: Record<string, string | number | boolean> = {}): void {
   try {
     tracer?.startSpan(name, { attributes: attrs }).end();
@@ -234,12 +182,7 @@ export function recordError(name: string, err: unknown, attrs: Record<string, st
   }
 }
 
-/** Catch what would otherwise only reach the browser console.
- *
- *  Deliberately NOT gated on `tracer` being ready: config is fetched asynchronously, so a
- *  guard here would install nothing (init has not finished when main calls this) — and an
- *  error thrown during startup is exactly the kind worth capturing. record() is a no-op
- *  while telemetry is off, so the listeners are free until it is on. */
+/** Catch what would otherwise only reach the browser console, installed before init completes since record() is a no-op until then. */
 export function installGlobalErrorHandlers(): void {
   window.addEventListener("error", (e) => {
     record("browser.error", {

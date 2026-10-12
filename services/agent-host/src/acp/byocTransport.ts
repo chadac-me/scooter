@@ -1,37 +1,19 @@
 /**
- * The BYOC transport — a RemoteTransport that speaks HTTP/SSE to the BYOC controller instead of
- * holding a WebSocket to the user's container.
- *
- * This is the swap that deletes a whole bug class (todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §L).
- * Before, each agent-host pod held the container socket in its own memory, so only the pod the
- * container happened to reach could drive that brain: a user with conversations spread across
- * replicas would find half of them dead. Same shape as the conversation-list bug in #284 — asking
- * one arbitrary pod what it happens to know, instead of the component that owns the answer.
- *
- * Here the pod holds NOTHING durable. Every outbound frame is a stateless POST; the ACP frames come
- * back as SSE on the prompt response. Any replica can serve any conversation and a rollout cannot
- * strand a run.
- *
- * ROUTING. `RemoteAcpClient` sends three kinds of frame, and each has its own endpoint because they
- * mean different things to the controller:
- *   prompt/cancel/initialize/... -> POST /byoc/:session/prompt       (starts a run, streams back)
- *   ack for a permission id      -> POST /byoc/:session/permission/:id  (unblocks the agent)
- *   exec_result for an exec id   -> POST /byoc/:session/exec/:id        (Channel B reply)
- * Posting an answer to the prompt endpoint would start a SECOND run rather than resolve the
- * blocked call — hence the explicit split rather than one catch-all route.
- *
- * FAILURE IS LOUD. Every error path closes the transport, because RemoteAcpClient's onClose is what
- * rejects in-flight requests and lets the bridge emit RUN_ERROR. A transport that merely goes quiet
- * would leave the bridge awaiting an ack that can never arrive — the user watching a spinner
- * forever, which is exactly the class of "weird detached state" this project keeps chasing.
+ * The BYOC transport: a RemoteTransport that speaks HTTP/SSE to the BYOC controller,
+ * which owns the WebSocket to the user's container, so the pod holds nothing durable
+ * and any replica can serve any conversation. Each frame kind has its own endpoint:
+ * ACP requests go to POST /byoc/:session/prompt (which streams the run back), a
+ * permission ack to /permission/:id, and an exec_result to /exec/:id. Every error
+ * path closes the transport, since RemoteAcpClient's onClose is what rejects
+ * in-flight requests and lets the bridge emit RUN_ERROR rather than hang.
  */
 
 import type { RemoteTransport, WireFrame } from "./remoteProtocol.js";
 
 export interface ByocTransportConfig {
-  /** Base URL of the BYOC controller Service (in-cluster), e.g. http://byoc-controller:8080. */
+  /** Base URL of the in-cluster BYOC controller Service, e.g. http://byoc-controller:8080. */
   baseUrl: string;
-  /** The controller-issued session id for THIS owner's container. */
+  /** The controller-issued session id for this owner's container. */
   sessionId: string;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
@@ -60,11 +42,10 @@ export function createByocTransport(config: ByocTransportConfig): RemoteTranspor
     for (const cb of [...closeCbs]) cb();
   };
 
-  /** Which endpoint a frame belongs to. See ROUTING above. */
+  /** Which endpoint a frame belongs to. */
   const endpointFor = (frame: WireFrame): string => {
     if (frame.ch === "exec" && frame.id) return `${base}/exec/${encodeURIComponent(frame.id)}`;
-    // An ACP `ack` going OUT is always an answer to a permission the container is blocked on —
-    // the agent-host never acks anything else (it is the requester on Channel A).
+    // An outbound ACP `ack` is always an answer to a permission the container is blocked on.
     if (frame.ch === "acp" && frame.type === "ack" && frame.id) {
       return `${base}/permission/${encodeURIComponent(frame.id)}`;
     }
@@ -92,7 +73,7 @@ export function createByocTransport(config: ByocTransportConfig): RemoteTranspor
           try {
             emit(JSON.parse(line.slice(5).trim()) as WireFrame);
           } catch {
-            // A malformed frame is skipped, never fatal: one bad line must not kill a live run.
+            // One bad line must not kill a live run.
           }
         }
       }
@@ -113,14 +94,13 @@ export function createByocTransport(config: ByocTransportConfig): RemoteTranspor
             signal: ac.signal,
           });
           if (!res.ok) {
-            // 503 = the container is not connected. Closing (rather than retrying silently) is
-            // deliberate: the bridge should tell the user their Claude is offline.
+            // Close rather than retry silently, so the bridge tells the user their Claude is offline.
             shutdown();
             return;
           }
           await pump(res);
         } catch {
-          if (!ac.signal.aborted) shutdown(); // an abort is OUR close(), not a failure
+          if (!ac.signal.aborted) shutdown(); // an abort is our own close(), not a failure
         } finally {
           inflight.delete(ac);
         }

@@ -2,13 +2,7 @@ package main
 
 import "testing"
 
-// EXISTENCE IS THE ROW — one rule, run by both stacks, which is what lets the kube-less e2e suite
-// exercise the same list code production does. A dev-only substitute here (or a cluster-only join
-// against a CRD watch cache) would break that.
-//
-// A row with NULL phase and NULL sandbox_ref is the kube-less stack's normal shape (nothing writes
-// a phase where there is no controller) — the projection must match what a CR with no phase and no
-// sandboxRef produced: status "running", empty sandbox name.
+// Every row that exists is listed, and a row with NULL phase and NULL sandbox_ref (the kube-less stack's normal shape) projects as status "running" with an empty sandbox name.
 func TestListsWhateverRowsExist(t *testing.T) {
 	metas := []ConversationRow{
 		{ID: "a", ThreadID: "a", Title: "A", CreatedAt: 100, LastActivityAt: 100},
@@ -66,9 +60,7 @@ func TestConversationRowOf(t *testing.T) {
 		t.Errorf("bare spec must be all-NULL, got %+v", r)
 	}
 
-	// A title smuggled into the spec is NOT a title. The spec is the CR's, and the CR has no
-	// such field — the apiserver prunes it, so anything that read it there would be reading a
-	// value production never stores.
+	// A title smuggled into the spec is not a title, since the CR has no such field and the apiserver prunes it.
 	r = conversationRowOf(NewConversation{
 		Name: "conv-3",
 		Spec: map[string]interface{}{"title": "from the spec"},

@@ -1,14 +1,8 @@
 /**
- * Tier 1 contract test — jobManager (run_background job-core).
- *
- * Drives the manager against a FAKE exec client that records execs + serves
- * canned file reads, and a fake registry. Proves:
- *   - start() launches the command DETACHED (nohup/setsid, redirect to the job's
- *     log, status written on exit) under the workspace-PVC jobs dir, records it in
- *     the registry, and returns a jobId WITHOUT waiting for the command;
- *   - check() reports "running" (no status file) vs "exited" (+ exitCode) and
- *     returns the captured log;
- *   - list() returns the registry's jobs (durable across restart).
+ * Contract tests for jobManager, the run_background job core, driven against a
+ * fake exec client that records execs and serves scripted results, plus a fake
+ * registry. start() must launch the command detached under the workspace jobs dir
+ * and return without waiting; check() reads status, liveness and log in one probe.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -17,9 +11,7 @@ import { createJobManager, JOBS_DIR, type JobRecord } from "../../src/session/jo
 import type { SandboxApiClient } from "../../src/exec/sandboxExec.js";
 import type { ExecRequest, ExecResult } from "../../src/types.js";
 
-/** A fake exec client: records every execute(), and lets a test script the
- *  ExecResult per call (by matching on the joined command). uploads/downloads
- *  are recorded too. */
+/** A fake exec client that records every execute() and lets a test script the ExecResult by joined command. */
 function fakeClient(script?: (cmd: string) => Partial<ExecResult> | undefined) {
   const execs: string[] = [];
   const uploads: Array<{ path: string; content: string }> = [];
@@ -41,10 +33,7 @@ function fakeClient(script?: (cmd: string) => Partial<ExecResult> | undefined) {
   return { client, execs, uploads };
 }
 
-/** Build the marker-delimited stdout that check()'s single probe expects:
- *  __STATUS__\n<status>\n__ALIVE__\n<y|n>\n__SIZE__\n<bytes>\n__LOG__\n<log>.
- *  Empty status + alive "y" = running; empty status + "n" = the process DIED without
- *  recording an exit code. */
+/** Build the marker-delimited stdout that check()'s single probe parses. */
 function probeOut(status: string, sizeBytes: number, log: string, alive: "y" | "n" = "y"): string {
   return `__STATUS__\n${status}\n__ALIVE__\n${alive}\n__SIZE__\n${sizeBytes}\n__LOG__\n${log}`;
 }
@@ -79,60 +68,45 @@ describe("jobManager.start", () => {
     const res = await mgr(client, registry).start("conv-1", "npm run build");
 
     expect(res.jobId).toBe("job-1");
-    // Some exec launched the job detached: it must reference the job's log +
-    // status under JOBS_DIR/<jobId>, and detach (nohup or setsid + trailing &).
     const launch = execs.find((c) => c.includes(`${JOBS_DIR}/job-1`));
     expect(launch, "a launch exec referencing the job dir").toBeTruthy();
-    expect(launch).toMatch(/nohup|setsid/); // detached from the exec's lifetime
-    expect(launch).toContain("npm run build"); // the actual command
-    // Recorded in the durable registry so list() sees it across a restart.
+    expect(launch).toMatch(/nohup|setsid/);
+    expect(launch).toContain("npm run build");
     expect(jobs.get("conv-1")?.[0]).toMatchObject({ jobId: "job-1", command: "npm run build" });
   });
 
   it("creates the job dir BEFORE the backgrounded job (mkdir not racing the pid write)", async () => {
-    // Regression: `mkdir -p $d && … & printf … > $d/pid` backgrounds the WHOLE chain,
-    // so the trailing pid-write races the not-yet-run mkdir and fails "No such file
-    // or directory" (the reported run_background launch failure). The mkdir must run
-    // in the FOREGROUND — before the `&` — so $d exists when pid is written.
+    // The mkdir must run in the foreground, before the `&`, so the job dir exists when the pid is written.
     const { client, execs } = fakeClient();
     const { registry } = fakeRegistry();
     await mgr(client, registry).start("conv-1", "sleep 1");
 
     const launch = execs.find((c) => c.includes(`${JOBS_DIR}/job-1`))!;
-    // The mkdir must be FOREGROUND — separated from the backgrounded setsid by a
-    // statement terminator `;` (not chained into it with `&&`, which the trailing
-    // `&` would then background wholesale). So: the mkdir/cmd segment ends with `;`
-    // BEFORE `setsid`, and the pid write comes AFTER the detach `&`.
     const setsidAt = launch.indexOf("setsid");
     const mkdirAt = launch.indexOf("mkdir -p");
     const bgAt = launch.indexOf("&");
     const pidAt = launch.indexOf("/pid");
     expect(mkdirAt).toBeGreaterThanOrEqual(0);
     expect(mkdirAt).toBeLessThan(setsidAt);
-    // A `;` sits between the foreground setup and the backgrounded setsid — this is
-    // exactly what stops the `&` from backgrounding the mkdir (the bug).
+    // A `;` between the mkdir and the setsid keeps the trailing `&` from backgrounding the mkdir too.
     expect(launch.slice(mkdirAt, setsidAt)).toContain(";");
-    expect(pidAt).toBeGreaterThan(bgAt); // pid write happens after the detach
+    expect(pidAt).toBeGreaterThan(bgAt);
   });
 
   it("does NOT block on the command (start returns before it would finish)", async () => {
-    // If start() awaited the command, this scripted long-runner would hang the test.
     const { client } = fakeClient((cmd) =>
       cmd.includes("sleep") ? { stdout: "", exitCode: 0 } : undefined,
     );
     const { registry } = fakeRegistry();
     const res = await mgr(client, registry).start("conv-1", "sleep 999");
-    expect(res.jobId).toBeTruthy(); // returned promptly, no await on the command
+    expect(res.jobId).toBeTruthy();
   });
 });
 
 describe("jobManager.check", () => {
   it("reports RUNNING when the status file does not exist yet", async () => {
-    // The status read exits non-zero (file absent) -> running; the log read returns
-    // partial output.
     const { client } = fakeClient((cmd) => {
-      // check() reads status+size+log in ONE probe; the fake returns the combined,
-      // marker-delimited output the impl parses. No status marker content = running.
+      // An empty status marker means running.
       if (cmd.includes("__STATUS__")) return { stdout: probeOut("", 12, "building...\n") };
       return undefined;
     });
@@ -183,7 +157,7 @@ describe("jobManager.check", () => {
 
   it("flags truncation when the log is larger than the tail cap", async () => {
     const { client } = fakeClient((cmd) =>
-      // size (2 MiB) far exceeds the default 64 KiB tail cap.
+      // 2 MiB exceeds the default 64 KiB tail cap.
       cmd.includes("__STATUS__") ? { stdout: probeOut("0", 2 * 1024 * 1024, "…tail…") } : undefined,
     );
     const { registry } = fakeRegistry();
@@ -198,11 +172,10 @@ describe("jobManager.cleanup", () => {
   it("removes EXITED jobs' dirs older than the TTL (find on old status files)", async () => {
     const { client, execs } = fakeClient();
     const { registry } = fakeRegistry();
-    // 10-min default TTL -> find -mmin +10; running jobs (no status file) untouched.
     await createJobManager({ client: () => client, registry }).cleanup("conv-1");
     const sweep = execs.find((c) => c.includes("find") && c.includes("status"));
     expect(sweep, "a find sweep over old status files").toBeTruthy();
-    expect(sweep).toMatch(/-mmin \+10/); // 10-min default TTL
+    expect(sweep).toMatch(/-mmin \+10/);
     expect(sweep).toContain(JOBS_DIR);
   });
 
@@ -217,7 +190,6 @@ describe("jobManager.cleanup", () => {
 describe("jobManager.kill", () => {
   it("SIGTERM+SIGKILLs the job's PROCESS GROUP (kill -- -PGID) when running", async () => {
     const { client, execs } = fakeClient((cmd) =>
-      // The kill probe: no status file (running), a pid present → it kills.
       cmd.includes("__KILLED__") ? { stdout: "__KILLED__\n" } : undefined,
     );
     const { registry } = fakeRegistry();
@@ -227,8 +199,8 @@ describe("jobManager.kill", () => {
     expect(res.outcome).toBe("killed");
     const killExec = execs.find((c) => c.includes("kill -TERM"));
     expect(killExec, "a kill exec").toBeTruthy();
-    expect(killExec).toMatch(/kill -TERM -- -/); // negative PGID = the process GROUP
-    expect(killExec).toMatch(/kill -KILL -- -/); // escalates to SIGKILL after a grace
+    expect(killExec).toMatch(/kill -TERM -- -/);
+    expect(killExec).toMatch(/kill -KILL -- -/);
   });
 
   it("reports already-exited when the job has finished (no kill)", async () => {
@@ -271,10 +243,8 @@ describe("jobManager.pollCompletions (the completion-watcher)", () => {
     expect(first.map((s) => s.jobId)).toEqual(["job-1"]);
     expect(first[0].state).toBe("exited");
     expect(first[0].output).toContain("all done");
-    // The registry record is now marked notified.
     expect(jobs.get("conv-1")?.[0].notifiedAt).toBeTruthy();
 
-    // A SECOND poll does NOT re-announce it (announce-at-most-once).
     const second = await mgr(client, registry).pollCompletions("conv-1");
     expect(second).toEqual([]);
   });
@@ -286,7 +256,7 @@ describe("jobManager.pollCompletions (the completion-watcher)", () => {
 
     const done = await mgr(client, registry).pollCompletions("conv-1");
     expect(done).toEqual([]);
-    expect(jobs.get("conv-1")?.[0].notifiedAt).toBeUndefined(); // not marked — still running
+    expect(jobs.get("conv-1")?.[0].notifiedAt).toBeUndefined();
   });
 
   it("skips jobs already marked notified", async () => {
@@ -295,7 +265,7 @@ describe("jobManager.pollCompletions (the completion-watcher)", () => {
     await registry.saveJob("conv-1", { jobId: "job-1", command: "x", startedAt: 1, notifiedAt: 999 });
 
     const done = await mgr(client, registry).pollCompletions("conv-1");
-    expect(done).toEqual([]); // already announced
+    expect(done).toEqual([]);
   });
 });
 
@@ -308,14 +278,11 @@ describe("jobManager — a job whose process DIED without writing status", () =>
   };
 
   it("THE REGRESSION: no status file + no process reports EXITED, not running", async () => {
-    // `status` is written by the job's OWN shell on exit, so a process killed first (pod
-    // restart, OOM, eviction) never writes it. Keying "running" on that file alone left the
-    // job running forever and the agent waiting on a completion that could not arrive.
-    // Observed live: conv-1ribob idle 2h18m on a nix build killed by a pod restart.
+    // `status` is written by the job's own shell on exit, so a process killed first never writes it.
     const st = await (await setup(probeOut("", 40, "building...\n", "n"))).check("conv-1", "job-1");
     expect(st.state).toBe("exited");
     expect(st.died).toBe(true);
-    expect(st.exitCode).toBe(137); // 128+SIGKILL — the real code is unknowable
+    expect(st.exitCode).toBe(137);
   });
 
   it("a LIVE process with no status file is still running", async () => {
@@ -328,12 +295,11 @@ describe("jobManager — a job whose process DIED without writing status", () =>
     const st = await (await setup(probeOut("0", 5, "done\n", "n"))).check("conv-1", "job-1");
     expect(st.state).toBe("exited");
     expect(st.exitCode).toBe(0);
-    expect(st.died).toBeUndefined(); // a normal completion, not a kill
+    expect(st.died).toBeUndefined();
   });
 
   it("an UNREADABLE liveness answer is NOT treated as death", async () => {
-    // Only a definite "n" means gone. A missing pid file or an unreadable /proc must not
-    // kill a job that is actually still building.
+    // Only a definite "n" means gone.
     const st = await (await setup(probeOut("", 40, "building...\n", "" as never))).check("conv-1", "job-1");
     expect(st.state).toBe("running");
   });

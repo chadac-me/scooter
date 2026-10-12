@@ -1,26 +1,10 @@
 /**
- * Queued-messages list — the messages the user sent WHILE a run was in flight,
- * waiting their turn behind it. Rendered inside the right-side panel's Queue tab
- * (it used to be an inline strip below the thread, which stacked full message text
- * and ate the screen on a backlog — see RightPanel).
- *
- * Priority: a message with priority > 0 will INTERRUPT the current turn (jump ahead)
- * rather than wait for it to finish. Those are visually distinct — a "Priority" pill
- * + lightning icon — and sorted to the top (highest priority first), so it's obvious
- * which messages run next. Normal (priority 0) messages show a clock cue and keep
- * their arrival order.
- *
- * Long messages are CLAMPED to a few lines with a Show more/less toggle, so one long
- * message can't dominate the narrow panel; the toggle only appears when the text
- * actually overflows the clamp.
- *
- * Why sourced from context: the queue lives in the agent-host's bridge run-queue
- * (server-side), which emits QUEUE_UPDATED snapshots on the integrity stream. The UI
- * used to track "queued" in client memory only, so it VANISHED on refresh (and never
- * showed across tabs). Reading the queue off the single-source stream (via
- * RuntimeProvider context) makes it durable + live: a refresh re-derives it from the
- * log, and it clears itself when the queue drains (the messages become normal user
- * turns as they run).
+ * Queued-messages list: the messages the user sent while a run was in flight, waiting
+ * their turn behind it, rendered in the right panel's Queue tab. A message with
+ * priority > 0 interrupts the current turn and sorts to the top; priority-0 messages
+ * keep their arrival order. The list is read from the QUEUE_UPDATED snapshots on the
+ * integrity stream (via RuntimeProvider context), so it survives a refresh and clears
+ * itself as the queue drains.
  */
 
 import { useLayoutEffect, useRef, useState } from "react";
@@ -31,20 +15,17 @@ import { Button } from "@/components/ui/button";
 
 type QueuedMessage = { id: string; text: string; priority: number };
 
-/** Lines to show before clamping a long queued message. The class is spelled out
- *  literally (not interpolated) so Tailwind's JIT scanner emits the utility. */
+/** Lines to show before clamping; spelled out literally so Tailwind's JIT scanner emits the utility. */
 const CLAMP_CLASS = "line-clamp-4";
 
 function QueuedMessageRow({ m }: { m: QueuedMessage }) {
   const priority = m.priority > 0;
   const textRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
-  // Whether the (clamped) text actually overflows — only then do we offer a toggle.
+  // The toggle is offered only when the clamped text actually overflows.
   const [overflows, setOverflows] = useState(false);
 
-  // Measure after layout: when clamped, a taller scrollHeight than clientHeight means
-  // the text is longer than the clamp, so the toggle is warranted. Re-measured when
-  // the text changes (a QUEUE_UPDATED snapshot can replace the list).
+  // Measured after layout: a scrollHeight taller than clientHeight means the text exceeds the clamp.
   useLayoutEffect(() => {
     const el = textRef.current;
     if (!el || expanded) return;
@@ -63,16 +44,12 @@ function QueuedMessageRow({ m }: { m: QueuedMessage }) {
       }
       title={priority ? "Will interrupt the current turn" : "Waiting for the current turn to finish"}
     >
-      {/* State cue: a lightning bolt for a priority (interrupting) message, a clock
-          for a normal waiting one. */}
+      {/* Lightning bolt for a priority message, clock for a waiting one. */}
       <span aria-hidden className={"mt-0.5 shrink-0 " + (priority ? "text-warning" : "text-muted-foreground/70")}>
         {priority ? <FiZap size={13} /> : <FiClock size={13} />}
       </span>
       <div className="min-w-0 flex-1">
-        {/* Wrap long messages (incl. unbroken strings) instead of stretching the panel
-            width; clamp to CLAMP_LINES until expanded. When clamped, line-clamp-4 sets
-            `display:-webkit-box` (so do NOT also set `block`, which would override it and
-            defeat the clamp); expanded is a normal block. min-w-0 lets break-words apply. */}
+        {/* When clamped, line-clamp-4 sets `display:-webkit-box`, so do not also set `block`, which would override it. */}
         <div
           ref={textRef}
           data-testid="queued-message-text"
@@ -108,8 +85,7 @@ export function QueuedMessages() {
   const { queuedMessages } = useConversationInterrupts();
   if (queuedMessages.length === 0) return null;
 
-  // Priority messages (will interrupt the current turn) float to the top, highest
-  // first; ties + normal messages keep their arrival order (stable sort).
+  // Priority messages float to the top, highest first; ties and normal messages keep arrival order.
   const ordered = queuedMessages
     .map((m, i) => ({ m, i }))
     .sort((a, b) => b.m.priority - a.m.priority || a.i - b.i)

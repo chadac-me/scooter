@@ -6,6 +6,5 @@ from scooter_lib.settings import ScooterBaseSettings
 
 
 class KagiSettings(ScooterBaseSettings):
-    # An API token from a paid Kagi account (https://kagi.com/settings?p=api). Empty ⇒
-    # this provider is disabled, so `web_search` is not listed at all.
+    # An API token from a paid Kagi account (https://kagi.com/settings?p=api); empty disables the provider.
     kagi_api_key: str = ""

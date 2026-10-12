@@ -1,17 +1,13 @@
 /**
- * Tier 1 contract — the ACP provider resolver (pickAcpProvider).
- *
- * Locks the per-run selection contract: highest-priority ELIGIBLE provider wins, with an
- * always-eligible floor guaranteeing a pick. This is the seam the human-trigger guardrail
- * (Increment 2) plugs into — a `remote-personalized` provider whose eligible() keys on
- * owner + source. See todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+ * The ACP provider resolver (pickAcpProvider): the highest-priority eligible provider
+ * wins, with an always-eligible floor guaranteeing a pick.
  */
 
 import { describe, it, expect } from "vitest";
 
 import { pickAcpProvider, type AcpProvider, type RunContext } from "../../src/acp/provider.js";
 
-/** A stub provider — createClient is never called by the resolver (pure selection). */
+/** A stub provider whose createClient the resolver never calls. */
 const provider = (
   id: string,
   priority: number,
@@ -41,7 +37,7 @@ describe("pickAcpProvider", () => {
   });
 
   it("falls to the always-eligible floor when the higher-priority provider is INELIGIBLE", async () => {
-    // The guardrail shape: remote is only eligible for human sources; a scheduled run drops to floor.
+    // Remote is only eligible for human sources, so a scheduled run drops to the floor.
     const remote = provider("remote-personalized", 10, (c) => c.source !== "scheduler");
     expect((await pickAcpProvider([floor, remote], ctx({ source: "ui" })))?.id).toBe("remote-personalized");
     expect((await pickAcpProvider([floor, remote], ctx({ source: "scheduler" })))?.id).toBe("bedrock-goose");

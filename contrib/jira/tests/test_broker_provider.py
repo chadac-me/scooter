@@ -1,9 +1,4 @@
-"""Jira's broker half: the Atlassian OAuth source and the auto-link rule.
-
-Moved out of the broker's test_sources / test_autolink with the provider
-(PR #582). The token flow is jira implementation, not shared surface — the
-generic `static_token` source stays covered in scooter_broker_lib.
-"""
+"""Jira's broker half: the Atlassian OAuth source and the auto-link rule."""
 
 from __future__ import annotations
 
@@ -49,12 +44,10 @@ async def test_atlassian_oauth_source_mints_and_caches(monkeypatch):
     assert cred.expires_at and cred.expires_at > time.time()
 
     await src.get(_identity())
-    assert calls["n"] == 1  # cached
+    assert calls["n"] == 1
 
 
 def test_jira_issue_rule_builds_browse_url(monkeypatch):
-    # The contrib owns JIRA_SITE_URL now, so the env is what configures the link —
-    # the broker app has no jira field to patch. Why: PR #582.
     monkeypatch.setenv("JIRA_SITE_URL", "https://acme.atlassian.net")
     r = _match(_JIRA_LINK_RULES, "POST", "rest/api/3/issue")
     link = r.extract({"key": "PROJ-12", "self": "https://api.atlassian.com/.../issue/10001"})
@@ -63,8 +56,7 @@ def test_jira_issue_rule_builds_browse_url(monkeypatch):
 
 
 def test_without_a_site_url_the_api_self_link_is_used():
-    # Empty is a MODE: no site configured -> fall back to the API `self` URL rather
-    # than building a link to a host we are guessing at.
+    # With no site configured the API `self` URL is used rather than a guessed host.
     r = _match(_JIRA_LINK_RULES, "POST", "rest/api/2/issue")
     link = r.extract({"key": "PROJ-12", "self": "https://api.atlassian.com/x/issue/10001"})
     assert link == Link("jira", "issue", "https://api.atlassian.com/x/issue/10001", "PROJ-12")

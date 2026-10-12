@@ -1,17 +1,8 @@
-// Kube-less DEV/E2E mode. The local fast-e2e / dev stack has no apiserver and no controller — a
-// single agent-host fronts a real Postgres. This file is the seams that differ there:
-//
-//   - routing: a single AGENT_HOST_URL (the empty ownership cache always misses, so every route
-//     falls through to this one upstream);
-//   - create: the conversations-row INSERT alone (devCreator), with no CR write alongside it.
-//
-// EXISTENCE and PHASE are deliberately NOT among them: both are columns on the row, read by one
-// code path in both stacks. Keep it that way — a dev-only substitute for either (existence
-// especially, which the cluster would otherwise take from a CRD watch cache) puts different list
-// code under test than production runs, and the e2e suite stops being evidence. Why: PR #654.
-//
-// None of this compiles into the production path's behaviour: it is reached only when
-// ROUTER_DEV_MODE is set (see main.go).
+// Kube-less dev/e2e mode, reached only when ROUTER_DEV_MODE is set: a single agent-host
+// fronts a real Postgres with no apiserver or controller. The seams that differ are routing
+// (a single AGENT_HOST_URL) and create (the conversations-row insert alone, with no CR).
+// Existence and phase are columns on the row read by one code path in both stacks, and a
+// dev-only substitute for either would stop the e2e suite being evidence about production.
 package main
 
 import (
@@ -30,9 +21,7 @@ func devModeEnabled() bool {
 	return v == "1" || v == "true"
 }
 
-// agentHostURLFromEnv parses AGENT_HOST_URL — the single agent-host every dev-mode request proxies
-// to. It is the fallback upstream (the empty cache never resolves an owner IP), so it must be an
-// absolute URL.
+// agentHostURLFromEnv parses AGENT_HOST_URL, the single absolute upstream every dev-mode request proxies to.
 func agentHostURLFromEnv() (*url.URL, error) {
 	raw := os.Getenv("AGENT_HOST_URL")
 	if raw == "" {
@@ -48,17 +37,12 @@ func agentHostURLFromEnv() (*url.URL, error) {
 	return u, nil
 }
 
-// devCreator is the kube-less create path: it inserts the conversations row directly rather than
-// writing a Conversation CR (there is no apiserver). agent-host hydrates the conversation from that
-// row on the first prompt (hydrateByThread), so create-then-prompt works with no controller. It
-// holds its OWN writable pool, fenced behind ROUTER_DEV_MODE — separate from the production
-// WriteStore path (store.go).
+// devCreator is the kube-less create path, inserting the conversations row directly through its own writable pool so agent-host can hydrate the conversation on the first prompt.
 type devCreator struct {
 	pool *pgxpool.Pool
 }
 
-// OpenDevCreator opens the small writable pool for dev-mode creates. dsn is the same agent_host DSN
-// the read store uses (in dev it is a superuser/trust role, so it can write).
+// OpenDevCreator opens the small writable pool for dev-mode creates.
 func OpenDevCreator(ctx context.Context, dsn string) (*devCreator, error) {
 	if dsn == "" {
 		return nil, errors.New("ROUTER_DEV_MODE needs a writable AGENT_HOST_DB DSN (set AGENT_HOST_DB_DSN)")
@@ -82,8 +66,7 @@ func (d *devCreator) Close() {
 	}
 }
 
-// Create inserts a fresh conversations row — the ONLY write this stack makes on create, since there
-// is no CR here. The row shape itself lives in conversationrow.go, shared with the cluster path.
+// Create inserts a fresh conversations row, the only write this stack makes on create.
 func (d *devCreator) Create(ctx context.Context, c NewConversation) error {
 	_, err := d.pool.Exec(ctx, insertConversationSQL, conversationRowOf(c, time.Now().UnixMilli()).args()...)
 	return err

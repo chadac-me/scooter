@@ -1,8 +1,7 @@
 /**
- * Tier 1 — the subagent transcript builder. Folds a persisted AG-UI event log into
- * ordered turns INCLUDING compact tool-call summaries, so a parent monitoring a
- * subagent sees what it DID (tools) as well as what it SAID (text) — the point is
- * spotting divergence. See todo/docs/SUBAGENT_INTERACTION.md.
+ * The subagent transcript builder folds a persisted AG-UI event log into ordered turns
+ * including compact tool-call summaries, so a parent monitoring a subagent sees what it
+ * did as well as what it said.
  */
 
 import { describe, it, expect } from "vitest";
@@ -75,7 +74,7 @@ describe("foldTurnsWithTools", () => {
   it("drops empty text turns; a tool with no args still summarizes by name", () => {
     const turns = foldTurnsWithTools([
       ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" }),
-      ev({ type: "TEXT_MESSAGE_END", messageId: "a1" }), // empty → dropped
+      ev({ type: "TEXT_MESSAGE_END", messageId: "a1" }),
       ev({ type: "TOOL_CALL_START", toolCallId: "t1", toolCallName: "list_dir" }),
     ]);
     expect(turns).toHaveLength(1);

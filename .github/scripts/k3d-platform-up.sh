@@ -1,23 +1,14 @@
 #!/usr/bin/env bash
-# Bring up the k3d cluster the e2e FULL target runs against: registry, cluster,
+# Bring up the k3d cluster the e2e full target runs against: registry, cluster,
 # agent-sandbox controller, platform images, and the deployed platform itself.
-#
-# Extracted from the `e2e full shard` job so the label-gated `flake focus full`
-# job runs against an IDENTICAL cluster. Two copies of this would drift, and a
-# flake check standing up a subtly different cluster from the one that produced
-# the flake is worse than no check at all.
-#
-# Leaves behind: a running `scooter-ci` k3d cluster with the platform rolled out
-# in the `agent-sandbox` namespace. Callers tear it down with
+# Shared by the `e2e full shard` and `flake focus full` jobs so both stand up an
+# identical cluster. Leaves behind a running `scooter-ci` k3d cluster with the
+# platform rolled out in the `agent-sandbox` namespace; callers tear it down with
 # `k3d cluster delete scooter-ci`.
 set -euo pipefail
 
 # --- phase timing ------------------------------------------------------------
-# This script is the bulk of an e2e shard's wall clock (~7 of ~12 min), but
-# which PART was never measured -- the image push, the cluster boot, and the
-# platform rollout were all guesses. `phase` stamps each boundary and the trap
-# prints a breakdown at exit, so the next optimisation targets whatever is
-# actually slow rather than whatever looks slow.
+# `phase` stamps each boundary and the exit trap prints a per-phase breakdown.
 _PHASE_T0=$(date +%s)
 _PHASE_LAST=$_PHASE_T0
 _PHASE_LOG=""
@@ -43,55 +34,25 @@ trap _phase_summary EXIT
 
 phase "cluster+registry"
 # --- cluster + registry ------------------------------------------------------
-# `scooter-reg.localhost` is the trick that makes ONE image ref work on both
-# sides: a `.localhost` name resolves to 127.0.0.1 on the HOST (so skopeo pushes
-# to it directly) and to the registry container via docker DNS inside the
-# cluster (so containerd pulls from it) — see k3dImages in flake.nix. This
-# replaces the docker-daemon load + `k3d image import` tarball round-trip: every
-# byte used to cross FOUR formats (nix store -> skopeo -> docker archive ->
-# docker save tar -> ctr import); now skopeo streams blobs from /nix/store into
-# the registry once, skipping any layer already present.
+# A `.localhost` name resolves to 127.0.0.1 on the host (skopeo pushes to it) and
+# to the registry container inside the cluster (containerd pulls from it), so one
+# image ref works on both sides; see k3dImages in flake.nix.
 nix shell nixpkgs#k3d nixpkgs#kubectl -c bash -c '
-  # PERSIST THE BLOB STORE when the runner provides one (self-hosted: the cache
-  # volume bind-mounts /var/lib/k3d-registry). k3d registry create makes a fresh
-  # container every run, so without this skopeo re-uploads all eight images into
-  # an empty registry -- measured at 103s, the largest single item in this
-  # script. The push already skips layers "already present"; this is what makes
-  # any be present. On a GitHub-hosted runner the directory does not exist and
-  # the registry is ephemeral exactly as before.
+  # Persist the registry blob store when the runner provides one (self-hosted
+  # bind-mounts /var/lib/k3d-registry), so pushes can skip layers already present.
   reg_vol=""
   [ -d /var/lib/k3d-registry ] && reg_vol="-v /var/lib/k3d-registry:/var/lib/registry"
 
-  # PERSIST THE NODE CONTENT STORE for the same reason, but for the images we do
-  # NOT build: postgres:16-alpine, alpine/k8s:1.30.0, busybox:1.36. Those are
-  # pulled from Docker Hub by containerd inside the node, and the node is fresh
-  # every run, so they download every time. postgres:16-alpine measured 45s for
-  # 201M and gates the whole rollout -- postgres-init waits on it for roles,
-  # db-migrate for schema, every service on both.
-  #
-  # Verified across node recreation and a k3s version change (1.32.5 -> 1.30.2):
-  # no snapshot corruption, and a pod with the default IfNotPresent policy logs
-  # "already present on machine" and starts in ~1s without any network call.
-  #
-  # Same shape as reg_vol: absent directory (GitHub-hosted) means no flag and
-  # the old cold-pull behaviour.
+  # Persist the node content store for the same reason, for the images pulled
+  # from Docker Hub (postgres, alpine/k8s, busybox).
   ctd_vol=""
   [ -d /var/lib/k3d-containerd ] && ctd_vol="-v /var/lib/k3d-containerd:/var/lib/rancher/k3s/agent/containerd"
 
-  # REUSE an existing registry rather than failing on it. `flake-focus-full`
-  # runs this script TWICE in one job (the PR, then the control at the base) and
-  # `k3d registry create` errors on a name already in use. Reuse is also the
-  # faster path: tags are content-addressed, so every image the base shares with
-  # the PR — all of them, for a test-only flake fix — is already present and the
-  # push phase skips it on a HEAD.
-  # Anchored, with the column separator OR end-of-line: `k3d registry list` pads
-  # a table, and a bare substring match would also fire on a longer name that
-  # merely starts with ours.
-  #
-  # DOUBLE quotes, and `\$` for the regex anchor: this whole block is already
-  # inside a single-quoted `bash -c '...'`, so a nested single quote would close
-  # it and hand the outer shell a bare `(` — which is exactly how the first
-  # version of this failed to parse.
+  # Reuse an existing registry, since `flake-focus-full` runs this script twice in
+  # one job.
+  # Anchored on the column separator or end-of-line because `k3d registry list`
+  # pads a table, and double-quoted with `\$` because this block is inside a
+  # single-quoted `bash -c`.
   if k3d registry list 2>/dev/null | grep -qE "^k3d-scooter-reg\.localhost([[:space:]]|\$)"; then
     echo "registry k3d-scooter-reg.localhost is already up — reusing its blob store"
   else
@@ -119,13 +80,8 @@ echo "Registry is ready!"
 
 phase "sandbox-crd+controller"
 # --- the Sandbox CRD + controller -------------------------------------------
-# Previously unnecessary here BY ACCIDENT: the job set GOOSE_BIN=fake, which also
-# forced a noop provisioner, so nothing ever touched the Sandbox API. Decoupling
-# those flags (so the cluster tier tests a REAL sandbox) made this a hard
-# dependency — without it the apiserver answers a plain-text "404 page not found"
-# and every run ends RUN_ERROR.
-#
-# Same version + assets as test/support/cluster-up.sh installs locally.
+# Required because the cluster tier provisions a real sandbox; same version and
+# assets as test/support/cluster-up.sh installs locally.
 base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2"
 nix shell nixpkgs#kubectl -c bash -c "
   kubectl apply -f '${base}/sandbox.yaml'
@@ -135,27 +91,12 @@ nix shell nixpkgs#kubectl -c bash -c "
 
 phase "platform-images-push"
 # --- platform images ---------------------------------------------------------
-# attr -> content-tagged registry ref, from the flake (single source of truth with
-# the platform-manifests-k3d render). Pushes run 4-wide: skopeo streams layer blobs
-# straight from /nix/store, and layers shared between images (there are many — same
-# nixpkgs base) upload exactly once.
-# Split the push phase: EVALUATING the refs (a nix build, which may itself be
-# the slow part) is distinct from PUSHING the blobs. @chadac's hypothesis is
-# that the store->registry copy dominates; this tells us whether that is true
-# or whether we are actually waiting on nix eval.
+# attr -> content-tagged registry ref, from the flake; the ref evaluation is
+# timed separately from the blob push.
 _push_eval_t0=$(date +%s)
-# ONE build for everything this script needs from the flake: the refs map, the
-# eight image manifests, their copyTo runners, and the k3d platform manifests.
-#
-# WHY ONE. Each `nix build` is its own evaluation, and in CI each one
-# re-evaluates the sandbox-os NixOS system -- the expensive part of this flake.
-# The tell is the `stdenv.isLinux is deprecated` warning, which comes from that
-# evaluation: it fired 55s into image-refs-eval and AGAIN 24.5s into a separate
-# image-manifest-build. The same ~6.4k-derivation instantiation, twice.
-#
-# This does NOT reproduce locally, where those derivations are already written
-# and an "evaluation" is really a lookup (4.6s then 1.0s). A local timing
-# under-predicts the CI cost every time; do not use one to judge this.
+# One build for everything this script needs from the flake (refs map, image
+# manifests, copyTo runners, k3d platform manifests), since each separate
+# `nix build` re-evaluates the sandbox-os system.
 deps=$(nix build .#k3d-ci-deps --no-link --print-out-paths)
 refs="$deps/image-refs.json"
 echo "[phase] image-refs-eval=$(( $(date +%s) - _push_eval_t0 ))s"
@@ -172,12 +113,8 @@ push_attrs=(
 )
 
 
-# REFS map -> a bash array in push_attrs order, in ONE jq call. The refs file is
-# attr -> "k3d-scooter-reg.localhost:5800/<name>:<tag>"; jq emits just the values,
-# ordered by the attr list, so the three arrays line up by index.
-# `--args` AFTER the file, not before: jq treats everything following --args as
-# positional, so putting it first makes jq read the filename as an arg and then
-# block forever on stdin. (It does exactly that; caught before this shipped.)
+# The refs map -> a bash array in push_attrs order, in one jq call; `--args` goes
+# after the file or jq reads the filename as an arg and blocks on stdin.
 mapfile -t push_refs < <(
   nix shell nixpkgs#jq -c jq -r '
       . as $m | $ARGS.positional[] | $m[.]
@@ -188,12 +125,12 @@ if [ "${#push_refs[@]}" -ne "${#push_attrs[@]}" ]; then
   exit 1
 fi
 
-# EXPORTED for the xargs subshells: they are separate bash processes and
-# inherit the environment, not shell variables.
+# Exported for the xargs subshells, which inherit the environment but not shell
+# variables.
 export DEPS="$deps"
 
 _push_copy_t0=$(date +%s)
-# attr=storepath=ref per line. Plain printf -- no per-image process at all.
+# attr=ref per line.
 for _i in "${!push_attrs[@]}"; do
   printf '%s=%s\n' "${push_attrs[$_i]}" "${push_refs[$_i]}"
 done \
@@ -202,20 +139,9 @@ done \
       attr="${1%%=*}"; ref="${1#*=}"
       push_ref="localhost:${ref#*.localhost:}"
 
-      # ALREADY THERE? Tags are content-addressed (ghcrContentTag = the store
-      # hash), so a tag that exists in the registry holds exactly the bytes we
-      # are about to push. Asking costs one HTTP HEAD against localhost.
-      #
-      # This is worth more than the blob transfer it avoids. With the registry
-      # blob store persisted on the /nix volume, skopeo already skips layers it
-      # finds present -- measured 85s -> 42s once tags were stable. The 42s that
-      # REMAINED is `nix run` paying Nix evaluation eight times over, once per
-      # image, and that cost is the same whether or not a single byte moves.
-      # Skipping the command skips the eval too.
-      #
-      # The registry is the k3d-managed one on 5800; `|| true` because a
-      # registry that does not answer must fall through to a real push rather
-      # than fail the shard.
+      # Tags are content-addressed, so a tag already in the registry holds exactly
+      # the bytes about to be pushed, and skipping the push also skips its Nix
+      # evaluation; a registry that does not answer falls through to a real push.
       repo="${push_ref#*/}"; repo="${repo%%:*}"
       tag="${push_ref##*:}"
       if curl -sfI -o /dev/null --max-time 5 \
@@ -231,15 +157,8 @@ done \
       max_retries=3
       retry=0
       while [ $retry -lt $max_retries ]; do
-        # `nix run .#<attr>.copyTo`, NOT a skopeo we name ourselves. copyTo
-        # bundles skopeo 1.24.1 and is SUBSTITUTABLE; the exposed
-        # `skopeo-nix2container` attr is a DIFFERENT derivation (1.21.0) that
-        # nothing has cached, so naming it costs a source build plus ~139 paths
-        # / 203 MiB of fetches. Measured, after trying exactly that.
-        #
-        # This still evaluates -- but the batched `nix build` above has already
-        # realised the graph, so it is a cache hit rather than the ~6.4k-drv
-        # re-instantiation that the lock contention used to force.
+        # copyTo bundles a substitutable skopeo, and the batched `nix build` above
+        # has already realised the graph, so this evaluation is a cache hit.
         if "${DEPS}/${attr}.copyTo/bin/copy-to" "docker://${push_ref}" --dest-tls-verify=false; then
           echo "✓ $attr pushed successfully"
           exit 0
@@ -259,36 +178,27 @@ echo "All images pushed successfully!"
 
 phase "platform-rollout"
 # --- the platform itself -----------------------------------------------------
-# From the single build at the top of the push phase -- not another `nix build`,
-# which would be a third evaluation of the same flake.
+# From the single build in the push phase.
 manifests="$deps/platform-manifests-k3d.yaml"
 nix shell nixpkgs#kubectl -c bash -c "
   set -euo pipefail
   kubectl apply -f '${manifests}'
-  # The conv-token signing key. modules/platform.nix wires it with no \`optional\`, so a
-  # missing Secret stops agent-host/agent-broker starting (#700) -- CI must create it
-  # out-of-band exactly like a real deploy. Idempotent: a re-run must not fail.
+  # The conv-token signing key, which modules/platform.nix requires; created
+  # out-of-band like a real deploy, idempotently.
   kubectl -n agent-sandbox create secret generic agent-conv-token-secret \
     --from-literal=secret=\"\$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')\" \
     --dry-run=client -o yaml | kubectl apply -f -
-  # Postgres accepts TCP before it is USABLE: agent-postgres-init creates the roles
-  # (until then callers get 28P01) and agent-db-migrate creates the schema (until then
-  # 42P01). Nothing below waits on the database, so every service raced it. Selected by
-  # label, not name — both Job names carry a spec hash that changes with the schema.
+  # Postgres accepts TCP before it is usable (roles from agent-postgres-init,
+  # schema from agent-db-migrate), so wait on both Jobs, selected by label since
+  # their names carry a spec hash.
   kubectl -n agent-sandbox rollout status deployment/agent-shared-db --timeout=180s
   kubectl -n agent-sandbox wait --for=condition=complete job \
     -l app.kubernetes.io/name=agent-postgres-init --timeout=180s
   kubectl -n agent-sandbox wait --for=condition=complete job \
     -l app.kubernetes.io/name=agent-db-migrate --timeout=180s
-  # MULTI-REPLICA + SPREAD. The default topology (replicas=2, podCap=100) puts every
-  # test conversation on ONE pod, so any per-pod-view bug is invisible — which is
-  # exactly how the 'GET /conversations returns one pod's slice' bug reached
-  # production. Force podCap=1 so each conversation lands on a DIFFERENT pod, and
-  # give the fleet room to spread.
-  # AGENT_HOST_MIN_REPLICAS, not just a manual scale: the controller IS the autoscaler and
-  # the single writer of agent-host replicas (desired = ceil(demand/cap), clamped to
-  # [min,max]). With no conversations yet, demand is 0, so it scaled the fleet straight back
-  # down and the spread this suite needs evaporated before the tests created anything.
+  # podCap=1 lands each conversation on a different pod so per-pod-view bugs are
+  # visible; AGENT_HOST_MIN_REPLICAS because the controller is the autoscaler and
+  # would otherwise scale the fleet back down before the tests create anything.
   kubectl -n agent-sandbox set env deployment/conversation-controller \
     CONVERSATION_POD_CAP=1 AGENT_HOST_MIN_REPLICAS=3
   kubectl -n agent-sandbox scale deployment/agent-host --replicas=3

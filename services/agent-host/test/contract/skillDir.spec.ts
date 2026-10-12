@@ -1,10 +1,8 @@
 /**
- * Tier 1 contract test — provider-split prompts + .claude/skills materialisation.
- *
- * Proves: the two providers get DIFFERENT prompts (no goose tool names leak
- * into the SDK's, no system-reminder sentence leaks into goose's), and the SDK
- * gets a .claude/skills tree of SKILL.md symlinks carrying a non-empty
- * description — the field it matches on.
+ * Tier 1 contract test for provider-split prompts and .claude/skills materialisation.
+ * The two providers get different prompts (no goose tool names leak into the SDK's, no
+ * system-reminder sentence leaks into goose's), and the SDK gets a .claude/skills tree
+ * of SKILL.md symlinks carrying a non-empty description, the field it matches on.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -68,7 +66,7 @@ describe("provider-split prompts", () => {
   it("sdkAddendum explains system reminders (a custom prompt replaces the preset)", () => {
     const a = sdkAddendum();
     expect(a.toLowerCase()).toContain("system reminder");
-    // It must say reminders come from the APPLICATION, not the user.
+    // It must say reminders come from the application, not the user.
     expect(a.toLowerCase()).toMatch(/not .*messages from the user|application/);
   });
 
@@ -105,8 +103,7 @@ describe("frontmatter -> description", () => {
   });
 
   it("uses the skill's own prose over its triggers", () => {
-    // Triggers are a keyword list; prose states when the skill applies. The
-    // live test showed the model acts on the latter and ignores the former.
+    // Triggers are a keyword list, while prose states when the skill applies.
     writeSkill("b", "name: b\ntriggers:\n- gh pr create\n- open a pull request", "# Topic\n\nApplies when doing a specific thing.");
     const d = loadSkills(skillsDir)[0].description;
     expect(d).toContain("Applies when doing a specific thing");
@@ -144,11 +141,7 @@ describe("writeSkillDir", () => {
   });
 
   it("THE BUG: the description is PROSE, not a trigger keyword dump", () => {
-    // Proven live on one pod, same body, only the description differing:
-    //   "Use when the task involves: gh, gh cli, gh pr create, ..."  -> gh pr create
-    //   "Applies when you are trying to use the gh CLI ..."          -> agent-broker
-    // A keyword list reads as a topic label. The model needs a sentence saying
-    // when the skill applies, so prefer the skill's own opening paragraph.
+    // A keyword list reads as a topic label, so prefer the skill's own opening sentence saying when it applies.
     writeSkill(
       "scooter-github",
       "name: scooter-github\ntriggers:\n- gh pr create\n- open a pull request",
@@ -237,7 +230,7 @@ describe("skillPayloads — what a BYO container receives", () => {
     expect(p.content).toMatch(/^---/);
     expect(p.content).toContain("description:");
     expect(p.content).toContain("Applies when you use the gh CLI");
-    // and the BODY, since the container has no other way to get it
+    // and the body, since the container has no other way to get it
     expect(p.content).toContain("Use agent-broker.");
   });
 

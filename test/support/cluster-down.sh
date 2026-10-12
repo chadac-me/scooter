@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Tear down the local cluster created by cluster-up.sh.
-# Design/Tests stage: outline only.
 
 set -euo pipefail
 PROVIDER="${1:-k3s}"

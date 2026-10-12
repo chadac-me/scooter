@@ -1,9 +1,7 @@
 /**
- * The sandbox status hook polls every 4s. loadWebServices returns a freshly
- * parsed array each time, so setting it unconditionally gives every consumer a
- * new reference on every tick — including the hook that wraps the whole thread,
- * which re-rendered all 36,252 fibers (~340ms) three times in a 12s profile.
- * An unchanged poll must therefore keep the previous array.
+ * The sandbox status hook polls every 4s and loadWebServices returns a freshly
+ * parsed array each time, so an unchanged poll must keep the previous array or
+ * every consumer re-renders on every tick.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -37,7 +35,7 @@ describe("sameServices", () => {
   });
 
   it("keeps the previous reference when unchanged, swaps when changed", () => {
-    // The property that actually matters: what the state setter does.
+    // The property that matters is what the state setter does.
     const prev = [svc()];
     const set = (p: WebService[], next: WebService[]) => (sameServices(p, next) ? p : next);
     expect(set(prev, [svc()])).toBe(prev);
@@ -48,9 +46,7 @@ describe("sameServices", () => {
 
 describe("the services poll", () => {
   it("routes its state update through sameServices", () => {
-    // sameServices being correct is worthless if the poll does not call it:
-    // dropping the dedupe at the call site is the regression that reintroduces
-    // the full-tree re-render, and it leaves this file's other tests green.
+    // A correct sameServices is worthless if the poll does not call it.
     const src = readFileSync(new URL("./SandboxPanel.tsx", import.meta.url), "utf8");
     const setter = src.match(/if \(svcs\) setServices\(([^\n]*)\);/)?.[1];
     expect(setter, "services poll setter not found").toBeTruthy();

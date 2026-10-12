@@ -1,12 +1,10 @@
-# Credential broker — Deployment + Service + RBAC.
+# Credential broker: Deployment, Service and RBAC.
 #
-# The broker authenticates sandbox pods via K8s TokenReview (so it needs a
-# cluster-scoped ClusterRole granting `create tokenreviews`), then injects/vends
-# credentials. See docs/BROKER.md + services/broker/.
-#
-# Sandboxes reach it at http://agent-broker.<ns>.svc.cluster.local:8080 and
-# authenticate with their projected SA token (audience agent-broker), which the
-# per-conversation Sandbox template already mounts (modules/conversation.nix).
+# The broker authenticates sandbox pods via K8s TokenReview (hence the
+# cluster-scoped `create tokenreviews` ClusterRole) and then vends credentials;
+# see docs/BROKER.md and services/broker/. Sandboxes reach it at
+# http://agent-broker.<ns>.svc.cluster.local:8080 with the projected SA token
+# (audience agent-broker) that modules/conversation.nix mounts.
 
 { config, lib, ... }:
 
@@ -14,10 +12,8 @@ let
   cfg = config.scooter;
   bcfg = cfg.broker;
 
-  # Static shares external origin + CSP allowlist. Both fall back to the public
-  # ingress host so a deployment only has to set `shares.enable`; leaving them
-  # empty (no explicit value AND no ingress host) makes the broker return
-  # relative /s/<uuid>/ URLs and a `'self'` frame-ancestors default.
+  # Share origin and CSP allowlist both fall back to the ingress host, and when
+  # that is empty too the broker returns relative URLs with a `'self'` default.
   sharesBaseUrl =
     if bcfg.shares.publicBaseUrl != "" then bcfg.shares.publicBaseUrl
     else if cfg.ingress.host != "" then "https://${cfg.ingress.host}"
@@ -57,13 +53,8 @@ in
     };
 
     # --- How a contrib reaches the broker Deployment ------------------------
-    # A contrib owns its own deployment config in contrib/<name>/deployment.nix
-    # (imported by modules/platform.nix), but the Deployment is declared HERE.
-    # These are the seams it contributes through — without them a contrib would
-    # have to redeclare the container to add one env var. Why: #599.
-    #
-    # Lists, not attrsets, because that is the k8s shape; a contrib emits only
-    # what its own `enable` gates, so a disabled one contributes nothing.
+    # A contrib's deployment.nix adds env, volumes and annotations to the
+    # Deployment declared here through these seams, gated on its own `enable`.
     extraEnv = mkOption {
       type = types.listOf (types.attrsOf types.anything);
       default = [ ];
@@ -102,9 +93,7 @@ in
       example = literalExpression ''{ "eks.amazonaws.com/role-arn" = "arn:aws:iam::…"; }'';
       description = "Annotations on the agent-broker ServiceAccount (IRSA and the like).";
     };
-    # The agent-facing MCP endpoint. A nested `mcp.enable` rather than a flat
-    # `mcpEnabled`, matching `shares` / `fga` below — the namespace is where the
-    # endpoint's other knobs (per-tool gating, a tool allowlist) will land.
+    # The agent-facing MCP endpoint.
     mcp = {
       enable = mkOption {
         type = types.bool;
@@ -124,14 +113,8 @@ in
       };
     };
     # --- Static shares (broker/shares/) — persistent static webpages --------
-    # The broker's shares feature lets agents publish static bundles, served at
-    # /s/<uuid>/ and embeddable in the conversation UI. Off by default; when on,
-    # the /shares + /s/<uuid>/ routes mount and the store persists to the shared
-    # Postgres `broker` DB via the BROKER_DB_* components every broker store
-    # shares —
-    # there is deliberately NO SHARES_DB_DSN (setting it would pin the store to
-    # the SQLite dev path and silently lose shares on restart). Without this
-    # option the shares code ships in the image but the routes never mount.
+    # Agents publish static bundles served at /s/<uuid>/, persisted in the shared
+    # Postgres `broker` DB through the BROKER_DB_* settings.
     shares = {
       enable = mkOption {
         type = types.bool;
@@ -162,12 +145,8 @@ in
     };
 
     # --- OpenFGA authorization (the approver gate) --------------------------
-    # SUBSTRATE, not a provider's: core/authz.py builds the authorizer from these
-    # FGA_* settings and hands it to EVERY provider through BrokerContext (#624), so
-    # this must not move back under one integration's options. Off -> NoopAuthorizer.
-    # WHO may approve WHAT stays the provider's: the object half of a tuple
-    # (`aws_account:<alias>`) is spelled by the code that knows what an account is.
-    # Why: PR #636.
+    # core/authz.py builds the authorizer from these settings and hands it to every
+    # provider through BrokerContext; off means NoopAuthorizer.
     fga = {
       enable = mkOption {
         type = types.bool;
@@ -197,17 +176,12 @@ in
     };
   };
 
-  # mkMerge: the table declarations are UNCONDITIONAL (see modules/db-spec.nix) —
-  # the tables exist in lib/sql whether or not this deployment runs the service —
-  # while everything else stays gated on `enable`. The gated body keeps its own
-  # indentation so this wrapper is the whole diff.
+  # The table declarations are unconditional (see modules/db-spec.nix); everything
+  # else is gated on `enable`.
   config = lib.mkMerge [
 
-  # The tables the `broker` database holds (scooter.db, #606). The OWNER is
-  # declared here and the tables MERGE in from wherever the code that writes them
-  # lives: permission_requests is contrib/aws/deployment.nix's now (stage 2 of #606).
-  # static_shares + static_share_versions are still here because `shares` is not a
-  # contrib yet; they move on the same line when it becomes one.
+  # The tables the `broker` database holds; the owner is declared here and tables
+  # merge in from wherever the code that writes them lives.
   {
     scooter.db.broker = {
       owner = "broker";
@@ -220,9 +194,8 @@ in
     };
   }
   (lib.mkIf bcfg.enable {
-    # mkMerge (not //): the fga block and every contrib's platform module each
-    # add to `deployments`/`services`, and a shallow // would REPLACE those keys
-    # (dropping agent-broker). mkMerge deep-merges so all of them coexist.
+    # Deep-merged so the fga block and the contribs' additions to
+    # `deployments`/`services` coexist.
     kubernetes.resources = lib.mkMerge [
     {
       serviceAccounts.agent-broker = {
@@ -230,14 +203,13 @@ in
           name = "agent-broker";
           namespace = cfg.namespace;
         } // lib.optionalAttrs (bcfg.serviceAccountAnnotations != { }) {
-          # Contributed, e.g. IRSA (`eks.amazonaws.com/role-arn`) so the broker pod
-          # can assume a cloud role. Emitted only when non-empty: an
-          # `annotations = { }` key is not the same manifest as no key.
+          # Emitted only when non-empty, since an empty `annotations` key is a
+          # different manifest from no key.
           annotations = bcfg.serviceAccountAnnotations;
         };
       };
 
-      # TokenReview is cluster-scoped → ClusterRole + ClusterRoleBinding.
+      # TokenReview is cluster-scoped, so this is a ClusterRole.
       clusterRoles.agent-broker-tokenreview = {
         metadata.name = "agent-broker-tokenreview";
         rules = [{
@@ -264,22 +236,14 @@ in
       deployments.agent-broker = {
         metadata = { name = "agent-broker"; namespace = cfg.namespace; };
         spec = {
-          # Stateless (Postgres-backed; only an in-memory STS cache that re-vends on a
-          # miss) — 2 replicas by default so consolidation can't take the broker down.
+          # Stateless apart from an in-memory STS cache that re-vends on a miss.
           replicas = cfg.statelessReplicas;
           selector.matchLabels.app = "agent-broker";
           template = {
             metadata = {
               labels.app = "agent-broker";
-              # Roll the broker pod when its config content changes. K8s only
-              # rolls a Deployment when the POD TEMPLATE mutates — a ConfigMap
-              # content change alone doesn't (the mounted file updates in-place, but
-              # the long-lived process has already read it, so it runs stale until a
-              # manual `rollout restart`). Hashing the ConfigMap data into a pod
-              # annotation mutates the template on any change → automatic rollout.
-              # (Standard k8s pattern; Helm does this with sha256sum.) The hashes
-              # come from whoever owns the ConfigMap — a contrib stamps its own
-              # through broker.podAnnotations rather than this file listing them.
+              # Contribs stamp a hash of their ConfigMap here so a config change
+              # mutates the pod template and rolls the Deployment.
               annotations = bcfg.podAnnotations;
             };
             spec = {
@@ -289,10 +253,8 @@ in
                 image = bcfg.image;
                 imagePullPolicy = cfg.pullPolicy;
                 command = [ "agent-broker" ];
-                # A credential-vending service. 1Gi limit (not 512Mi): the broker holds
-                # per-account STS cred caches + the provider registry, and 512Mi ran it
-                # close enough that a liveness-kill during a DB-outage restart loop
-                # looked like an OOM (exit 137). Give real headroom.
+                # The per-account STS caches and provider registry need headroom
+                # above the request.
                 resources = lib.mkDefault {
                   requests = { cpu = "50m"; memory = "256Mi"; };
                   limits = { memory = "1Gi"; };
@@ -303,77 +265,53 @@ in
                   { name = "TOKEN_AUDIENCE"; value = "agent-broker"; }
                   { name = "SANDBOX_NAMESPACE"; value = cfg.namespace; }
                   { name = "TEST_PROVIDER_ENABLED"; value = lib.boolToString bcfg.testProvider; }
-                  # Auto-linking: when an agent creates a PR/MR/issue via the proxy,
-                  # the broker POSTs it to the agent-host /conversations/{id}/links.
+                  # Where the broker POSTs auto-linked PRs/issues and approval
+                  # interrupts.
                   { name = "AGENT_HOST_URL"; value = bcfg.agentHostUrl; }
 
-                  # The shared platform `broker` database. Unconditional: the
-                  # `broker` consumer is registered whenever the broker runs (see
-                  # postgres.consumers below), so the role and its agent-pg-broker
-                  # secret always exist — and EVERY broker store resolves its DSN
-                  # from these. A store that finds no password falls back to a
-                  # SQLite dev path and loses its data on restart without an error,
-                  # so emitting these per-feature is the failure, not the saving.
+                  # Every broker store resolves its DSN from these, and a store that
+                  # finds no password silently falls back to a SQLite dev path.
                   { name = "BROKER_DB_HOST"; value = cfg.postgres.host; }
                   { name = "BROKER_DB_PORT"; value = toString cfg.postgres.port; }
                   { name = "BROKER_DB_NAME"; value = "broker"; }
                   { name = "BROKER_DB_USER"; value = "broker"; }
                   { name = "BROKER_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-broker"; key = "password"; }; }
 
-                  # The agent-host relays a user's action to the broker as itself, so
-                  # core auth admits it as a non-sandbox caller and sets is_approver.
-                  # Unconditional: TWO features read that flag — aws approve/deny and
-                  # shares' cross-conversation listing — so gating the list on
-                  # aws.enable made `shares` without `aws` 403 on the UI's own list
-                  # request, with the agent-host looking like a stranger. It was
-                  # AWS_APPROVER_SERVICE_ACCOUNTS for that reason. Why: #599.
+                  # The agent-host relays a user's action as itself, so core auth
+                  # admits it as a non-sandbox caller and sets is_approver.
                   { name = "APPROVER_SERVICE_ACCOUNTS"; value = "system:serviceaccount:${cfg.namespace}:agent-host"; }
 
-                  # --- The agent-facing MCP endpoint (#700) ---------------------------
-                  # Who may act FOR a conversation by presenting a conversation token.
-                  # SEPARATE from APPROVER_SERVICE_ACCOUNTS above even though both name
-                  # the agent-host: that one means "may relay a human's approve/deny",
-                  # this one means "may act as any conversation it holds a signed token
-                  # for". Collapsing them would make the second an accidental
-                  # consequence of the first.
+                  # --- The agent-facing MCP endpoint ---------------------------------
+                  # Who may act for a conversation by presenting a signed conversation
+                  # token, a separate grant from APPROVER_SERVICE_ACCOUNTS.
                   { name = "MCP_CALLER_SERVICE_ACCOUNTS"; value = "system:serviceaccount:${cfg.namespace}:agent-host"; }
-                  # The shared HS256 key. Same Secret the agent-host signs with — one
-                  # name, one key, no way for the bytes to diverge.
+                  # The HS256 key, from the same Secret the agent-host signs with.
                   {
                     name = "CONV_TOKEN_SECRET";
                     valueFrom.secretKeyRef = { name = cfg.convTokenSecret; key = "secret"; };
                   }
-                  # The broker's own tool surface. OFF until the provider tools move out
-                  # of the agent-host (phase 2): an empty tools/list offered to the agent
-                  # is worse than no endpoint at all.
+                  # Whether the broker serves its own tool surface.
                   { name = "MCP_ENABLED"; value = lib.boolToString bcfg.mcp.enable; }
                 ] ++ lib.optional (cfg.postgres.sslmode != null)
                   { name = "BROKER_DB_SSLMODE"; value = cfg.postgres.sslmode; }
                 ++ lib.optionals bcfg.shares.enable ([
-                  # Static shares -> the broker mounts /shares + /s/<uuid>/ and
-                  # persists bundles in the shared Postgres `broker` DB. The store
-                  # reuses the BROKER_DB_* components (StoreConfig builds a
-                  # Postgres DSN whenever a db password is set), so SHARES_DB_DSN
-                  # is deliberately left unset — setting it would pin the store to
-                  # the SQLite dev path and silently lose shares on restart.
+                  # Static shares: the broker mounts /shares + /s/<uuid>/ and persists
+                  # bundles through the BROKER_DB_* components, so SHARES_DB_DSN stays
+                  # unset.
                   { name = "SHARES_ENABLED"; value = "true"; }
                 ] ++ lib.optional (sharesBaseUrl != "")
                   { name = "SHARES_PUBLIC_BASE_URL"; value = sharesBaseUrl; }
                 ++ lib.optional (sharesFrameAncestors != "")
                   { name = "SHARES_FRAME_ANCESTORS"; value = sharesFrameAncestors; }
                 ) ++ lib.optionals bcfg.fga.enable [
-                  # The authorizer core/authz.py builds and hands to every provider
-                  # through BrokerContext — substrate, so it is emitted here rather
-                  # than by the integration that happens to check a tuple.
+                  # Settings for the authorizer core/authz.py hands to every provider.
                   { name = "FGA_ENABLED"; value = "true"; }
                   { name = "FGA_API_URL"; value = bcfg.fga.apiUrl; }
                   { name = "FGA_STORE_ID"; value = bcfg.fga.storeId; }
                   { name = "FGA_AUTHORIZATION_MODEL_ID"; value = bcfg.fga.authorizationModelId; }
                 ]
-                # Contribs last. A name emitted twice is silently the LAST value in
-                # k8s, so examples/check.nix asserts this container declares no
-                # duplicate env name at all — that check, not this ordering, is what
-                # stops a contrib from quietly repointing BROKER_DB_HOST.
+                # k8s silently keeps the last of a duplicated env name, so
+                # examples/check.nix asserts this container has none.
                 ++ bcfg.extraEnv;
                 volumeMounts = bcfg.extraVolumeMounts;
                 readinessProbe.httpGet = { path = "/health"; port = "http"; };
@@ -394,11 +332,8 @@ in
       };
     }
     (lib.mkIf bcfg.fga.enable {
-      # OpenFGA authorization server — the broker's policy enforcement backend.
-      # Uses the shared Postgres (agent-shared-db) as its datastore (a separate
-      # `openfga` database). The broker seeds the model + approver tuples at
-      # startup. (storeId/modelId are provided via broker.fga options once
-      # created — e.g. by a one-time `fga store create` against this server.)
+      # OpenFGA server backed by its own `openfga` database in the shared Postgres;
+      # the broker seeds the model and approver tuples at startup.
       deployments.openfga = {
         metadata = { name = "openfga"; namespace = cfg.namespace; };
         spec = {
@@ -413,8 +348,7 @@ in
               env = [
                 { name = "OPENFGA_DATASTORE_ENGINE"; value = "postgres"; }
                 {
-                  # postgres://openfga@host:5432/openfga — shared platform Postgres,
-                  # OpenFGA's OWN db + auto-provisioned role (agent-pg-openfga).
+                  # OpenFGA's own db and auto-provisioned role in the shared Postgres.
                   name = "OPENFGA_DATASTORE_URI";
                   value = "postgres://openfga@${cfg.postgres.host}:${toString cfg.postgres.port}/openfga?sslmode=${if cfg.postgres.sslmode != null then cfg.postgres.sslmode else "disable"}";
                 }
@@ -445,10 +379,7 @@ in
     })
     ];
 
-    # Register with the shared Postgres so the provisioning Job creates each db + a
-    # dedicated owner role (agent-pg-broker / agent-pg-openfga). The `broker` db is
-    # used by every store in the broker image — its own and any contrib's, which is
-    # why the BROKER_DB_* env above is unconditional; openfga only when FGA is on.
+    # The provisioning Job creates each db and its owner role from these.
     scooter.postgres.consumers = lib.mkMerge [
       { broker = { db = "broker"; user = "broker"; }; }
       (lib.mkIf bcfg.fga.enable { openfga = { db = "openfga"; user = "openfga"; }; })

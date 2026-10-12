@@ -1,4 +1,4 @@
-"""Pydantic API models + SQLAlchemy ORM tables for scheduled tasks + runs."""
+"""Pydantic API models and SQLAlchemy ORM tables for scheduled tasks and runs."""
 
 from __future__ import annotations
 
@@ -24,8 +24,7 @@ class TaskRow(Base):
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     cron: Mapped[str] = mapped_column(String, nullable=False)
     timezone: Mapped[str] = mapped_column(String, nullable=False, default="UTC")
-    # The Scooter user who created the task; set as the owner of every conversation
-    # it spawns (task owner == conversation owner).
+    # The user who created the task, and the owner of every conversation it spawns.
     owner: Mapped[str] = mapped_column(String, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -53,8 +52,7 @@ class TaskCreate(BaseModel):
     cron: str
     timezone: str = "UTC"
     enabled: bool = True
-    # owner is NOT accepted from the body — it's the authenticated request identity
-    # (so a user can't create tasks owned by someone else). Set server-side.
+    # owner is the authenticated request identity, never accepted from the body.
 
 
 class TaskPatch(BaseModel):

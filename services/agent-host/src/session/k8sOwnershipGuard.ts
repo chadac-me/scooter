@@ -1,8 +1,7 @@
 /**
- * k8sOwnershipGuard — wires an OwnershipTracker to a live WATCH of the Conversation CRD,
- * so the fencing decision (ownershipGuard.canWrite) reflects the current status.hostPod /
- * generation with no per-append k8s call. Used only in multi-replica mode (POD_NAME set);
- * single-replica agent-host uses allowAllGuard and never constructs this.
+ * Wires an OwnershipTracker to a live watch of the Conversation CRD, so the fencing
+ * decision (canWrite) reflects the current status.hostPod / generation with no per-append
+ * k8s call. Used only in multi-replica mode (POD_NAME set).
  */
 
 import { KubeConfig, Watch } from "@kubernetes/client-node";
@@ -19,9 +18,8 @@ interface ConversationCR {
 }
 
 /**
- * Build the tracker for `selfPod` and start watching Conversations in `namespace`. The
- * watch reconnects on close. Returns the tracker (an OwnershipGuard) + a stop() to end
- * the watch on shutdown. `kc` defaults to the in-cluster config.
+ * Build the tracker for `selfPod` and start a self-reconnecting watch of Conversations in
+ * `namespace`, returning the tracker and a stop(); `kc` defaults to the in-cluster config.
  */
 export function createK8sOwnershipGuard(
   selfPod: string,
@@ -43,8 +41,8 @@ export function createK8sOwnershipGuard(
     }
     const hostPod = obj.status?.hostPod;
     const generation = obj.status?.generation;
-    // Only record a real assignment; an un-assigned CR (no hostPod) leaves it unobserved
-    // (fail-open) until the controller assigns one.
+    // An unassigned CR (no hostPod) stays unobserved, which fails open, until the controller
+    // assigns one.
     if (hostPod && typeof generation === "number") {
       tracker.observe(name, { hostPod, generation });
     } else {
@@ -59,7 +57,7 @@ export function createK8sOwnershipGuard(
         `/apis/${GROUP}/${VERSION}/namespaces/${namespace}/${PLURAL}`,
         {},
         onEvent as (type: string, obj: unknown) => void,
-        // Reconnect on any close/error (watches expire); back off a touch.
+        // Reconnect on any close or error, since watches expire.
         () => { if (!aborted) setTimeout(start, 1000); },
       )
       .then((r) => { req = r as { abort: () => void }; })

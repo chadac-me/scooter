@@ -1,10 +1,4 @@
-"""Resource shapes are a REGISTRY: the mechanism is the lib's, the knowledge isn't.
-
-The provider regexes this file used to test now live with their providers (the app
-today, their contribs as they migrate), so what's left to prove here is the part
-that stays: expansion order, and what happens for a source nobody registered.
-Why: PR #576.
-"""
+"""Resource shapes are a registry: expansion order, and what happens for a source nobody registered."""
 
 from __future__ import annotations
 
@@ -46,12 +40,10 @@ def _register_acme() -> None:
     )
 
 
-# --- an UNREGISTERED source: exact match, and nothing invented ------------------
+# --- an unregistered source: exact match, and nothing invented ------------------
 
 
 def test_an_unregistered_source_resolves_only_to_itself():
-    # A deployment that doesn't ship gitlab has no gitlab shapes. That must degrade to
-    # exact match — the pre-#571 behavior — not to a guess.
     assert resource_id_variants("gitlab", "mr", "acme/web!7") == ["acme/web!7"]
     assert link_variants("gitlab", "mr", "acme/web!7") == [("mr", "acme/web!7")]
     assert canonical_resource_type("gitlab", "mr") == "mr"
@@ -59,7 +51,7 @@ def test_an_unregistered_source_resolves_only_to_itself():
 
 
 def test_a_source_with_aliases_but_no_id_variants_still_expands_types():
-    # Slack's shape: one id spelling, several type spellings.
+    # One id spelling, several type spellings.
     register_resource_shapes(
         "chat", ResourceShapes(type_aliases={"message": "thread", "thread": "thread"})
     )
@@ -71,8 +63,6 @@ def test_a_source_with_aliases_but_no_id_variants_still_expands_types():
 
 
 def test_the_callers_own_shape_is_tried_first():
-    # A row written in this service's own terms must match without a rewrite, so the
-    # caller's spelling leads and the alternatives follow.
     _register_acme()
     assert link_variants("acme", "tkt", "A-1")[0] == ("tkt", "A-1")
     assert link_variants("acme", "ticket", "A-1")[0] == ("ticket", "A-1")

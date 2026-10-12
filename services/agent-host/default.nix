@@ -1,26 +1,13 @@
 { lib, buildNpmPackage, nodejs, makeWrapper, goose-cli, agent ? goose-cli, claudeSdkProvider ? null, marimoMcp ? null, scooterSchemaJs ? null, ... }:
 
-# Builds the agent-host TypeScript app (tsc -> dist/) into a node application,
-# with `goose` (the ACP agent) wrapped onto PATH.
-#
-# `agent` is the goose package to put on PATH — defaults to nixpkgs' goose-cli, but
-# the flake passes the PATCHED goose (bedrock tool-name sanitize). It MUST be the same
-# derivation the image's gooseLayer bakes, else the closure ships goose TWICE (~455MB
-# duplicate) AND the wrapper's PATH could run the unpatched goose. Keep them one.
-#
-# `claudeSdkProvider` is the isolated Claude Agent SDK provider derivation (zod v4,
-# kept out of THIS package's zod-v3 tree). We symlink its built package into
-# node_modules/@scooter/claude-sdk-provider so agent-host resolves the import both at
-# `tsc` time and at runtime. Optional (null) so a bare callPackage still works.
-#
-# `scooterSchemaJs` is the generated @scooter/schema package (Drizzle tables + guard,
-# from lib/sql). Same isolation + symlink pattern: resourceMapping.ts imports its typed
-# tables so a lib/sql column rename becomes a compile error here. Optional (null).
+# Builds the agent-host TypeScript app (tsc -> dist/) into a node application with
+# the ACP agent wrapped onto PATH. `agent` must be the same goose derivation the
+# image's gooseLayer bakes, or the closure ships goose twice. `claudeSdkProvider`,
+# `marimoMcp` and `scooterSchemaJs` are isolated @scooter/* packages linked into
+# node_modules so their imports resolve at tsc time and at runtime; each is optional.
 
 let
-  # The installed app dir under $out/lib/node_modules is named by package.json "name"
-  # (NOT pname). Read it deterministically at eval time so the provider symlinks target
-  # the RIGHT node_modules (see the postInstall note on the old nondeterministic find).
+  # The installed app dir under $out/lib/node_modules is named by package.json "name", not pname.
   appName = (lib.importJSON ./package.json).name;
 in
 buildNpmPackage {
@@ -32,9 +19,7 @@ buildNpmPackage {
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # Link the isolated provider into node_modules BEFORE `tsc` runs, so the import
-  # `@scooter/claude-sdk-provider` resolves (its .d.ts + dist). buildNpmPackage runs
-  # npm ci in the configure phase; do this in postConfigure (after node_modules exists).
+  # Link the isolated packages into node_modules after npm ci and before `tsc` runs.
   postConfigure = lib.optionalString (claudeSdkProvider != null) ''
     mkdir -p node_modules/@scooter
     ln -s ${claudeSdkProvider}/lib/node_modules/@scooter/claude-sdk-provider \
@@ -44,33 +29,18 @@ buildNpmPackage {
     ln -s ${marimoMcp}/lib/node_modules/@scooter/marimo-mcp \
       node_modules/@scooter/marimo-mcp
   '' + lib.optionalString (scooterSchemaJs != null) ''
-    # COPY @scooter/schema's dist as a REAL dir under agent-host's node_modules (do NOT
-    # symlink like the providers above). Its `drizzle-orm/pg-core` type imports must
-    # resolve to agent-host's OWN drizzle-orm via node_modules walk-up, giving a SINGLE
-    # drizzle type identity. A store symlink realpaths back to the isolated package,
-    # whose BUNDLED drizzle-orm is a second copy — then schema's PgColumn types no longer
-    # match agent-host's db.select() and tsc fails (TS2322). Ship dist + package.json
-    # only; drizzle-orm comes from agent-host. Why: PR #407.
+    # @scooter/schema is copied as a real dir, so its drizzle-orm type imports resolve to agent-host's own drizzle-orm and share one type identity.
     mkdir -p node_modules/@scooter/schema
     cp -rL ${scooterSchemaJs}/lib/node_modules/@scooter/schema/dist node_modules/@scooter/schema/dist
     cp -L ${scooterSchemaJs}/lib/node_modules/@scooter/schema/package.json node_modules/@scooter/schema/package.json
     chmod -R u+w node_modules/@scooter/schema
   '';
 
-  # `npm run build` (tsc) emits dist/; bin agent-host -> dist/index.js.
   postInstall = ''
     wrapProgram $out/bin/agent-host \
       --prefix PATH : ${lib.makeBinPath [ agent nodejs ]}
   '' + lib.optionalString (claudeSdkProvider != null || marimoMcp != null || scooterSchemaJs != null) ''
-    # The runtime `import("@scooter/...")` must resolve from the installed app's OWN
-    # package dir. buildNpmPackage installs it at $out/lib/node_modules/<name>, where
-    # <name> is package.json "name" (NOT pname) — read it deterministically here.
-    #
-    # DO NOT `find ... -path '*/dist/index.js' | head -1`: that matches ANY dependency's
-    # dist/index.js (e.g. pg-cloudflare) and find's order is filesystem-dependent, so on
-    # some machines it resolved appdir to a NESTED dep and linked the providers into the
-    # wrong node_modules — a nondeterministic build failure. The package name is exact;
-    # read it from the SOURCE package.json at eval time (cwd-independent, deterministic).
+    # The runtime `import("@scooter/...")` must resolve from the installed app's own package dir.
     appdir="$out/lib/node_modules/${appName}"
     if [ ! -d "$appdir/dist" ]; then
       echo "postInstall: expected app at $appdir (with dist/), not found — did package.json 'name' change?" >&2

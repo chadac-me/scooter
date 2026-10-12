@@ -1,17 +1,9 @@
 /**
- * Trusted-caller verification for the webhooks service.
- *
- * The conversation `owner` on POST /agui (a webhook-resolved Scooter user) is a
- * PRIVILEGED field — if any caller could set it, a user could claim someone else's
- * conversation. So the agent-host honors `owner` ONLY when the request presents a
- * valid **webhooks ServiceAccount token**, cryptographically verified via k8s
- * TokenReview (NOT a header the ingress is merely trusted to strip — that was
- * spoofable). Mirrors the broker's SA-token auth (services/broker/broker/core/auth.py).
- *
- * A `Bearer <token>` that authenticates as `system:serviceaccount:<ns>:<sa>` (the
- * configured webhooks SA) → trusted. Anything else (no token, invalid token, a
- * valid-but-different SA, TokenReview unreachable) → NOT trusted → `owner` ignored,
- * the conversation stays unowned (never blocks the run).
+ * Trusted-caller verification for the webhooks and scheduler services. The
+ * conversation `owner` on POST /agui is privileged, so it is honored only when the
+ * request presents a ServiceAccount token that k8s TokenReview authenticates as one
+ * of the configured SAs; anything else leaves the conversation unowned and never
+ * blocks the run.
  */
 
 import { KubeConfig, AuthenticationV1Api } from "@kubernetes/client-node";
@@ -22,14 +14,11 @@ import type { IncomingMessage } from "node:http";
 export type WebhooksCallerVerifier = (req: IncomingMessage) => Promise<boolean>;
 
 export interface WebhooksVerifierConfig {
-  /** The trusted SA username(s) that may set `owner`, COMMA-SEPARATED — e.g.
-   *  `system:serviceaccount:agent-sandbox:agent-webhooks,system:serviceaccount:agent-sandbox:agent-scheduler`.
-   *  Both webhooks and the scheduler spawn owner-set conversations. A single value
-   *  stays valid. Empty/undefined → verification DISABLED (owner never honored). */
+  /** The comma-separated trusted SA usernames that may set `owner`, e.g. `system:serviceaccount:agent-sandbox:agent-webhooks`; empty disables verification. */
   expectedServiceAccount?: string;
-  /** The token audience the webhooks SA token is projected for (must match). */
+  /** The token audience the SA token is projected for. */
   audience?: string;
-  /** Injectable TokenReview (tests). Default hits the real k8s API. */
+  /** Injectable TokenReview for tests. */
   reviewToken?: (token: string, audience?: string) => Promise<{ authenticated: boolean; username?: string }>;
 }
 
@@ -64,16 +53,8 @@ function defaultReviewToken(): (token: string, audience?: string) => Promise<{ a
   };
 }
 
-/**
- * Build a verifier. When `expectedServiceAccount` is empty, returns a verifier that
- * always says "not trusted" (owner is never honored — the safe default until the
- * SA-token trust chain is wired). Otherwise verifies the request's Bearer token via
- * TokenReview and checks the SA username matches.
- */
+/** Build a verifier that checks the request's Bearer token via TokenReview against the expected SA usernames, or always says "not trusted" when none are configured. */
 export function createWebhooksCallerVerifier(config: WebhooksVerifierConfig): WebhooksCallerVerifier {
-  // A COMMA-SEPARATED set of trusted SA usernames (webhooks AND scheduler both
-  // spawn conversations that set `owner`). Empty/undefined → verification disabled
-  // (owner never honored). A single value stays valid (back-compat).
   const expected = new Set(
     (config.expectedServiceAccount ?? "")
       .split(",")
@@ -89,7 +70,7 @@ export function createWebhooksCallerVerifier(config: WebhooksVerifierConfig): We
       const { authenticated, username } = await review(token, config.audience);
       return authenticated && username !== undefined && expected.has(username);
     } catch {
-      // TokenReview unreachable / RBAC missing → treat as untrusted (owner ignored).
+      // An unreachable TokenReview is treated as untrusted.
       return false;
     }
   };

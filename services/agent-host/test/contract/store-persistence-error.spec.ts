@@ -1,14 +1,7 @@
 /**
- * Tier 1 contract test — a FAILED durable append must leave a trace.
- *
- * Audit finding #4 (HIGH): the conversation's only persistence is this JSONL log.
- * appendEvent is fired-and-forgotten (`void store.appendEvent(...)`) and its
- * per-conversation write chain swallows a prior link's rejection (correct, to
- * keep ordering). But THIS append's own appendFile failure (ENOSPC/EACCES/
- * unmounted PVC) was never observed — a turn vanished with no log/metric/signal.
- *
- * Fix: an onAppendError observer fires on a failed append. This test asserts the
- * failure is surfaced (not silent). RED until onAppendError exists + fires.
+ * The file store's failure surface: a failed durable append fires onAppendError and
+ * still rejects, and reads distinguish a missing log or state dir (empty) from a
+ * real read failure (throws).
  */
 
 import { describe, it, expect } from "vitest";
@@ -27,18 +20,16 @@ describe("fileStore persistence-error surface", () => {
     const root = mkdtempSync(join(tmpdir(), "store-perr-"));
     try {
       const id = "conv-x" as SessionId;
-      // Make the conversation's directory path collide with a FILE, so ensureDir's
-      // mkdir (and the subsequent appendFile) fails — a stand-in for an unwritable
-      // / unmounted conversation-state volume.
+      // A file at the conversation's directory path makes ensureDir's mkdir fail, standing in for an unwritable volume.
       writeFileSync(join(root, "conv-x"), "i am a file, not a dir", "utf8");
 
       const store = createFileConversationStore(root);
       const errors: Array<{ id: SessionId; error: unknown }> = [];
       store.onAppendError?.((eid, error) => errors.push({ id: eid, error }));
 
-      // Fire-and-forget, exactly like the manager does.
+      // Fire-and-forget, as the manager does.
       const p = store.appendEvent(id, event);
-      await p.catch(() => {}); // the returned promise still rejects; await it settling
+      await p.catch(() => {});
 
       expect(errors.length).toBe(1);
       expect(errors[0].id).toBe(id);
@@ -59,8 +50,6 @@ describe("fileStore persistence-error surface", () => {
     }
   });
 
-  // Finding #11: readEvents must yield empty for a NEW conversation (ENOENT) but
-  // THROW on a real read failure (else a real conversation replays as blank).
   it("readEvents yields empty for a missing log (ENOENT), not an error", async () => {
     const root = mkdtempSync(join(tmpdir(), "store-re-"));
     try {
@@ -76,8 +65,7 @@ describe("fileStore persistence-error surface", () => {
   it("readEvents THROWS on a non-ENOENT read error (real log unreadable)", async () => {
     const root = mkdtempSync(join(tmpdir(), "store-re2-"));
     try {
-      // Make the events.jsonl path a DIRECTORY -> readFile fails with EISDIR
-      // (a non-ENOENT read failure standing in for EACCES/EIO/unmounted PVC).
+      // A directory at the events.jsonl path makes readFile fail with EISDIR.
       const id = "conv-z";
       mkdirSync(join(root, id, "events.jsonl"), { recursive: true });
       const store = createFileConversationStore(root);
@@ -89,11 +77,9 @@ describe("fileStore persistence-error surface", () => {
     }
   });
 
-  // Finding #12: listConversations returns [] for a missing state dir (ENOENT)
-  // but THROWS on a real readdir failure (else the whole list vanishes silently).
   it("listConversations returns [] for a missing state dir (ENOENT)", async () => {
     const root = join(tmpdir(), `store-lc-${process.pid}-${Math.random().toString(36).slice(2)}`);
-    // root deliberately does not exist
+    // The root deliberately does not exist.
     const store = createFileConversationStore(root);
     expect(await store.listConversations?.()).toEqual([]);
   });
@@ -101,7 +87,7 @@ describe("fileStore persistence-error surface", () => {
   it("listConversations THROWS when the state path is not a directory (real error)", async () => {
     const root = mkdtempSync(join(tmpdir(), "store-lc2-"));
     try {
-      // Point the store root at a FILE -> readdir fails with ENOTDIR (non-ENOENT).
+      // A file as the store root makes readdir fail with ENOTDIR.
       const fileRoot = join(root, "not-a-dir");
       writeFileSync(fileRoot, "x", "utf8");
       const store = createFileConversationStore(fileRoot);

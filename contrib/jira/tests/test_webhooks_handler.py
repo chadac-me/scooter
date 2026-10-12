@@ -1,10 +1,4 @@
-"""The jira handler, exercised through the real extension seam.
-
-Moved out of the webhooks app's suite with the handler (PR #582). The app no
-longer knows jira exists, so what proves the integration is the entry point plus
-the registries: discovery finds the handler, its route mounts, its gating answers,
-and its resource shapes arm when it is imported.
-"""
+"""The jira handler through the real extension seam: discovery finds it, its route mounts, its gating answers, and its resource shapes arm on import."""
 
 from __future__ import annotations
 
@@ -20,7 +14,7 @@ from scooter_contrib_jira import webhooks_handler as jira_h
 
 @pytest.fixture
 def client():
-    """A minimal app with only this contrib's router mounted — no webhooks app."""
+    """A minimal app with only this contrib's router mounted."""
     app = FastAPI()
     app.include_router(jira_h.router)
     return TestClient(app)
@@ -45,7 +39,7 @@ def test_webhooks_discovers_jira_via_entrypoint():
 
 
 def test_jira_webhook_disabled(client):
-    """Off toggle answers `disabled` in-route rather than unmounting."""
+    """The off toggle answers `disabled` in-route rather than unmounting."""
     with patch.object(jira_h, "settings") as mock_settings:
         mock_settings.jira_enabled = False
         resp = client.post("/webhooks/jira", json={})
@@ -53,20 +47,14 @@ def test_jira_webhook_disabled(client):
 
 
 def test_importing_the_handler_arms_the_resource_shapes():
-    """Shapes register by import side effect and nothing else imports them: losing
-    that line would make a browse-URL link stop matching a bare key (issue #563)."""
+    """Shapes register by import side effect and nothing else imports them."""
     from scooter_webhooks_lib import resources
 
     assert "jira" in resources.registered_sources()
 
 
 async def test_jira_ack_posts_before_the_run():
-    """The 'Scooter is on it' ack must post BEFORE the agent run.
-
-    create_conversation() blocks until the whole turn finishes, so posting the ack
-    after it returned delayed the link by the entire run. The handler posts inside
-    the `on_created` hook; a fake create_conversation fires it and records ORDER.
-    """
+    """The 'Scooter is on it' ack posts inside the `on_created` hook, before the agent run."""
     order: list[str] = []
 
     async def rec_post(*a, **k):
@@ -78,9 +66,7 @@ async def test_jira_ack_posts_before_the_run():
         order.append("run")
         return {"conversation_id": "conv-xyz", "result": "done"}
 
-    # AsyncMock for `db` so EVERY store call is awaitable — the handler writes the
-    # conversation, the generic resource link (not the retired jira_tickets helper,
-    # PR #582) and drains pending messages.
+    # AsyncMock for `db` so every store call is awaitable.
     with (
         patch.object(jira_h, "db", new=AsyncMock()),
         patch.object(jira_h, "create_conversation", fake_create),

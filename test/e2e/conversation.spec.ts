@@ -1,25 +1,14 @@
 /**
- * Tier 3 E2E — the core happy path through the real assistant-ui Thread.
- *
- * Runs against the local dummy-agent stack (fake ACP agent, no cluster/model;
- * booted by playwright.config webServer). The dummy agent streams a
- * deterministic turn: reasoning -> tool call -> a reply echoing the prompt.
- *
- * Every test here also gets the automatic "no error in the UI" assertion from
- * fixtures.ts.
+ * Tier 3 E2E for the core happy path through the real assistant-ui Thread, against the
+ * local dummy-agent stack booted by the playwright.config webServer. The dummy agent
+ * streams a deterministic turn: reasoning -> tool call -> a reply echoing the prompt.
  */
 
 import { test, expect } from "./fixtures.js";
 
 test.describe("conversation happy path", () => {
-  // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). On the full target EVERY turn —
-  // even a plain-text one — runs a real `echo` exec in the sandbox (fakeAgent.ts always
-  // createTerminal's), so each test's FIRST turn funds a sandbox boot: 5-25s cold. The
-  // multi-turn test is the worst case at the 60s default: open (~5s) + boot (≤25s) +
-  // turn 1 (~10s streamed) + turn 2 (~10s) ≈ 50s of expected work with zero headroom.
-  // 120s funds it with margin; the per-assert budgets below already suffice.
-  // 240s, not 120: the shell/tool tests below now allow 90s per assertion so a first-turn
-  // cold sandbox boot cannot expire them, and the tool test chains three of those waits.
+  // On the full target every turn runs a real exec in the sandbox, so each test's first
+  // turn funds a cold boot.
   test.setTimeout(240_000);
 
   test("sending a message streams an assistant reply", async ({ chat }) => {
@@ -33,21 +22,14 @@ test.describe("conversation happy path", () => {
 
   test("!cmd runs a real sandbox command and shows its output", async ({ chat, page }) => {
     await chat.open();
-    // The "!" prefix runs the rest as a bash command in the sandbox via the
-    // REAL exec path (ACP createTerminal -> bridge -> ExecBackend; local
-    // subprocess in fake mode, pod exec in cluster mode). This is the e2e
-    // command harness — `!agent-broker test/whoami` rides the same path to
-    // verify broker/IRSA auth in cluster mode.
+    // The "!" prefix runs the rest as a bash command in the sandbox via the real exec path
+    // (local subprocess in fake mode, pod exec in cluster mode).
     await chat.send("!echo zxcvbnm-marker");
 
-    // 90s here and below, not 30: this is the conversation's FIRST turn and a real sandbox
-    // exec on the full target, so everything it asserts sits behind a cold pod boot.
+    // This is the conversation's first turn, so on the full target it sits behind a cold pod boot.
     await expect(chat.toolCalls().first()).toBeVisible({ timeout: 90_000 });
-    // The tool card shows the COMMAND the agent ran (not just an empty result) —
-    // the args ride a tool_call_update, which the bridge must surface as
-    // TOOL_CALL_ARGS, and the shell card renders it as "$ <command>". Scoped to the
-    // card body so it can't be satisfied by the echoed user message. Regression
-    // guard for the "empty tool card" bug.
+    // The tool card shows the command the agent ran, scoped to the card body so the echoed
+    // user message cannot satisfy it.
     await expect(
       page.locator('[data-testid="provider-tool-body"]').filter({ hasText: /echo zxcvbnm-marker/ }),
     ).toBeVisible({ timeout: 90_000 });
@@ -58,10 +40,8 @@ test.describe("conversation happy path", () => {
   test("!cmd evaluates shell (not a literal echo of the message)", async ({ chat }) => {
     await chat.open();
     await chat.send("!echo $((6 * 7))");
-    // Proves the command runs in a shell — output is 42, not the literal text.
-    // 90s, not 30: this is the conversation's FIRST turn and it is a real sandbox exec on
-    // the full target, so the reply is behind a cold pod boot (15-25s, longer while the
-    // cluster is replacing sandboxes). 30s was priced against the fake stack's ~1s turn.
+    // Proves the command runs in a shell (output is 42, not the literal text), behind a cold
+    // pod boot on the full target.
     await expect(chat.assistantMessages().last()).toContainText(/\b42\b/, { timeout: 90_000 });
   });
 
@@ -75,15 +55,13 @@ test.describe("conversation happy path", () => {
     const refresh = page.getByRole("button", { name: /refresh/i }).first();
     await refresh.click();
 
-    // A second reply renders; the auto no-error fixture asserts no AGUIError
-    // ("Cannot send 'RUN_FINISHED' while text messages are still active").
+    // A second reply renders; the auto no-error fixture asserts no AGUIError.
     await chat.waitForReply(/dummy agent/i);
   });
 
   test("multi-turn: a follow-up continues the same thread", async ({ chat }) => {
     await chat.open();
-    // sendTurn (count-based) guarantees the first run FINISHED before the second
-    // send, which otherwise races an unfinished run and gets dropped.
+    // sendTurn guarantees the first run finished before the second send.
     await chat.sendTurn("first message");
 
     await chat.send("second message");

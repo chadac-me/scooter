@@ -1,9 +1,8 @@
 """GitHub webhook handler.
 
-Trigger rules:
-- @openhands mention in issue/PR comment -> creates/forwards conversation
-- 'openhands' label added to issue/PR -> creates conversation
-- Any comment on resource with active conversation -> auto-forwarded
+A mention in an issue or PR comment creates or forwards a conversation, the trigger
+label creates one, and any comment on a resource with an active conversation is
+auto-forwarded.
 """
 
 import asyncio
@@ -43,14 +42,7 @@ def _verify_signature(body: bytes, signature: str) -> bool:
 
 
 async def _is_self_authored(actor: dict, body: str) -> bool:
-    """Should this comment/review be dropped as machine chatter?
-
-    The agent comments through the same GitHub App as this service, so its own
-    comments come back here authored by `<slug>[bot]` — and reviews are forwarded
-    at interrupt priority, so an unfiltered one preempts the run that wrote it.
-    The identity check must win even when the body mentions the agent (it quotes
-    users), so it runs before the mention-gated bot fallback. Why: PR #530.
-    """
+    """Whether this comment or review is machine chatter to drop, including the agent's own comments posted through the same GitHub App."""
     actor = actor or {}
     login = actor.get("login", "")
     if policy.is_ignored_user(login):
@@ -62,9 +54,7 @@ async def _is_self_authored(actor: dict, body: str) -> bool:
     if own_login and login.lower() == own_login.lower():
         return True
 
-    # Fallback while App credentials aren't wired (get_app_login -> None): drop
-    # bot chatter that isn't addressed to the agent. A bot that wants the agent
-    # mentions it; our own comments are caught above regardless.
+    # Without App credentials, drop bot chatter that is not addressed to the agent.
     return (
         policy.ignore_bot_authors()
         and actor.get("type") == "Bot"
@@ -77,16 +67,7 @@ def _resource_id(owner: str, repo: str, number: int) -> str:
 
 
 def _link_variants(res_type: str, res_id: str) -> list[tuple[str, str]]:
-    """(resource_type, resource_id) pairs to try, widest-compatible first.
-
-    Links are WRITTEN by the agent through agent-host's /links as
-    ("pr"|"issue", <html_url>), but this handler asks for
-    ("pull_request"|"issue", "owner/repo#N"). Both halves differ, so an exact
-    match never hit and every linked-PR forward was dropped silently. The shape
-    knowledge itself lives in `scooter_webhooks_lib.resources` — every source
-    shares it now (#563); THIS package's `resources` module is what registers
-    github's half of it, hence the aliased import.
-    """
+    """(resource_type, resource_id) pairs to try, widest-compatible first; this package's `resources` module registers github's shapes."""
     return _lib_link_variants("github", res_type, res_id)
 
 
@@ -114,8 +95,7 @@ def _response_instructions(owner: str, repo: str, number: int, is_pr: bool) -> s
 
 
 def _comment_ref(comment_id: int | None) -> str:
-    """The id of THIS comment, so a reply/reaction can target it. Data only — what
-    to do with it is the scooter-github skill's business, not the forwarder's."""
+    """The id of this comment, so a reply or reaction can target it."""
     return f"\n\n(comment_id: {comment_id})" if comment_id else ""
 
 
@@ -265,15 +245,7 @@ async def _handle_comment(payload: dict):
 
 
 async def _forward_or_ignore(res_id: str, message: str) -> None:
-    """Forward to the conversation LINKED to this PR, or do nothing.
-
-    Unlike _handle_comment there is no create-a-conversation path and no mention
-    gate: a review comment on a PR the agent opened is addressed to it by
-    construction, and a review comment on a PR it does NOT own is not ours to act
-    on. priority=True so it preempts a run in progress — the agent-host turns that
-    into interrupt:"thinking" (idle generation yields; an in-flight tool call
-    finishes first).
-    """
+    """Forward at interrupt priority to the conversation linked to this PR, or do nothing; a PR the agent does not own is not ours to act on."""
     existing = await _resolve_conversation("pull_request", res_id)
     if not existing or is_pending(existing):
         return
@@ -281,14 +253,14 @@ async def _forward_or_ignore(res_id: str, message: str) -> None:
 
 
 def _line_ref(comment: dict) -> str:
-    """`path:line`, or just the path when GitHub gives no line (an outdated diff)."""
+    """`path:line`, or just the path when GitHub gives no line."""
     path = comment.get("path", "")
     line = comment.get("line") or comment.get("original_line")
     return f"{path}:{line}" if line else path
 
 
 async def _handle_review_comment(payload: dict):
-    """pull_request_review_comment — a comment on a SPECIFIC LINE of the diff."""
+    """pull_request_review_comment: a comment on a specific line of the diff."""
     if payload.get("action") != "created":
         return
 
@@ -328,7 +300,7 @@ async def _handle_review_comment(payload: dict):
 
 
 async def _handle_review(payload: dict):
-    """pull_request_review — the review ENVELOPE (approved / changes_requested)."""
+    """pull_request_review: the review envelope (approved / changes_requested)."""
     if payload.get("action") != "submitted":
         return
 
@@ -346,7 +318,7 @@ async def _handle_review(payload: dict):
     owner = repo_data.get("owner", {}).get("login", "")
     repo = repo_data.get("name", "")
 
-    # The individual line comments arrive as their own events; this is the summary.
+    # The individual line comments arrive as their own events.
     if state == "approved":
         head = f"@{user} APPROVED PR #{number} in {owner}/{repo}."
         tail = "No action needed unless the body asks for something."
@@ -365,12 +337,7 @@ async def _handle_review(payload: dict):
 
 
 async def _previous_run_failed(owner: str, repo: str, workflow_id, branch: str, before_id: int) -> bool:
-    """Did the PREVIOUS run of this workflow on this branch fail?
-
-    Queried from the API rather than kept in a table: webhooks holds no per-resource
-    state, and "was the last run red?" is exactly that. One round-trip, and on any
-    error we answer False — a missed red->green notice is better than a spurious one.
-    """
+    """Whether the previous run of this workflow on this branch failed, answering False on any error."""
     try:
         from .responses import _headers_for_repo, GITHUB_API
 
@@ -382,7 +349,7 @@ async def _previous_run_failed(owner: str, repo: str, workflow_id, branch: str, 
             )
             resp.raise_for_status()
             runs = resp.json().get("workflow_runs", [])
-    except Exception as e:  # noqa: BLE001 - never let this break the webhook
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             "previous-run lookup failed; treating as not-previously-red",
             extra={**_C, "source": "github", "error": str(e)},
@@ -396,27 +363,18 @@ async def _previous_run_failed(owner: str, repo: str, workflow_id, branch: str, 
 
 
 async def _handle_workflow_run(payload: dict):
-    """workflow_run — CI finished.
-
-    NOT check_run: that fires at created/in_progress/completed for every job (109 on
-    one real commit here, ~300 webhooks per push) and arrives over minutes, so the
-    bridge's queue coalescing cannot merge it. workflow_run is one event per workflow.
-
-    Forwarded on FAILURE, and on success only when the previous run was red — so the
-    agent learns it is unblocked without polling, and a routinely-green push costs
-    nothing.
-    """
+    """workflow_run: CI finished, forwarded on failure and on a success that follows a red run."""
     if payload.get("action") != "completed":
         return
 
     run = payload.get("workflow_run", {})
     conclusion = run.get("conclusion")
     if conclusion not in ("failure", "success"):
-        return  # cancelled / skipped / timed_out: not actionable
+        return
 
     prs = run.get("pull_requests") or []
     if not prs:
-        return  # not a PR run — nothing to route it to
+        return
     number = prs[0].get("number")
 
     repo_data = payload.get("repository", {})
@@ -448,7 +406,7 @@ async def _handle_workflow_run(payload: dict):
 
 
 async def _failed_jobs(owner: str, repo: str, run_id) -> list[str]:
-    """Names of the jobs that failed in a run — the useful half of a CI failure."""
+    """Names of the jobs that failed in a run."""
     try:
         from .responses import _headers_for_repo, GITHUB_API
 
@@ -547,11 +505,7 @@ async def _background_create_conversation(
     conv_title: str, owner: str, repo_name: str,
     issue_number: int, invoking_user: str | None = None,
 ) -> None:
-    # Register the mapping + link AND post the "on it — follow along" comment
-    # BEFORE the agent runs. create_conversation blocks until the whole turn
-    # finishes, so doing this after it returned delayed the link comment by the
-    # entire run (the 5-10min lag). Everything here needs only conv_id (known in
-    # the hook), so fire it pre-run.
+    # Runs pre-run, since create_conversation blocks until the whole agent turn finishes.
     async def _register(conv_id: str) -> None:
         await db.store_conversation("github", res_type, res_id, conv_id)
         gh_kind = "pull" if res_type == "pull_request" else "issues"
@@ -566,8 +520,7 @@ async def _background_create_conversation(
             body=f"Scooter is on it — follow along: [View conversation]({conversation_url(conv_id)})",
         )
 
-    # Map the invoking GitHub user -> their Scooter user (by public email) so the
-    # conversation gets a real owner. Best-effort -> None -> unowned.
+    # Best-effort owner lookup; None leaves the conversation unowned.
     conv_owner = await resolve_owner("github", invoking_user) if invoking_user else None
 
     try:
@@ -577,7 +530,7 @@ async def _background_create_conversation(
         )
         if not result:
             await _clear_pending(res_type, res_id)
-            # The optimistic "on it" comment already posted in _register; correct it.
+            # Correct the optimistic comment already posted in _register.
             await post_github_comment(
                 owner=owner, repo=repo_name, issue_number=issue_number,
                 body="…actually, Scooter couldn't start on this one — failed to create the conversation.",
@@ -585,13 +538,11 @@ async def _background_create_conversation(
             return
 
         if result.get("interrupted"):
-            # Run cut short by an agent-host restart; the conversation exists and is
-            # resumed on boot. Don't post a failure and don't flush pending here.
+            # The agent-host resumes the interrupted run on boot, so neither post a failure nor flush pending.
             return
 
         if result.get("errored"):
-            # The agent crashed mid-run; the conversation exists + did work. Post a
-            # truthful "hit an error partway through" note, not "couldn't start".
+            # The conversation exists and did work, so this is an error partway through, not a failed start.
             await _clear_pending(res_type, res_id)
             conv_id = result.get("conversation_id", "")
             await post_github_comment(
@@ -602,7 +553,6 @@ async def _background_create_conversation(
 
         conv_id = result.get("conversation_id", "")
 
-        # Flush pending messages
         messages = await db.get_and_clear_pending_messages("github", res_type, res_id)
         for msg in messages:
             ok = await send_message(conv_id, msg, source="github")
@@ -626,14 +576,10 @@ async def _clear_pending(res_type: str, res_id: str) -> None:
     await db.get_and_clear_pending_messages("github", res_type, res_id)
 
 
-# Discovered + mounted by the webhooks service via the entry-point registry.
-# Handlers self-gate in-route (a disabled provider returns {"status": "disabled"}),
-# so this registers enabled and keeps its per-request gating.
+# Discovered and mounted by the webhooks service via the entry-point registry; the handler self-gates in-route.
 from scooter_webhooks_lib.registry import WebhookHandler, register_webhook
 
-# Imported for their REGISTRATION side effects: this module is what the webhooks
-# service loads, so github's owner lookup (#575) and resource shapes (#576) arm
-# with it. Nothing else imports either. Why: PR #591.
+# Imported for their registration side effects.
 from . import identity  # noqa: F401
 from . import resources  # noqa: F401
 

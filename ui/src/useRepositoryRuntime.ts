@@ -1,21 +1,11 @@
 /**
- * A minimal external-store runtime for scooter's single-source render model.
- *
- * Replaces `useAgUiRuntime` for RENDERING. scooter does NOT let the react-ag-ui
- * runtime fold events (its per-run aggregator merges our multi-run integrity replay
- * wrong — see RuntimeProvider's header). Instead our IntegrityAgent folds the log and
- * we hand assistant-ui the result. The old path did `runtime.thread.reset(...)` on
- * every push, which REBUILDS the whole message repository (fresh ids, full re-paint —
- * the "open a conversation and it jumps/flashes" bug).
- *
- * Here we feed the external store a `messageRepository` SNAPSHOT instead. The core
- * reconciles per-message (add / keep-in-place / delete + resetHead), so unchanged
- * messages are NOT re-painted and the viewport stays pinned at the head. This is also
- * the foundation for load-earlier/prepend (older messages inserted above the head).
- *
- * Only the surface scooter actually uses is wired: the repository render, `onNew`
- * (the composer send), `isRunning`, and the thread-list + attachment adapters.
- * Interrupts / run-state come from the IntegrityAgent via context, NOT this runtime.
+ * A minimal external-store runtime for scooter's single-source render model: the
+ * IntegrityAgent folds the log, and this hands assistant-ui the resulting
+ * `messageRepository` snapshot. The core reconciles per message (add, keep in place,
+ * delete and resetHead), so unchanged messages are not re-painted and the viewport
+ * stays pinned at the head. Only the surface scooter uses is wired (the repository
+ * render, `onNew`, `isRunning`, and the thread-list and attachment adapters);
+ * interrupts and run state come from the IntegrityAgent via context, not this runtime.
  */
 
 import { useMemo } from "react";
@@ -30,14 +20,14 @@ import {
 import type { RepositorySnapshot } from "./messageRepository.js";
 
 export interface RepositoryRuntimeOptions {
-  /** The current message-repository snapshot (from toRepositorySnapshot). A NEW
-   *  object each render with STABLE inner ids — the core skips the reconcile if the
-   *  object is reference-equal to the previous one. */
+  /** The current message-repository snapshot: a new object each render with stable
+   *  inner ids, since the core skips the reconcile when it is reference-equal to the
+   *  previous one. */
   messageRepository: RepositorySnapshot;
   /** Whether a run is in flight (drives the composer's running state / Stop). */
   isRunning: boolean;
-  /** The composer send. Receives the appended user message; we extract text +
-   *  images and fire-and-forget it to the agent-host (see RuntimeProvider). */
+  /** The composer send, receiving the appended user message whose text and images
+   *  RuntimeProvider forwards to the agent-host. */
   onNew: (message: AppendMessage) => Promise<void>;
   adapters?: {
     threadList?: ExternalStoreThreadListAdapter;
@@ -45,29 +35,19 @@ export interface RepositoryRuntimeOptions {
   };
 }
 
-/**
- * Build the assistant-ui runtime from a message-repository snapshot. The store is
- * re-created each render (so the reconcile runs when the snapshot changes), but the
- * per-message reconcile is a no-op for messages whose ids didn't change.
- */
+/** Build the assistant-ui runtime from a message-repository snapshot; the per-message
+ *  reconcile is a no-op for messages whose ids did not change. */
 export function useRepositoryRuntime(options: RepositoryRuntimeOptions) {
   const { messageRepository, onNew, adapters } = options;
-  // IMPORTANT: we pass isRunning=FALSE to the external-store runtime UNCONDITIONALLY. assistant-ui
-  // DISABLES composer submission while its runtime's isRunning is true — but scooter QUEUES a message
-  // sent mid-run (server-side priority queue; see RuntimeProvider.onNew). If we forwarded our real
-  // run state here, the composer would swallow every Enter/Send while the agent was working, so a
-  // message sent mid-run never reached the queue at all ("messages sent while working don't show up
-  // in the queue"). Our OWN run state (the Stop button + thinking indicator + the queued-message UI)
-  // comes from useConversationInterrupts, NOT this runtime — so telling the runtime "not running"
-  // only frees the composer to always submit; it never hides that a run is in flight. Caught by
-  // test/e2e/queue-durability.spec.ts.
+  // The runtime is always told "not running": assistant-ui disables composer submission
+  // while running, but scooter queues a message sent mid-run, and our own run state
+  // comes from useConversationInterrupts.
   const runtimeIsRunning = false;
   return useExternalStoreRuntime<ThreadMessage>(
     useMemo(
       () => ({
-        // Repository (not flat `messages`) → the incremental reconcile path. Our items
-        // are already ThreadMessage, so convertMessage is the identity (the store type
-        // requires it, but the repository path never invokes it).
+        // The repository (not flat `messages`) takes the incremental reconcile path, and
+        // the items are already ThreadMessage, so convertMessage is the identity.
         convertMessage: (m: ThreadMessage) => m,
         messageRepository,
         isRunning: runtimeIsRunning,

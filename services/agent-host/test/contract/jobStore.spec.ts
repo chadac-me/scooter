@@ -1,14 +1,8 @@
 /**
- * Tier 1 contract — the background-job registry lives in Postgres, and a conversation
- * whose jobs exist only in a file registry still lists them.
- *
- * The registry answers "which jobs does this conversation have?" and must survive a
- * rollout. LOCAL_STATE_PATH is an emptyDir that every rollout wipes, and the RWX mirror
- * is write-only for jobs (nothing hydrates them back), so a file-backed registry loses a
- * conversation's jobs whenever the pod moves. These tests run in exactly that shape: the
- * file registry is EMPTY (wiped) and the data is only in the database.
- *
- * Job OUTPUT is not covered here — it lives in-pod on the workspace PVC by design.
+ * Contract tests for the Postgres background-job registry, which must survive a
+ * rollout and still list jobs that exist only in a legacy file registry. The tests
+ * run with an empty file registry so the data is only in the database. Job output
+ * is not covered; it lives in-pod on the workspace PVC.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -26,21 +20,15 @@ const job = (over: Partial<JobRecord> = {}): JobRecord => ({
   ...over,
 });
 
-/**
- * A tiny in-memory Postgres standing UNDER Drizzle: the store now builds its statements
- * with the generated schema, but Drizzle still hands the pool `{text}` + a params array,
- * so the same SQL branching stays under test — conflict semantics included, which is what
- * backfill correctness rests on. Wrapped with drizzle() by `fakeDrizzle` below.
- */
+/** A tiny in-memory Postgres standing under Drizzle, branching on the SQL text it is handed; conflict semantics are what backfill correctness rests on. */
 function fakeDb(): { query: (cfg: unknown, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number }>; rows: Map<string, JobRecord>; queries: string[] } {
-  const rows = new Map<string, JobRecord>(); // "conv|jobId" -> record
+  const rows = new Map<string, JobRecord>();
   const queries: string[] = [];
   const key = (c: string, j: string) => `${c}|${j}`;
   return {
     rows,
     queries,
     async query(cfg: unknown, paramsIn: unknown[] = []) {
-      // drizzle: query({ text, types }, params). Raw pg: query(sql, params).
       const sql = typeof cfg === "string" ? cfg : ((cfg as { text: string }).text ?? "");
       const params = paramsIn;
       queries.push(sql.trim().split(/\s+/).slice(0, 3).join(" "));
@@ -65,10 +53,8 @@ function fakeDb(): { query: (cfg: unknown, params?: unknown[]) => Promise<{ rows
         const out = [...rows.entries()]
           .filter(([k]) => k.startsWith(`${c}|`))
           .map(([, r]) => r)
-          .sort((a, b) => b.startedAt - a.startedAt) // ORDER BY started_at DESC
-          // drizzle asks for rowMode:"array" — positional values in SELECT order, which
-          // it then maps back onto the aliases the query named. bigint comes back as a
-          // STRING from node-postgres; the store must coerce.
+          .sort((a, b) => b.startedAt - a.startedAt)
+          // drizzle asks for rowMode:"array", and node-postgres returns bigint as a string.
           .map((r) => [
             r.jobId,
             r.command,
@@ -79,8 +65,7 @@ function fakeDb(): { query: (cfg: unknown, params?: unknown[]) => Promise<{ rows
       }
 
       if (/^UPDATE/i.test(sql.trim())) {
-        // drizzle binds SET values FIRST, then the WHERE terms — the reverse of the
-        // hand-written statement this replaced.
+        // drizzle binds the SET values first, then the WHERE terms.
         const [command, startedAt, notifiedAt, c, j] = params as [string, number, number | null, string, string];
         const k = key(c, j);
         if (!rows.has(k)) return { rows: [], rowCount: 0 };
@@ -93,8 +78,7 @@ function fakeDb(): { query: (cfg: unknown, params?: unknown[]) => Promise<{ rows
   };
 }
 
-/** The store takes a Drizzle handle; wrap the in-memory pg so the tests drive the real
- *  query builder and the fake still sees the SQL it asserts on. */
+/** Wrap the in-memory pg in a Drizzle handle so the tests drive the real query builder. */
 const fakeDrizzle = (db: ReturnType<typeof fakeDb>) => drizzle(db as never);
 
 /** A file-backed registry standing in for one a deployment still carries on disk. */
@@ -112,17 +96,16 @@ describe("Postgres job registry", () => {
   });
 
   it("THE ROLLOUT SHAPE: jobs survive when the file registry is empty", async () => {
-    // The pod moved: the local emptyDir is gone, so the legacy registry answers []. The
-    // database is the only copy, and it must still list the conversation's jobs.
+    // The legacy registry answers [] and the database is the only copy.
     const db = fakeDb();
-    const legacy = legacyWith({}); // wiped
+    const legacy = legacyWith({});
     const store = createPgJobStore({ db: fakeDrizzle(db), legacy });
 
     await store.saveJob(CONV, job({ jobId: "j1", startedAt: 1_000 }));
     await store.saveJob(CONV, job({ jobId: "j2", startedAt: 2_000 }));
 
     const listed = await store.listJobs(CONV);
-    expect(listed.map((j) => j.jobId)).toEqual(["j2", "j1"]); // newest first
+    expect(listed.map((j) => j.jobId)).toEqual(["j2", "j1"]);
   });
 
   it("scopes jobs to their own conversation", async () => {
@@ -135,8 +118,7 @@ describe("Postgres job registry", () => {
   });
 
   it("coerces bigint timestamps back to numbers", async () => {
-    // node-postgres hands back bigint columns as strings; a JobRecord carries ms-epoch
-    // NUMBERS, and the completion watcher does arithmetic on them.
+    // node-postgres hands back bigint columns as strings, and the completion watcher does arithmetic on them.
     const db = fakeDb();
     const store = createPgJobStore({ db: fakeDrizzle(db) });
     await store.saveJob(CONV, job({ startedAt: 1_700_000_000_000, notifiedAt: 1_700_000_009_999 }));
@@ -156,8 +138,7 @@ describe("Postgres job registry", () => {
   });
 
   it("updateJob does NOT create a row for a job that was never registered", async () => {
-    // The watcher marks EXISTING jobs announced. Conjuring a row here would invent a
-    // job the conversation never started.
+    // Conjuring a row would invent a job the conversation never started.
     const db = fakeDb();
     const store = createPgJobStore({ db: fakeDrizzle(db) });
     await store.updateJob!(CONV, job({ jobId: "ghost", notifiedAt: 1 }));
@@ -180,17 +161,16 @@ describe("read-through to a legacy file registry", () => {
     const legacy = legacyWith({ [CONV]: [job({ jobId: "old" })] });
     const store = createPgJobStore({ db: fakeDrizzle(db), legacy });
 
-    await store.listJobs(CONV); // reads through + backfills
+    await store.listJobs(CONV);
     legacy.listJobs.mockClear();
 
     const second = await store.listJobs(CONV);
     expect(second.map((j) => j.jobId)).toEqual(["old"]);
-    expect(legacy.listJobs).not.toHaveBeenCalled(); // no longer consulted
+    expect(legacy.listJobs).not.toHaveBeenCalled();
   });
 
   it("never lets a backfill overwrite a row the database already has", async () => {
-    // A stale legacy notifiedAt must not clobber the live one — that would make the
-    // completion watcher announce a job it has already announced.
+    // A stale legacy notifiedAt clobbering the live one would re-announce a job.
     const db = fakeDb();
     const legacy = legacyWith({ [CONV]: [job({ jobId: "j1", notifiedAt: undefined })] });
     const store = createPgJobStore({ db: fakeDrizzle(db), legacy });
@@ -214,8 +194,7 @@ describe("read-through to a legacy file registry", () => {
   });
 
   it("updateJob pulls a legacy-only job forward, then applies the mark", async () => {
-    // The watcher can announce a job whose conversation has never been listed, so the
-    // read-through that would have pulled it forward has not run yet.
+    // The watcher can announce a job whose conversation has never been listed.
     const db = fakeDb();
     const legacy = legacyWith({ [CONV]: [job({ jobId: "old" })] });
     const store = createPgJobStore({ db: fakeDrizzle(db), legacy });

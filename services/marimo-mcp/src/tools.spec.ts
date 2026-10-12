@@ -1,5 +1,4 @@
-/** Unit — the marimo tool handlers over a FAKE client (no HTTP). Covers the
- *  happy paths, the code-mode marker plumbing, and error→ToolResult mapping. */
+/** Unit tests for the marimo tool handlers over a fake client: happy paths, the code-mode marker plumbing and error mapping. */
 
 import { describe, it, expect, vi } from "vitest";
 
@@ -17,7 +16,7 @@ const result = (over: Partial<ExecuteResult> = {}): ExecuteResult => ({
   ...over,
 });
 
-/** A fake client whose execute() is scripted. `execute` records the code it saw. */
+/** A fake client whose execute() is scripted and records the code it saw. */
 function fakeClient(over: Partial<MarimoClient> = {}): MarimoClient & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -33,7 +32,7 @@ function fakeClient(over: Partial<MarimoClient> = {}): MarimoClient & { calls: s
   } as MarimoClient & { calls: string[] };
 }
 
-/** A done result whose stdout carries the code-mode marker (ok). */
+/** A done result whose stdout carries the code-mode marker. */
 const markerOk = (obj: Record<string, unknown>) =>
   result({ stdout: `${CODE_MODE_MARKER} ${JSON.stringify({ ok: true, ...obj })}\n` });
 

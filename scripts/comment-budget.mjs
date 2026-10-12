@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Comment budget: ONE sentence, TEN words, per comment. Flags only ADDED comment lines.
+// Comment budget (one sentence, ten words per comment), flagging only added comment lines.
 //   node comment-budget.mjs <base-ref>
 
 import { execSync } from "node:child_process";

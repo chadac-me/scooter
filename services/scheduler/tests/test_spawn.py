@@ -1,12 +1,4 @@
-"""Tier 1 — spawn_conversation CREATES a conversation, then prompts the id the
-server assigned.
-
-The scheduler used to mint its own uuid and rely on /agui creating the
-conversation implicitly. That path is gone: the server owns conversation ids
-(POST /conversations, served by the conversation-router as a control-plane CR
-write). These tests pin the two-call flow and, critically, that the id the
-scheduler records is the SERVER's — not one it chose.
-"""
+"""Tier 1: spawn_conversation creates a conversation, then prompts the id the server assigned."""
 
 import json
 
@@ -60,7 +52,6 @@ async def test_spawn_creates_then_prompts_the_server_assigned_id():
     agent = _Agent()
     conv = await _spawn(agent)
 
-    # Create FIRST, then prompt — and the returned id is the SERVER's.
     assert agent.calls == ["POST /conversations", "POST /agui"]
     assert conv == SERVER_ID
     assert agent.prompt_body["threadId"] == SERVER_ID
@@ -70,11 +61,10 @@ async def test_spawn_creates_then_prompts_the_server_assigned_id():
 
 @pytest.mark.asyncio
 async def test_spawn_never_invents_its_own_id():
-    """The regression that matters: the scheduler must not choose the id."""
+    """The scheduler must not choose the id."""
     agent = _Agent(server_id="server-chosen")
     conv = await _spawn(agent)
     assert conv == "server-chosen"
-    # Nothing in the CREATE body may carry a caller-chosen id.
     assert "threadId" not in agent.create_body
     assert "id" not in agent.create_body
 
@@ -90,29 +80,25 @@ async def test_title_rides_the_create_call():
 async def test_owner_is_sent_on_both_calls():
     agent = _Agent()
     await _spawn(agent, owner="alice")
-    # The router stamps spec.owner from the CREATE BODY for an SA-verified caller. NOT
-    # from an identity header: that header's name is deployment-configurable
-    # (AUTH_USER_HEADER) and under alb-oidc is a different header entirely, so the
-    # hard-coded `x-auth-user` this used to send was silently dropped (#527).
+    # The owner rides the body, not an identity header whose name is deployment-configurable.
     assert agent.create_body["owner"] == "alice"
     assert "x-auth-user" not in {k.lower() for k in agent.create_headers}
-    # The agent-host also honors the body owner for the SA-verified caller.
     assert agent.prompt_body["owner"] == "alice"
 
 
 @pytest.mark.asyncio
 async def test_spawn_returns_none_when_create_fails():
-    """A failed create means there is NO conversation — do not prompt into the void."""
+    """A failed create means there is no conversation to prompt."""
     agent = _Agent(create_status=502)
     conv = await _spawn(agent)
     assert conv is None
-    assert agent.calls == ["POST /conversations"]  # never reached /agui
+    assert agent.calls == ["POST /conversations"]
 
 
 @pytest.mark.asyncio
 async def test_spawn_returns_none_when_create_returns_no_id():
     agent = _Agent()
-    agent.server_id = None  # a 201 with no usable id
+    agent.server_id = None
     transport = httpx.MockTransport(agent.handler)
     async with httpx.AsyncClient(transport=transport) as client:
         conv = await spawn_conversation("p", title="t", owner=None, client=client)

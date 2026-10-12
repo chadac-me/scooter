@@ -5,9 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  // Explicitly define VITE_TELEMETRY_CONSOLE from the environment so it's available
-  // to import.meta.env even when passed through playwright's webServer.env. Without
-  // this, the env var set by playwright might not be visible to Vite's transformation.
+  // Define VITE_TELEMETRY_CONSOLE from the environment so it reaches import.meta.env when passed through playwright's webServer.env.
   define: {
     "import.meta.env.VITE_TELEMETRY_CONSOLE": JSON.stringify(process.env.VITE_TELEMETRY_CONSOLE),
   },
@@ -18,21 +16,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // Proxy the agent-host API to avoid CORS in dev. MUST mirror the prod nginx
-    // proxy (pkgs/ui-image) EXACTLY — every agent-host API prefix the UI calls.
-    // A path missing here falls through to the SPA (index.html 200), so e.g.
-    // /whoami returned HTML and the UI was always anonymous in dev (identity, the
-    // Mine/All owner filter, and the scheduled-tasks/users pages silently broke
-    // only in dev). Keep this list in sync with pkgs/ui-image/default.nix.
+    // Proxy the agent-host API to avoid CORS in dev; every prefix must mirror the prod nginx proxy in pkgs/ui-image/default.nix, since a missing path falls through to the SPA.
     proxy: {
-      // The e2e SSE-resilience harness sets AGENT_HOST_STREAM_URL to a fault proxy
-      // so it can drop/stall/kill INTEGRITY-STREAM frames — but ONLY the stream:
-      // everything else (POST /agui, /conversations, /tail, …) still goes straight
-      // to agent-host. Chaining ALL traffic through the extra proxy hop raced the
-      // long-lived SSE against concurrent POSTs and 400'd multi-turn sends. This
-      // regex (more specific → matched first) carves the integrity stream out to
-      // the stream target; the general /conversations entry below handles the rest.
-      // Absent AGENT_HOST_STREAM_URL, it just points at the same agent-host (no-op).
+      // The e2e fault proxy sets AGENT_HOST_STREAM_URL so only the integrity stream (this regex matches first) routes through it; absent, this points at the same agent-host.
       "^/conversations/[^/]+/events\\.integrity": {
         target: process.env.AGENT_HOST_STREAM_URL ?? process.env.AGENT_HOST_URL ?? "http://localhost:8080",
         changeOrigin: true,

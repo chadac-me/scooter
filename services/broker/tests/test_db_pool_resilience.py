@@ -1,18 +1,6 @@
-"""No broker store may build its own async engine — they all go through the surface.
-
-Without `pool_pre_ping` the pool hands out a connection the server has already closed
-and the request dies with asyncpg "connection is closed"; the service then stays
-broken until it is itself restarted. `pool_recycle` retires connections proactively
-before common idle-timeout windows rather than waiting to be bitten. The webhooks
-engine added both after exactly that failure in production.
-
-This used to enumerate the modules that build an engine and check each one's kwargs —
-and it had already missed shares/store.py, which was added later and guarded only
-because its author happened to copy registry/store.py. Since PR #622 there is ONE
-engine constructor (scooter_broker_lib.store.open_sessions, which carries the guards
-and is tested there), so the useful assertion here is the inverse: nothing in the
-broker constructs an engine itself, because that is the only way back to an unguarded
-one. A new store — or a contrib's — inherits the guards by having no other option.
+"""No broker store may build its own async engine, since scooter_broker_lib.store.open_sessions
+is the one constructor carrying the pool_pre_ping and pool_recycle guards and a store
+inherits them by having no other option.
 """
 
 from __future__ import annotations

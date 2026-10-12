@@ -1,4 +1,4 @@
-# grafana's DEPLOYMENT half. Gated on contribs.grafana.enable; why: #599, #711.
+# grafana's deployment half, gated on contribs.grafana.enable.
 { config, lib, ... }:
 
 let

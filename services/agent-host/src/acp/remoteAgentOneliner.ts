@@ -1,22 +1,11 @@
-/**
- * Builds the Settings "Connect your Claude agent" payload: an owner-bound join token + the
- * ready-to-copy `docker run` one-liner (token + wss URL baked in). Separated for testability.
- * See todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §H/§I.
- */
+/** Builds the Settings "Connect your Claude agent" payload: an owner-bound join token plus the ready-to-copy `docker run` one-liner. */
 
 import { mintJoinToken } from "../auth/remoteAgentToken.js";
 
-/** The published container image (ghcr). Overridable for a private registry / a pinned tag. */
-// ghcr.io/<owner>/scooter/<image> — the path scheme publish-images.yml actually pushes.
+/** The published container image, overridable for a private registry or a pinned tag. */
 const DEFAULT_IMAGE = "ghcr.io/chadac/scooter/remote-agent:latest";
 
-/** The ws(s) URL the CONTAINER dials, for ONE minted session (§L).
- *
- *  This replaced a STATIC bridge URL (`wss://<host>/claude-bridge/connect`, identical for every
- *  user). The controller path is per-owner — the session id is how it routes a prompt to the right
- *  container — so the URL can only be built AFTER minting. `publicByocUrl` is the public base of
- *  the BYOC ingress; http→ws, https→wss, and a bare host defaults to wss so a copy-paste never
- *  silently downgrades to plaintext. */
+/** The ws(s) URL the container dials for one minted session, derived from the public BYOC base (a bare host defaults to wss). */
 export function connectWsUrl(publicByocUrl: string | undefined, sessionId: string): string {
   const base = (publicByocUrl ?? "").trim().replace(/\/$/, "");
   const path = `/byoc/ws/${encodeURIComponent(sessionId)}`;
@@ -26,10 +15,7 @@ export function connectWsUrl(publicByocUrl: string | undefined, sessionId: strin
   return `wss://${base}${path}`;
 }
 
-/** The full `docker run` one-liner (restart-always service form). The container serves the local
- *  token-entry page on 127.0.0.1:34579 (published to the host) on first run — the user pastes their
- *  `claude setup-token` output there — then connects. (We can't run Claude's OAuth in-container: the
- *  authorize step is gated by a browser-minted hCaptcha attestation.) */
+/** The full `docker run` one-liner; the container serves a local token-entry page on 127.0.0.1:34579 on first run, where the user pastes their `claude setup-token` output. */
 export function dockerCommand(wsUrl: string, token: string, image = DEFAULT_IMAGE): string {
   return [
     "docker run -d --restart always --name scooter-agent",
@@ -48,23 +34,20 @@ export interface RemoteAgentStatus {
 
 export interface RemoteAgentUiDeps {
   joinSecret: string;
-  /** The BYOC controller's IN-CLUSTER base URL — where the session is minted. */
+  /** The BYOC controller's in-cluster base URL, where the session is minted. */
   controllerUrl: string;
-  /** The controller's PUBLIC base URL — what the container dials from the user's laptop. */
+  /** The controller's public base URL, which the container dials from the user's laptop. */
   publicByocUrl?: string;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
-  /** Synchronous connected check (in-memory live registry). Use this OR isConnectedAsync. */
+  /** Synchronous connected check against the in-memory live registry. */
   isConnected?: (owner: string) => boolean;
-  /** Async connected check (the durable Postgres badge, cross-replica). Preferred when a DB is
-   *  wired; falls back to isConnected otherwise. */
+  /** Async connected check against the durable Postgres badge, preferred over isConnected when wired. */
   isConnectedAsync?: (owner: string) => Promise<boolean>;
-  /** Full status detail from the controller — connected + the owner's most recent REJECTED
-   *  connection attempt, so the Settings page can say WHY a container is not connected
-   *  instead of a clean "disconnected" identical to never-started. */
+  /** Full status from the controller, including the owner's most recent rejected connection attempt. */
   statusAsync?: (owner: string) => Promise<RemoteAgentStatus>;
   image?: string;
-  /** Join-token TTL (seconds). Long enough to copy + start the container. */
+  /** Join-token TTL in seconds. */
   ttlSeconds?: number;
 }
 
@@ -72,8 +55,7 @@ export interface RemoteAgentUiDeps {
 export function createRemoteAgentUi(deps: RemoteAgentUiDeps) {
   const doFetch = deps.fetchImpl ?? fetch;
   return {
-    /** Mint a session on the CONTROLLER, then build the one-liner around it. Async because the
-     *  session is per-owner and only the controller can create one — a static URL cannot route. */
+    /** Mint a session on the controller, then build the one-liner around it. */
     async mint(owner: string) {
       const res = await doFetch(`${deps.controllerUrl.replace(/\/$/, "")}/byoc/sessions`, {
         method: "POST",
@@ -82,8 +64,7 @@ export function createRemoteAgentUi(deps: RemoteAgentUiDeps) {
         throw new Error(`could not mint a BYOC session: ${String(err)}`);
       });
       if (!res.ok) {
-        // FAIL LOUD. Handing back a one-liner that cannot connect is worse than an error: the user
-        // runs it, it retries forever, and nothing says why.
+        // A one-liner that cannot connect is worse than an error.
         throw new Error(`could not mint a BYOC session (${res.status})`);
       }
       const { sessionId } = (await res.json()) as { sessionId: string };
@@ -91,14 +72,12 @@ export function createRemoteAgentUi(deps: RemoteAgentUiDeps) {
       const token = mintJoinToken(owner, deps.joinSecret, { ttlSeconds: deps.ttlSeconds ?? 900 });
       return { token, wsUrl, dockerCommand: dockerCommand(wsUrl, token, deps.image) };
     },
-    /** Is the owner's agent connected? Prefers the durable (async) check; falls back to the
-     *  sync live-registry check; false if neither is wired. */
-    /** Status detail for the Settings page; degrades to the boolean check when the detailed
-     *  probe is not wired (tests, legacy composition). */
+    /** Status detail for the Settings page, degrading to the boolean check when the detailed probe is not wired. */
     async status(owner: string): Promise<RemoteAgentStatus> {
       if (deps.statusAsync) return deps.statusAsync(owner);
       return { connected: await this.isConnected(owner), lastAuthFailure: null };
     },
+    /** Whether the owner's agent is connected, preferring the durable check over the live registry. */
     async isConnected(owner: string): Promise<boolean> {
       if (deps.isConnectedAsync) return deps.isConnectedAsync(owner);
       if (deps.isConnected) return deps.isConnected(owner);

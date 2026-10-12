@@ -1,15 +1,9 @@
 /**
- * Tier 3 E2E — RECONNECT / REFRESH-mid-run + the "weird detached state" bugs.
- *
- * Targets the reported "requires a refresh to properly receive new messages" + "sometimes ends up in
- * a weird detached state" reliability problems. Two mechanisms:
- *   1. Page RELOADS at awkward moments (mid-run, mid-queue) — the UI must re-fold the persisted
- *      integrity log correctly (no lost messages, no stuck "working", no duplicates).
- *   2. The SSE fault proxy drops/kills/stalls live frames — the idle-watchdog reconnect must un-stick
- *      a UI that the server has already moved past (the detached state: server done, UI still busy).
- *
- * Fault-proxy tests use the isolated resilience stack (baseURL 5273, fast idle-watchdog). Pure-reload
- * tests use the pristine stack.
+ * Tier 3 E2E for reconnect and refresh mid-run. Page reloads at awkward moments (mid-run,
+ * mid-queue) must re-fold the persisted integrity log correctly, and when the SSE fault
+ * proxy drops, kills or stalls live frames the idle-watchdog reconnect must un-stick a UI
+ * the server has already moved past. Fault-proxy tests use the isolated resilience stack
+ * (baseURL 5273); pure-reload tests use the pristine stack.
  */
 
 import { test, expect } from "./fixtures.js";
@@ -30,7 +24,7 @@ fastOnly("needs the SSE fault proxy to kill the stream mid-run")("reload mid-run
     await chat.send("!sleep 3");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     const before = await chat.assistantMessages().count();
-    await page.reload(); // reload mid-run — the persisted log must re-fold + the run finishes
+    await page.reload(); // reload mid-run; the persisted log must re-fold and the run finishes
     await expect.poll(async () => chat.assistantMessages().count(), { timeout: 45_000 }).toBeGreaterThan(before);
     // And the UI is not stuck "working" afterwards.
     await expect(page.locator(".aui-composer-send, [aria-label=\"Send message\"]").first()).toBeVisible({ timeout: 15_000 });
@@ -47,7 +41,7 @@ fastOnly("needs the SSE fault proxy to kill the stream mid-run")("reload mid-run
     await page.reload();
     await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 20_000 }); // survived the reload
-    // Eventually the sleep + the queued run both finish → the queue empties + a reply lands.
+    // Eventually the sleep and the queued run both finish, so the queue empties and a reply lands.
     await expect(chat.queuedMessages()).toHaveCount(0, { timeout: 45_000 });
     await expect(chat.userMessages().filter({ hasText: "queued across a reload" })).toHaveCount(1);
   });
@@ -57,7 +51,7 @@ fastOnly("needs the SSE fault proxy to kill the stream mid-run")("reload mid-run
     await chat.sendTurn("a turn before the reload storm");
     const users = await chat.userMessages().count();
     await page.reload();
-    await page.reload(); // immediately again — no double-fold / duplication
+    await page.reload(); // immediately again; no double-fold or duplication
     await expect(chat.userMessages()).toHaveCount(users, { timeout: 30_000 });
     // Still fully functional after: a new turn works first-try.
     await chat.sendTurn("still works after two reloads");
@@ -68,7 +62,7 @@ fastOnly("needs the SSE fault proxy to kill the stream mid-run")("reload mid-run
     await chat.open();
     const before = await chat.assistantMessages().count();
     await chat.send("deliver me live");
-    // The reply must arrive over the live stream — assert WITHOUT reloading the page.
+    // The reply must arrive over the live stream, without reloading the page.
     await expect.poll(async () => chat.assistantMessages().count(), { timeout: 45_000 }).toBeGreaterThan(before);
   });
 });
@@ -80,11 +74,11 @@ test.describe("detached state recovery (fault-proxy stack)", () => {
   test("server finished but the UI missed RUN_FINISHED → sending queues, then the watchdog un-sticks it", async ({ chat, page, request }) => {
     await chat.open();
     await chat.sendTurn("healthy first turn");
-    // Drop the NEXT RUN_FINISHED → the UI thinks the run is still going (detached from the server,
-    // which has finished). The idle-watchdog reconnect re-folds the intact persisted log to recover.
+    // Drop the next RUN_FINISHED so the UI thinks the run is still going; the idle-watchdog
+    // reconnect re-folds the persisted log.
     await setFault(request, { mode: "drop", eventType: "RUN_FINISHED" });
     await chat.send("this finish gets dropped");
-    // Recovery: the reply finalizes + the composer un-sticks (no permanent "working" state).
+    // Recovery: the reply finalizes and the composer un-sticks.
     await expect(chat.assistantMessages()).toHaveCount(2, { timeout: 30_000 });
     await expect(page.locator(".aui-composer-send, [aria-label=\"Send message\"]").first()).toBeVisible({ timeout: 15_000 });
   });
@@ -95,7 +89,7 @@ test.describe("detached state recovery (fault-proxy stack)", () => {
     const before = await chat.assistantMessages().count();
     await setFault(request, { mode: "killAfter", n: 2 }); // close the stream after 2 frames
     await chat.send("stream dies mid-reply");
-    // The reconnect re-folds the log → exactly one new assistant message (no dupes from re-fold).
+    // The reconnect re-folds the log, so exactly one new assistant message.
     await expect.poll(async () => chat.assistantMessages().count(), { timeout: 30_000 }).toBe(before + 1);
   });
 
@@ -105,6 +99,6 @@ test.describe("detached state recovery (fault-proxy stack)", () => {
     await setFault(request, { mode: "stall", stallMs: 1500 });
     await chat.send("held back briefly");
     await expect.poll(async () => chat.assistantMessages().count(), { timeout: 30_000 }).toBeGreaterThan(before);
-    // (The auto no-error-box fixture assertion covers "no stuck error".)
+    // The auto no-error-box fixture covers "no stuck error".
   });
 });

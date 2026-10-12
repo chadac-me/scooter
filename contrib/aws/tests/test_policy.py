@@ -1,8 +1,4 @@
-"""Guardrail tests — the security core of the AWS permissions broker.
-
-These run GREEN now (policy.py is fully ported). They lock in the three layers:
-structural validation, the global deny-list, and per-account bounds.
-"""
+"""Guardrail tests for the three policy layers: structural validation, the global deny-list, and per-account bounds."""
 
 from scooter_contrib_aws import policy
 from scooter_contrib_aws.models import RiskLevel
@@ -50,7 +46,6 @@ def test_iam_privilege_escalation_blocked():
 
 
 def test_blocked_pattern_matches_wildcard():
-    # guardduty:Delete* pattern catches guardduty:DeleteDetector AND others.
     assert any("blocked" in e for e in policy.validate_policy(stmt("guardduty:DeletePublishingDestination")))
 
 
@@ -70,7 +65,6 @@ def test_prod_service_wide_write_wildcard_rejected():
 
 
 def test_nonprod_wildcard_resource_on_write_allowed():
-    # Outside prod, a write to Resource:"*" is allowed (still subject to bounds).
     assert policy.validate_policy(stmt("s3:PutObject", "*"), target_account="acme-dev") == []
 
 
@@ -109,7 +103,7 @@ def test_unrestricted_bounds_allows_anything_not_denied():
 
 def test_empty_bounds_denies_all():
     errs = policy.validate_policy_within_bounds(stmt("s3:GetObject"), {"Statement": []})
-    assert errs  # nothing is allowed
+    assert errs
 
 
 # --- summary -------------------------------------------------------------
@@ -128,7 +122,6 @@ def test_is_read_only_policy_false_when_any_write():
 
 
 def test_is_read_only_policy_false_for_wildcard():
-    # "*" and "service:*" grant writes -> NOT auto-approvable.
     assert not policy.is_read_only_policy(stmt("s3:*"))
     assert not policy.is_read_only_policy(stmt("*"))
 
@@ -138,7 +131,6 @@ def test_is_read_only_policy_false_for_empty():
 
 
 def test_is_read_only_policy_ignores_deny_statements():
-    # A Deny can't grant anything, so a Deny on a write action doesn't disqualify.
     doc = {"Statement": [
         {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"},
         {"Effect": "Deny", "Action": "s3:DeleteObject", "Resource": "*"},
@@ -146,9 +138,8 @@ def test_is_read_only_policy_ignores_deny_statements():
     assert policy.is_read_only_policy(doc)
 
 
-# --- covered_by_auto_policy (the auto-approve tier: glob superset that skips human) ---
+# --- covered_by_auto_policy (the auto-approve tier) ---
 
-# The assume-a-specific-role example the user asked for.
 ASSUME = {"Version": V, "Statement": [{"Effect": "Allow",
     "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::123456789012:role/deploy-prod"}]}
 AUTO_ASSUME = {"Statement": [{"Action": ["sts:AssumeRole"],
@@ -156,18 +147,15 @@ AUTO_ASSUME = {"Statement": [{"Action": ["sts:AssumeRole"],
 
 
 def test_auto_covers_assume_role_via_glob():
-    # sts:AssumeRole to deploy-prod is covered by the deploy-* auto superset -> auto.
     assert policy.covered_by_auto_policy(ASSUME, [], AUTO_ASSUME, [])
 
 
 def test_auto_rejects_action_outside_the_superset():
-    # A write not in the auto policy -> NOT auto (falls through to human approval).
     write = stmt("s3:PutObject", "arn:aws:s3:::b/*")
     assert not policy.covered_by_auto_policy(write, [], AUTO_ASSUME, [])
 
 
 def test_auto_rejects_resource_outside_the_glob():
-    # Right action, wrong resource (a role the glob doesn't cover) -> NOT auto.
     other = {"Version": V, "Statement": [{"Effect": "Allow",
         "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::123456789012:role/admin"}]}
     assert not policy.covered_by_auto_policy(other, [], AUTO_ASSUME, [])
@@ -179,7 +167,6 @@ def test_auto_empty_tiers_never_auto():
 
 
 def test_auto_no_grants_is_not_auto():
-    # A request with no doc and no ARNs has nothing to auto-approve.
     assert not policy.covered_by_auto_policy(None, [], AUTO_ASSUME, ["*"])
 
 
@@ -189,13 +176,12 @@ def test_auto_managed_arn_matched_by_glob():
 
 
 def test_auto_managed_arn_case_sensitive():
-    # ARNs are case-sensitive: a role-name glob must not match a different case.
     arn = "arn:aws:iam::123456789012:policy/MyPolicy"
     assert not policy.covered_by_auto_policy(None, [arn], None, ["arn:aws:iam::123456789012:policy/mypolicy"])
 
 
 def test_auto_any_uncovered_managed_arn_blocks():
-    # Doc covered + one managed ARN NOT in the auto-managed list -> NOT auto (all-or-nothing).
+    # Coverage is all-or-nothing.
     assert not policy.covered_by_auto_policy(
         ASSUME, ["arn:aws:iam::aws:policy/AdministratorAccess"], AUTO_ASSUME, ["arn:aws:iam::aws:policy/ReadOnly*"],
     )

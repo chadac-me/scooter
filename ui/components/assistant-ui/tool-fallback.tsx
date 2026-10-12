@@ -355,10 +355,7 @@ function ToolFallbackApproval({
   )
     return null;
 
-  // Custom (`_`-prefixed) kinds cannot be resolved to a boolean by the kit;
-  // hosts using custom kinds render their own bar. A declared option list is
-  // a host constraint: the kit never adds an approval path beyond it, but
-  // always preserves a refusal path.
+  // Custom (`_`-prefixed) kinds cannot be resolved to a boolean, so a declared option list is filtered to the known kinds while a refusal path is always preserved.
   const declaredOptions = respondToApproval ? approval?.options : undefined;
   const options = declaredOptions?.filter((o) =>
     Object.hasOwn(APPROVAL_OPTION_DEFAULT_LABELS, o.kind),
@@ -537,10 +534,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent & {
   interrupt,
   approval,
   respondToApproval,
-  // Our single-source render model FORCES `status` to "complete" for every folded
-  // tool part (ExternalThread clobbers it), so a still-running generic tool would
-  // never spin. ToolCallView derives the real liveness from our run state and
-  // passes it here to override the (useless) status to "running".
+  // The folded part's `status` is always "complete", so ToolCallView passes the real liveness here to force "running".
   forceRunning,
 }: ToolCallMessagePartProps & { forceRunning?: boolean }) => {
   const effectiveStatus: ToolCallMessagePartStatus | undefined = forceRunning
@@ -576,15 +570,14 @@ const ToolFallbackImpl: ToolCallMessagePartComponent & {
             respondToApproval={respondToApproval}
           />
         )}
-        {/* While running, no result yet — the folded result is stale/absent. */}
+        {/* While running there is no result yet, so the folded result is stale or absent. */}
         {!isCancelled && !forceRunning && <ToolFallbackResult result={result} />}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );
 };
 
-/** The component accepts the stock part props PLUS our `forceRunning` override,
- *  so callers (ToolCallView) can drive the spinner from our own run state. */
+/** The stock part props plus the `forceRunning` override, so ToolCallView can drive the spinner from our own run state. */
 type ToolFallbackComponent = ((
   props: ToolCallMessagePartProps & { forceRunning?: boolean },
 ) => React.ReactNode) & {

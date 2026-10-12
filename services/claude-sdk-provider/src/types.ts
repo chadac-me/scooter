@@ -1,14 +1,9 @@
 /**
- * The interface boundary between this isolated package and the agent-host.
- *
- * This package bundles the Claude Agent SDK (which peer-requires zod v4) and
- * exposes ONLY `createSdkAcpClient` returning an `AcpClient`. To keep the SDK's
- * zod v4 from colliding with the agent-host's zod v3, nothing here imports from
- * agent-host's src. Instead we redeclare the small, stable contract types the two
- * sides share — `AcpClient`, `ExecBackend`, `SessionUpdate`, `ContentBlock`, etc.
- * They are STRUCTURALLY identical to agent-host's (services/agent-host/src/acp/
- * client.ts + types.ts), so agent-host consumes the return value as its own
- * AcpClient with no adapter. If agent-host's interface changes, mirror it here.
+ * The interface boundary between this isolated package and the agent-host. Nothing
+ * here imports from agent-host's src (the SDK's zod v4 must not collide with
+ * agent-host's zod v3); the contract types are redeclared structurally identical to
+ * services/agent-host/src/acp/client.ts and types.ts, and must be mirrored when
+ * those change.
  */
 
 // --- content + session-update contract (mirror of acp/client.ts) --------------
@@ -24,8 +19,7 @@ export type SessionUpdate =
   | { sessionUpdate: "tool_call"; toolCallId: string; title: string; rawInput?: unknown }
   | { sessionUpdate: "tool_call_update"; toolCallId: string; status: string; content?: unknown; rawInput?: unknown; rawOutput?: unknown }
   | { sessionUpdate: "plan"; entries: unknown[] }
-  // Context-window fill after a turn — usedTokens / contextWindow (both absolute), so
-  // the UI can show a fill bar. Rides the SDK `result` message's modelUsage.
+  // Context-window fill after a turn, both values absolute, for the UI's fill bar.
   | { sessionUpdate: "context_usage"; usedTokens: number; contextWindow: number };
 
 export interface InitializeParams {
@@ -54,13 +48,9 @@ export interface AcpClient {
   prompt(params: PromptParams): Promise<{ stopReason: string }>;
   cancel(sessionId: string): Promise<void>;
   killActiveTerminals(): Promise<void>;
-  /** Liveness of the underlying agent. The bridge's stall watchdog probes it: a
-   *  run silent because its agent is DEAD is terminated; silent because a long
-   *  tool is running is healthy. The in-process SDK is alive until close(). */
+  /** Liveness of the underlying agent, probed by the bridge's stall watchdog. */
   isAlive(): boolean;
-  /** Recent diagnostic lines (oldest first) — what a subprocess provider would have
-   *  left on stderr. The agent-host's dead-on-arrival watchdog quotes the last one:
-   *  for a run that produced nothing, ACP carries no cause at all. Why: PR #565. */
+  /** Recent diagnostic lines (oldest first), which the dead-on-arrival watchdog quotes. */
   recentDiagnostics(): string[];
   onSessionUpdate(cb: (sessionId: string, update: SessionUpdate) => void): () => void;
   onTerminalCreated(cb: (terminalId: string, command: string, args: string[]) => void): () => void;

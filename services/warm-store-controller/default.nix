@@ -1,11 +1,8 @@
 { lib, python3Packages, ... }:
 
-# The warm /nix/store PVC pool controller (Python). Leader-elected reconcile loop that
-# keeps a pool of overlay-upper PVCs warmed against the current sandbox image tag: tops up
-# (warm Jobs), GCs retired tags, returns claimed PVCs on suspend, and recovers leaks. Runs
-# alongside the upstream agent-sandbox controller (which owns the Sandbox→pod/PVC lifecycle).
-# The agent-host provisioner does the CLAIM (claimName swap). See
-# todo/docs/WARM_STORE_PVC_MANAGER.md.
+# The warm /nix/store PVC pool controller (Python): a leader-elected reconcile loop
+# that keeps a pool of overlay-upper PVCs warmed against the current sandbox image
+# tag, while the agent-host provisioner does the claim.
 
 python3Packages.buildPythonApplication {
   pname = "warm-store-controller";

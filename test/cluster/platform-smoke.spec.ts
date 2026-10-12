@@ -1,21 +1,11 @@
 /**
- * Tier 2 — multi-replica PLATFORM smoke, end to end on a real k3d cluster.
+ * Tier 2: multi-replica platform smoke on a real k3d cluster.
  *
- * The distribution/routing/rollout topology (#254/#255/#256) shipped with NO cluster
- * coverage — it was validated only manually on odin. This is the CI guard: with the full
- * platform deployed (agent-host DEPLOYMENT + conversation-controller + conversation-router,
- * fakeAgent), a conversation POSTed through the front-door `agent-host` Service (which fronts
- * the ROUTER) must be:
- *   1. created (the agent-host registers a Conversation CR),
- *   2. ASSIGNED a host by the controller (status.hostPod), AND
- *   3. given a routing address (status.hostIP) — the field the router proxies to.
- *
- * That exercises the whole loop the pod-IP-routing PR introduced: CR create → controller
- * reconcile (writes hostPod + hostIP) → the router's CRD watch. If the topology regresses
- * (agent-host back to a StatefulSet, controller not assigning, hostIP dropped), this fails.
- *
- * The workflow deploys the platform + waits for the Deployments before running this; the spec
- * talks to the already-live `agent-sandbox` namespace. Gated: RUN_CLUSTER_TESTS=1.
+ * With the full platform deployed (agent-host Deployment, conversation-controller,
+ * conversation-router, fakeAgent), a conversation posted through the front-door `agent-host`
+ * Service must be created as a Conversation CR, assigned a host (status.hostPod) and given a
+ * routing address (status.hostIP). The workflow deploys the platform before running this; the
+ * spec talks to the already-live `agent-sandbox` namespace and is gated on RUN_CLUSTER_TESTS=1.
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -25,8 +15,7 @@ import { withCluster, clusterTestsEnabled, type Cluster } from "../support/clust
 const maybe = clusterTestsEnabled() ? describe : describe.skip;
 
 const NS = process.env.PLATFORM_NS ?? "agent-sandbox";
-// The public front door (Service `agent-host` → the router). A conversation POSTed here is
-// routed to the owning pod by IP — the same path the UI/broker/webhooks use.
+// The public front door (Service `agent-host`, fronting the router), the same path the UI, broker and webhooks use.
 const AGENT_HOST = `http://agent-host.${NS}.svc.cluster.local:8080`;
 
 type ConversationCR = {
@@ -34,21 +23,9 @@ type ConversationCR = {
   status?: { phase?: string; hostPod?: string; hostIP?: string; generation?: number };
 };
 
-
-/**
- * Create a conversation the way every caller now does: POST /conversations
- * through the front door, which the ROUTER serves by writing the Conversation CR
- * directly. Returns the SERVER-ASSIGNED id.
- *
- * Callers no longer invent a threadId and rely on /agui creating the conversation
- * implicitly — that path is gone (the agent-host fleet is capacity-bounded, so
- * creating there made conversation replicas*cap+1 uncreatable). This helper is
- * therefore also the k3d coverage for the router's create route: if the router is
- * not serving it, every test below fails at setup.
- */
+/** Create a conversation via POST /conversations through the front door and return the server-assigned id. */
 async function createConversation(cluster: Cluster): Promise<string> {
-  // curlJson, not JSON.parse(curlInCluster(...)): the curl pod's output can carry a stray
-  // line after the payload, which fails the parse with entirely valid data on line 1.
+  // curlJson tolerates the stray trailing line the curl pod can append after the payload.
   const res = await cluster.curlJson<{ id?: string }>(`${AGENT_HOST}/conversations`, {
     method: "POST",
     headers: ["Content-Type: application/json"],
@@ -67,12 +44,9 @@ maybe("multi-replica platform smoke", () => {
   });
 
   it("a conversation routed through the front door is assigned a hostPod + hostIP", async () => {
-    // CREATE first (router → Conversation CR), then prompt the id it assigned.
     const threadId = await createConversation(cluster);
 
-    // POST /agui through the front-door Service (→ router → a ready pod, since it's unassigned
-    // at first). The fakeAgent replies deterministically; we only need the run to START so the
-    // agent-host registers the Conversation CR.
+    // The run only needs to start so the agent-host registers the Conversation CR.
     const body = await cluster.curlInCluster(`${AGENT_HOST}/agui`, {
       method: "POST",
       headers: ["Content-Type: application/json", "Accept: text/event-stream"],
@@ -83,28 +57,14 @@ maybe("multi-replica platform smoke", () => {
       }),
       timeoutMs: 60_000,
     });
-    // The run must have REACHED THE AGENT and produced a stream. Deliberately NOT
-    // `toContain("RUN_STARTED")`: `curlInCluster` shells out to `kubectl run -i`, which cannot
-    // attach to the throwaway pod's stdout until that pod is scheduled and running — a gap of a
-    // couple of seconds. For a buffered response that is invisible (one chunk, delivered whole),
-    // but /agui is SSE: the bridge emits RUN_STARTED immediately and "before any awaiting"
-    // (bridge.ts), while later events trickle out over the following seconds. So the FIRST frame
-    // is precisely the one that can fall into the attach gap, and this assertion failed while the
-    // run itself was perfectly healthy — the captured body held the tool calls, the text, and
-    // RUN_FINISHED, with only the opening frame missing.
-    //
-    // Asserting on a TERMINAL event is race-free in the right direction: it cannot be observed
-    // unless the run actually started, so this still proves the front-door → router → agent-host
-    // path works, and it is not sensitive to when the attach lands.
+    // Assert on a terminal event: `kubectl run -i` attaches a few seconds late and can miss the opening RUN_STARTED frame of the SSE stream.
     expect(body, "the front door produced no AG-UI stream at all").toMatch(
       /RUN_FINISHED|RUN_ERROR/,
     );
-    // A RUN_ERROR means the path routed but the run failed — worth failing loudly and distinctly
-    // rather than letting the CR assertions below report a confusing downstream symptom.
+    // A RUN_ERROR means the path routed but the run failed, which should fail distinctly here.
     expect(body, "the run reached the agent but errored").toContain("RUN_FINISHED");
 
-    // The controller must ASSIGN it: status.hostPod (owner name) AND status.hostIP (routing
-    // address) both populated. Poll the CR until the reconcile lands (interval ~5s).
+    // Poll until the controller's reconcile has written both the owner name and the routing address.
     const cr = await cluster.waitFor<ConversationCR>(
       "Conversation",
       threadId,
@@ -115,31 +75,13 @@ maybe("multi-replica platform smoke", () => {
 
     expect(cr.status?.phase).toBe("Assigned");
     expect(cr.status?.hostPod, "controller assigned an owner pod").toBeTruthy();
-    // hostIP is the ROUTING address — an IPv4 dotted quad (the pod IP the router proxies to).
+    // hostIP is the pod IP the router proxies to.
     expect(cr.status?.hostIP, "controller wrote a routing IP").toMatch(/^\d+\.\d+\.\d+\.\d+$/);
     expect(cr.status?.generation ?? 0).toBeGreaterThanOrEqual(1);
   });
 
-  // REGRESSION (odin 2026-08-20): GET /conversations was answered from ONE pod's IN-MEMORY session
-  // map, so on a multi-replica fleet the user saw only the conversations that pod happened to host —
-  // a different fraction each time the Service load-balanced elsewhere, which reads as
-  // "my conversations vanished". Per-pod counts observed: 0,2,2,4,4,4,7,7,8,8 while 20 CRs existed.
-  //
-  // This asserts the FRONT DOOR returns the UNION across the fleet. It only has teeth when the
-  // conversations actually land on DIFFERENT pods, which the CI job arranges with podCap=1 (see
-  // ci.yml / the platform-smoke deploy): each new conversation fills a pod and forces the next onto
-  // another. Repeated calls guard against a lucky load-balance passing a broken build.
   it("a SHORT-ID-addressed request routes to the OWNER, not a random pod", async () => {
-    // The broker addresses its AWS approval-notify by the sandbox SHORT-ID
-    // (POST /conversations/<shortId>/approvals/<contrib>, from req.conversation_id), never the thread
-    // UUID. The router's ownership cache used to be keyed ONLY by the CR name (the UUID), so that
-    // lookup missed, resolveTarget fell back to the ClusterIP Service, and the raise landed on a
-    // NON-OWNER — where getByShortId() misses and the interrupt is silently dropped. The user saw
-    // a run start and finish with no Approve button.
-    //
-    // Unit tests cover the cache in isolation; only a MULTI-REPLICA cluster proves the request
-    // actually reaches the owner, because with one pod the fallback IS the owner and the bug is
-    // invisible. That is exactly how this shipped.
+    // The broker addresses approval-notify by the sandbox short-id, and only a multi-replica cluster can show a request landing on a non-owner.
     const threadId = await createConversation(cluster);
     await cluster.curlInCluster(`${AGENT_HOST}/agui`, {
       method: "POST",
@@ -163,12 +105,7 @@ maybe("multi-replica platform smoke", () => {
     const shortId = (cr.spec?.sandboxRef ?? "").replace(/^conv-/, "");
     expect(shortId, "the CR must carry a sandboxRef to derive a short-id from").toMatch(/\S/);
 
-    // THE ASSERTION. Addressed by SHORT-ID through the front door, the request must reach the pod
-    // that actually hosts the conversation. A 404 here is the bug: the router sent it to a
-    // non-owner, which does not know this conversation.
-    //
-    // Repeated, because the failure was a COIN FLIP per request (fallback round-robin) — a single
-    // attempt passes ~1/N of the time by luck even when routing is broken.
+    // Repeated because a misrouted request only fails on the attempts that land on a non-owner.
     for (let attempt = 0; attempt < 5; attempt++) {
       const out = await cluster.curlInCluster(
         `${AGENT_HOST}/conversations/${shortId}/approvals/aws`,
@@ -187,7 +124,6 @@ maybe("multi-replica platform smoke", () => {
   });
 
   it("GET /conversations returns EVERY conversation in the fleet, not one pod's slice", async () => {
-    // Three conversations, each created by the ROUTER (server-assigned ids).
     const ids: string[] = [];
     for (let n = 0; n < 3; n++) ids.push(await createConversation(cluster));
 
@@ -208,8 +144,7 @@ maybe("multi-replica platform smoke", () => {
       );
     }
 
-    // Sanity: the conversations really are spread across MORE THAN ONE pod, otherwise this test
-    // would pass even with the single-pod bug present (that is exactly why CI missed it).
+    // The assertion below only has teeth when the conversations span more than one pod.
     const hosts = new Set<string>();
     for (const threadId of ids) {
       const cr = await cluster.waitFor<ConversationCR>(
@@ -219,17 +154,9 @@ maybe("multi-replica platform smoke", () => {
     }
     expect(hosts.size, "conversations must span >1 pod for this regression to be meaningful").toBeGreaterThan(1);
 
-    // The front door must list ALL of them, on EVERY call (not whichever pod answered).
+    // The front door must list all of them on every call, whichever pod answers.
     for (let attempt = 0; attempt < 5; attempt++) {
-      // curlJson, not JSON.parse(curlInCluster(...)): the curl pod's output can carry a stray
-      // line after the payload, which failed this exact assertion with valid data on line 1.
-      //
-      // A read that does not come back as JSON at all is a TRANSPORT failure, not the
-      // single-pod bug this test pins — curlJson throws "Unexpected end of JSON input" on an
-      // empty body, which killed the test before any assertion ran (observed on CI). Retry
-      // the read a few times so the attempt measures what the router LISTED, not whether one
-      // curl came back. If it never returns JSON, rethrow — a front door that cannot answer
-      // is a real failure, just a different one, and the message says so.
+      // A read that returns no JSON at all is a transport failure, so retry it a few times before giving up.
       let listed: Array<{ id: string }> | undefined;
       let lastErr: unknown;
       for (let read = 0; read < 5 && !listed; read++) {

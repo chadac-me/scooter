@@ -1,14 +1,8 @@
-"""Permission-request store — durable record of the request lifecycle.
+"""Permission-request store: the durable record of the request lifecycle.
 
-Backed by the SHARED Postgres (`agent-shared-db` in the agent-manager
-namespace) on a SEPARATE database (`broker`), via SQLAlchemy async + asyncpg —
-the same DSN-from-components + secretKeyRef pattern the webhooks store uses.
-SQLite (aiosqlite) is the local/dev default. See the storage-consolidation TODO
-in docs/AWS_PERMISSIONS_BROKER.md.
-
-STS credentials are NEVER stored here — they live in an in-memory cache
-(service.py) until retrieved or expired. Durability lesson from the webhooks
-store: AWAIT writes so a crash can't lose a row.
+Backed by the shared `broker` database via SQLAlchemy async, with SQLite as the
+local default. STS credentials are never stored here; they live in service.py's
+in-memory cache.
 """
 
 from __future__ import annotations
@@ -39,7 +33,7 @@ class _Row(_Base):
     justification: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String, index=True)
     risk_level: Mapped[str] = mapped_column(String)
-    # JSON-encoded blobs (portable across SQLite + Postgres).
+    # JSON-encoded text, portable across SQLite and Postgres.
     policy_document: Mapped[str | None] = mapped_column(Text, nullable=True)
     managed_policy_arns: Mapped[str] = mapped_column(Text, default="[]")
     policy_summary: Mapped[str] = mapped_column(Text, default="")
@@ -87,7 +81,7 @@ def _to_model(row: _Row) -> PermissionRequest:
     )
 
 
-# Columns stored as JSON-encoded text (mapped on write).
+# Columns stored as JSON-encoded text.
 _JSON_FIELDS = {"policy_document", "managed_policy_arns"}
 
 
@@ -120,9 +114,7 @@ def _row_kwargs(req: PermissionRequest) -> dict[str, Any]:
 
 
 class PermissionStore:
-    """Persists PermissionRequest rows. Cross-conversation isolation:
-    get_for_conversation only returns a request to the conversation that created
-    it (identity from the SA token). Async (asyncpg/aiosqlite)."""
+    """Persists PermissionRequest rows; get_for_conversation only returns a request to the conversation that created it."""
 
     def __init__(self, config: StoreConfig) -> None:
         self._engine: AsyncEngine

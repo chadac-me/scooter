@@ -1,10 +1,6 @@
 /**
- * Tier 1 contract test — the Sandbox/SA delete-error policy (findings #7/#8).
- *
- * destroy() must IGNORE a 404 (the object is already gone — the delete's goal)
- * but PROPAGATE every other delete error (403/409/5xx/timeout) — silently
- * swallowing those leaks the Sandbox CR + pod + workspace PVC (#7) or the
- * per-conversation ServiceAccount = the broker identity (#8).
+ * The Sandbox/SA delete-error policy: destroy() ignores a 404 and propagates every
+ * other delete error, since swallowing one leaks the Sandbox or the ServiceAccount.
  */
 
 import { describe, it, expect } from "vitest";

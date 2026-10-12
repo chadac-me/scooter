@@ -1,16 +1,11 @@
 /**
- * Tier 1 contract — the BYOC run path (increment 2 of todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §M).
+ * Tier 1 contract for the BYOC run path, against a fake container socket.
  *
  *   agent-host --POST /byoc/:session/prompt--> controller --WS--> container
  *   agent-host <----------- SSE (ACP frames) --controller <--WS-- container
  *
- * Why HTTP/SSE and not a socket from each pod (§L decision 1): the pod holds NO state, so any
- * replica can serve any conversation and a rollout cannot strand a run. The controller owns the one
- * duplex WS to the container; everything above it is stateless and retryable.
- *
- * Tested against a FAKE container socket so the transport is proven before the real container is
- * repointed at it. The failure modes matter as much as the happy path — a relay that HANGS when the
- * container vanishes is worse than one that errors, because the agent-host's run never terminates.
+ * The failure modes matter as much as the happy path: a relay that hangs when the container
+ * vanishes leaves the agent-host's run never terminating.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -31,7 +26,7 @@ function fakeStore(): SessionStore {
   };
 }
 
-/** A fake container: records what the controller sends, and can push frames back. */
+/** A fake container that records what the controller sends and can push frames back. */
 function fakeContainer() {
   const sent: WireFrame[] = [];
   let onMessage: ((raw: string) => void) | undefined;
@@ -40,16 +35,16 @@ function fakeContainer() {
     closed: false,
     send(raw: string) { sent.push(JSON.parse(raw) as WireFrame); },
     close() { this.closed = true; },
-    /** Wire the controller's inbound handler (the real one comes from the ws 'message' event). */
+    /** Wire the controller's inbound handler. */
     bind(handler: (raw: string) => void) { onMessage = handler; },
     /** Simulate the container pushing a frame up. */
     push(frame: WireFrame) { onMessage?.(JSON.stringify(frame)); },
-    /** The id the controller assigned to the Nth frame it sent (for correlating an ack). */
+    /** The id the controller assigned to the Nth frame it sent. */
     idOf(n = 0) { return sent[n]?.id as string; },
   };
 }
 
-/** Drain an async iterable of SSE events into an array (the agent-host's read side). */
+/** Drain an async iterable of SSE events into an array. */
 async function collect<T>(it: AsyncIterable<T>, max = 50): Promise<T[]> {
   const out: T[] = [];
   for await (const v of it) {
@@ -76,11 +71,7 @@ describe("BYOC run relay", () => {
   });
 
   it("forwards initialize/new_session AS THEMSELVES, not as an empty prompt", async () => {
-    // THE BUG THIS PINS. byocTransport POSTs every ACP request to /prompt (fine — each frame
-    // carries its own `type`), but the relay rebuilt the frame with a hardcoded type:"prompt".
-    // So the container saw `initialize` and `new_session` as prompts with no sessionId and no
-    // text — `prompt acp-session=undefined text=""` — the ACP handshake never completed, and no
-    // run could start. Every existing test here sends a prompt, so nothing caught it.
+    // byocTransport POSTs every ACP request to /prompt, and each frame must keep its own `type`.
     void relay.request(sessionId, "initialize", { params: { protocolVersion: 1 } });
     expect(container.sent[0]).toMatchObject({ ch: "acp", type: "initialize" });
     expect(container.sent[0].payload).toMatchObject({ params: { protocolVersion: 1 } });
@@ -111,7 +102,7 @@ describe("BYOC run relay", () => {
 
     const events = await collect(stream);
     expect(events.map((e) => e.type)).toEqual(["session_update", "session_update", "ack"]);
-    // Order is the whole contract for a token stream — a reordered chunk is corrupt output.
+    // A reordered chunk is corrupt output.
     const texts = events
       .filter((e) => e.type === "session_update")
       .map((e) => ((e.payload as { update: { content: { text: string } } }).update.content.text));
@@ -148,8 +139,7 @@ describe("BYOC run relay", () => {
     container.push({ ch: "acp", type: "session_update", payload: { sessionId: "acp-1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial" } } } });
     relay.onContainerGone(sessionId); // the ws 'close' event
     const events = await collect(stream);
-    // The partial output survives, then a terminal frame — the agent-host can surface a RUN_ERROR
-    // rather than waiting on a container that will never answer.
+    // The partial output survives, then a terminal frame the agent-host surfaces as a RUN_ERROR.
     expect(events[0].type).toBe("session_update");
     expect(events.at(-1)?.type).toBe("ack");
     expect((events.at(-1)?.payload as { error?: string }).error).toMatch(/disconnect/i);
@@ -157,8 +147,7 @@ describe("BYOC run relay", () => {
 
   it("frames for a DIFFERENT run id are not delivered into this run's stream", async () => {
     const stream = relay.prompt(sessionId, { sessionId: "acp-1", prompt: [] });
-    // An ack for some other in-flight request must not terminate this one. With two runs
-    // multiplexed on ONE container socket, mis-correlation would cross users' output.
+    // An ack for some other in-flight request must not terminate this one.
     container.push({ ch: "acp", type: "ack", id: "some-other-id", payload: { result: {} } });
     container.push({ ch: "acp", type: "ack", id: container.idOf(), payload: { result: { stopReason: "end_turn" } } });
     const events = await collect(stream);
@@ -179,7 +168,7 @@ describe("BYOC run relay", () => {
   });
 });
 
-// --- the caller's frame id must ROUND-TRIP (aeonai bug: handshake hangs) --------------------
+// --- the caller's frame id must round-trip -------------------------------------------------
 
 describe("caller frame-id round-trip", () => {
   let registry: SessionRegistry;
@@ -198,17 +187,13 @@ describe("caller frame-id round-trip", () => {
   });
 
   it("THE HANG: the ack the caller receives carries the CALLER'S id, not a relay-minted one", async () => {
-    // The agent-host's remoteAcpClient correlates request→ack BY FRAME ID: it sends
-    // `initialize` with id A and awaits pending.get(A). The relay minted randomUUID(),
-    // discarded A, and yielded the container's ack (carrying the new id) straight up — so
-    // pending.get(A) never resolved, initialize() hung forever, and EVERY real BYOC run died
-    // no_activity_timeout while curl probes (which don't correlate) looked healthy.
+    // The agent-host's remoteAcpClient correlates request to ack by frame id.
     const stream = relay.request(sessionId, "initialize", { params: { protocolVersion: 1 } }, "CALLER-ID-A");
     const collected = collect(stream);
-    // The container acks with whatever id it was SENT (it echoes faithfully)...
+    // The container acks with whatever id it was sent.
     container.push({ ch: "acp", type: "ack", id: container.idOf(0), payload: { result: { protocolVersion: 1 } } });
     const frames = await collected;
-    // ...and what reaches the CALLER must be its own id.
+    // What reaches the caller must be its own id.
     expect(frames).toHaveLength(1);
     expect(frames[0].id).toBe("CALLER-ID-A");
   });
@@ -222,7 +207,7 @@ describe("caller frame-id round-trip", () => {
   });
 
   it("two CONCURRENT requests with caller ids each get their own ack back", async () => {
-    // The map-back must be per-run, not global: interleaved acks must not swap ids.
+    // The map-back is per-run, so interleaved acks must not swap ids.
     const s1 = collect(relay.request(sessionId, "initialize", {}, "A"));
     const s2 = collect(relay.request(sessionId, "new_session", {}, "B"));
     container.push({ ch: "acp", type: "ack", id: container.idOf(1), payload: { result: { sessionId: "sdk-1" } } });
@@ -233,7 +218,7 @@ describe("caller frame-id round-trip", () => {
   });
 });
 
-// --- CONCURRENT conversations on one container: route by ACP session ------------------------
+// --- concurrent conversations on one container: route by ACP session ------------------------
 
 describe("concurrent runs on one container session", () => {
   let registry: SessionRegistry;
@@ -252,9 +237,7 @@ describe("concurrent runs on one container session", () => {
   });
 
   it("CROSS-TALK: each conversation's stream receives ONLY its own session_updates", async () => {
-    // Two conversations of one owner share the container session; each prompt names its own
-    // ACP session. The relay used to broadcast every notification to every in-flight run —
-    // conversation A's transcript interleaved B's output.
+    // Two conversations of one owner share the container session, and each prompt names its own ACP session.
     const sA = collect(relay.prompt(sessionId, { sessionId: "acp-A", prompt: [{ type: "text", text: "a" }] } as never), 3);
     const sB = collect(relay.prompt(sessionId, { sessionId: "acp-B", prompt: [{ type: "text", text: "b" }] } as never), 3);
 
@@ -306,7 +289,7 @@ describe("concurrent runs on one container session", () => {
   });
 });
 
-// --- Channel C: TUNNEL forwarding (MCP over the wire) ---------------------------------------
+// --- Channel C: tunnel forwarding (MCP over the wire) ---------------------------------------
 
 describe("tunnel frame forwarding", () => {
   let registry: SessionRegistry;
@@ -333,8 +316,7 @@ describe("tunnel frame forwarding", () => {
   });
 
   it("a tunnel stream is NOT a run — it never terminates one", async () => {
-    // The critical separation: tunnel frames share the socket with ACP runs. If a tunnel close
-    // were routed through the run bookkeeping it would end the user's actual turn.
+    // A tunnel close routed through the run bookkeeping would end the user's actual turn.
     const stream = collect(relay.prompt(sessionId, { sessionId: "acp-A", prompt: [] } as never), 2);
     relay.answerTunnel(sessionId, "s1", { ch: "tunnel", type: "close", id: "s1", payload: {} });
     // The run is still live: only its own ack ends it.
@@ -351,8 +333,7 @@ describe("tunnel frame forwarding", () => {
   });
 
   it("container->cloud tunnel frames are exposed to the agent-host, not routed as run output", async () => {
-    // The agent-host subscribes to these to serve MCP; they must NOT be pushed into a run's
-    // SSE stream (that stream is the conversation's transcript).
+    // The agent-host subscribes to these to serve MCP; they must not land in a run's SSE stream.
     const seen: Array<{ id?: string; type: string }> = [];
     relay.onTunnelFrame?.((sid, frame) => { if (sid === sessionId) seen.push({ id: frame.id, type: frame.type }); });
     const stream = collect(relay.prompt(sessionId, { sessionId: "acp-A", prompt: [] } as never), 2);

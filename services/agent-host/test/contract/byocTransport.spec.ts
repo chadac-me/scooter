@@ -1,19 +1,8 @@
 /**
- * Tier 1 contract — the BYOC transport (increment 4 of todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §M).
- *
- * This is the swap that deletes the bug class. Before: each agent-host pod held the container's
- * WebSocket in its own memory, so only the pod the container happened to reach could drive that
- * brain — one user's conversations spread across replicas would half-work, which is the same shape
- * as the conversation-list bug in #284.
- *
- * After: the pod holds NOTHING. It POSTs a prompt to the BYOC controller and reads the ACP frames
- * back as SSE; the controller owns the single socket. Any replica can serve any conversation, and a
- * rollout cannot strand a run.
- *
- * The seam is `RemoteTransport` (send / onFrame / isOpen / onClose / close), which RemoteAcpClient
- * already drives — so this is a TRANSPORT swap, not a rewrite of the ACP client. What matters is
- * that the HTTP/SSE implementation honours the same contract, especially the failure modes: a
- * transport that goes quiet instead of closing leaves the bridge waiting on an ack forever.
+ * The BYOC transport: the agent-host pod holds no socket, it POSTs a prompt to the BYOC
+ * controller and reads the ACP frames back as SSE, so any replica can serve any
+ * conversation. It implements the `RemoteTransport` seam RemoteAcpClient drives, and
+ * every failure must close the transport rather than go quiet.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -73,8 +62,7 @@ describe("BYOC transport (agent-host -> controller over HTTP/SSE)", () => {
   it("a permission answer is POSTed to the permission endpoint, not the prompt endpoint", async () => {
     const { impl, calls } = sseFetch([]);
     const t = createByocTransport({ baseUrl: "http://byoc:8080", sessionId: "sess-1", fetchImpl: impl });
-    // An ACP `ack` whose id matches a permission the container is blocked on is an ANSWER going
-    // back down — it must not be posted as a new prompt (which would start a second run).
+    // An ACP `ack` for a permission the container is blocked on is an answer going back down, not a new prompt.
     t.send({ ch: "acp", type: "ack", id: "perm-1", payload: { optionId: "allow" } });
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].url).toBe("http://byoc:8080/byoc/sess-1/permission/perm-1");
@@ -94,9 +82,7 @@ describe("BYOC transport (agent-host -> controller over HTTP/SSE)", () => {
     const onClose = vi.fn();
     t.onClose(onClose);
     t.send(PROMPT);
-    // The controller answers 503 when the container is not connected. If the transport just went
-    // quiet here, RemoteAcpClient would wait on an ack that can never arrive and the user would
-    // watch a spinner forever.
+    // The controller answers 503 when the container is not connected.
     await vi.waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(t.isOpen()).toBe(false);
   });

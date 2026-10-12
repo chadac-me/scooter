@@ -1,12 +1,9 @@
 /**
- * Tier 3 E2E — interrupts coexisting with a QUEUE, and recovery back to a clean state.
- *
- * Targets the "weird detached state" family where an approval interrupt + queued messages + run
- * state get out of sync. An interrupt PAUSES the run awaiting a human answer; messages sent during
- * that pause must queue (and be visible), and answering the interrupt must let the queue proceed and
- * return the UI to a clean, sendable state.
- *
- * Uses the fake agent's `?pick a color` (a permission interrupt) + `!sleep` (a long run).
+ * Tier 3 E2E for interrupts coexisting with a queue, and recovery back to a clean state. An
+ * interrupt pauses the run awaiting a human answer; messages sent during that pause must
+ * queue and be visible, and answering the interrupt must let the queue proceed and return
+ * the UI to a clean, sendable state. Uses the fake agent's `?pick a color` (a permission
+ * interrupt) and `!sleep` (a long run).
  */
 
 import { test, expect } from "./fixtures.js";
@@ -21,32 +18,15 @@ const panel = {
   queueTab: '[data-testid="right-panel-tab-queue"]',
 };
 
-// CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). On the full target a fresh
-// conversation provisions a REAL sandbox before its first run event (~15-25s cold,
-// per the instrumented stop-run runs), and these tests chain several phases each
-// funded with its own 15-30s wait: open (~20s) + panel (~30s incl. provisioning) +
-// queue/answer (~15-30s) + drain + the queued/follow-up turn (~30-45s) ≈ 120-160s
-// worst case — past the 60s default on arithmetic alone while every step behaves.
-// Assertions unchanged; only the ceiling.
-//
-// The per-step waits matter as much as the ceiling. ANSWERING an interrupt resumes a
-// paused run whose exec then waits for a ready sandbox pod — on a fresh conversation
-// that is the cold boot, so "you picked: X" lands well past a 30s budget (observed on
-// CI: all three post-answer assertions timed out at 30s with the feature working).
-// Those, and the follow-up sendTurns that fund the same boot, get 90s.
+// On the full target a fresh conversation provisions a real sandbox, and answering an
+// interrupt resumes a run whose exec waits for that pod, so both the ceiling and the
+// post-answer waits need cluster budgets.
 const CLUSTER_BUDGET_MS = 180_000;
 const ANSWER_BUDGET_MS = 90_000;
 
 /**
- * Click an interrupt option (or Dismiss) until the agent's answer actually lands.
- *
- * The panel renders as soon as the interrupt arrives, but a click made before it is wired
- * resolves to the element and never reaches the agent — CI failed with "you picked: green"
- * absent for the entire budget and the panel completely untouched. Waiting longer cannot
- * fix a click that did nothing, so re-click while the panel is still up.
- *
- * This does not paper over a broken answer path: the retry is conditional on the panel
- * still being open, so an answer that never works leaves it open and still fails.
+ * Click an interrupt option (or Dismiss) until the agent's answer actually lands, re-clicking
+ * while the panel is still up because a click made before it is wired never reaches the agent.
  */
 async function answerInterrupt(
   page: import("@playwright/test").Page,
@@ -73,7 +53,7 @@ test.describe("interrupt + queue coexistence", () => {
     await chat.send("?pick a color");
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 }); // run paused on the interrupt
 
-    // The run is paused awaiting the pick → a message sent now must queue.
+    // The run is paused awaiting the pick, so a message sent now must queue.
     await chat.sendWhileRunning("queued behind the approval");
     await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
@@ -88,26 +68,18 @@ test.describe("interrupt + queue coexistence", () => {
     await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
 
-    // Switch BACK to the Approvals tab (openQueueTab moved us to Queue) so the interrupt options are
-    // visible, then answer → the paused run resumes, then the queued message runs.
+    // Switch back to the Approvals tab so the interrupt options are visible, then answer.
     await page.locator(panel.approvalsTab).click();
     await answerInterrupt(page, /green/i, /you picked: green/i);
 
-    // The queued message becomes a real user turn. Asserted FIRST because it is the
-    // substantive claim — the queue emptying is only meaningful if the message went
-    // somewhere. ANSWER_BUDGET_MS, not 30s: on the full target the drained message runs a
-    // real sandbox exec, which is the same cold-boot wait the answer above is funded for.
+    // The queued message becomes a real user turn, which on the full target runs a real
+    // sandbox exec.
     await expect(chat.userMessages().filter({ hasText: "run after I approve" })).toHaveCount(1, {
       timeout: ANSWER_BUDGET_MS,
     });
 
-    // ...and only then is the queue empty.
-    //
-    // Re-open the Queue tab first. The click above moved the panel to Approvals, and the
-    // tab's contents are UNMOUNTED when it is not selected — so `queuedMessages()` resolves
-    // to 0 whatever the queue actually holds, and this assertion passed vacuously. CI proved
-    // it: the failing run's snapshot has this assertion satisfied while the tab strip still
-    // reads "Queue 1". A check that cannot fail hid the state it was supposed to guard.
+    // Re-open the Queue tab first, since its contents are unmounted when it is not selected
+    // and `queuedMessages()` would resolve to 0 vacuously.
     await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(0, { timeout: 30_000 });
   });
@@ -126,7 +98,7 @@ test.describe("interrupt + queue coexistence", () => {
 });
 
 test.describe("interrupt persistence + recovery", () => {
-  test.beforeEach(() => test.setTimeout(CLUSTER_BUDGET_MS)); // same arithmetic as above
+  test.beforeEach(() => test.setTimeout(CLUSTER_BUDGET_MS));
 
   test("a pending approval SURVIVES a reload (the panel reappears)", async ({ chat, page }) => {
     await chat.open();
@@ -134,22 +106,12 @@ test.describe("interrupt persistence + recovery", () => {
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
 
     await page.reload();
-    // The interrupt is persisted on the integrity log → the panel re-derives after the reload.
-    // This is the assertion the test is named for, and it holds on BOTH targets.
+    // The interrupt is persisted on the integrity log, so the panel re-derives after the reload.
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(panel.option)).toHaveCount(3, { timeout: 30_000 });
 
-    // ANSWERING after a reload is asserted on the fast target only. On a cluster the
-    // reload drops the stream, and the reconnected answer can land on a pod that does
-    // not know the conversation yet — the agent-host then logs
-    //   "resume: revive failed; answering best-effort"  ("unknown conversation: ...")
-    // and the answer is dropped, so "you picked: red" never arrives. That is a real
-    // platform gap in the revive-on-answer path (the same family as the revive-push race
-    // this branch already carries fixes for), NOT something a test budget can wait out —
-    // it reproduced across two runs at 30s and at 90s. Asserting it here would make this
-    // spec a proxy for that bug rather than for interrupt persistence, which is what it
-    // exists to prove. Tracked separately; the panel-survives-reload assertion above
-    // still runs everywhere.
+    // Answering after a reload is asserted on the fast target only: on a cluster the
+    // reconnected answer can land on a pod that does not know the conversation yet and is dropped.
     if (!isFull) {
       await page.locator(panel.option).filter({ hasText: /red/i }).click();
       await expect(page.getByText(/you picked: red/i).first()).toBeVisible({ timeout: ANSWER_BUDGET_MS });
@@ -165,7 +127,7 @@ test.describe("interrupt persistence + recovery", () => {
     // Clean state: the interrupt panel is gone, no stuck run-status bar, and a new turn works first-try.
     await expect(page.locator(panel.root)).toHaveCount(0, { timeout: 10_000 });
     await expect(page.locator('[data-testid="run-status-bar"]')).toHaveCount(0, { timeout: 15_000 });
-    // 90s, not sendTurn's 45s default: same cold-boot arithmetic as the answer above.
+    // Same cold-boot arithmetic as the answer above.
     await chat.sendTurn("a normal turn after the interrupt", ANSWER_BUDGET_MS);
     await expect(chat.userMessages().filter({ hasText: "a normal turn after the interrupt" })).toHaveCount(1);
   });
@@ -176,8 +138,7 @@ test.describe("interrupt persistence + recovery", () => {
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
     await answerInterrupt(page, null, /you picked: \(cancelled\)/i);
     await expect(page.locator(panel.root)).toHaveCount(0, { timeout: 10_000 });
-    // 90s, not sendTurn's 45s default: this is the conversation's FIRST completed exec (the
-    // interrupt was cancelled, so nothing has run yet), so it funds the cold sandbox boot.
+    // This is the conversation's first completed exec, so it funds the cold sandbox boot.
     await chat.sendTurn("works after a cancel", ANSWER_BUDGET_MS);
     await expect(chat.userMessages().filter({ hasText: "works after a cancel" })).toHaveCount(1);
   });

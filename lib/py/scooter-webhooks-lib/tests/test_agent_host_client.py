@@ -1,9 +1,4 @@
-"""Unit tests for the agent-host client — the spawn-via-/agui seam.
-
-Mocks the agent-host AG-UI SSE stream and proves create_conversation generates a
-threadId, posts the task, accumulates the final assistant message, and returns
-it; send_message follows up on the same thread; RUN_ERROR surfaces as failure.
-"""
+"""Unit tests for the agent-host client against a mocked AG-UI SSE stream."""
 
 from __future__ import annotations
 
@@ -36,13 +31,12 @@ class _FakeStream:
         return False
 
 
-# The id the fake server assigns. Every test that runs a conversation needs this
-# stubbed, since create_conversation now asks the server for the id.
+# The id the fake server assigns.
 SERVER_CONV_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 def _patch_create(monkeypatch, captured: dict | None = None, status: int = 201, conv_id=SERVER_CONV_ID):
-    """Stub POST /conversations. Returns a server-assigned id, like the router."""
+    """Stub POST /conversations with a server-assigned id."""
 
     async def fake_post(self, url, **kwargs):  # noqa: ANN001
         if captured is not None:
@@ -63,7 +57,6 @@ def _patch_stream(monkeypatch, body: bytes, captured: dict | None = None):
         return _FakeStream(body)
 
     monkeypatch.setattr(httpx.AsyncClient, "stream", fake_stream)
-    # Every path that streams /agui first CREATES the conversation.
     _patch_create(monkeypatch, captured)
 
 
@@ -81,17 +74,13 @@ async def test_create_conversation_collects_final_message(monkeypatch):
 
     assert result is not None
     assert result["result"] == "Done: fixed it."
-    assert result["conversation_id"]  # a generated threadId
-    # The repo was woven into the task, posted to /agui.
+    assert result["conversation_id"]
     assert captured["json"]["messages"][0]["content"].startswith("Repository: o/r")
     assert captured["json"]["threadId"] == result["conversation_id"]
 
 
 async def test_on_created_fires_with_conv_id_BEFORE_the_run(monkeypatch):
-    # The Slack "first message escapes the thread" fix: the agent may call a
-    # response tool on its first turn (before create_conversation returns), so
-    # the target link/mapping must be registered up front. on_created is awaited
-    # with the conversation_id BEFORE the /agui stream is opened.
+    # The agent may call a response tool on its first turn, so the target link must be registered before the /agui stream opens.
     order: list[str] = []
 
     def fake_stream(self, method, url, **kwargs):  # noqa: ANN001
@@ -99,7 +88,7 @@ async def test_on_created_fires_with_conv_id_BEFORE_the_run(monkeypatch):
         return _FakeStream(_sse('{"type":"RUN_FINISHED","threadId":"t","runId":"r"}'))
 
     monkeypatch.setattr(httpx.AsyncClient, "stream", fake_stream)
-    _patch_create(monkeypatch)  # the run is preceded by POST /conversations
+    _patch_create(monkeypatch)
 
     seen: dict = {}
 
@@ -109,7 +98,6 @@ async def test_on_created_fires_with_conv_id_BEFORE_the_run(monkeypatch):
 
     result = await ahc.create_conversation("do a thing", on_created=on_created)
     assert result is not None
-    # The hook ran, got the SAME id the conversation ended up with, and ran FIRST.
     assert seen["conv_id"] == result["conversation_id"]
     assert order == ["on_created", "run"]
 
@@ -120,16 +108,12 @@ async def test_on_created_failure_is_non_fatal(monkeypatch):
     async def boom(_conv_id: str) -> None:
         raise RuntimeError("registration failed")
 
-    # A hook failure must NOT sink the run — the conversation still starts.
     result = await ahc.create_conversation("do a thing", on_created=boom)
     assert result is not None
 
 
 async def test_run_error_is_ERRORED_not_none(monkeypatch):
-    # A RUN_ERROR = the agent CRASHED mid-run. The conversation already exists (the
-    # on_created hook posted the link + anchor) and did work — so this must NOT return
-    # None (which posts "couldn't start"). It signals `errored` (with the message) so
-    # the caller posts a truthful "hit an error partway through" note instead.
+    # The conversation already exists and did work, so a crash mid-run is `errored`, not None.
     body = _sse(
         '{"type":"RUN_STARTED","threadId":"t","runId":"r"}',
         '{"type":"RUN_ERROR","message":"agent blew up"}',
@@ -144,25 +128,22 @@ async def test_run_error_is_ERRORED_not_none(monkeypatch):
 
 
 async def test_connection_drop_mid_run_is_INTERRUPTED_not_failed(monkeypatch):
-    # The agent-host restarts mid-run: the SSE raises a transport error. This is
-    # transient (the agent-host resumes on boot) — create_conversation must signal
-    # `interrupted`, NOT return None (which would post "couldn't start").
+    # A transport error mid-run is transient (the agent-host resumes on boot), so it is `interrupted`, not None.
     class _DroppingStream(_FakeStream):
         async def aiter_lines(self):
             yield 'data: {"type":"RUN_STARTED","threadId":"t","runId":"r"}'
-            raise httpx.ReadError("connection reset")  # pod died mid-stream
+            raise httpx.ReadError("connection reset")
 
     monkeypatch.setattr(httpx.AsyncClient, "stream", lambda *a, **k: _DroppingStream(b""))
-    _patch_create(monkeypatch)  # the run is preceded by POST /conversations
+    _patch_create(monkeypatch)
     result = await ahc.create_conversation("do a thing")
     assert result is not None
     assert result.get("interrupted") is True
-    assert result["conversation_id"]  # the conversation exists (resumes on boot)
+    assert result["conversation_id"]
 
 
 async def test_stream_ending_before_RUN_FINISHED_is_INTERRUPTED(monkeypatch):
-    # A graceful close mid-run (no transport error, but no RUN_FINISHED either) is
-    # also interrupted, not a completed run.
+    # A graceful close without RUN_FINISHED is also interrupted.
     _patch_stream(monkeypatch, _sse('{"type":"RUN_STARTED","threadId":"t","runId":"r"}'))
     result = await ahc.create_conversation("do a thing")
     assert result is not None
@@ -185,20 +166,11 @@ def test_resolve_sandbox_is_identity():
     assert asyncio.run(ahc.resolve_sandbox_to_conversation("conv-x")) == "conv-x"
 
 
-# --- finding #17: status fetch distinguishes 404 from a transient failure -------
-#
-# get_conversation_status returns None for BOTH a 404 (conversation gone) and a
-# 5xx/unreachable error, but they're logged DISTINCTLY so a dead agent-host
-# doesn't silently look like every conversation vanished. We assert the return
-# values + that a transient failure logs at WARNING (vs a 404 at debug).
+# --- status fetch distinguishes a 404 from a transient failure -------
+# Both return None, but a transient failure logs at WARNING and a 404 at debug.
 
 def _patch_get(monkeypatch, handler):
-    """Make the module's httpx.AsyncClient route through a MockTransport handler.
-
-    Replace the AsyncClient class the module references with a factory that
-    injects a MockTransport — so `async with httpx.AsyncClient(...)` + client.get
-    hits our handler (no recursion, unlike patching .get on the instance).
-    """
+    """Route the module's httpx.AsyncClient through a MockTransport handler."""
     real_client = httpx.AsyncClient
 
     def factory(*args, **kwargs):
@@ -224,15 +196,14 @@ async def test_status_5xx_returns_none_and_warns(monkeypatch, caplog):
     _patch_get(monkeypatch, lambda req: httpx.Response(503))
     with caplog.at_level(logging.WARNING, logger="webhooks.agent_host_client"):
         assert await ahc.get_conversation_status("c1") is None
-    # A transient failure is surfaced at WARNING (NOT silently like a 404).
-    # msg is a CONSTANT now; the varying detail rides as structured fields.
+    # msg is a constant; the varying detail rides as structured fields.
     warned = [r for r in caplog.records if r.message == "status fetch failed, transient, will retry"]
     assert warned
     assert warned[0].conversation_id == "c1"
     assert warned[0].error["status"] == 503
 
 
-# --- multimodal content (stage 5): images -> text+image parts array -----------
+# --- multimodal content: images -> text+image parts array -----------
 
 
 async def test_create_conversation_with_images_sends_content_parts(monkeypatch):
@@ -264,7 +235,6 @@ async def test_create_conversation_without_images_sends_a_plain_string(monkeypat
 
     await ahc.create_conversation("just text")
 
-    # Back-compat: no images -> content stays a plain string.
     assert captured["json"]["messages"][0]["content"] == "just text"
 
 
@@ -341,13 +311,11 @@ async def test_create_conversation_without_files_or_images_stays_plain(monkeypat
 
     await ahc.send_message("c1", "just text")
 
-    # Back-compat: no attachments -> content stays a plain string (byte-for-byte).
     assert captured["json"]["messages"][0]["content"] == "just text"
 
 
 async def test_create_conversation_uses_the_SERVER_assigned_id(monkeypatch):
-    """webhooks must not invent the conversation id; everything downstream —
-    on_created, the link mapping, the prompt — uses the server's."""
+    """webhooks must not invent the conversation id; everything downstream uses the server's."""
     captured: dict = {}
     body = b'data: {"type":"RUN_FINISHED","threadId":"t","runId":"r"}\n'
     _patch_stream(monkeypatch, body, captured)
@@ -361,8 +329,6 @@ async def test_create_conversation_uses_the_SERVER_assigned_id(monkeypatch):
 
     assert result is not None
     assert result["conversation_id"] == SERVER_CONV_ID
-    # on_created registers the link mapping, so it must get the server's id or the
-    # agent's first reply has no thread to infer.
     assert seen == [SERVER_CONV_ID]
     assert captured["json"]["threadId"] == SERVER_CONV_ID
     assert "threadId" not in (captured["create_json"] or {})
@@ -380,15 +346,11 @@ async def test_create_conversation_returns_None_when_create_fails(monkeypatch):
     _patch_create(monkeypatch, status=502, conv_id=None)
 
     assert await ahc.create_conversation("do a thing") is None
-    assert streamed == []  # never reached /agui
+    assert streamed == []
 
 
-# --- owner attribution (#527) ---------------------------------------------------
-# The Slack user is resolved to a Scooter owner and must actually REACH the router.
-# It used to travel in a hard-coded `x-auth-user` header while the router read whatever
-# AUTH_USER_HEADER named, so on any deployment that renamed the header (or used
-# alb-oidc, where it is a different header entirely) the owner was silently dropped and
-# scope=mine hid the conversation from the person who started the thread.
+# --- owner attribution ---------------------------------------------------
+# The resolved owner rides the create body, since the identity header's name is deployment-specific.
 
 
 async def test_create_sends_the_owner_in_the_body_not_a_hardcoded_header(monkeypatch):
@@ -398,10 +360,7 @@ async def test_create_sends_the_owner_in_the_body_not_a_hardcoded_header(monkeyp
     result = await ahc.create_conversation("do a thing", owner="slack-resolved-user")
 
     assert result is not None
-    # The owner rides the CREATE body — the only place the router reads it from a
-    # trusted in-cluster caller, and the only place immune to the header's name.
     assert captured["create_json"]["owner"] == "slack-resolved-user"
-    # No identity header: its name is deployment-specific, so guessing it is the bug.
     assert "x-auth-user" not in {k.lower() for k in captured["create_headers"]}
 
 
@@ -411,6 +370,5 @@ async def test_create_omits_owner_when_there_is_no_human_trigger(monkeypatch):
 
     await ahc.create_conversation("do a thing")
 
-    # No resolved user => no owner key at all. An empty-string owner would create a
-    # conversation owned by "", which is not the same as unowned.
+    # An empty-string owner would create a conversation owned by "", which is not unowned.
     assert "owner" not in captured["create_json"]

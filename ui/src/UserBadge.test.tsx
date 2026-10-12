@@ -1,10 +1,4 @@
-/**
- * UI unit test — the header user badge (pure view).
- *
- * Shows the signed-in user and — critically — renders NOTHING when the caller is
- * anonymous (auth off / no ingress identity), so the badge never shows a
- * meaningless "anonymous" chip.
- */
+/** The header user badge (pure view): shows the signed-in user and renders nothing when the caller is anonymous. */
 
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";

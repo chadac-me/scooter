@@ -8,14 +8,14 @@ version = "0.0.0"
 license = "MIT"
 description = "GitHub integration for Scooter — broker provider (App-token proxy + git credentials) and webhooks handler"
 requires-python = ">=3.11"
-# Depends on the extension SURFACES, never on the broker/webhooks apps. Why: PR #567.
+# Depends on the extension surfaces, never on the broker or webhooks apps.
 dependencies = [
   "fastapi",
   "httpx",
-  "pyjwt[crypto]", # RS256 App JWT -> installation access token
+  "pyjwt[crypto]", # the RS256 App JWT
 ]
 
-# One EXTRA per service, so `pip install` obeys the same split the Nix build does.
+# One extra per service, so `pip install` obeys the same split the Nix build does.
 [project.optional-dependencies]
 broker = ["scooter-broker-lib", "scooter-lib"]
 webhooks = ["scooter-webhooks-lib", "scooter-lib"]

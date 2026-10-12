@@ -1,21 +1,8 @@
-# webServices.marimo — a marimo notebook served under /c/<id>/marimo/.
-#
-# marimo supports sub-path serving: `--base-url /c/<id>/marimo` makes it emit
-# prefixed hyperlinks/assets, and `--proxy <host>` makes absolute URLs correct for
-# the external host. Both are read from the pod env (CONVERSATION_ID injected by
-# the provisioner; PUBLIC_HOST optional) at start, so ExecStart is a shell wrapper.
-#
-# Packaged lazily: modules/sandbox-os/stubs.nix declares `marimo`, so `pkgs.marimo`
-# is a nix-stubs shim — the image ships the build recipe and the notebook itself
-# materializes on first start. Paired with the scooter-web-services skill (marimo-pair) so the agent can
-# drive the running notebook.
-#
-# This module only supplies DEFAULTS (mkDefault) for the marimo service + its
-# lazy-tool. They're inert until a deployment/agent sets
-# `webServices.marimo.enable = true` — so we must NOT gate on
-# `cfg.enable` here (reading the option to define the option is infinite
-# recursion). The parent web-services.nix filters on `.enable` when it renders
-# units + the manifest, so an un-enabled marimo produces nothing.
+# webServices.marimo: a marimo notebook served under /c/<id>/marimo/, with
+# `--base-url` and `--proxy` read from the pod env at start. `pkgs.marimo` is a
+# nix-stubs shim that materializes on first start. This module only supplies
+# mkDefault values and must not gate on `cfg.enable` (infinite recursion); the
+# parent web-services.nix filters on `.enable` when it renders units.
 
 { config, lib, pkgs, uvNix ? null, ... }:
 
@@ -23,55 +10,38 @@ let
   cfg = config.webServices.marimo;
 in
 {
-  # The marimo shim on PATH, so the agent can run it by hand (marimo-pair does).
+  # The marimo shim on PATH, so the agent can run it by hand.
   environment.systemPackages = lib.mkIf cfg.enable [ pkgs.marimo ];
 
   webServices.marimo = {
     port = lib.mkDefault 2718;
     displayName = lib.mkDefault "marimo";
-    # Run as root (like the agent's own exec'd shell) so notebooks land on the
-    # /workspace PVC the agent uses — there's no dedicated sandbox user, and
-    # DynamicUser couldn't write the shared workspace.
+    # Root, like the agent's own exec'd shell, so notebooks land on the /workspace PVC.
     user = lib.mkDefault "root";
     workingDirectory = lib.mkDefault "/workspace";
-    # `command` is types.str; writeShellScript returns a DERIVATION, so interpolate it
-    # to its store-path STRING. (A bare derivation type-checks in the image build's
-    # coercion path but FAILS the re-converge eval — where webServices.command is read
-    # as a plain string.)
-    # Point uv at a NIX-provided Python so it doesn't download its own managed CPython
-    # — a generic dynamically-linked ELF that can't exec on NixOS (uv-nix's patch of the
-    # download currently misses the real binary → marimo crash-loops; being fixed
-    # upstream). UV_PYTHON_DOWNLOADS=never forbids the fetch; UV_PYTHON pins the Nix
-    # interpreter. Only when running under uv (uvNix set); a bare marimo needs neither.
+    # Pin uv to a Nix-provided Python, since a downloaded CPython cannot exec on NixOS.
     environment = lib.mkIf (uvNix != null) (lib.mkDefault {
       UV_PYTHON = "${pkgs.python314}/bin/python3.14";
       UV_PYTHON_DOWNLOADS = "never";
     });
 
-    # Launch marimo UNDER the uv-nix uv when available: `uv run --with marimo marimo
-    # edit --sandbox` gives each notebook a uv-managed venv, and uv-nix patches the
-    # wheels so Nix-supplied native libs (BLAS/LAPACK for numpy/scipy, matplotlib's
-    # backends…) resolve — so `uv add matplotlib` / the notebook's PEP 723 deps
-    # actually import in the kernel. Without uvNix (nixosTests / no input) fall back to
-    # a bare `marimo edit` on PATH (the lazy tool) — no science-dep patching, but boots.
+    # Under uv-nix each notebook gets a uv-managed venv with patched wheels so native deps import; without it, a bare `marimo edit` still boots.
     command =
       let
         uvBin = if uvNix != null then "${uvNix}/bin/uv" else null;
         runner =
           if uvBin != null
-          # `uv run --with marimo` resolves marimo into an ephemeral env; --sandbox
-          # makes each notebook self-contained (inline PEP 723 deps). uv is on PATH via
-          # the absolute store path so the unit needs no extra PATH entry.
+          # --sandbox makes each notebook self-contained with its inline PEP 723 deps.
           then ''exec ${uvBin} run --with marimo marimo edit --sandbox''
           else "exec ${pkgs.marimo}/bin/marimo edit";
       in
+      # `command` is types.str, so the derivation is interpolated to its store path for the re-converge eval.
       lib.mkDefault "${pkgs.writeShellScript "marimo-web-service" ''
         set -euo pipefail
         base="/c/''${CONVERSATION_ID:-unknown}/marimo"
         proxy_args=()
         if [ -n "''${PUBLIC_HOST:-}" ]; then proxy_args+=(--proxy "''${PUBLIC_HOST}"); fi
-        # --no-token: access is gated by the platform proxy (the pod isn't public);
-        # marimo-pair also needs a token-less server to attach to.
+        # --no-token: access is gated by the platform proxy, and marimo-pair needs a token-less server.
         ${runner} \
           --host 0.0.0.0 --port ${toString cfg.port} \
           --base-url "$base" "''${proxy_args[@]}" \

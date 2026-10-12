@@ -1,8 +1,7 @@
 """Slack webhook handler.
 
-Trigger rules:
-- @openhands mention in a channel -> creates/forwards conversation
-- Any message in a thread with active conversation -> auto-forwarded
+A mention in a channel creates or forwards a conversation; any message in a thread
+with an active conversation is auto-forwarded.
 """
 
 import asyncio
@@ -36,38 +35,21 @@ router = APIRouter()
 
 _bot_user_id: str | None = None
 
-# Idempotency guard for the Slack Events API. Slack DELIVERS THE SAME EVENT MORE
-# THAN ONCE: it retries (up to 3×, with an X-Slack-Retry-Num header) whenever it
-# doesn't get a 200 within ~3s, and it can deliver both an `app_mention` AND a
-# `message` event for the same mention. Every delivery carries a stable outer
-# `event_id`; we drop any event_id we've already handled so a single user message
-# creates exactly one conversation / one reply. The webhooks service runs a single
-# replica (see modules/webhooks.nix), so an in-process guard is sufficient — no
-# cross-pod store needed. Bounded FIFO so it can't grow without limit.
+# Bounded in-process guard against Slack's retried deliveries, keyed on the stable `event_id`; the webhooks service runs a single replica.
 from collections import OrderedDict
 
 _SEEN_EVENT_IDS: "OrderedDict[str, None]" = OrderedDict()
 _SEEN_EVENT_IDS_MAX = 4096
 
-# Messages ALREADY dispatched to the agent, keyed on the message (channel:ts). ONE
-# user message can reach us as MULTIPLE Slack events:
-#   • an @mention arrives as BOTH an `app_mention` AND a `message` event (DIFFERENT
-#     event_ids, so _already_handled misses the pair) with the SAME message `ts`;
-#   • a redelivery arrives with a new event_id, same ts.
-# BOTH handlers (_handle_mention and _handle_thread_message) consult this guard and
-# record on dispatch, so a given (channel, ts) is forwarded to the agent AT MOST
-# ONCE regardless of which event type arrives first — text-independent, so it holds
-# even when Slack strips/rewrites the mention on one twin. #83 broke intake by
-# recording BEFORE dispatch in _handle_event, so a skipping twin stamped the ts and
-# the real message was dropped; record-ON-dispatch (never before) fixes that.
+# Messages already dispatched to the agent, keyed on channel:ts, because one mention arrives as both an `app_mention` and a `message` event with different event_ids; both handlers record here only at the point of dispatch.
 _DISPATCHED_MESSAGES: "OrderedDict[str, None]" = OrderedDict()
 _DISPATCHED_MESSAGES_MAX = 4096
 
 
 def _already_handled(event_id: str) -> bool:
-    """True if this Slack event_id was seen before (a retry / duplicate delivery)."""
+    """True if this Slack event_id was seen before."""
     if not event_id:
-        return False  # no id to dedupe on — let it through
+        return False
     if event_id in _SEEN_EVENT_IDS:
         return True
     _SEEN_EVENT_IDS[event_id] = None
@@ -77,17 +59,14 @@ def _already_handled(event_id: str) -> bool:
 
 
 def _message_already_dispatched(channel: str, ts: str) -> bool:
-    """True if this message (channel:ts) was ALREADY dispatched to the agent by
-    EITHER handler. Read-only — does NOT record. Call before dispatching; record
-    with _record_message_dispatched only once you actually dispatch."""
+    """True if this message (channel:ts) was already dispatched by either handler; read-only."""
     if not ts:
-        return False  # no ts to dedupe on — let it through
+        return False
     return f"{channel}:{ts}" in _DISPATCHED_MESSAGES
 
 
 def _record_message_dispatched(channel: str, ts: str) -> None:
-    """Mark a message (channel:ts) as dispatched, so a twin event / a redelivery is
-    dropped. Called ONLY at the point a handler actually forwards/creates."""
+    """Mark a message (channel:ts) as dispatched, only at the point a handler actually forwards or creates."""
     if not ts:
         return
     _DISPATCHED_MESSAGES[f"{channel}:{ts}"] = None
@@ -114,14 +93,7 @@ def _resource_id(channel: str, thread_ts: str) -> str:
 
 
 def _weave_attachments(text: str, dl: DownloadedFiles) -> str:
-    """Fold Slack attachments into the agent's message TEXT.
-
-    - Text-representable files: append their inlined fenced blocks.
-    Binary files are NOT woven here: the agent-host materializes them into the
-    sandbox and appends the "saved into your sandbox: <path>" note itself (one
-    weaver for every entrypoint — see services/agent-host bridge buildFileNote),
-    so the note can't drift from where the bytes were actually written.
-    Images are NOT woven here either — they ride as multimodal content parts."""
+    """Append the inlined text attachments to the message; binary files and images ride as content parts instead."""
     if not dl.inline_text:
         return text
     return text + "\n\n" + dl.inline_text
@@ -173,11 +145,9 @@ async def handle_slack_event(request: Request):
     body = await request.body()
     payload = await request.json()
 
-    # Handle Slack URL verification challenge
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge", "")}
 
-    # Verify signature
     timestamp = request.headers.get("x-slack-request-timestamp", "")
     signature = request.headers.get("x-slack-signature", "")
     if not _verify_slack_signature(body, timestamp, signature):
@@ -186,10 +156,6 @@ async def handle_slack_event(request: Request):
     event_type = payload.get("type", "")
 
     if event_type == "event_callback":
-        # Drop retries / duplicate deliveries of the same event so one user
-        # message doesn't create two conversations / two replies. `event_id` is
-        # stable across Slack's retries; the X-Slack-Retry-Num header (present
-        # only on retries) is a fast secondary signal we can log.
         event_id = payload.get("event_id", "")
         if _already_handled(event_id):
             retry = request.headers.get("x-slack-retry-num", "")
@@ -215,11 +181,9 @@ async def _handle_event(event: dict):
     event_type = event.get("type", "")
     subtype = event.get("subtype", "")
 
-    # Ignore bot messages and message changes
     if subtype in ("bot_message", "message_changed", "message_deleted"):
         return
 
-    # Ignore own messages
     bot_id = await _get_bot_id()
     user = event.get("user", "")
     if bot_id and user == bot_id:
@@ -232,13 +196,7 @@ async def _handle_event(event: dict):
 
 
 async def _format_thread_history(channel: str, thread_ts: str, up_to_ts: str) -> str:
-    """When @scooter is mentioned INSIDE an existing thread, the agent otherwise
-    sees only the single mention message and loses the conversation it's being
-    pulled into — so it replies out of context. Fetch the thread's prior messages
-    (conversations.replies) and format them as context, up to (but not including)
-    the mention itself. Returns "" for a root-level mention (no prior history) or
-    on any fetch failure (best-effort — a missing history must not block the reply).
-    """
+    """Format the thread's messages before `up_to_ts` as context for a mention inside an existing thread, or "" when there is none or the fetch fails."""
     try:
         messages = await get_thread_history(channel, thread_ts)
     except Exception:
@@ -251,8 +209,7 @@ async def _format_thread_history(channel: str, thread_ts: str, up_to_ts: str) ->
     lines: list[str] = []
     for m in messages:
         m_ts = m.get("ts", "")
-        # Stop at the mention message (it's already the current request) + skip our
-        # own bot posts (status/acks — not part of the human conversation).
+        # Skip the mention itself and our own bot posts.
         if m_ts and up_to_ts and m_ts >= up_to_ts:
             continue
         if bot_id and m.get("user") == bot_id:
@@ -271,22 +228,17 @@ async def _format_thread_history(channel: str, thread_ts: str, up_to_ts: str) ->
 
 
 async def _handle_mention(event: dict):
-    """Handle app_mention events — user mentioned @scooter."""
+    """Handle app_mention events."""
     text = event.get("text", "")
     user = event.get("user", "unknown")
     channel = event.get("channel", "")
     ts = event.get("ts", "")
-    thread_ts = event.get("thread_ts", ts)  # If in thread, use thread_ts; otherwise use message ts
+    thread_ts = event.get("thread_ts", ts)
 
     if policy.is_ignored_user(user):
         return
 
-    # A mention arrives as BOTH app_mention + message twin events (different
-    # event_ids, same message ts). Drop it if THIS mention was already dispatched
-    # (its twin won the race, or Slack redelivered it with a new event_id). Read
-    # only — we record ONLY when we actually dispatch below, so the twin `message`
-    # event (which _handle_thread_message skips, never dispatching) can't pre-empt
-    # us. Keyed on the message `ts` (what the twins share), not thread_ts.
+    # Keyed on the message `ts` the twin events share, not thread_ts.
     if _message_already_dispatched(channel, ts):
         logger.info(
             "message already dispatched, dropping the twin",
@@ -301,9 +253,7 @@ async def _handle_mention(event: dict):
         or await db.get_conversation_for_resource("slack", "thread", res_id)
     )
 
-    # Keep the message readable: rewrite the bot's own <@U…> mention to a plain
-    # "@scooter" (so "@scooter please review" stays meaningful instead of becoming
-    # "please review") and leave any OTHER user mentions intact.
+    # Rewrite the bot's own <@U…> mention to the plain pattern and leave other user mentions intact.
     import re
     bot_id = await _get_bot_id()
     message_text = text.strip()
@@ -313,10 +263,7 @@ async def _handle_mention(event: dict):
 
     comment_text = f"<@{user}> said:\n\n{message_text}\n\n(message_ts: {ts} — pass this to slack_react to react to THIS message)"
 
-    # Download any attached multimedia. Images ride as multimodal content parts;
-    # text-representable files are inlined into the message; binary files become
-    # file parts the agent-host writes to /workspace/uploads (their saved paths are
-    # noted in the woven text below).
+    # Images ride as content parts, text files are inlined, binary files become file parts the agent-host writes to the sandbox.
     dl = await download_files(event.get("files"))
     images = dl.images
     files = dl.file_parts
@@ -329,28 +276,22 @@ async def _handle_mention(event: dict):
         return
 
     if existing:
-        # Forward to the existing conversation OFF the request path — send_message
-        # blocks for the whole agent turn, which would blow Slack's retry window and
-        # get every delivery dropped as a duplicate. React so the user sees it landed.
+        # Forward off the request path, since send_message blocks for the whole agent turn and Slack retries after ~3s.
         _record_message_dispatched(channel, ts)
         forward_msg = _format_forwarded_message(comment_text, channel, thread_ts, has_mention=True)
         await add_slack_reaction(channel, ts, "eyes")
-        # A mention to an ACTIVE conversation is priority: force-interrupt a stuck
-        # turn after the agent-host's timeout (it owns the timer).
+        # A mention to an active conversation is priority, so the agent-host may interrupt a stuck turn.
         asyncio.create_task(
             _background_forward(existing, forward_msg, priority=True, images=images, files=files)
         )
         return
 
-    # React to indicate we're processing
     _record_message_dispatched(channel, ts)
     await add_slack_reaction(channel, ts, "eyes")
 
     await db.store_conversation("slack", "thread", res_id, PENDING_CONVERSATION_ID)
 
-    # If the mention is INSIDE an existing thread (thread_ts != this message's ts),
-    # publish the thread's prior history so the agent works from the real
-    # conversation it was pulled into, not just the one mention message.
+    # A mention inside an existing thread carries the thread's prior history as context.
     history = ""
     if thread_ts and thread_ts != ts:
         history = await _format_thread_history(channel, thread_ts, up_to_ts=ts)
@@ -372,7 +313,7 @@ async def _handle_thread_message(event: dict):
     """Handle message events in threads with active conversations."""
     thread_ts = event.get("thread_ts")
     if not thread_ts:
-        return  # Only handle threaded messages
+        return
 
     text = event.get("text", "")
     user = event.get("user", "unknown")
@@ -387,19 +328,11 @@ async def _handle_thread_message(event: dict):
 
     ts = event.get("ts", "")
 
-    # A message that mentions the bot ALSO arrives as a separate `app_mention`
-    # event, which _handle_mention owns. Forwarding it here too would send the
-    # agent a 2nd (non-priority) copy. PRIMARY skip: detect BOTH the configured
-    # `@scooter` pattern AND the raw `<@BOTID>` form Slack actually puts in the
-    # event text (the pattern alone misses the raw form).
+    # A message that mentions the bot also arrives as an `app_mention` event, which _handle_mention owns.
     if policy.mentions_agent(text) or (bot_id and f"<@{bot_id}>" in text):
         return
 
-    # BACKSTOP skip (order-independent, text-independent): if this exact message
-    # (channel:ts) was ALREADY dispatched — e.g. its `app_mention` twin already
-    # forwarded it as a priority mention, in EITHER arrival order — don't forward it
-    # again here. Covers the case where the mention text was stripped/rewritten on
-    # this `message` twin so the text skip above missed it (the reported duplicate).
+    # Text-independent backstop for a twin whose mention text Slack stripped or rewrote.
     if _message_already_dispatched(channel, ts):
         logger.info(
             "message already dispatched, dropping the twin",
@@ -419,20 +352,16 @@ async def _handle_thread_message(event: dict):
 
     comment_text = f"<@{user}> said:\n\n{text}\n\n(message_ts: {ts} — pass this to slack_react to react to THIS message)"
 
-    # Download attached multimedia (images -> parts; text -> inlined; binary -> parts
-    # written to /workspace/uploads). Weave text/binary into the message body.
     dl = await download_files(event.get("files"))
     comment_text = _weave_attachments(comment_text, dl)
 
-    # No mention (guarded above) → a for-awareness thread message.
     if is_pending(existing):
         _record_message_dispatched(channel, ts)
         forward_msg = _format_forwarded_message(comment_text, channel, thread_ts, has_mention=False)
         await db.store_pending_message("slack", "thread", res_id, forward_msg)
         return
 
-    # Forward OFF the request path (send_message blocks for the whole agent turn;
-    # awaiting it here blows Slack's retry window → every delivery deduped).
+    # Forward off the request path, since send_message blocks for the whole agent turn.
     _record_message_dispatched(channel, ts)
     forward_msg = _format_forwarded_message(comment_text, channel, thread_ts, has_mention=False)
     asyncio.create_task(
@@ -448,17 +377,7 @@ async def _background_forward(
     images: list[dict] | None = None,
     files: list[dict] | None = None,
 ) -> None:
-    """Forward a follow-up into an existing conversation OFF the request path.
-
-    send_message blocks until the agent's whole turn finishes (the /agui SSE runs
-    to RUN_FINISHED, minutes). Awaiting it inside the webhook handler blows Slack's
-    ~3s window, so Slack retries — and every retry is dropped as a duplicate, so the
-    channel looks dead ("everything classified as a duplicate on existing
-    conversations"). Run it as a task so the handler can 200 immediately; the reply
-    still streams into the thread via the agent's slack_respond.
-
-    `priority=True` (an @mention to an active conversation, from _handle_mention)
-    force-interrupts a stuck turn after the agent-host's priority timeout."""
+    """Forward a follow-up into an existing conversation off the request path, with `priority=True` for a mention to an active conversation."""
     ok = await send_message(existing, forward_msg, priority=priority, images=images, files=files, source="slack")
     if not ok:
         logger.warning(
@@ -473,41 +392,31 @@ async def _background_create_conversation(
     images: list[dict] | None = None,
     files: list[dict] | None = None,
 ) -> None:
-    # Register the Slack thread anchor BEFORE the agent runs. create_conversation
-    # blocks until the turn finishes, and the agent is instructed to acknowledge
-    # first — so its FIRST slack_respond fires before this returns. If the link
-    # (with ref.threadTs) isn't there yet, that first reply has no thread to infer
-    # and escapes to the channel top-level (the reported bug). Pushing it in the
-    # on_created hook (fired pre-run) guarantees the anchor exists from message 1.
+    # The thread anchor is registered pre-run so the agent's first slack_respond has a thread to infer.
     async def _register(conv_id: str) -> None:
         await db.store_conversation("slack", "thread", res_id, conv_id)
-        # Persist slack_channel/slack_ts too, so the agent-host DB fallback resolves
-        # the thread even if the link push is slow/lost.
+        # The DB fallback resolves the thread even if the link push is slow or lost.
         await db.store_slack_metadata(conv_id, channel, thread_ts)
         await push_link(
             conv_id, source="slack", resource_type="thread",
             title=f"{channel} thread",
             ref={"channel": channel, "threadTs": thread_ts},
         )
-        # Post the "on it — follow along" link NOW, pre-run. create_conversation
-        # blocks until the whole agent turn finishes, so posting the link after it
-        # returned delayed it by the entire run (the 5-10min lag). The link only
-        # needs conv_id (known here), so post it immediately.
+        # Posted pre-run, since create_conversation blocks until the whole agent turn finishes.
         await post_slack_message(
             channel=channel,
             text=f"Scooter is on it — follow along: <{conversation_url(conv_id)}|View conversation>",
             thread_ts=thread_ts,
         )
 
-    # Map the invoking Slack user -> their Scooter user (by email), off the request
-    # path, so the conversation gets a real owner. Best-effort: None -> unowned.
+    # Best-effort owner lookup; None leaves the conversation unowned.
     owner = await resolve_owner("slack", invoking_user) if invoking_user else None
 
     try:
         result = await create_conversation(message, title=conv_title, on_created=_register, owner=owner, images=images, files=files, source="slack")
         if not result:
             await _clear_pending(res_id)
-            # The optimistic "on it" ack already posted in _register; correct it.
+            # Correct the optimistic ack already posted in _register.
             await post_slack_message(
                 channel=channel,
                 text="…actually, Scooter couldn't start on this one — failed to create the conversation.",
@@ -516,15 +425,11 @@ async def _background_create_conversation(
             return
 
         if result.get("interrupted"):
-            # The run was cut short by an agent-host restart; the conversation
-            # exists and the agent-host resumes it on boot. Don't post a failure and
-            # don't flush pending here — leave it to the resumed run.
+            # The agent-host resumes the interrupted run on boot, so neither post a failure nor flush pending.
             return
 
         if result.get("errored"):
-            # The agent CRASHED mid-run. The conversation exists (link already
-            # posted) and did work — so NOT "couldn't start". Tell the user it hit an
-            # error partway through and point at the conversation for details.
+            # The conversation exists and did work, so this is an error partway through, not a failed start.
             await _clear_pending(res_id)
             conv_id = result.get("conversation_id", "")
             await post_slack_message(
@@ -536,7 +441,6 @@ async def _background_create_conversation(
 
         conv_id = result.get("conversation_id", "")
 
-        # Flush pending messages
         messages = await db.get_and_clear_pending_messages("slack", "thread", res_id)
         for msg in messages:
             ok = await send_message(conv_id, msg, source="slack")
@@ -575,14 +479,10 @@ async def relay_slack_reply(request: Request, req: SlackReplyRequest):
     return {"ok": True, "ts": ts}
 
 
-# Discovered + mounted by the webhooks service via the entry-point registry.
-# Handlers self-gate in-route (a disabled provider returns {"status": "disabled"}),
-# so this registers enabled and keeps its per-request gating.
+# Discovered and mounted by the webhooks service via the entry-point registry; the handler self-gates in-route.
 from scooter_webhooks_lib.registry import WebhookHandler, register_webhook
 
-# Imported for their REGISTRATION side effects: this module is what the webhooks
-# service loads, so slack's owner lookup (#575) and resource shapes (#576) arm
-# with it. Nothing else imports either. Why: PR #588.
+# Imported for their registration side effects.
 from . import identity  # noqa: F401
 from . import resources  # noqa: F401
 

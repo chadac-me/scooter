@@ -1,21 +1,11 @@
 /**
- * OpenTelemetry metrics for the agent-host — vendor-neutral via OTLP, so a
- * deployer can ship to Datadog / Grafana / Honeycomb / any OTLP backend.
- *
- * Two metric families:
- *   - OPERATIONAL (no token data needed): run count, run-duration histogram,
- *     runs by model, active/suspended sandbox gauges, errors.
- *   - COST/USAGE: per-run token counts (by kind + model) read from goose's
- *     session DB (see gooseUsage.ts) and derived USD cost (see pricing.ts).
- *
- * Configuration is via the standard OTEL_EXPORTER_OTLP_* env vars (the OTel SDK
- * reads them directly) plus an on/off flag — OFF by default. When disabled,
- * createMetrics() returns a NO-OP sink so call sites stay unconditional.
- *
- * The rest of the codebase depends only on the MetricsSink interface, never on
- * OTel types — so metrics can be disabled, faked in tests, or swapped wholesale.
- *
- * DESIGN STAGE: signatures + types only. No implementation.
+ * OpenTelemetry metrics for the agent-host over OTLP: operational metrics (run
+ * count and duration by model and outcome, sandbox gauges, errors) and cost/usage
+ * metrics (per-run token counts from goose's session DB via gooseUsage.ts and the
+ * derived USD cost via pricing.ts). Configured by the standard OTEL_EXPORTER_OTLP_*
+ * env vars plus an on/off flag; when disabled, createMetrics() returns a no-op sink
+ * so call sites stay unconditional. The rest of the codebase depends only on the
+ * MetricsSink interface, never on OTel types.
  */
 
 import { metrics, type Counter, type Histogram, type ObservableGauge } from "@opentelemetry/api";
@@ -33,21 +23,14 @@ export interface MetricsSink {
   /** A run started for a conversation on a given model. */
   runStarted(attrs: { conversationId: string; model: string }): void;
 
-  /**
-   * A run finished. Records the run count + duration histogram (by model +
-   * outcome) and, if a goose usage reader is configured, asynchronously reads
-   * this session's token-usage delta and emits token + derived-cost metrics.
-   */
+  /** A run finished: records count and duration, and asynchronously emits the session's token-usage delta and derived cost when a usage reader is configured. */
   runFinished(attrs: {
     conversationId: string;
     model: string;
     acpSessionId: string;
     durationMs: number;
     outcome: "ok" | "error";
-    /** The conversation OWNER's user id + email, for per-user cost attribution.
-     *  Undefined = unowned (anonymous creator / unresolved webhook) → bucketed as
-     *  user_id "anonymous" with an empty email so no cost goes uncounted. These
-     *  become labels on agent_cost_usd_total + agent_tokens_total. */
+    /** The conversation owner's user id and email for per-user cost attribution; undefined buckets as "anonymous". */
     ownerId?: string;
     ownerEmail?: string | null;
   }): void;
@@ -58,8 +41,7 @@ export interface MetricsSink {
   /** A broker request passed through (provider + outcome), if wired. */
   brokerRequest?(attrs: { provider: string; outcome: "ok" | "error" }): void;
 
-  /** A durable conversation-log append FAILED (finding #4) — the conversation's
-   *  only persistence lost a turn. Surfaced so an operator can alert on it. */
+  /** A durable conversation-log append failed, losing a turn. */
   persistenceError?(attrs: { conversationId: string }): void;
 
   /** Flush + shut down the exporter (called on graceful shutdown). */
@@ -67,34 +49,21 @@ export interface MetricsSink {
 }
 
 export interface MetricsConfig {
-  /** Master switch. Off -> createMetrics returns the no-op sink. */
+  /** Master switch; off makes createMetrics return the no-op sink. */
   enabled: boolean;
   /** Logical service name (resource attribute service.name). */
   serviceName: string;
-  /** deployment.environment resource attribute (e.g. "dev", "prod"). Optional. */
+  /** deployment.environment resource attribute (e.g. "dev", "prod"). */
   environment?: string;
-  /** The per-model price table for cost derivation (empty = no cost, just tokens). */
+  /** The per-model price table for cost derivation; empty means tokens only, no cost. */
   prices: PriceTable;
-  /**
-   * Reads token usage per session for cost metrics. Omit to emit operational
-   * metrics only (no token/cost). Endpoint/headers come from OTEL_* env.
-   */
+  /** Reads token usage per session for cost metrics; omit to emit operational metrics only. */
   usageReader?: GooseUsageReader;
-  /**
-   * Test seam: an alternate MetricReader (e.g. a manual reader over an
-   * InMemoryMetricExporter) instead of the OTLP/periodic exporter. Production
-   * leaves this unset. Typed loosely to avoid leaking the SDK type into the
-   * public interface.
-   */
+  /** Test seam: an alternate MetricReader in place of the OTLP/periodic exporter, typed loosely to keep the SDK type out of the public interface. */
   readerForTest?: unknown;
 }
 
-/**
- * Build the metrics sink. When `enabled` is false, returns a no-op sink (every
- * method is a cheap no-op, shutdown resolves immediately) so call sites don't
- * branch. When enabled, initializes the OTel MeterProvider with an OTLP metric
- * exporter (configured from OTEL_EXPORTER_OTLP_* env) and the instruments.
- */
+/** Build the metrics sink: a no-op when disabled, otherwise an OTel MeterProvider with an OTLP exporter and the instruments. */
 export function createMetrics(config: MetricsConfig): MetricsSink {
   if (!config.enabled) return noopMetrics();
 
@@ -102,9 +71,7 @@ export function createMetrics(config: MetricsConfig): MetricsSink {
     [ATTR_SERVICE_NAME]: config.serviceName,
     ...(config.environment ? { [ATTR_DEPLOYMENT_ENVIRONMENT_NAME]: config.environment } : {}),
   });
-  // The OTLP exporter reads OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS / _PROTOCOL
-  // etc. from the environment automatically — nothing to thread through here.
-  // Tests inject a manual reader (over an in-memory exporter) instead.
+  // The OTLP exporter reads OTEL_EXPORTER_OTLP_* from the environment itself.
   const reader =
     (config.readerForTest as PeriodicExportingMetricReader | undefined) ??
     new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter() });
@@ -134,8 +101,7 @@ export function createMetrics(config: MetricsConfig): MetricsSink {
     description: "Durable conversation-log append failures (a turn was lost).",
   });
 
-  // Sandbox population is observed (set from outside); an ObservableGauge reads
-  // the latest values at collection time.
+  // Sandbox population is set from outside and read by the gauge at collection time.
   let sandboxRunning = 0;
   let sandboxSuspended = 0;
   const sandboxGauge: ObservableGauge = meter.createObservableGauge("agent_sandboxes", {
@@ -146,8 +112,7 @@ export function createMetrics(config: MetricsConfig): MetricsSink {
     obs.observe(sandboxSuspended, { state: "suspended" });
   });
 
-  // Per-session cumulative usage already counted, so we emit only the per-run
-  // DELTA (goose's accumulated_* columns are cumulative for the session).
+  // Per-session usage already counted, so only the per-run delta is emitted.
   const lastUsage = new Map<string, { input: number; output: number; cacheRead: number; cacheWrite: number }>();
 
   const emitUsageDelta = async (
@@ -159,7 +124,7 @@ export function createMetrics(config: MetricsConfig): MetricsSink {
     if (!reader) return;
     try {
       const u = await reader.readSessionUsage(acpSessionId);
-      if (!u) return; // no DB / unknown session -> skip silently (graceful)
+      if (!u) return; // no DB or unknown session
       const cur = {
         input: u.inputTokens ?? 0,
         output: u.outputTokens ?? 0,
@@ -200,20 +165,18 @@ export function createMetrics(config: MetricsConfig): MetricsSink {
 
   return {
     runStarted() {
-      // Reserved for an in-flight gauge if needed; runs are counted on finish.
+      // Runs are counted on finish.
     },
 
     runFinished(attrs) {
       runs.add(1, { model: attrs.model, outcome: attrs.outcome });
       runDuration.record(attrs.durationMs, { model: attrs.model, outcome: attrs.outcome });
-      // Per-user cost attribution: label token/cost with the owner id + email.
-      // Unowned (anonymous creator / unresolved webhook) buckets as "anonymous"
-      // with an empty email, so no cost goes uncounted.
+      // Unowned buckets as "anonymous" so no cost goes uncounted.
       const user = {
         user_id: attrs.ownerId || "anonymous",
         user_email: attrs.ownerEmail || "",
       };
-      // Token/cost read is async + best-effort; don't block the run.
+      // The token/cost read is best-effort and must not block the run.
       void emitUsageDelta(attrs.acpSessionId, attrs.model, user);
     },
 
@@ -241,7 +204,7 @@ export function createMetrics(config: MetricsConfig): MetricsSink {
   };
 }
 
-/** The always-safe no-op sink (used when metrics are disabled or in tests). */
+/** The no-op sink used when metrics are disabled or in tests. */
 export function noopMetrics(): MetricsSink {
   return {
     runStarted() {},

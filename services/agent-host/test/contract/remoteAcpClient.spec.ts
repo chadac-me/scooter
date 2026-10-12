@@ -1,10 +1,8 @@
 /**
- * Tier 1 contract — RemoteAcpClient (the cloud side of bring-your-own-Claude) over a fake WS.
- *
- * Proves the ACP-over-WS split: ACP requests go DOWN + await their ack; the agent's notifications
- * come UP to the bridge callbacks; the agent's TOOL calls (Channel B) run on the CLOUD ExecBackend;
- * a dropped connection rejects in-flight requests (offline → RUN_ERROR, not a silent hang). See
- * remoteProtocol.ts + todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+ * RemoteAcpClient, the cloud side of bring-your-own-Claude, over a fake transport: ACP
+ * requests go down and await their ack, the agent's notifications come up to the bridge
+ * callbacks, the agent's tool calls run on the cloud ExecBackend, and a dropped
+ * connection rejects in-flight requests.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -13,7 +11,7 @@ import { createRemoteAcpClient } from "../../src/acp/remoteAcpClient.js";
 import type { RemoteTransport, WireFrame } from "../../src/acp/remoteProtocol.js";
 import type { ExecBackend } from "../../src/types.js";
 
-/** An in-memory transport pair: whatever `a` sends, `b` receives, and vice-versa. Models the WS. */
+/** An in-memory transport pair: whatever `a` sends, `b` receives, and vice versa. */
 function transportPair(): { a: RemoteTransport; b: RemoteTransport; closeBoth: () => void } {
   const make = () => {
     const frameCbs = new Set<(f: WireFrame) => void>();
@@ -46,7 +44,6 @@ function transportPair(): { a: RemoteTransport; b: RemoteTransport; closeBoth: (
   };
   const A = make();
   const B = make();
-  // Wire the duplex: A.send → B's frame listeners; B.send → A's.
   A.transport.send = (f: WireFrame) => queueMicrotask(() => B.frameCbs.forEach((cb) => cb(f)));
   B.transport.send = (f: WireFrame) => queueMicrotask(() => A.frameCbs.forEach((cb) => cb(f)));
   return {
@@ -59,7 +56,7 @@ function transportPair(): { a: RemoteTransport; b: RemoteTransport; closeBoth: (
   };
 }
 
-/** A fake ExecBackend for the cloud side — records runs, returns a canned result. */
+/** A fake cloud-side ExecBackend that records runs and returns a canned result. */
 function fakeExec(): ExecBackend & { runs: Array<{ command: string; args: string[] }> } {
   const runs: Array<{ command: string; args: string[] }> = [];
   return {
@@ -77,14 +74,12 @@ function fakeExec(): ExecBackend & { runs: Array<{ command: string; args: string
   } as ExecBackend & { runs: Array<{ command: string; args: string[] }> };
 }
 
-/** A minimal fake "container agent" bound to transport end `b`: answers ACP requests with acks and
- *  can push notifications / exec requests to the cloud. */
+/** A fake container agent on transport end `b` that acks ACP requests and can push notifications or exec requests. */
 function fakeContainerAgent(b: RemoteTransport) {
   const acked: WireFrame[] = [];
   b.onFrame((f) => {
     if (f.ch === "acp" && f.id && f.type !== "ack") {
       acked.push(f);
-      // Reply with a canned ack per request type.
       const result =
         f.type === "initialize" ? { protocolVersion: 1 }
         : f.type === "new_session" ? { sessionId: "sess-remote-1" }
@@ -115,7 +110,6 @@ describe("RemoteAcpClient over a fake WS", () => {
     expect((await client.newSession({ cwd: "/workspace" })).sessionId).toBe("sess-remote-1");
     expect((await client.prompt({ sessionId: "sess-remote-1", prompt: [{ type: "text", text: "hi" }] })).stopReason).toBe("end_turn");
 
-    // The agent saw exactly those three ACP requests, in order.
     expect(agent.acked.map((f) => f.type)).toEqual(["initialize", "new_session", "prompt"]);
   });
 
@@ -145,25 +139,25 @@ describe("RemoteAcpClient over a fake WS", () => {
     agent.runToolInCloud("x1", "echo", ["SENTINEL"]);
     await tick();
 
-    // The tool ran on the CLOUD exec backend (not the laptop) + the result tunneled back.
+    // The tool ran on the cloud exec backend and the result tunneled back.
     expect(exec.runs).toEqual([{ command: "echo", args: ["SENTINEL"] }]);
     expect(result).toEqual({ stdout: "ran:echo SENTINEL", stderr: "", exitCode: 0 });
   });
 
   it("rejects an in-flight prompt when the connection drops (offline → RUN_ERROR, not a hang)", async () => {
     const { a, b } = transportPair();
-    // A container that NEVER acks — so prompt() stays pending until we drop the connection.
+    // A container that never acks, so prompt() stays pending until the connection drops.
     b.onFrame(() => {});
     const client = createRemoteAcpClient({ transport: a, exec: fakeExec() });
 
     const p = client.prompt({ sessionId: "s", prompt: [{ type: "text", text: "hi" }] });
-    a.close(); // the WS drops
+    a.close();
     await expect(p).rejects.toThrow(/disconnected|not connected/i);
     expect(client.isAlive()).toBe(false);
   });
 });
 
-/** Helper: push an agent_message_chunk update from container end `b`. */
+/** Push an agent_message_chunk update from container end `b`. */
 function agent_pushChunk(b: RemoteTransport, sessionId: string, text: string) {
   b.send({ ch: "acp", type: "session_update", payload: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } } });
 }

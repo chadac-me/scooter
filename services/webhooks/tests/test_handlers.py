@@ -1,9 +1,4 @@
-"""Tests for webhook handler logic.
-
-Tests the webhook endpoint routing and handler behavior using
-FastAPI's TestClient. External API calls (OpenHands, GitLab, etc.)
-are mocked.
-"""
+"""Webhook endpoint routing and handler behavior through FastAPI's TestClient, with external calls mocked."""
 
 from unittest.mock import AsyncMock, patch, MagicMock
 
@@ -15,7 +10,7 @@ from webhooks.app import app
 
 @pytest.fixture
 def client():
-    """Create a test client with a mocked DB (no real store/agent-host)."""
+    """A test client with a mocked DB."""
     with patch("webhooks.app.db") as mock_db:
         mock_db.init_db = AsyncMock()
         mock_db.close_db = AsyncMock()
@@ -33,16 +28,6 @@ def test_health_endpoint(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
-
-
-# ---------------------------------------------------------------------------
-# GitLab webhook
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Jira webhook
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

@@ -1,37 +1,23 @@
 /**
- * Detect an INTERRUPTED conversation from its event log tail.
- *
- * A run is a RUN_STARTED … (events) … RUN_FINISHED|RUN_ERROR unit. If the agent-
- * host process dies mid-run, the last RUN_STARTED never gets its RUN_FINISHED/
- * RUN_ERROR — a "dangling" run. On restart we resume such conversations (revive +
- * a nudge to continue) instead of leaving the work stuck and the caller seeing a
- * spurious failure.
- *
- * We look at the tail only (the LAST run is what matters): scanning from the end,
- * a RUN_FINISHED/RUN_ERROR seen before any RUN_STARTED means the last run
- * completed; a RUN_STARTED seen first means it's dangling.
+ * Detect an interrupted conversation from its event log. A run is a RUN_STARTED …
+ * RUN_FINISHED|RUN_ERROR unit; if the agent-host dies mid-run the last RUN_STARTED never
+ * gets its terminal, and on restart such conversations are resumed with a nudge. Scanning
+ * from the end, a terminal seen before any RUN_STARTED means the last run completed, and
+ * a RUN_STARTED seen first means it is dangling.
  */
 
 import type { AguiEvent } from "../bridge.js";
 
 /**
- * True iff the conversation's last run started but never finished AND was not started
- * by `self` — i.e. it is genuinely stranded, not merely in flight here.
- *
- * `events` should be the recent tail (order-preserving); an empty/finished log is not
- * dangling. Pass `self` (this pod + the generation it owns the conversation at) so a
- * run THIS pod is still executing is not mistaken for one a dead pod left behind —
- * without it, revive-on-assign nudged a conversation's own live first run and the user
- * saw a spurious "interrupted by a restart" during their first message.
+ * True iff the conversation's last run started but never finished and was not started by
+ * `self`, so a run this pod is still executing is not mistaken for a stranded one.
  */
 export function hasDanglingRun(events: AguiEvent[], self?: RunOrigin): boolean {
   return danglingRunInfo(events, self) !== null;
 }
 
-/** The dangling run's identity + whether the user asked to STOP it before the old
- *  host died. `cancelRequested` distinguishes "resume the stranded work" from
- *  "the user stopped this; mark it terminal" — without it, a Stop that raced a
- *  scale-down was resurrected by the next owner's resume nudge. */
+/** The dangling run's identity plus whether the user asked to stop it before the old host died,
+ *  which decides between resuming it and marking it terminal. */
 export interface DanglingRunInfo {
   runId: string;
   threadId: string;
@@ -59,29 +45,22 @@ export interface RunOrigin {
 }
 
 /**
- * True iff `started` was begun by the CALLER — i.e. the caller is still executing it,
- * so it is in flight rather than stranded.
- *
- * Conservative by design: with no caller identity (single-replica), or an event from
- * before RUN_STARTED carried an origin, this returns false and the run reads as
- * dangling — preserving the original behaviour rather than silently skipping a resume
- * a rollout depends on.
+ * True iff `started` was begun by the caller, so it is in flight rather than stranded;
+ * conservative, since no caller identity or no origin on the event reads as dangling.
  */
 export function isOwnRun(started: { host?: string; gen?: number }, self?: RunOrigin): boolean {
   if (!self || started.host === undefined) return false; // unknown origin -> treat as foreign
   if (started.host !== self.host) return false; // a different pod started it
-  // Same pod, EARLIER generation: the conversation was reassigned away and back, so
-  // that run is genuinely stranded even though the host name matches.
+  // Same pod, earlier generation: the conversation was reassigned away and back, so that run is
+  // stranded.
   if (self.gen !== undefined && started.gen !== undefined && started.gen < self.gen) return false;
   return true;
 }
 
 /**
- * True iff the conversation has run at least once AND its last run COMPLETED
- * (RUN_FINISHED/RUN_ERROR seen before any RUN_STARTED, scanning from the end).
- * The completion signal for the subagent watcher — robust to a run that starts
- * and finishes BETWEEN watcher ticks (unlike edge-detecting the live bridge's
- * `running` flag, which misses a fast run entirely).
+ * True iff the conversation has run at least once and its last run completed; the
+ * completion signal for the subagent watcher, robust to a run that starts and finishes
+ * between ticks.
  */
 export function lastRunCompleted(events: AguiEvent[]): boolean {
   for (let i = events.length - 1; i >= 0; i--) {
@@ -99,24 +78,9 @@ export interface OrphanRun {
 }
 
 /**
- * Every run in `events` with a RUN_STARTED and no RUN_FINISHED/RUN_ERROR, oldest
- * first.
- *
- * `danglingRunInfo` deliberately looks only at the TAIL, so it answers "is the
- * conversation mid-run right now?" — it stops at the first terminal it meets
- * scanning backwards. That makes it blind to an orphan BURIED under a later
- * completed run, which is exactly what an ownership fence leaves behind: the
- * outgoing pod's remaining events (terminal included) are dropped, the next turn
- * completes normally on the new owner, and the orphan is now unreachable. The
- * conversation never self-heals, and the UI's `running` flag — a boolean, not a
- * counter — reads the stray RUN_STARTED as "still working" forever.
- *
- * Pairing by runId finds those. Used on adopt to close them: the adopting pod is
- * the sole writer (controller keeps one hostPod, the fence blocks the old one),
- * so writing a terminal here cannot race the run's real author.
- *
- * `self` EXCLUDES runs this pod is still executing: assignment lands seconds after
- * the first prompt starts, so that run is open and is not an orphan. Why: PR #640.
+ * Every run in `events` with a RUN_STARTED and no terminal, oldest first, excluding runs
+ * `self` is still executing; unlike danglingRunInfo this finds an orphan buried under a
+ * later completed run, which a fenced hand-off leaves behind.
  */
 export function orphanRuns(events: AguiEvent[], self?: RunOrigin): OrphanRun[] {
   const started = new Map<string, { threadId: string; own: boolean }>();

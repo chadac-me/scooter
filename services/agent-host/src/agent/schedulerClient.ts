@@ -1,8 +1,7 @@
 /**
- * HTTP SchedulerClient — the agent-host's client to the scheduler service's REST
- * API (SCHEDULER_URL). Every call carries the conversation owner as `x-auth-user`
- * so the scheduler attributes/scopes the task to that user (the agent can only
- * manage its own owner's tasks). Optional relay key as Bearer.
+ * HTTP SchedulerClient to the scheduler service's REST API. Every call carries the
+ * owner as `x-auth-user` so the scheduler scopes the task to that user, plus an
+ * optional relay key as Bearer.
  */
 
 import type { SchedulerClient, ScheduledTask, TaskRun, Owner } from "./schedulerTools.js";
@@ -17,8 +16,7 @@ export function createHttpSchedulerClient(deps: HttpSchedulerClientDeps): Schedu
   const doFetch = deps.fetchImpl ?? fetch;
   const base = deps.baseUrl.replace(/\/$/, "");
 
-  // A null owner is the unowned/anonymous scope — send an empty x-auth-user so the
-  // scheduler scopes to unowned tasks (not a refusal).
+  // A null owner sends an empty x-auth-user so the scheduler scopes to unowned tasks.
   const headers = (owner: Owner): Record<string, string> => {
     const h: Record<string, string> = { "content-type": "application/json", "x-auth-user": owner ?? "" };
     if (deps.relayKey) h.authorization = `Bearer ${deps.relayKey}`;

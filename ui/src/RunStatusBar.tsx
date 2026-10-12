@@ -1,19 +1,9 @@
 /**
- * Inline run status — a thinking indicator (what the agent is doing + for how long)
- * and a Stop button, shown INLINE in the conversation flow (just above the composer)
- * while a run is in flight. Also surfaces a failed run's error inline.
- *
- * Reads the log-derived `isRunning` / `activeTool` / `runStartedAt` + `cancel` from
- * the conversation context (RuntimeProvider), so it reflects EVERY run (local, Slack,
- * another tab), not just a locally-driven one.
- *
- * Why our own control instead of assistant-ui's built-in Composer Stop: the
- * single-source render model bypasses the react-ag-ui runtime's per-run aggregator,
- * so `thread.isRunning` is always false and the stock Stop button is dead (see
- * RuntimeProvider header). This drives off our real signal.
- *
- * It lives IN the thread (not a detached bottom bar) so the user sees it right where
- * the conversation is happening — following the scroll, next to the latest message.
+ * Inline run status: a thinking indicator (what the agent is doing and for how long)
+ * and a Stop button, rendered in the conversation flow just above the composer while
+ * a run is in flight, plus a failed run's error. It reads `isRunning` / `activeTool` /
+ * `runStartedAt` / `cancel` from the conversation context (RuntimeProvider), so it
+ * reflects every run (local, Slack, another tab) rather than only a locally-driven one.
  */
 
 import { useEffect, useState } from "react";
@@ -31,9 +21,8 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-/** A thin context-window fill bar, shown just above the composer. Grey → amber >75%
- *  → red >90%, so the user can see how full the conversation's context is (and knows
- *  it may compact / get too long). Hidden until we have a usage reading. */
+/** A thin context-window fill bar above the composer: grey, amber past 75%, red past
+ *  90%, hidden until a usage reading exists. */
 export function ContextFillBar() {
   const { contextFill, contextTokens, conversationId, isRunning } = useConversationInterrupts();
   const [compacting, setCompacting] = useState(false);
@@ -46,14 +35,13 @@ export function ContextFillBar() {
     ? `Context ${pct}% full — ${contextTokens.used.toLocaleString()} / ${contextTokens.total.toLocaleString()} tokens`
     : `Context ${pct}% full`;
 
-  // Offer Compact once the context is getting full (≥50%), when NOT mid-run. It
-  // summarizes older turns so the conversation can keep going on less context.
+  // Offer Compact once the context is at least half full and no run is in flight.
   const canCompact = pct >= 50 && !isRunning && !compacting;
   const compact = async () => {
     setCompacting(true);
     setNote(null);
     try {
-      // Compaction acts on an EXISTING conversation; nothing to compact before one.
+      // Nothing to compact before the conversation exists server-side.
       if (!hasId(conversationId)) return;
       const r = await compactConversation(agentHostConfig, conversationId);
       setNote(r.compacted ? "Compacted earlier messages." : "Nothing to compact yet.");
@@ -96,13 +84,12 @@ export function ContextFillBar() {
   );
 }
 
-/** The inline indicator + Stop / error, rendered in the conversation (above the
- *  composer). Returns null when idle with no error. */
+/** The inline indicator, Stop button and error banner above the composer; null when
+ *  idle with no error. */
 export function InlineRunStatus() {
   const { isRunning, activeTool, runStartedAt, cancel, cancelState, runError, runRetrying, streamAuthError, conversationId } = useConversationInterrupts();
 
-  // Tick once a second WHILE running so the elapsed time advances — this is what
-  // makes a long, silent tool call visibly "still working" instead of looking stuck.
+  // Tick once a second while running so the elapsed time advances.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!isRunning) return;
@@ -110,10 +97,8 @@ export function InlineRunStatus() {
     return () => clearInterval(t);
   }, [isRunning]);
 
-  // An expired ingress/auth session (the live stream is 401/403ing) takes
-  // precedence over everything: retrying silently would leave the user staring at
-  // a "working" dot forever. Surface a durable banner so they know to re-auth; it
-  // self-clears once the stream reconnects (the pump keeps polling).
+  // An expired ingress/auth session outranks every other state: show a durable banner
+  // that clears once the stream reconnects.
   if (streamAuthError) {
     return (
       <div
@@ -129,10 +114,8 @@ export function InlineRunStatus() {
     );
   }
 
-  // AUTO-RETRY in progress: the agent died/stalled transiently and the server is re-driving the run
-  // with backoff. Show a "retrying (n/N)…" banner instead of the terminal error — it supersedes the
-  // death RUN_ERROR until we know the outcome (a fresh RUN_STARTED clears it; exhaustion falls through
-  // to the error banner). Takes precedence over the error banner but sits below auth errors.
+  // A server-side auto-retry supersedes the run error until a fresh RUN_STARTED clears
+  // it or the retries are exhausted.
   if (runRetrying) {
     return (
       <div
@@ -148,10 +131,7 @@ export function InlineRunStatus() {
     );
   }
 
-  // A failed run (RUN_ERROR) clears `isRunning` but the base applier renders no
-  // message — so when the run isn't in flight but errored, show a visible error
-  // inline instead of nothing (the silent-failure half of the hydrate bug). A live
-  // run takes precedence (its own indicator below).
+  // A failed run clears `isRunning` but renders no message, so surface the error inline.
   if (!isRunning) {
     if (!runError) return null;
     return (
@@ -170,9 +150,8 @@ export function InlineRunStatus() {
   const failed = cancelState === "failed";
   const elapsed = runStartedAt != null ? fmtElapsed(Math.max(0, now - runStartedAt)) : null;
 
-  // The label says WHAT it's doing + for HOW LONG — so a long silent tool call (e.g.
-  // a build poll) is clearly "still working", not stuck. "Running bash… 2m 10s" /
-  // "Working… 8s". Stop states take precedence.
+  // The label says what the agent is doing and for how long ("Running bash… 2m 10s" /
+  // "Working… 8s"); stop states take precedence.
   const workingLabel = activeTool
     ? `Running ${activeTool}…${elapsed ? ` ${elapsed}` : ""}`
     : `Working…${elapsed ? ` ${elapsed}` : ""}`;
@@ -192,12 +171,8 @@ export function InlineRunStatus() {
         variant="outline"
         size="sm"
         data-testid="stop-run"
-        // While a stop is in flight the button is disabled + shows the pending state,
-        // so the click is visibly acknowledged (the run's terminal event still
-        // round-trips through the stream to actually clear it). If the stop failed to
-        // land, re-enable so the user can retry.
-        // Also disabled with no server id: there is no run to stop, so the control says
-        // so rather than firing a cancel that cannot be addressed.
+        // Disabled while a stop is in flight or there is no server-side run to stop; a
+        // failed stop re-enables the button so the user can retry.
         disabled={stopping || !hasId(conversationId)}
         aria-busy={stopping}
         onClick={() => void cancel()}

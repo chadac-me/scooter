@@ -1,7 +1,4 @@
-"""Jira's AGENT TOOL — comment on the conversation's issue.
-
-Moved here from the agent-host by issue #700.
-"""
+"""Jira's agent tool: comment on the conversation's issue."""
 
 from __future__ import annotations
 
@@ -22,8 +19,7 @@ def _target_from_link(link: dict) -> JiraTarget | None:
     key = ref_of(link).get("issueKey")
     if key:
         return JiraTarget(issue_key=str(key))
-    # The browse-URL form first, then a BARE key: jira's conversation_map resource_id
-    # is the key itself ("ENG-12"), while a resource_links row holds the browse URL.
+    # The browse-URL form first, then a bare key as jira's conversation_map stores it.
     raw = (link.get("url") or "").strip()
     if not raw:
         return None
@@ -55,8 +51,7 @@ async def jira_comment(body: str, ctx: ToolContext = ToolContextDep) -> ToolResu
             "link with an issue key. Use the broker's /jira proxy with an explicit key "
             "instead."
         )
-    # REST v2, not v3: v2 accepts a plain-text `body` where v3 requires ADF. The
-    # upstream already includes /ex/jira/{cloud_id}, so the path starts at rest/.
+    # REST v2 accepts a plain-text `body` where v3 requires ADF; the upstream already includes /ex/jira/{cloud_id}.
     path = f"rest/api/2/issue/{quote(target.issue_key, safe='')}/comment"
     response = await ctx.upstream.request("POST", path, json={"body": body})
     return ToolResult.from_upstream(response, success_text="Commented on the Jira issue.")

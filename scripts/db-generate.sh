@@ -1,60 +1,39 @@
 #!/usr/bin/env bash
 # db-generate.sh — regenerate everything derived from the schema spec.
 #
-# TWO sources, in order:
+# Two sources, in order: the `scooter.db` module option (the topology: which
+# databases exist, which tables are in each, who writes and who reads) renders
+# lib/sql/owners.toml and lib/sql/atlas.hcl, and then lib/sql/<db>/schema.sql
+# renders lib/ts/scooter-schema/src/<db>.ts (Drizzle, via drizzle-kit pull) and
+# lib/py/scooter-schema/src/scooter_schema/<db>.py (SQLAlchemy, via sqlacodegen).
+# owners.toml's top-level `[<database>]` sections are the database list that step
+# 2 iterates. Each schema is loaded into an embedded pglite, so no real Postgres
+# is touched and concurrent runs never interfere.
 #
-#   1. The `scooter.db` MODULE OPTION (#606) — the topology: which databases
-#      exist, which tables are in each, who writes and who reads. From it:
-#        - lib/sql/owners.toml     the ownership manifest
-#        - lib/sql/atlas.hcl       one Atlas env per database
-#      owners.toml's top-level `[<database>]` sections ARE the database list, which
-#      this script and the justfile read back rather than keeping a third artifact.
-#      These used to be five hand-maintained lists (here, the justfile, atlas.hcl,
-#      db-migrate.nix's `candidates`, guard.ts's DATABASES) that nothing checked
-#      against each other.
-#
-#   2. lib/sql/<db>/schema.sql — the DDL. From it:
-#        - lib/ts/scooter-schema/src/<db>.ts   (Drizzle, via drizzle-kit pull)
-#        - lib/py/scooter-schema/src/scooter_schema/<db>.py (SQLAlchemy, via sqlacodegen)
-#
-# Step 1 must run first: the database list it writes is what step 2 iterates.
-#
-# Neither generator touches a real/shared Postgres: the schema is loaded into an
-# EMBEDDED pglite (WASM Postgres). drizzle-kit pulls from a pglite data dir; for
-# SQLAlchemy the same pglite is exposed on a loopback socket that sqlacodegen
-# introspects. Each run is fully isolated, so concurrent CI jobs never interfere.
-#
-# Regenerate whenever a schema.sql changes; `just db-generate-check` fails CI if the
-# committed output drifts from what this produces.
-#
-# Needs: node + npx (drizzle-kit, @electric-sql/pglite[-socket] from the workspace
-# install) and uv (runs a pinned sqlacodegen). Run from the repo root.
+# Regenerate whenever a schema.sql changes; `just db-generate-check` fails CI if
+# the committed output drifts. Needs node + npx (drizzle-kit, @electric-sql/pglite
+# from the workspace install) and uv; run from the repo root.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # --- step 1: render the spec artifacts from the module system ----------------
-# Built, not evaluated with `nix eval`, so both files come out of one
-# derivation and can't disagree with each other.
+# Built rather than `nix eval`ed, so both files come from one derivation and
+# cannot disagree.
 echo "rendering lib/sql spec artifacts from scooter.db ..."
 spec="$(nix build --no-link --print-out-paths "$ROOT#db-spec")"
 install -m 644 "$spec/owners.toml"    lib/sql/owners.toml
 install -m 644 "$spec/atlas.hcl"      lib/sql/atlas.hcl
 
-# The database set, read back out of the manifest we just wrote — no third artifact.
+# The database set, read back out of the manifest just written.
 ENVS="$(sed -n 's/^\[\([a-z_][a-z_0-9]*\)\]$/\1/p' lib/sql/owners.toml | tr '\n' ' ')"
 TS_OUT="lib/ts/scooter-schema/src"
 PY_OUT="lib/py/scooter-schema/src/scooter_schema"
 SQLACODEGEN_VERSION="4.0.4"
-# …and SQLAlchemy, which sqlacodegen does NOT pin. The generated annotation for a
-# JSONB column is SQLAlchemy's `JSONB.python_type`, and 2.1.0 (2026-09-24) changed
-# it from `dict` to `object` — so main went red with no commit behind it, on a
-# required check, from an upstream release alone. Pinning the tool is not enough
-# when the tool's dependency decides the output.
-#
-# 2.0.54 is the newest 2.0.x, i.e. the latest release that still reproduces the
-# committed bindings. Bump deliberately: raise this, regenerate, review the diff.
+# sqlacodegen does not pin SQLAlchemy, whose version decides the generated
+# annotations, so pin it too and bump deliberately (raise, regenerate, review the
+# diff).
 SQLALCHEMY_VERSION="2.0.54"
 
 work="$(mktemp -d)"

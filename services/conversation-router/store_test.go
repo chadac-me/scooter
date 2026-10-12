@@ -5,9 +5,7 @@ import (
 	"testing"
 )
 
-// storeDSNFromEnv is the wiring seam between the k8s env and the pool. These lock down the two
-// ways it can silently misbehave: leaking a wrong default, or building a DSN when no DB is
-// configured (which would make the router try — and fail — to connect on every boot).
+// storeDSNFromEnv must not leak a wrong default or build a DSN when no DB is configured.
 func TestStoreDSNFromEnv(t *testing.T) {
 	clear := func() {
 		for _, k := range []string{
@@ -39,7 +37,7 @@ func TestStoreDSNFromEnv(t *testing.T) {
 		t.Setenv("AGENT_HOST_DB_PASSWORD", "p@ss/word")
 		t.Setenv("AGENT_HOST_DB_HOST", "agent-shared-db.ns.svc")
 		dsn := storeDSNFromEnv()
-		// Default user is the read-only role, default db is agent_host, and the password is escaped.
+		// The default user is the read-only role, the default db is agent_host, and the password is escaped.
 		if !strings.Contains(dsn, "conversation_router:") {
 			t.Errorf("expected default read-only user in DSN: %q", dsn)
 		}
@@ -61,8 +59,7 @@ func TestStoreDSNFromEnv(t *testing.T) {
 	})
 }
 
-// The client-side half of the read-only guarantee: EVERY connection the pool opens must carry
-// default_transaction_read_only=on, so a mis-provisioned grant can't become a write from here.
+// Every connection the pool opens must carry default_transaction_read_only=on.
 func TestBuildPoolConfigIsReadOnly(t *testing.T) {
 	cfg, err := buildPoolConfig("postgresql://u:p@h:5432/agent_host")
 	if err != nil {

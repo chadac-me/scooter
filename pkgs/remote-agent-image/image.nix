@@ -1,9 +1,8 @@
 { pkgs, lib, n2c, remoteAgent, ... }:
 
-# OCI image for the bring-your-own-Claude remote agent (published to ghcr; users `docker run` it).
-# Bundles the wrapped remote-agent bin (which already has node + the glibc `claude` CLI on PATH),
-# CA certs (for the Anthropic + wss TLS), and a minimal shell/coreutils (the SDK's `claude`
-# subprocess shells out). Exposes 1717 for the local Claude login server.
+# OCI image for the bring-your-own-Claude remote agent, which users `docker run`:
+# the wrapped remote-agent bin, CA certs, and a minimal shell/coreutils for the
+# SDK's `claude` subprocess.
 
 let
   image = n2c.buildImage {
@@ -24,12 +23,11 @@ let
       Entrypoint = [ "${remoteAgent}/bin/scooter-remote-agent" ];
       Env = [
         "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
-        # Where Claude Code reads/writes credentials — mounted volume in the one-liner.
+        # Where Claude Code reads/writes credentials (a mounted volume in the one-liner).
         "CLAUDE_CONFIG_DIR=/root/.claude"
         "HOME=/root"
       ];
-      # The local Claude login server (127.0.0.1:34579 in the container, published to the host).
-      # Port 34579 is in the high ephemeral range Anthropic's OAuth client whitelists for loopback.
+      # The local Claude login server, published to the host.
       ExposedPorts = { "34579/tcp" = { }; };
     };
   };

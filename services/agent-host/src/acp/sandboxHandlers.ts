@@ -1,13 +1,9 @@
 /**
- * The ACP client-method handlers that service Goose's fs/* and terminal/*
- * callbacks against the ExecBackend. Extracted from client.ts so they can be
- * unit-tested WITHOUT spawning a real `goose acp` subprocess.
- *
- * Terminal bookkeeping lives here: a per-terminal handle map + an output buffer
- * map, both keyed by the ExecBackend handle's id. That id is UNIQUE per spawn
- * (see sandboxExec.ts), so concurrent terminals never collide on a key — the bug
- * this seam exists to test: identical concurrent bash calls used to share one id
- * and clobber each other's handle/buffer, hanging the orphaned call.
+ * The ACP client-method handlers that service Goose's fs/* and terminal/* callbacks
+ * against the ExecBackend, kept separate from client.ts so they can be unit-tested
+ * without spawning a `goose acp` subprocess. Terminal bookkeeping (a handle map and an
+ * output-buffer map) is keyed by the ExecBackend handle's id, which is unique per
+ * spawn, so concurrent terminals never collide.
  */
 
 import type * as schema from "@zed-industries/agent-client-protocol";
@@ -32,29 +28,17 @@ export interface SandboxClientHandlers {
     p: schema.ReleaseTerminalRequest,
   ): Promise<schema.ReleaseTerminalResponse | void>;
   killTerminal(p: schema.KillTerminalCommandRequest): Promise<schema.KillTerminalResponse | void>;
-  /** Kill EVERY live terminal for this session (a user cancel / force-interrupt).
-   *  Best-effort — a kill that finds a finished terminal is a no-op. */
+  /** Best-effort kill of every live terminal for this session. */
   killAllTerminals(graceForPendingSpawn?: boolean): Promise<void>;
 }
 
 export function createSandboxClientHandlers(
   exec: ExecBackend,
-  // Notified when goose creates a terminal to run a command. goose's shell tool
-  // carries the command HERE (terminal/create), NOT in the tool_call's rawInput —
-  // so this is the ONLY place the actual command text is available. The bridge uses
-  // it to surface the command as the tool call's args (keyed by terminalId), which
-  // the UI renders as `$ <command>`. Optional so tests/other callers can omit it.
+  // Notified when goose creates a terminal, the only place the command text is available,
+  // so the bridge can surface it as the tool call's args.
   onTerminalCreated?: (terminalId: string, command: string, args: string[]) => void,
 ): SandboxClientHandlers {
-  // Per-terminal handle + accumulated output, keyed by the (unique) handle id.
-  /** A USER stop can land before the shell it means to stop exists: the Stop button
-   *  appears at RUN_STARTED, but the terminal only registers once the tool call spawns.
-   *  Killing an empty map then succeeds silently and the run never ends. Hold a kill for
-   *  the next terminal until this deadline instead.
-   *
-   *  Armed ONLY for a user stop, and BOUNDED. Internal preemption also cancels with no
-   *  terminal live, and there the replacement shell must survive — arming on every cancel
-   *  killed the preempting run's own terminal, so nothing stayed running to queue behind. */
+  /** How long a user stop that lands before its terminal exists is held for the next terminal; armed only for a user stop, since an internal preemption's replacement shell must survive. */
   const CANCEL_GRACE_MS = 2_000;
   let cancelDeadline = 0;
   const terminals = new Map<string, ReturnType<ExecBackend["spawn"]>>();
@@ -73,10 +57,8 @@ export function createSandboxClientHandlers(
 
     async createTerminal(params) {
       debug("[acp] createTerminal:", JSON.stringify({ command: params.command, args: params.args, cwd: params.cwd }));
-      // goose passes ITS OWN session cwd (a path in the agent-host pod), which
-      // does not exist in the sandbox. The agent's work happens in the sandbox
-      // workspace, so run there unless goose gave a sandbox-absolute path under
-      // /workspace. (A `cd` to a missing dir would fail the whole command.)
+      // goose passes its own session cwd, which does not exist in the sandbox, so run in
+      // the workspace unless goose gave a path under /workspace.
       const sandboxCwd =
         params.cwd && params.cwd.startsWith("/workspace") ? params.cwd : "/workspace";
       const handle = exec.spawn({
@@ -87,9 +69,8 @@ export function createSandboxClientHandlers(
       });
       terminals.set(handle.id, handle);
       if (Date.now() < cancelDeadline) {
-        // A cancel landed while this terminal was still starting — kill it now rather
-        // than letting it run to completion after the user asked it to stop. Consumed
-        // here so one missed cancel kills one terminal, not every later one.
+        // A cancel landed while this terminal was still starting, so kill it now; one
+        // missed cancel kills one terminal.
         cancelDeadline = 0;
         log.info("killing a terminal that started after a cancel", { terminal_id: handle.id });
         void handle.kill().catch(() => {});
@@ -99,10 +80,8 @@ export function createSandboxClientHandlers(
       handle.onOutput((chunk) => {
         terminalBuffers.set(handle.id, (terminalBuffers.get(handle.id) ?? "") + chunk);
       });
-      // Surface the command so the bridge can attribute it to the tool call
-      // (keyed by this terminalId) and the UI can show WHAT ran. Pass the ORIGINAL
-      // command/args goose requested (not the sandboxCwd-adjusted spawn), which is
-      // what the user means by "the command".
+      // Surface the original command/args goose requested so the bridge can attribute
+      // them to the tool call.
       onTerminalCreated?.(handle.id, params.command, params.args ?? []);
       return { terminalId: handle.id };
     },
@@ -116,11 +95,8 @@ export function createSandboxClientHandlers(
     async waitForTerminalExit(params) {
       const handle = terminals.get(params.terminalId);
       if (!handle) {
-        // Finding #14: an unknown terminalId is a HOST bug (the id was never
-        // registered, or was released/killed before this wait) — NOT a command
-        // outcome. Fabricating exitCode:1 made an internal bug masquerade as "your
-        // command failed", misleading the agent. Throw a clear protocol error
-        // instead (still non-hanging — the original concern — but honest).
+        // An unknown terminalId is a host bug, not a command outcome, so throw a
+        // protocol error rather than fabricate an exit code.
         throw new Error(`waitForTerminalExit: unknown terminalId ${params.terminalId}`);
       }
       const { exitCode } = await handle.waitForExit();
@@ -138,14 +114,8 @@ export function createSandboxClientHandlers(
     },
 
     async killAllTerminals(graceForPendingSpawn = false) {
-      // Cancel: kill every live terminal so a running command (a stuck shell) is
-      // actually stopped, not just left orphaned. Kills concurrently; a failure on
-      // one must not skip the rest.
-      //
-      // An EMPTY map succeeds silently — indistinguishable from a real kill at the call
-      // site, which is how "the Stop button does nothing" looks from above. When there
-      // is nothing to kill, arm the grace window instead: the shell this cancel was
-      // aimed at is probably still spawning.
+      // Kill every live terminal concurrently, and when there is nothing to kill arm the
+      // grace window since the shell this cancel was aimed at is probably still spawning.
       if (graceForPendingSpawn && terminals.size === 0) cancelDeadline = Date.now() + CANCEL_GRACE_MS;
       log.info("killAllTerminals", { terminal_count: terminals.size, grace: graceForPendingSpawn });
       await Promise.allSettled([...terminals.values()].map((h) => h.kill()));

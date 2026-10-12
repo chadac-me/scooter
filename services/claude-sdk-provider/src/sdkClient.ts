@@ -1,17 +1,10 @@
 /**
- * AcpClient backed by the Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`),
- * for the `claude-code` provider. Drop-in for the goose-backed createAcpClient:
- * it satisfies the SAME AcpClient interface, so the bridge / SessionManager /
- * AG-UI mapping / permission flow are unchanged.
- *
- * Why: under the goose claude-code path, claude's built-in Bash/Read/Edit/Write
- * run in the agent-host pod (proven live) — so scooter-rebuild (in the sandbox)
- * was unreachable. Here we DISABLE those built-ins and redirect them (toolAliases
- * + disallowedTools) to an in-process MCP server whose tools exec via ExecBackend
- * → the SANDBOX pod. Subscription auth is preserved: the SDK spawns the same
- * `claude` CLI, authenticated with CLAUDE_CODE_OAUTH_TOKEN via options.env.
- *
- * See todo/CLAUDE_AGENT_SDK_PROVIDER.md for the full design.
+ * AcpClient backed by the Claude Agent SDK, for the `claude-code` provider. It
+ * satisfies the same AcpClient interface as the goose-backed client, so the bridge,
+ * SessionManager, AG-UI mapping and permission flow are shared. Claude's built-in
+ * Bash/Read/Edit/Write are disabled and aliased to an in-process MCP server whose
+ * tools exec via ExecBackend into the sandbox pod, while the SDK spawns the `claude`
+ * CLI authenticated with CLAUDE_CODE_OAUTH_TOKEN.
  */
 
 import type {
@@ -30,98 +23,62 @@ import { createSandboxMcpServer } from "./sandboxMcp.js";
 import { decideTool } from "./toolPolicy.js";
 import { debug, debugError } from "./debug.js";
 
-// Stream text/thinking as deltas (responsive AG-UI). MUST be threaded into
-// sdkMessageToUpdates so the final `assistant` message doesn't ALSO re-emit the
-// text — else every reply is sent twice (see sdkAdapter's partialsEnabled).
+// Stream text/thinking as deltas, threaded into sdkMessageToUpdates so the final assistant message does not re-emit the text.
 const INCLUDE_PARTIALS = true;
 
 export interface SdkAcpClientDeps {
-  /** Subscription OAuth token (`claude setup-token`). Passed to the SDK as
-   *  env.CLAUDE_CODE_OAUTH_TOKEN so its `claude` subprocess authenticates. */
+  /** Subscription OAuth token, passed to the SDK as env.CLAUDE_CODE_OAUTH_TOKEN. */
   oauthToken: string;
-  /** Model for query() (was GOOSE_MODEL). */
+  /** Model for query(). */
   model: string;
-  /** Services the sandbox-routed MCP tools — the SAME ExecBackend the goose ACP
-   *  handlers use, so tool calls exec in this conversation's sandbox pod. */
+  /** The ExecBackend the sandbox-routed MCP tools run through. */
   exec: ExecBackend;
-  /** The scooter-env HTTP MCP endpoint URL for THIS conversation (already carries
-   *  ?conv=<id>). Exposes the platform tools — scheduler, slack/github/gitlab/jira,
-   *  background jobs, model switch, sandbox resize — to the agent. Omit to run with
-   *  only the sandbox tools (e.g. no MCP endpoint deployed). Without this, the
-   *  claude-code agent can DESCRIBE those capabilities (from its skills) but has no
-   *  tools to actually use them. */
+  /** The scooter-env HTTP MCP endpoint URL for this conversation; omit to run with only the sandbox tools. */
   mcpEndpointUrl?: string;
-  /** Headers for `mcpEndpointUrl` — the conversation token. The endpoint takes its
-   *  conversation from this, not from the URL. Why: issue #700. */
+  /** Headers for `mcpEndpointUrl`, carrying the conversation token the endpoint resolves its conversation from. */
   mcpEndpointHeaders?: Record<string, string>;
-  /** ADDITIONAL named MCP servers, each already reachable at its own URL. The in-cluster paths
-   *  pass mcpEndpointUrl (one server on loopback); a BYO container passes this instead — one
-   *  local proxy per server, tunnelled to the cloud — because a conversation can offer MANY
-   *  servers and their URLs are per-container, not a single fixed endpoint. */
+  /** Additional named MCP servers, each reachable at its own URL, as a BYO container passes one local tunnelled proxy per server. */
   mcpServers?: Array<{ name: string; url: string; headers?: Record<string, string> }>;
-  /** Agent identity, as the SDK systemPrompt. Carries NO skill bodies: the SDK
-   *  discovers those from `<cwd>/.claude/skills` when settingSources allows. */
+  /** Agent identity as the SDK systemPrompt, carrying no skill bodies since the SDK discovers those from `<cwd>/.claude/skills`. */
   systemPrompt: string;
   /** Working dir the SDK scans for `.claude/skills` (and CLAUDE.md). */
   cwd?: string;
-  /** Filesystem settings the SDK may load. MUST include "project" for skills:
-   *  with this unset the SDK loads none, so no skill list is ever sent. */
+  /** Filesystem settings the SDK may load, which must include "project" for skills to be discovered. */
   settingSources?: Array<"user" | "project" | "local">;
-  /** Called once with the SDK's init report, so the caller can log what the
-   *  session actually discovered (skills, command count). */
+  /** Called once with the SDK's init report so the caller can log the discovered skills and command count. */
   onInit?: (info: { skills: unknown[]; commands: number }) => void;
-  /** Which discovered skills Claude may invoke: "all", or an exact-name list.
-   *  Setting it also puts the Skill tool in allowedTools automatically -- which
-   *  our explicit allowedTools otherwise suppresses. */
+  /** Which discovered skills Claude may invoke ("all" or an exact-name list), which also puts the Skill tool in allowedTools. */
   skills?: "all" | string[];
   /** Extra env for the claude subprocess (e.g. IS_SANDBOX if ever needed). */
   extraEnv?: Record<string, string>;
-  /** Absolute path to a glibc `claude` CLI to use instead of the SDK's bundled
-   *  (musl) one. Defaults to CLAUDE_CODE_COMMAND env, else "claude" on PATH. */
+  /** Absolute path to a glibc `claude` CLI; defaults to CLAUDE_CODE_COMMAND, else "claude" on PATH. */
   claudeCodePath?: string;
-  /** Override the SDK's query() — for tests (inject a fake stream). Defaults to the
-   *  real `@anthropic-ai/claude-agent-sdk` query, imported lazily. */
+  /** Override the SDK's query() for tests; defaults to the real SDK query, imported lazily. */
   queryImpl?: SdkQueryFn;
-  /** BACK-PRESSURE: when this returns true, a higher-priority item is waiting on
-   *  the parent's queue (e.g. a finished subagent's result). The pre-tool gate
-   *  then DENIES the next tool with an explanation + interrupt:true, ending the
-   *  turn so the parent goes idle and the queued item can inject — instead of the
-   *  agent spinning in a tool loop that blocks its own result. Omit to disable.
-   *  See todo/docs/SUBAGENT_BACKPRESSURE.md. */
+  /** Back-pressure probe: when it returns true a higher-priority item is waiting, and the next tool-call boundary ends the turn so it can inject. */
   shouldYield?: () => boolean;
-  /** TRANSCRIPT RECORDER (test-harness): when set, called with each RAW SDK
-   *  query() message BEFORE normalization — the ground truth for keeping the fake
-   *  query() faithful. Injected by agent-host (which owns the file writing); this
-   *  isolated package stays dependency-free. Omit to disable (zero overhead).
-   *  See todo/docs/AGENT_TRANSCRIPT_HARNESS.md. */
+  /** Transcript recorder, called with each raw SDK query() message before normalization. */
   recordRaw?: (msg: unknown) => void;
 }
 
-/** The minimal shape of the SDK's query() we depend on — declared locally so this
- *  module type-checks without the SDK installed (it's imported lazily at runtime). */
+/** The minimal shape of the SDK's query() this module depends on, declared locally so it type-checks without the SDK installed. */
 interface SdkQuery extends AsyncIterable<SdkMessage> {
-  /** Interrupt the running turn (cancel). */
+  /** Interrupt the running turn. */
   interrupt?(): Promise<void>;
 }
-/** A minimal mirror of the SDK's `SDKUserMessage` (the streaming-input form of
- *  query()'s `prompt`). We only ever yield ONE of these — it's how a MULTIMODAL
- *  prompt (text + image the model can SEE) is passed, since a plain-string prompt
- *  can't carry image bytes. */
+/** A minimal mirror of the SDK's `SDKUserMessage`, the streaming-input form that carries a multimodal prompt. */
 type SdkUserMessage = {
   type: "user";
   message: { role: "user"; content: SdkContentParam[] };
   parent_tool_use_id: string | null;
 };
-/** Anthropic content-block params we emit into a streaming-input user message:
- *  text, and a base64 image in the wire shape the model actually SEES. */
+/** Content-block params emitted into a streaming-input user message. */
 type SdkContentParam =
   | { type: "text"; text: string }
   | { type: "image"; source: { type: "base64"; media_type: string; data: string } };
 type SdkQueryFn = (params: { prompt: string | AsyncIterable<SdkUserMessage>; options: Record<string, unknown> }) => SdkQuery;
 
-/** Flatten a text-only ContentBlock[] prompt to the string query() takes. Used for
- *  the common (no-image) path; a prompt carrying an image goes through
- *  promptToSdkContent + the streaming-input form instead (see prompt()). */
+/** Flatten a text-only ContentBlock[] prompt to the string query() takes. */
 function promptToText(blocks: ContentBlock[]): string {
   return blocks
     .map((b) => (b.type === "text" ? b.text : b.type === "resource_link" ? b.uri : ""))
@@ -129,11 +86,7 @@ function promptToText(blocks: ContentBlock[]): string {
     .join("\n");
 }
 
-/** Map ACP prompt blocks to Anthropic content-block params for the SDK's
- *  streaming-input form. image → a base64 image block (the model SEES it) —
- *  emitting it as the literal text "[image]" is exactly why the agent was blind to
- *  attachments. text/resource_link → text (empty text dropped: the API rejects an
- *  empty text block). */
+/** Map ACP prompt blocks to content-block params for the SDK's streaming-input form, dropping empty text blocks. */
 function promptToSdkContent(blocks: ContentBlock[]): SdkContentParam[] {
   const out: SdkContentParam[] = [];
   for (const b of blocks) {
@@ -144,16 +97,13 @@ function promptToSdkContent(blocks: ContentBlock[]): SdkContentParam[] {
   return out;
 }
 
-/** Map an SDK result message's terminal reason to the bridge's stopReason string
- *  (the bridge only distinguishes end_turn vs an error-ish stop). */
+/** Map an SDK result message's terminal reason to the bridge's stopReason string. */
 function resultStopReason(msg: { subtype?: string; is_error?: boolean }): string {
   if (msg.subtype === "success") return "end_turn";
   return msg.subtype ?? (msg.is_error ? "error" : "end_turn");
 }
 
-/** Build a `context_usage` update from the SDK result's modelUsage (per-model
- *  inputTokens/cache/output + contextWindow). Sums used tokens across models and
- *  takes the largest window. Returns null if the result has no usable usage. */
+/** Build a `context_usage` update from the SDK result's modelUsage, or null if it carries no usable usage. */
 function emitContextUsage(msg: unknown): SessionUpdate | null {
   const mu = (msg as { modelUsage?: Record<string, {
     inputTokens?: number; outputTokens?: number;
@@ -163,9 +113,7 @@ function emitContextUsage(msg: unknown): SessionUpdate | null {
   let used = 0;
   let contextWindow = 0;
   for (const u of Object.values(mu)) {
-    // Context usage = the prompt going INTO the next turn: input + both cache tiers.
-    // (output isn't part of the resident context, but including it slightly
-    // over-estimates toward "getting full", which is the safe direction for a bar.)
+    // Context usage is the prompt going into the next turn: input plus both cache tiers, with output included as a safe over-estimate.
     used += (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0) + (u.outputTokens ?? 0);
     if ((u.contextWindow ?? 0) > contextWindow) contextWindow = u.contextWindow ?? 0;
   }
@@ -175,7 +123,6 @@ function emitContextUsage(msg: unknown): SessionUpdate | null {
 
 /** Spawn an SDK-backed AcpClient. */
 export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpClient> {
-  // Build the sandbox MCP server + the alias/disable lists ONCE per client.
   const { server, toolAliases, disallowedTools } = await createSandboxMcpServer(deps.exec);
 
   // Lazy import so the module graph (and unit tests) load without the SDK.
@@ -186,29 +133,21 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
   const updateCbs = new Set<(sessionId: string, u: SessionUpdate) => void>();
   const terminalCreatedCbs = new Set<(id: string, command: string, args: string[]) => void>();
   let permissionHandler: ((req: PermissionRequest) => Promise<PermissionAnswer>) | undefined;
-  /** Monotonic suffix so each permission request gets its own id (see canUseTool). */
+  /** Monotonic suffix so each permission request gets its own id. */
   let permissionSeq = 0;
 
   let sessionId = "";
   let active: SdkQuery | undefined; // the in-flight query() for cancel()
-  let closed = false; // set by close(); the SDK runs in-process, so "alive" == not closed
+  let closed = false; // the SDK runs in-process, so alive means not closed
 
-  // This provider runs IN-PROCESS, so its failures never reach a stderr the agent-host
-  // can tail — they would be lost to the agent-host's own console. Keep the last few
-  // so the dead-on-arrival watchdog can quote one (the `[ede_diagnostic]` signature
-  // lands here). Why: PR #565.
+  // The SDK runs in-process, so its failures never reach a stderr the agent-host can tail; keep the last few lines for the dead-on-arrival watchdog to quote.
   const diagnostics: string[] = [];
   const DIAGNOSTICS_MAX = 20;
   const noteDiagnostic = (line: string): void => {
     diagnostics.push(line);
     if (diagnostics.length > DIAGNOSTICS_MAX) diagnostics.shift();
   };
-  // The SDK's OWN session UUID (from message.session_id), captured each turn and
-  // passed as `resume` on the next prompt so the conversation CONTINUES with full
-  // history — without it every query() is a fresh, context-free session (the agent
-  // "loses total context", most visibly after a cancel). Resume also survives an
-  // interrupt: the interrupted session's transcript is intact, so the next turn
-  // picks up where it left off instead of dead-starting.
+  // The SDK's own session UUID, captured each turn and passed as `resume` on the next prompt so the conversation continues with full history.
   let sdkSessionId: string | undefined;
   /** Init is logged once per client, not once per turn. */
   let loggedInit = false;
@@ -219,15 +158,9 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
     ...(deps.cwd ? { cwd: deps.cwd } : {}),
     ...(deps.settingSources ? { settingSources: deps.settingSources } : {}),
     ...(deps.skills ? { skills: deps.skills } : {}),
-    // The SDK bundles its OWN `claude` binary (musl-linked) which fails to launch on
-    // the glibc NixOS image. Point it at the glibc `claude` baked onto the image
-    // (nixpkgs claude-code, on PATH as `claude`), overridable via CLAUDE_CODE_COMMAND.
+    // The SDK's bundled musl `claude` cannot launch on the glibc image, so point it at the glibc CLI on PATH, overridable via CLAUDE_CODE_COMMAND.
     pathToClaudeCodeExecutable: deps.claudeCodePath ?? process.env.CLAUDE_CODE_COMMAND ?? "claude",
-    // `sandbox` routes Bash/Read/Edit/Write into the pod; `scooter-env` (when wired)
-    // is the platform HTTP MCP server carrying scheduler / slack / github / gitlab /
-    // jira / background-jobs / model-switch / sandbox-resize tools. WITHOUT scooter-env
-    // the claude-code agent only has the sandbox tools — it can describe scheduling
-    // etc. from its skills but can't actually invoke them.
+    // `sandbox` routes Bash/Read/Edit/Write into the pod; `scooter-env` is the platform HTTP MCP server carrying the scheduler, chat, background-job, model-switch and resize tools.
     mcpServers: {
       sandbox: server,
       ...(deps.mcpEndpointUrl
@@ -249,30 +182,16 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
     },
     toolAliases,
     disallowedTools,
-    // DENY-BY-DEFAULT. "default" mode PROMPTS for anything not pre-approved, and the
-    // spawned CLI is headless — nobody answers, the turn stalls holding the prompt,
-    // and readMessages throws `stop_reason=tool_use` while the UI shows a bare exit 1.
-    // "dontAsk" is documented as "Don't prompt for permissions, deny if not
-    // pre-approved", which is exactly the contract we want. Belt to the hook's braces:
-    // even if a call bypasses PreToolUse, nothing headless can sit on a prompt.
+    // Deny by default: "dontAsk" refuses anything not pre-approved instead of prompting, which the headless CLI could never answer.
     permissionMode: "dontAsk",
-    // Suppresses the permission PROMPT for tools we own (per the SDK docs). Their real
-    // gate is the PreToolUse hook below + the bridge's own permission flow.
+    // Suppresses the permission prompt for the tools we own; their real gate is the PreToolUse hook and the bridge's permission flow.
     allowedTools: [
       ...Object.values(toolAliases),
       ...(deps.mcpEndpointUrl ? ["mcp__scooter-env"] : []),
       ...(deps.mcpServers ?? []).map((m) => `mcp__${m.name}`),
       ...(deps.mcpServers ?? []).map((m) => `mcp__${m.name}`),
     ],
-    // THE enforcement point. canUseTool is a USER-INPUT callback — the SDK docs say it
-    // "never fires for auto-approved tools", which is why the note below about it not
-    // firing 18× is documented behaviour rather than a bug. For logic that must apply
-    // to EVERY call the documented mechanism is PreToolUse, which runs before the rest
-    // of the permission flow and cannot be short-circuited by an earlier approval.
-    //
-    // A denial here is seen by the model, which "may adjust its approach" (SDK docs),
-    // so an unsupported tool redirects it onto the scooter-env equivalent instead of
-    // hanging the turn. See toolPolicy.ts for the policy and its rationale.
+    // The enforcement point: PreToolUse runs for every call, and a denial is seen by the model, which redirects onto the scooter-env equivalent (see toolPolicy.ts).
     hooks: {
       PreToolUse: [
         {
@@ -295,27 +214,14 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
         },
       ],
     },
-    includePartialMessages: INCLUDE_PARTIALS, // stream text deltas for responsive AG-UI
-    // Surface the spawned claude CLI's stderr — otherwise a CLI failure (bad flag,
-    // auth, version mismatch) is an opaque "exited with code 1". Always logged.
+    includePartialMessages: INCLUDE_PARTIALS, // stream text deltas
+    // Surface the spawned claude CLI's stderr so a CLI failure is not an opaque exit 1.
     stderr: (data: string) => debugError("[sdk:claude-stderr]", data),
-    // MERGE with process.env — the SDK REPLACES the subprocess env with this object
-    // (does not merge), so passing only the token strips PATH/HOME/etc and the
-    // spawned claude crashes configuring its HTTP client (the axios baseURL error).
+    // The SDK replaces the subprocess env with this object rather than merging, so process.env must be spread in.
     env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: deps.oauthToken, ...(deps.extraEnv ?? {}) },
-    // canUseTool is the USER-INPUT callback: the SDK calls it only when it needs a
-    // human (an approval prompt, or AskUserQuestion). It does NOT fire for tools an
-    // earlier step already approved — allowedTools, or a mode like dontAsk — which is
-    // documented behaviour, not a quirk. Seen in production (2026-08) as a
-    // check_subagent loop running 18× with this callback never firing.
-    //
-    // So back-pressure CANNOT rely on this path; the real yield gate is the
-    // tool-call-boundary interrupt in prompt()'s stream loop below, and per-call policy
-    // lives in the PreToolUse hook above. Kept as defence in depth for anything that
-    // DOES reach it. https://code.claude.com/docs/en/agent-sdk/user-input
+    // canUseTool is the user-input callback and does not fire for pre-approved tools, so the real yield gate is the tool-call-boundary check in prompt() and this is defence in depth.
     canUseTool: async (toolName: string, input: unknown) => {
-      // BACK-PRESSURE (defense-in-depth; the stream-loop interrupt is primary): if a
-      // higher-priority item is waiting, DENY with interrupt:true so the turn ENDS.
+      // Back-pressure: if a higher-priority item is waiting, deny with interrupt:true so the turn ends.
       if (deps.shouldYield?.()) {
         return {
           behavior: "deny",
@@ -327,11 +233,7 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
         };
       }
       if (!permissionHandler) return { behavior: "allow", updatedInput: input };
-      // UNIQUE per request. The bridge keys pendingPermissions by toolCallId, so reusing
-      // the tool NAME made two concurrent calls to the same tool collide: the second
-      // `set` evicted the first, whose promise then never resolved — the tool call hung
-      // with no TOOL_CALL_RESULT and the agent reported it as "rejected". The SDK does
-      // not hand us its tool_use id here, so mint one. PR #413.
+      // The bridge keys pendingPermissions by toolCallId, so each request needs a unique id; the SDK does not hand us its tool_use id here.
       const permissionId = `perm-${toolName}-${++permissionSeq}`;
       const ans = await permissionHandler({
         sessionId,
@@ -353,21 +255,17 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
     },
 
     async newSession(_p: NewSessionParams) {
-      // The SDK mints its own session id on first query; we return a stable handle.
+      // The SDK mints its own session id on first query; this is a stable handle.
       sessionId = `sdk_${Date.now()}`;
-      // A genuinely new conversation starts fresh — clear any resume id so the first
-      // prompt is a new SDK session (not a resume of the previous conversation).
+      // Clear any resume id so the first prompt starts a fresh SDK session.
       sdkSessionId = undefined;
       return { sessionId };
     },
 
     async prompt(params: PromptParams): Promise<{ stopReason: string }> {
-      // Resume the SDK session so the turn CONTINUES the conversation (history
-      // intact). First turn: sdkSessionId is undefined → a fresh session.
+      // Resume the SDK session so the turn continues the conversation; undefined on the first turn.
       const options = sdkSessionId ? { ...baseOptions, resume: sdkSessionId } : baseOptions;
-      // A prompt with an image can't ride the plain-string form — pass it via the
-      // SDK streaming-input form (one user message of content blocks) so the base64
-      // image reaches the model. Text-only stays a string (unchanged common path).
+      // A prompt with an image rides the SDK streaming-input form so the base64 image reaches the model.
       const hasImage = params.prompt.some((b) => b.type === "image");
       const promptArg: string | AsyncIterable<SdkUserMessage> = hasImage
         ? (async function* () {
@@ -384,10 +282,7 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
       let stopReason = "end_turn";
       try {
         for await (const msg of q) {
-          // The SDK's init message carries the skills it discovered. Surface it
-          // via onInit so the host can LOG it: the previous version wrote to an
-          // in-memory ring buffer nothing reads, so the one diagnostic added for
-          // "the agent cannot see its skills" was itself unreadable.
+          // Surface the SDK's init message (the skills it discovered) via onInit so the host can log it.
           const m = msg as { type?: string; subtype?: string; skills?: unknown; slash_commands?: unknown };
           if (m.type === "system" && m.subtype === "init" && !loggedInit) {
             loggedInit = true;
@@ -397,16 +292,12 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
             });
           }
           deps.recordRaw?.(msg);
-          // Capture the SDK's session id from any message that carries it, so the
-          // NEXT prompt resumes this same session. (The id is stable across a turn;
-          // capturing every time is harmless and covers new/forked sessions.)
+          // Capture the SDK's session id so the next prompt resumes this same session.
           const sid = (msg as { session_id?: string }).session_id;
           if (sid) sdkSessionId = sid;
           if (msg.type === "result") {
             stopReason = resultStopReason(msg as { subtype?: string; is_error?: boolean });
-            // The result carries per-model usage incl. the context window — emit a
-            // context_usage update so the UI can show a fill bar. modelUsage is keyed
-            // by model id (usually one); sum used tokens, take the max window.
+            // The result carries per-model usage including the context window; emit it for the UI's fill bar.
             const usage = emitContextUsage(msg);
             if (usage) for (const cb of updateCbs) cb(sessionId, usage);
             continue;
@@ -415,29 +306,7 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
           for (const u of updates) {
             for (const cb of updateCbs) cb(sessionId, u);
           }
-          // BACK-PRESSURE (the real gate on the claude-code provider): the SDK does
-          // NOT invoke canUseTool for our allowed/aliased tools, so we can't deny a
-          // tool there. Instead, when the agent ISSUES a tool call (a `tool_use`
-          // block → a `tool_call` update), if a higher-priority item is now waiting
-          // (a subagent result, a priority message), END the turn cleanly by stopping
-          // consumption of the query stream — the agent goes idle and the queued item
-          // injects on the next turn, instead of spinning in a check_subagent loop
-          // that blocks the very result it awaits.
-          //
-          // We key on `tool_call` (the CALL), NOT `tool_call_update` (the RESULT):
-          // verified from a recorded real transcript that the SDK sends tool_result
-          // in a `user` message the adapter drops — so tool_call_update is NEVER
-          // emitted for claude, and the old hook never fired (the production bug).
-          // The tool_call fires reliably.
-          //
-          // CRITICAL: we do NOT call q.interrupt() here — that sends "user stopped"
-          // / "tool rejected" signals the agent can't distinguish from a real user
-          // action (the bug in #453). Instead we just break, abandoning the stream.
-          // The SDK session is preserved via sdkSessionId and resumes on the next
-          // turn, so the in-flight tool call naturally re-issues after the priority
-          // item is handled. Breaking cleanly (vs interrupt) prevents spurious
-          // interrupt/denial signals from reaching the agent during notification
-          // delivery.
+          // Back-pressure gate: when the agent issues a tool call while a higher-priority item is waiting, stop consuming the stream without interrupting, so the agent goes idle and the resumed session re-issues the call on the next turn.
           if (deps.shouldYield?.() && updates.some((u) => u.sessionUpdate === "tool_call")) {
             debug("[sdk] back-pressure: yielding turn (priority item waiting) — ending stream");
             stopReason = "end_turn";
@@ -461,15 +330,12 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
     },
 
     async killActiveTerminals() {
-      // The SDK owns tool execution; interrupting the query stops the running
-      // tool. Sandbox terminals are ExecBackend handles released per-call.
+      // Interrupting the query stops the running tool; sandbox terminals are ExecBackend handles released per call.
       await active?.interrupt?.().catch(() => {});
     },
 
     isAlive() {
-      // In-process SDK: there's no subprocess to crash, so it's alive until
-      // close(). (A hung tool call here is bounded by the ExecBackend command
-      // timeout, same as goose — not by this liveness signal.)
+      // The in-process SDK has no subprocess to crash, so it is alive until close().
       return !closed;
     },
 

@@ -1,30 +1,10 @@
 #!/usr/bin/env node
 /**
- * Distribute INDIVIDUAL TESTS (not spec files) into N balanced shards.
- *
- * WHY PER-TEST. File-level packing cannot balance this suite. From the 4-shard run
- * 36645763986: shard 1 got 5 tests / 139s while shard 3 got 41 tests / 1816s -- a
- * 12x spread -- because a file is an atomic unit and some files are enormous. The
- * worst single TEST is 347s (concurrency-divergence.spec.ts:68), longer than most
- * whole files, so no file-level assignment can smooth it. Per-test packing makes
- * 347s the floor on imbalance instead of ~540s (queue-durability.spec.ts, which is
- * really 2x175s tests plus others).
- *
- * It also dissolves the duplicated smoke work: `cluster smoke` ran platform-smoke +
- * event-backfill (127s + 30s) on EVERY shard against four identical clusters. Those
- * are 3 + 3 individual tests, so they schedule like anything else and run ONCE.
- *
- * ONE POOL for both runners. A shard carrying platform-smoke's slowest test should
- * get less playwright work, and that only balances if both kinds share a weight
- * list. Each test carries `kind` and the emitted matrix has a selector per kind.
- *
- * SELECTION IS BY TITLE, ESCAPED. See test-inventory.mjs for why -- briefly: a
- * stale file:line matches nothing and exits 0, and an unescaped regex metacharacter
- * does the same (59/170 playwright titles and 25/47 cluster titles contain one).
- *
- * COMPLETENESS IS ASSERTED, not assumed. Per-test sharding can silently drop a
- * test in ways file-level sharding could not, so this fails rather than emitting a
- * plan whose selections do not cover the inventory exactly once.
+ * Distribute individual tests (not spec files) into N balanced shards. A file is an atomic
+ * unit and some files are enormous, so per-test packing is what keeps the shards balanced;
+ * playwright and cluster tests share one pool so the weights balance across both kinds.
+ * Selection is by escaped title (see test-inventory.mjs), and completeness is asserted
+ * rather than assumed: the plan fails unless its selections cover the inventory exactly once.
  *
  * Usage:
  *   node test/e2e/support/shard-tests.mjs <N>
@@ -40,16 +20,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const E2E_DIR = join(HERE, "..");
 const WEIGHTS_PATH = join(E2E_DIR, "test-weights.json");
 
-const DEFAULT_WEIGHT = 30; // seconds — a middling test.
+const DEFAULT_WEIGHT = 30; // seconds; a middling test
 
-/** A stable key for a test across runs: "<kind> <file basename> <title>".
- *  Basename, not full path, so the key survives a checkout at a different prefix
- *  (CI runs under /home/runner, dev machines do not). */
+/** A stable key for a test across runs, "<kind> <file basename> <title>", using the
+ *  basename so the key survives a checkout at a different prefix. */
 export function testKey(t) {
   return `${t.kind} ${basename(t.file)} ${t.title}`;
 }
 
-/** Committed fallback weights, keyed by testKey. Missing/unparseable → {}. */
+/** Committed fallback weights keyed by testKey; missing or unparseable yields {}. */
 function committedWeights() {
   if (!existsSync(WEIGHTS_PATH)) return {};
   try {
@@ -61,8 +40,7 @@ function committedWeights() {
   }
 }
 
-/** Per-TEST durations (seconds) from a prior playwright JSON report.
- *  Keyed the same way as the weights file so the two are interchangeable. */
+/** Per-test durations (seconds) from a prior playwright JSON report, keyed like the weights file. */
 function priorReportWeights(reportPath) {
   if (!reportPath || !existsSync(reportPath)) return {};
   let report;
@@ -105,8 +83,7 @@ export function packTests(tests, weights, n) {
   return shards;
 }
 
-/** THE COVERAGE ASSERTION. Every inventory test must appear in exactly one shard.
- *  Throws with the specific tests at fault rather than emitting a lossy plan. */
+/** Every inventory test must appear in exactly one shard; throws naming the tests at fault. */
 export function assertCoverage(inventoryTests, shards) {
   const seen = new Map();
   for (const [i, s] of shards.entries()) {
@@ -138,12 +115,8 @@ export function assertCoverage(inventoryTests, shards) {
   return { covered: seen.size };
 }
 
-/** Build the per-shard selector strings. Playwright takes --grep, vitest takes -t;
- *  both are regexes, so titles are escaped and joined with |.
- *
- *  An EMPTY string means "this shard has no tests of that kind" -- the workflow
- *  must skip the step rather than run it with an empty pattern, which would match
- *  EVERYTHING. */
+/** Build the per-shard selector strings (escaped titles joined with |); an empty string
+ *  means the shard has no tests of that kind and the workflow must skip the step. */
 export function selectorsFor(shardTests) {
   const grepFor = (kind) => {
     const titles = shardTests

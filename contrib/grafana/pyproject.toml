@@ -8,12 +8,12 @@ version = "0.0.0"
 license = "MIT"
 description = "Grafana integration for Scooter's broker — proxies /grafana/* with a service-account token injected"
 requires-python = ">=3.11"
-# Depends on the extension SURFACE, never on the broker app. Why: PR #567.
+# Depends on the extension surface, never on the broker app.
 dependencies = [
   "fastapi",
 ]
 
-# One EXTRA per service. Why: PR #567.
+# One extra per service.
 [project.optional-dependencies]
 broker = ["scooter-broker-lib", "scooter-lib"]
 

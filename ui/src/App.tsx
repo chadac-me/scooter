@@ -21,9 +21,7 @@ import { Thread } from "@/components/assistant-ui/thread";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-/** The Thread wrapped in an error boundary keyed to the render tick, so a
- *  transient assistant-ui runtime crash (e.g. during a model-switch rebuild)
- *  recovers on the next frame instead of blanking the page. */
+/** The Thread in an error boundary keyed to the render tick, so a transient runtime crash recovers on the next frame. */
 function GuardedThread() {
   const { renderTick } = useConversationInterrupts();
   return (
@@ -33,21 +31,14 @@ function GuardedThread() {
   );
 }
 
-/** The conversation area: ALWAYS the thread (its history + composer), even when the
- *  pod is asleep. A suspended/ended pod no longer takes the screen over with a landing
- *  that hides the conversation — the history renders straight off the persisted
- *  integrity stream (no live pod needed), and SENDING a message resumes the pod
- *  automatically (promptByThread revives before it runs). Start is also available in
- *  the Sandbox tab for an explicit wake. The only non-thread state is the brief
- *  spinner while a Sandbox-tab Start is in flight, so that click gives feedback. */
+/** The conversation area is always the thread, even when the pod is asleep; the only other state is the spinner while a Sandbox-tab Start is in flight. */
 function ConversationArea() {
   const { starting } = useSandboxStatus();
   if (starting) return <StartingPodLanding />;
   return <GuardedThread />;
 }
 
-/** Header sandbox pill — a colored dot + "sandbox <state>", mirroring the Sandbox
- *  tab's own status so the pod's liveness is visible from anywhere in the shell. */
+/** Header sandbox pill mirroring the Sandbox tab's status. */
 function SandboxStatusPill() {
   const { state, hasConversation } = useSandboxStatus();
   if (!hasConversation) return null;
@@ -63,9 +54,7 @@ function SandboxStatusPill() {
   );
 }
 
-/** The dim/dismiss layer shown behind an open mobile drawer. Sits below the header
- *  (top-11) so the toggle buttons stay reachable, and below the drawers (z-30 < z-40).
- *  Desktop hides it via `desk:hidden` — the panels are in-flow there, never overlays. */
+/** The dim/dismiss layer behind an open mobile drawer; it sits below the header (top-11) and the drawers (z-30), and desktop hides it via `desk:hidden`. */
 function MobileDrawerBackdrop() {
   const drawer = useDrawer();
   if (drawer === "none") return null;
@@ -86,10 +75,9 @@ export function App() {
     <RuntimeProvider>
       <div className="flex h-dvh flex-col">
         <header className="flex h-11 items-center justify-between gap-3 border-b bg-header px-3 pl-4 text-sm">
-          {/* Compact wordmark — mark + name; the tagline was dropped in the paper reskin. */}
+          {/* Compact wordmark: mark + name. */}
           <div className="flex items-center gap-2">
-            {/* Mobile-only: open the sessions drawer. Hidden at desk+ (≥1200px) where the sidebar
-                is always in-flow. Only in chat (settings has no sidebar). */}
+            {/* Mobile-only sessions-drawer toggle, hidden at desk+ and in settings. */}
             {view !== "settings" && (
               <Button
                 data-testid="mobile-nav-open"
@@ -108,13 +96,11 @@ export function App() {
             <span className="text-[13.5px] font-semibold tracking-tight">scooter</span>
           </div>
           <div className="flex items-center gap-2">
-            {/* Live pod status, mirrored from the Sandbox tab. Desktop-only — on mobile
-                the header has no room, and the same status lives in the ⚑ panel drawer. */}
+            {/* Live pod status, desktop-only. */}
             <span className="hidden desk:flex">
               <SandboxStatusPill />
             </span>
-            {/* Mobile-only: open the right panel (sandbox/approvals/queue) drawer.
-                Hidden at desk+ (≥1200px) where the panel is always in-flow. */}
+            {/* Mobile-only right-panel toggle, hidden at desk+. */}
             {view !== "settings" && (
               <Button
                 data-testid="mobile-panel-open"
@@ -131,7 +117,7 @@ export function App() {
             )}
             {/* Light / dark / system theme toggle. */}
             <ThemePicker />
-            {/* Settings (scheduled tasks, …). Toggles the main pane. */}
+            {/* Settings toggles the main pane. */}
             <Button
               data-testid="settings-toggle"
               variant="ghost"
@@ -147,8 +133,7 @@ export function App() {
             >
               ⚙
             </Button>
-            {/* Signed-in user (from the ingress identity); hidden when anonymous, and
-                desktop-only — the header can't fit it on a phone. */}
+            {/* Signed-in user, hidden when anonymous and desktop-only. */}
             <span className="hidden desk:flex">
               <UserBadge />
             </span>
@@ -161,25 +146,15 @@ export function App() {
         ) : (
           <div className="relative flex min-h-0 flex-1">
             <Sidebar />
-            {/* Dim + dismiss layer behind an open mobile drawer (md-hidden). */}
+            {/* Dim + dismiss layer behind an open mobile drawer. */}
             <MobileDrawerBackdrop />
             <main className="flex min-h-0 flex-1 flex-col">
               <div className="min-h-0 flex-1">
-                {/* Provider "post" tool calls (slack/github/gitlab/jira) render as
-                    message cards with the provider icon; other tools use the stock
-                    generic box. ToolGroupOpen keeps grouped tool calls EXPANDED so
-                    the cards + shell commands are visible top-level, not hidden
-                    behind a "N tool calls" collapse. The run status (thinking
-                    indicator + Stop) now lives INLINE in the thread (above the
-                    composer), not a detached bottom bar — see InlineRunStatus.
-                    A suspended/ended pod shows a Start landing instead of the thread. */}
+                {/* Provider "post" tool calls render as cards, and ToolGroupOpen keeps grouped tool calls expanded. */}
                 <ConversationArea />
               </div>
             </main>
-            {/* Right-side tabbed panel: Approvals (AG-UI interrupts — a gate the user
-                can't miss; auto-focused on a new one) + Queue (messages waiting behind
-                the active run, moved off the main column so a backlog no longer eats
-                the screen). Collapses entirely when both are empty. */}
+            {/* Right-side tabbed panel (Approvals + Queue); collapses entirely when both are empty. */}
             <RightPanel />
           </div>
         )}

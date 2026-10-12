@@ -33,12 +33,10 @@
 
     config = {
       src = ./.;
-      # Moved out of ui/src/toolCallView.ts by #700, now that this contrib owns the tool.
+      # The tool card the UI renders for github_comment.
       ui.tools.github_comment = { argKey = "body"; action = "commented on GitHub"; };
 
-      # pyjwt+cryptography sign the RS256 App JWT. Both halves mint one (the broker
-      # vends git/API tokens, webhooks posts comments), and neither app carries the
-      # dep any more. Why: PR #591.
+      # pyjwt+cryptography sign the RS256 App JWT that both halves mint.
       services.broker = {
         enable = true;
         pythonDeps = ps: [ ps.pyjwt ps.cryptography ];

@@ -1,17 +1,8 @@
 /**
- * ACP provider selection — a capability-tagged registry of AcpProviders resolved PER RUN.
- *
- * Today the bridge picks its ACP client ONCE (a static `usingClaude ? sdk : goose` branch in
- * makeBridge, memoized for the conversation's life). This generalizes that into a registry of
- * providers, each declaring whether it can serve a given run (`eligible(ctx)`) + a priority; a
- * resolver picks the highest-priority eligible provider PER PROMPT. `source` is a per-prompt
- * property, so the choice must be per-run: a conversation can use a personalized (remote) brain
- * for a human trigger and the cloud brain for a scheduled one.
- *
- * Increment 1 ports the existing sdk + goose branches onto two providers with disjoint
- * eligibility (only one is eligible under today's config), so the resolver picks the SAME client
- * the old branch did — behavior-identical. Increment 2 adds a `remote-personalized` provider whose
- * eligibility encodes the human-trigger guardrail. See todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+ * ACP provider selection: a registry of AcpProviders, each declaring whether it can
+ * serve a given run (`eligible(ctx)`) and a priority, resolved per run. The choice is
+ * per run because `source` is a per-prompt property: a conversation can use a
+ * personalized remote brain for a human trigger and the cloud brain for a scheduled one.
  */
 
 import { formatError, logger } from "../log.js";
@@ -21,62 +12,39 @@ import type { SessionId } from "../types.js";
 
 const log = logger("acp-providers");
 
-/** The per-run context a provider's `eligible()` decides on. Assembled by the bridge at the start
- *  of each run from the conversation + the incoming prompt. */
+/** The per-run context a provider's `eligible()` decides on, assembled by the bridge from the conversation and the incoming prompt. */
 export interface RunContext {
-  /** The conversation id (== bridge sessionId). */
+  /** The conversation id (the bridge sessionId). */
   conversationId: SessionId;
-  /** The conversation OWNER (the Scooter user), or undefined for an unowned/anonymous conv.
-   *  Used by an owner-bound provider (e.g. the remote personalized agent). */
+  /** The conversation owner, or undefined for an unowned/anonymous conversation. */
   owner?: string;
-  /** The TRIGGER source of this run: "ui" (interactive), "slack"|"github"|"gitlab" (@mention),
-   *  "scheduler" (cron), "webhook", "nudge", … — the same tag threaded through the prompt path
-   *  (agui/server.ts → manager.prompt → bridge). Undefined = a plain interactive prompt (human).
-   *  The human-trigger guardrail (Increment 2) keys on this. */
+  /** The trigger source of this run ("ui", "slack", "github", "gitlab", "scheduler", "webhook", "nudge", ...); undefined means a plain interactive prompt. */
   source?: string;
-  /** The resolved model for this run (a provider may only serve certain models). */
+  /** The resolved model for this run. */
   model?: string;
   /** The provider the user explicitly picked; undefined = priority decides. */
   provider?: string;
 }
 
-/** One selectable ACP backend (goose/bedrock, in-process claude SDK, a remote personalized agent).
- *  Providers are pure declarations of capability + a factory; the resolver + BridgeAcpManager own
- *  selection + lifecycle. */
+/** One selectable ACP backend: a pure declaration of capability plus a factory, with selection and lifecycle owned by the resolver and BridgeAcpManager. */
 export interface AcpProvider {
-  /** The MCP servers to offer THIS provider's sessions, overriding the bridge's default. The
-   *  in-cluster paths use the default (a loopback URL they can reach); a BYO container cannot
-   *  reach loopback at all, so its provider offers TUNNEL NAMES instead and the container
-   *  proxies them locally. Absent = use the bridge's config. */
+  /** The MCP servers to offer this provider's sessions, overriding the bridge's default (a BYO container offers tunnel names it proxies locally). */
   mcpServersFor?: (conversationId: string) => Array<{ type: "http"; name: string; url: string; headers: Array<{ name: string; value: string }> }>;
-  /** The MODEL-NAMESPACE this provider serves — matched against each catalog model's
-   *  `providers` tags ("goose" = Bedrock ids via goose, "claude-code" = the in-cluster
-   *  subscription SDK, "byoc" = the user's own container). Absent = the pre-dimension
-   *  behaviour: any catalog model is offered. */
+  /** The model namespace this provider serves, matched against each catalog model's `providers` tags; absent offers any catalog model. */
   modelTag?: string;
-  /** Stable id for logging/metrics + as the BridgeAcpManager cache key (one client per provider
-   *  per conversation). e.g. "bedrock-goose" | "sdk-claude" | "remote-personalized". */
+  /** Stable id for logging/metrics and the BridgeAcpManager cache key, e.g. "bedrock-goose" or "remote-personalized". */
   readonly id: string;
-  /** Recording/telemetry label — maps to the bridge's `provider` ("goose" | "claude"). */
+  /** Recording/telemetry label, the bridge's `provider`. */
   readonly kind: "goose" | "claude";
-  /** Higher wins among eligible providers. The always-eligible floor (bedrock/goose) is lowest. */
+  /** Higher wins among eligible providers; the always-eligible floor is lowest. */
   readonly priority: number;
-  /** May this provider serve THIS run? Pure + synchronous (no I/O) — it's called on every run.
-   *  The floor provider returns true unconditionally so the resolver always terminates. */
-  /** May this provider serve the run? ASYNC-CAPABLE: the BYOC provider resolves ownership through
-   *  the controller (a network call), because a per-pod in-memory map cannot answer "who owns this
-   *  owner's container" on a multi-replica fleet — that was the bug. Sync providers may still
-   *  return a plain boolean. */
+  /** Whether this provider may serve the run, possibly async since the BYOC provider asks the controller. */
   eligible(ctx: RunContext): boolean | Promise<boolean>;
-  /** Build the AcpClient for a run this provider serves. The bridge calls this at most once per
-   *  conversation (it caches + lifecycle-manages the result per provider), so it need not memoize. */
+  /** Build the AcpClient for a run this provider serves; the bridge caches the result per provider, so it need not memoize. */
   createClient(ctx: RunContext): Promise<AcpClient> | AcpClient;
 }
 
-/** Pick the ACP provider for a run: the highest-priority ELIGIBLE provider. Deterministic
- *  tie-break by id (stable across runs). Returns undefined ONLY if NO provider is eligible —
- *  callers must include an always-eligible floor (bedrock/goose) so this never happens in prod;
- *  it's `undefined`-typed so a misconfigured registry fails loud rather than silently mis-routing. */
+/** Pick the highest-priority eligible provider (tie-break by id), or undefined only when none is eligible, so a registry without a floor fails loud. */
 export async function pickAcpProvider(
   providers: readonly AcpProvider[],
   ctx: RunContext,
@@ -85,9 +53,8 @@ export async function pickAcpProvider(
   const candidates = ctx.provider ? reorderPicked(providers, ctx.provider) : providers;
   let best: AcpProvider | undefined;
   for (const p of candidates) {
-    // Awaited because eligibility can require a NETWORK call (the BYOC provider asks the
-    // controller who owns this owner's container). A provider that throws must not take the run
-    // down with it — the floor has to stay reachable — so a rejection reads as "not eligible".
+    // Awaited because eligibility can require a network call, and a provider that throws reads
+    // as "not eligible" so the floor stays reachable.
     let ok = false;
     try {
       ok = await p.eligible(ctx);
@@ -114,8 +81,5 @@ function reorderPicked(providers: readonly AcpProvider[], picked: string): reado
 }
 
 // The bridge (bridge.ts) owns per-run resolution: at the start of each run it calls
-// pickAcpProvider(providers, ctx) and lazily initializes + caches ONE fully-started client per
-// provider (initialize → newSession → wire hooks, once), pointing its active acpClient/acpSessionId
-// at the resolved provider's client. Under Increment-1 config a single provider is eligible, so the
-// choice is stable — behavior-identical to the old single-client bridge. Increment 2 adds a remote
-// provider whose eligible() encodes the human-trigger guardrail.
+// pickAcpProvider(providers, ctx) and lazily initializes and caches one fully-started client per
+// provider, pointing its active acpClient/acpSessionId at the resolved provider's client.

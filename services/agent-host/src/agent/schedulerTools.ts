@@ -1,16 +1,8 @@
 /**
- * Scheduler agent-tools — let the agent view/list/search/create/edit/delete its own
- * scheduled tasks, from inside a conversation.
- *
- * A scheduled task cron-spawns a fresh Scooter conversation with a prompt (the
- * scheduler service, services/scheduler). These MCP tools are a thin, typed front
- * over its REST API (SCHEDULER_URL), SCOPED to the conversation's owner: the agent
- * only ever sees/edits tasks owned by the same user who owns this conversation, so
- * it can't touch someone else's schedules.
- *
- * Handlers are pure (an injected SchedulerClient + owner) so they're unit-testable
- * without HTTP; registerSchedulerTools wires them onto the MCP server. Mirrors
- * agentTools.ts (pure handlers + a register fn).
+ * Scheduler agent-tools: a thin typed front over the scheduler service's REST API
+ * that lets the agent manage scheduled tasks (cron-spawned conversations), scoped to
+ * the conversation's owner so it can never touch someone else's schedules. Handlers
+ * are pure and registerSchedulerTools wires them onto the MCP server.
  */
 
 import { z } from "zod";
@@ -31,7 +23,7 @@ export interface ScheduledTask {
   last_run_at: string | null;
 }
 
-/** A run record (history). */
+/** A run record. */
 export interface TaskRun {
   id: string;
   task_id: string;
@@ -41,15 +33,10 @@ export interface TaskRun {
   fired_at: string;
 }
 
-/** The scope a scheduler call runs under: a specific owner, or `null` for the
- *  unowned/anonymous bucket (the client sends an empty x-auth-user, and the
- *  scheduler scopes to unowned tasks). Both are valid — a null owner is not an
- *  error, just a different scope. */
+/** The scope a scheduler call runs under: a specific owner, or `null` for the unowned/anonymous bucket, which is a valid scope rather than an error. */
 export type Owner = string | null;
 
-/** HTTP client to the scheduler service. Injectable for tests. Every call is made
- *  on behalf of `owner` (the conversation owner, or null for unowned) — the client
- *  sets the x-auth-user header so the scheduler scopes/attributes the task. */
+/** Client to the scheduler service, where every call is made on behalf of `owner` via the x-auth-user header. */
 export interface SchedulerClient {
   create(owner: Owner, body: { title: string; prompt: string; cron: string; timezone?: string; enabled?: boolean }): Promise<ScheduledTask>;
   list(owner: Owner): Promise<ScheduledTask[]>;
@@ -61,8 +48,7 @@ export interface SchedulerClient {
 
 export interface SchedulerToolsWiring {
   client: SchedulerClient;
-  /** Resolve THIS conversation's owner — tasks are scoped to it. Null is fine: the
-   *  tools then manage the unowned/anonymous bucket (no refusal). */
+  /** Resolve this conversation's owner, which tasks are scoped to; null manages the unowned bucket. */
   owner(conversationId: string): Promise<Owner>;
 }
 
@@ -76,7 +62,7 @@ function fmt(t: ScheduledTask): string {
   return `- ${t.id} [${state}] "${t.title}" — cron="${t.cron}" tz=${t.timezone}${next}\n    ${t.prompt.replace(/\s+/g, " ").slice(0, 120)}`;
 }
 
-// --- pure handlers (no MCP; take the wiring + args) ----------------------------
+// --- pure handlers ----------------------------
 
 export async function handleList(w: SchedulerToolsWiring, conversationId: string): Promise<ToolResult> {
   const owner = await w.owner(conversationId);

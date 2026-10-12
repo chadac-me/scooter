@@ -1,8 +1,4 @@
-"""ScooterBaseSettings — the shared settings base.
-
-The default tests are the point: the two services disagree on `agent_host_url`
-and the disagreement is semantic, so collapsing it breaks one of them silently.
-"""
+"""ScooterBaseSettings, the shared settings base, whose `agent_host_url` default the services override differently."""
 
 from __future__ import annotations
 
@@ -18,8 +14,7 @@ def _clean_env(monkeypatch):
 
 
 def test_agent_host_url_defaults_to_empty():
-    # A real default here would switch broker auto-linking ON wherever the var
-    # is unset, and start POSTing to a host that may not exist.
+    # A real default would switch broker auto-linking on wherever the var is unset.
     assert ScooterBaseSettings().agent_host_url == ""
 
 
@@ -28,7 +23,6 @@ def test_token_path_defaults_to_the_projected_sa_token():
 
 
 def test_agent_manager_url_defaults_to_empty():
-    # Empty -> the "View conversation" deep-link degrades to the raw id.
     assert ScooterBaseSettings().agent_manager_url == ""
 
 
@@ -41,8 +35,6 @@ def test_agent_manager_url_defaults_to_empty():
     ],
 )
 def test_reads_the_env_var_the_manifests_already_inject(monkeypatch, env_var, field, value):
-    # Same vars the manifests already inject — what lets a migrated contrib run
-    # against a live deployment with no manifest change.
     monkeypatch.setenv(env_var, value)
     assert getattr(ScooterBaseSettings(), field) == value
 
@@ -53,7 +45,6 @@ def test_env_lookup_is_case_insensitive(monkeypatch):
 
 
 def test_a_subclass_may_override_a_default_without_touching_the_base():
-    # This is exactly what webhooks does, and the reason the base default is "".
     class Sub(ScooterBaseSettings):
         agent_host_url: str = "http://agent-host.agent-sandbox.svc.cluster.local:8080"
 
@@ -70,6 +61,5 @@ def test_a_subclass_still_reads_the_env_over_its_own_default(monkeypatch):
 
 
 def test_two_instances_read_the_same_environment(monkeypatch):
-    # A contrib builds its own instance; both must see the same deployment config.
     monkeypatch.setenv("AGENT_HOST_URL", "http://shared:8080")
     assert ScooterBaseSettings().agent_host_url == ScooterBaseSettings().agent_host_url == "http://shared:8080"

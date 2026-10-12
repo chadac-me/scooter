@@ -1,11 +1,7 @@
 /**
- * Tier 1 contract test — the overlay-store PVC wiring in the rendered Sandbox.
- *
- * When overlayStore is on (the agent uses the overlay-store image so its runtime
- * re-converge / in-pod builds can write), the Sandbox podTemplate must mount a
- * disk-backed PVC upper at /nix/.scooter-rw and declare a matching
- * volumeClaimTemplate. When off, neither appears. Pins the wiring so it can't
- * silently regress.
+ * The overlay-store PVC wiring in the rendered Sandbox: with overlayStore on, the
+ * podTemplate mounts a PVC upper at /nix/.scooter-rw and declares a matching
+ * volumeClaimTemplate; with it off, neither appears.
  */
 
 import { describe, it, expect } from "vitest";
@@ -53,8 +49,6 @@ describe("sandboxManifest overlay-store wiring", () => {
 });
 
 describe("sandboxManifest overlay upper — ONE uniform shape, always the vct", () => {
-  // A vct is a GENERATOR, not a fallback — one shape avoids the clobber. PR #403.
-
   it("ALWAYS emits the scooter-rw vct and NEVER a named pool volume", () => {
     const m = render({ overlayStore: true });
     expect(m.spec.volumeClaimTemplates.find((t) => t.metadata.name === "scooter-rw")).toBeDefined();
@@ -95,9 +89,7 @@ describe("imageTagOf — the pool version key (must match kubenix + the controll
 
 describe("sandboxManifest deployment config-files ConfigMap", () => {
   it("mounts the config-files CM read-only as a flat dir at /etc/agent-sandbox/config", () => {
-    // File-based config injection: multi-line files (e.g. a nix.conf) survive the
-    // CRD controller's env-var newline corruption because the kubelet mounts
-    // ConfigMap data byte-for-byte.
+    // The kubelet mounts ConfigMap data byte-for-byte, so multi-line files survive.
     const m = render({ configFilesConfigMap: "deploy-config-files" });
     const mounts = m.spec.podTemplate.spec.containers[0].volumeMounts ?? [];
     const mount = mounts.find((v) => v.name === "deploy-config");

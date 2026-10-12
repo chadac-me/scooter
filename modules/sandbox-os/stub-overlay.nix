@@ -1,12 +1,10 @@
-# The nix-stubs overlay for a stub set — ONE definition, two callers that must
-# produce an IDENTICAL overlay: the image build (flake.nix, at pkgs construction)
-# and the in-pod re-converge (stub-set.nix, via nixpkgs.overlays). If the two
-# diverge, a self-modify re-fattens the system with the real packages.
-# Why the callers apply it differently: PR #502.
+# The nix-stubs overlay for a stub set, shared by the image build (flake.nix) and
+# the in-pod re-converge (stub-set.nix) so a self-modify never re-fattens the
+# system with the real packages.
 
-{ lockLib # nix-stubs' pure-Nix lib — the flake's `lib`, or the vendored nix/lock.nix
-, flakeLock # the flake.lock that stubs.lock is synced to; mkOverlay asserts they agree
-, nix-stubs # the PREBUILT binary — a callPackage here compiles Rust in-pod
+{ lockLib # nix-stubs' pure-Nix lib (the flake's `lib`, or the vendored nix/lock.nix)
+, flakeLock # the flake.lock that stubs.lock is synced to
+, nix-stubs # the prebuilt binary, since a callPackage here would compile Rust in-pod
 , stubs ? ./stubs.nix
 , lock ? ./stubs.lock
 }:

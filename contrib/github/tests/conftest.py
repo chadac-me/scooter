@@ -1,10 +1,4 @@
-"""Bind the deployment-wide trigger policy the handler reads.
-
-`scooter_webhooks_lib.policy` is GIVEN its config by the service at startup
-(PR #577); these tests drive the handler directly, so nothing else calls init()
-and every event would hit the deliberate "init() was never called" guard.
-Why: PR #591.
-"""
+"""Bind the deployment-wide trigger policy the handler reads, since these tests drive the handler without the service."""
 
 from __future__ import annotations
 
@@ -17,7 +11,7 @@ from scooter_webhooks_lib import policy
 
 @dataclass
 class TriggerPolicy:
-    """The defaults the webhooks service ships (services/webhooks/webhooks/config.py)."""
+    """The defaults the webhooks service ships."""
 
     mention_pattern: str = "@agent"
     label_trigger: str = "scooter"

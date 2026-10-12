@@ -1,29 +1,9 @@
 #!/usr/bin/env bash
-# agent-broker — thin curl wrapper for calling the credential broker from inside
-# the sandbox, authenticated with the pod's projected ServiceAccount token.
-#
-# NOT plain curl: the broker <path> is a POSITIONAL first argument, not a
-# `-`-flagged URL. Put curl flags (-X / -H / -d / ...) AFTER the path.
-#
-# Usage:
-#   agent-broker <path> [curl-args...]
-#   e.g.  agent-broker test/whoami
-#         agent-broker github/git-credentials
-#         agent-broker github/repos/o/r/issues -X POST -d '{...}'   # path FIRST
-#
-#   agent-broker link add <url> [--type pr|mr|issue] [--source github|gitlab|jira] [--title T]
-#   agent-broker link ls
-#     Attach a link (PR/MR/issue/etc.) to THIS conversation, or list the ones
-#     already attached. PRs/MRs/issues created *through* the broker proxy are
-#     auto-linked; use `link add` for anything the injector missed (e.g. created
-#     via the gh/glab CLI). The conversation is taken from the pod's SA token.
-#
-# Reads:
-#   BROKER_URL        (e.g. http://agent-broker.<ns>.svc.cluster.local:8080)
-#   BROKER_TOKEN_PATH (default /var/run/secrets/broker/token)
-#
-# Adds the Authorization: Bearer header from the SA token and targets
-# $BROKER_URL/<path>, so callers don't repeat the auth boilerplate.
+# agent-broker: a thin curl wrapper for calling the credential broker from
+# inside the sandbox, authenticated with the pod's projected ServiceAccount
+# token (BROKER_URL, BROKER_TOKEN_PATH). The broker path is a positional first
+# argument and curl flags come after it; `link add`/`link ls` attach or list
+# links on this conversation.
 
 set -euo pipefail
 
@@ -128,10 +108,7 @@ if [ "$1" = "link" ]; then
     exit 0
 fi
 
-# The broker path must be FIRST. Agents used to curl reflexively write
-# `agent-broker -X POST <path> ...`, which would silently send `-X` as the path
-# and mangle the request. Catch a leading flag and self-correct instead of
-# failing with a confusing curl error.
+# A leading flag would silently be sent as the path, so reject it with a usable hint.
 if [ "${1#-}" != "$1" ]; then
     cat >&2 <<EOF
 agent-broker: the broker path must be the FIRST argument, but got a flag ('$1').

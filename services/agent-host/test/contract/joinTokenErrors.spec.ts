@@ -1,16 +1,7 @@
 /**
- * Tier 1 contract — /remote-agent/join-token when the BYOC controller is unreachable.
- *
- * THE BUG (observed live: agent-pg-byoc Secret missing → the controller pod never starts →
- * the mint POST gets connection-refused). mint() threw, the router has no catch, and the agui
- * server's outer catch did `res.end(String(err))` — a 500 whose body is a RAW stringified
- * error with no content-type. The Settings UI expects JSON on this route, so the user saw a
- * parser artifact instead of an explanation, and "the database secret is missing" surfaced as
- * an anonymous 500.
- *
- * An unreachable controller is an EXPECTED, diagnosable condition, not an internal error:
- * the route answers 503 with a JSON body that names the dependency, so the UI can render a
- * real message and an operator can tell "controller down" from "agent-host broken".
+ * /remote-agent/join-token when the BYOC controller is unreachable: an expected,
+ * diagnosable condition, so the route answers 503 with a JSON body naming the
+ * dependency rather than an uncaught 500.
  */
 
 import { describe, it, expect } from "vitest";
@@ -54,7 +45,7 @@ describe("POST /remote-agent/join-token — controller unreachable", () => {
   const deadControllerUi = () =>
     createRemoteAgentUi({
       joinSecret: "s",
-      controllerUrl: "http://127.0.0.1:9", // discard port — connection refused
+      controllerUrl: "http://127.0.0.1:9", // the discard port refuses connections
       publicByocUrl: "https://byoc.example.com",
     });
 
@@ -66,10 +57,9 @@ describe("POST /remote-agent/join-token — controller unreachable", () => {
   });
 
   it("the error body carries NO token material", async () => {
-    // The join token is a bearer credential; an error path must never leak one (or anything
-    // JWT-shaped) into a response that gets logged, screenshotted, and pasted into issues.
+    // The join token is a bearer credential, so an error path must not leak anything JWT-shaped.
     const { body } = await post(makeApi(deadControllerUi()), "/remote-agent/join-token");
-    expect(body).not.toMatch(/eyJ[A-Za-z0-9_-]+\./); // a JWT's header segment
+    expect(body).not.toMatch(/eyJ[A-Za-z0-9_-]+\./);
     expect(body).not.toMatch(/docker run/);
   });
 

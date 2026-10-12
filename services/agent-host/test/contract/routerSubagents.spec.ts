@@ -1,6 +1,4 @@
-/**
- * The router mints subagent ids now, not the host.
- */
+/** Subagent creation goes through the router, which mints the id. */
 
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

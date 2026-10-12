@@ -1,11 +1,6 @@
 /**
- * Tier 1 contract — a linked resource's URL identifies its target.
- *
- * THE OUTAGE THIS PREVENTS: every link written through the agent-host API (the broker's
- * auto-link injector, `link add`) stores an html_url and NO ref. The reply-tool
- * resolvers read `ref` first and a webhooks `owner/repo#n` id second, so a URL-form link
- * matched neither — `github_comment` was never registered and the agent had no way to
- * reply on the PR it was working on (155 of 156 live rows were in that shape). Issue #563.
+ * A linked resource's URL identifies its target: links written through the agent-host
+ * API carry only an html_url, so the ref the reply-tool resolvers read is derived from it.
  */
 
 import { describe, it, expect } from "vitest";
@@ -46,10 +41,10 @@ describe("resourceRef: github URLs", () => {
   });
 
   it.each([
-    "https://github.com/chadac/scooter",            // repo root — no resource
+    "https://github.com/chadac/scooter",            // repo root
     "https://github.com/chadac/scooter/pull/abc",   // not a number
     "https://github.com/o/r/releases/tag/v1",       // another kind of page
-    "chadac/scooter#561",                           // the OTHER id shape, not a url
+    "chadac/scooter#561",                           // the webhooks id shape, not a url
     "not a url",
   ])("returns undefined rather than guess: %s", (input) => {
     expect(parseGithubUrl(input)).toBeUndefined();
@@ -97,8 +92,7 @@ describe("resourceRef: ref derivation", () => {
   });
 
   it("puts a gitlab ISSUE iid in `iid`, never `mrIid`", () => {
-    // mrIid means "merge request N" to the resolver; an issue there would post the
-    // agent's comment on an unrelated MR.
+    // An issue iid in mrIid would post the agent's comment on an unrelated MR.
     expect(refFromUrl("gitlab", "https://gitlab.com/g/p/-/issues/5")).toEqual({ projectId: "g/p", iid: "5" });
     expect(refFromUrl("gitlab", "https://gitlab.com/g/p/-/merge_requests/5")).toEqual({ projectId: "g/p", mrIid: "5" });
   });
@@ -130,8 +124,7 @@ describe("resourceRef: ref derivation", () => {
 });
 
 describe("resourceRef: canonical resource_type", () => {
-  // MUST stay in step with webhooks/resources.py `_TYPE_ALIASES` — both services write
-  // resource_links, and the type is part of its unique key.
+  // Kept in step with webhooks/resources.py `_TYPE_ALIASES`, since the type is part of a resource_link's unique key.
   it.each([
     ["github", "pr", "pull_request"],
     ["github", "pull_request", "pull_request"],

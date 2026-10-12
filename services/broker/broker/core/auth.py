@@ -1,10 +1,5 @@
-"""Caller authentication — validate the pod's projected SA token via K8s
-TokenReview and extract the Identity.
-
-Unchanged model from openhands-nix: the pod presents a projected ServiceAccount
-token (audience agent-broker); we validate it and parse the SA username
-`system:serviceaccount:{ns}:sandbox-{conversationId}`.
-"""
+"""Caller authentication: validate a projected SA token via K8s TokenReview and parse the
+SA username `system:serviceaccount:{ns}:sandbox-{conversationId}` into an Identity."""
 
 from __future__ import annotations
 
@@ -20,7 +15,6 @@ from .conv_token import CONV_TOKEN_HEADER, ConvTokenError, verify_conv_token
 
 logger = logging.getLogger(__name__)
 
-# SA username pattern: system:serviceaccount:{ns}:sandbox-{conversationId}
 _SA_PATTERN = re.compile(r"^system:serviceaccount:([^:]+):sandbox-(.+)$")
 
 _authn_api: client.AuthenticationV1Api | None = None
@@ -45,13 +39,7 @@ def _bearer(request: Request) -> str:
 
 
 async def _review(token: str) -> str:
-    """Validate a projected SA token via TokenReview and return its SA username.
-
-    Extracted so the MCP endpoint's two-token path (authenticate_mcp, below) shares
-    exactly this validation rather than reimplementing it — the audience pin in
-    particular, which is what stops a token minted for some other audience being
-    replayed at the broker.
-    """
+    """Validate a projected SA token via TokenReview, pinned to the broker audience, and return its SA username."""
     review = client.V1TokenReview(
         spec=client.V1TokenReviewSpec(
             token=token,
@@ -75,16 +63,7 @@ async def authenticate(request: Request) -> Identity:
     token = _bearer(request)
     username = await _review(token)
 
-    # Approver SAs (e.g. the agent-host relaying a user's approve/deny) aren't
-    # sandboxes — they have no conversation_id but may approve, so they are
-    # admitted here rather than failing the _SA_PATTERN check below.
-    #
-    # This used to union a second list, sandbox_control_service_accounts, for the
-    # agent-host driving the broker's sandbox-lifecycle API. #584 moved that API
-    # to the agent-host and deleted the setting, but left this read — and pydantic
-    # raises AttributeError for a field that isn't declared, so EVERY caller got a
-    # 500 here. Don't reintroduce the union: the broker has no lifecycle API to
-    # gate, and the agent-host authenticates via the approver list above.
+    # Approver SAs are not sandboxes: they have no conversation_id but may approve.
     approvers = {s.strip() for s in settings.approver_service_accounts.split(",") if s.strip()}
     if username in approvers:
         return Identity(conversation_id="", namespace=settings.sandbox_namespace,
@@ -109,51 +88,26 @@ async def authenticate(request: Request) -> Identity:
 # MCP: the two-token path
 # ---------------------------------------------------------------------------
 #
-# The agent-facing MCP endpoint cannot use `authenticate` above, for a reason that is
-# the whole point of issue #700: an SA token identifies the CALLER, and for the
-# control plane the caller is one agent-host serving every conversation. Admitting it
-# as an approver (conversation_id="") is what makes a tool call anonymous as to
-# conversation — so the auto-link never fires — and trusting a caller-supplied id
-# instead is what let anything reaching the port name any conversation.
-#
-# So the MCP endpoint requires BOTH credentials and derives the conversation from the
-# one that is cryptographically bound to it:
-#
-#   control plane  Authorization: Bearer <agent-host SA token>   (TokenReview, must be
-#                                                                 in mcp_caller_*)
-#                  X-Scooter-Conversation: <conversation token>  (signed; THE id)
-#
-#   the sandbox    Authorization: Bearer <sandbox SA token>      -> id from the SA name
-#                                                                 sandbox-<id>, the
-#                                                                 existing path
-#
-# A sandbox needs no conversation token: its SA name already binds it to exactly one
-# conversation, and it cannot obtain another conversation's SA token. A control-plane
-# caller presenting NO conversation token is rejected rather than defaulted — there is
-# no safe conversation to pick, and an endpoint that picks one is the hole.
+# An SA token identifies the caller, and for the control plane that is one agent-host
+# serving every conversation, so the MCP endpoint derives the conversation from the
+# credential cryptographically bound to it: a control-plane caller presents its SA token
+# (TokenReview, allowlisted in mcp_caller_service_accounts) plus a signed conversation
+# token in X-Scooter-Conversation, while a sandbox's own SA name already binds it to
+# exactly one conversation. A control-plane caller without a conversation token is
+# rejected rather than defaulted.
 
 
 def _mcp_callers() -> set[str]:
-    """SA usernames allowed to act FOR a conversation via a conversation token.
-
-    Deliberately NOT `approver_service_accounts`. That list means "may relay a human's
-    approve/deny decision" and happens to name the agent-host today; reusing it would
-    make "may act as any conversation" an accidental consequence of an unrelated
-    setting. The two authorizations are different questions about the same SA, and
-    #700 hit the inverse of this: `github_comment` 403s on a deployment that never set
-    the approver list, because an integration tool was silently depending on it.
-    """
+    """SA usernames allowed to act for a conversation via a conversation token, a separate authorization from `approver_service_accounts`."""
     return {s.strip() for s in settings.mcp_caller_service_accounts.split(",") if s.strip()}
 
 
 async def authenticate_mcp(request: Request) -> Identity:
-    """FastAPI dependency for the MCP endpoint. Returns an Identity whose
-    conversation_id is always bound to the presented credentials."""
+    """FastAPI dependency for the MCP endpoint, returning an Identity whose conversation_id is bound to the presented credentials."""
     token = _bearer(request)
     username = await _review(token)
 
-    # Control plane: an allowlisted non-sandbox caller, acting for the conversation
-    # named by its conversation token.
+    # Control plane: an allowlisted caller acting for the conversation its token names.
     if username in _mcp_callers():
         conv_token = request.headers.get(CONV_TOKEN_HEADER, "").strip()
         if not conv_token:
@@ -167,8 +121,7 @@ async def authenticate_mcp(request: Request) -> Identity:
         try:
             verified = verify_conv_token(conv_token, settings.conv_token_secret)
         except ConvTokenError as exc:
-            # The REASON goes to our log only: a 403 body distinguishing "expired"
-            # from "bad signature" tells an attacker which half to work on.
+            # The reason goes to the log only, never the 403 body.
             logger.warning(
                 "rejected an MCP conversation token",
                 extra={"service_account": username, "reason": str(exc)},
@@ -181,7 +134,7 @@ async def authenticate_mcp(request: Request) -> Identity:
             owner=verified.owner,
         )
 
-    # The sandbox itself: the SA name is the binding, so no second token is needed.
+    # The sandbox itself: the SA name is the binding.
     m = _SA_PATTERN.match(username or "")
     if not m:
         raise HTTPException(status_code=403, detail=f"not permitted on the MCP endpoint: {username}")
@@ -189,9 +142,7 @@ async def authenticate_mcp(request: Request) -> Identity:
     if namespace != settings.sandbox_namespace:
         raise HTTPException(status_code=403, detail="wrong namespace")
 
-    # A sandbox presenting a conversation token for a DIFFERENT conversation is a
-    # confused or hostile caller either way; its SA wins and the mismatch is refused
-    # rather than silently resolved in favour of one of them.
+    # A conversation token naming a different conversation than the SA is refused.
     conv_token = request.headers.get(CONV_TOKEN_HEADER, "").strip()
     if conv_token:
         try:

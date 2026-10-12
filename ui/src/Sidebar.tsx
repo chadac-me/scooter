@@ -26,11 +26,7 @@ import { commitRename as commitRenameAction, isServerBacked, removeSession, togg
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-/** Per-row sandbox status dot (paper reskin): running = active blue, suspended =
- *  gold, failed = red, ended = muted. Mirrors the row's live pod lifecycle so the
- *  list reads at a glance without opening each conversation. "failed" is a terminal,
- *  sandbox-dead conversation (the zombie-repair escalation force-deleted the sandbox);
- *  it must be visually distinct from a normal idle-suspend, not shown as running. */
+/** Per-row sandbox status dot; "failed" is a dead sandbox and must look distinct from an idle suspend. */
 function StatusDot({ status }: { status: "running" | "suspended" | "failed" | "ended" }) {
   const cls =
     status === "running"
@@ -50,7 +46,7 @@ function StatusDot({ status }: { status: "running" | "suspended" | "failed" | "e
   );
 }
 
-/** A section heading in the conversation list (STARRED / RECENT). */
+/** A section heading in the conversation list (Starred / Recent). */
 function SectionHeader({ icon, label }: { icon?: ReactNode; label: string }) {
   return (
     <div className="flex items-center gap-1 px-2 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground first:pt-1">
@@ -60,8 +56,7 @@ function SectionHeader({ icon, label }: { icon?: ReactNode; label: string }) {
   );
 }
 
-/** A small "?" affordance with an explanatory tooltip (native title + aria-label,
- *  matching the sidebar's lightweight style). */
+/** A small "?" affordance with a native-title tooltip. */
 function InfoTip({ text }: { text: string }) {
   return (
     <span
@@ -78,13 +73,8 @@ function InfoTip({ text }: { text: string }) {
 }
 
 /** One conversation row: select, inline rename (double-click the title), star
- *  toggle, and delete-with-confirm (a stronger confirm when starred).
- *
- *  memo()'d: the 10s merge poll re-renders <Sidebar>, but a row whose Session
- *  reference + primitive props are unchanged (mergeFromServer reuses the object when
- *  nothing changed — see sameSession) skips re-render entirely. That's what keeps an
- *  in-progress interaction (an open rename input, a hover) from being disrupted by a
- *  background poll (the sidebar flake family). */
+ *  toggle, and delete-with-confirm. memo()'d so the 10s merge poll, which reuses an
+ *  unchanged Session object, does not re-render a row mid-interaction. */
 const SessionRow = memo(function SessionRow({
   session: s,
   depth,
@@ -97,26 +87,15 @@ const SessionRow = memo(function SessionRow({
   depth: number;
   childCount: number;
   active: boolean;
-  // Whether THIS row's inline rename input is open. Owned by the STORE (editingId),
-  // NOT local useState — see openRename below. Passed down from <Sidebar> so the row
-  // re-derives "am I being renamed?" from the store on every render, surviving any
-  // remount/reconcile the 10s merge poll triggers (the CI rename flake: local editing
-  // state was dropped when a background merge re-rendered/remounted the row mid-edit).
+  // Owned by the store (editingId), not local state, so the row re-derives it on every
+  // render and survives a poll-triggered remount.
   editing: boolean;
   labelMode: LabelMode;
 }) {
   const [draft, setDraft] = useState(s.title);
 
-  // Open the rename. flushSync forces React to COMMIT the editing state before the
-  // click handler returns, so the input mounts SYNCHRONOUSLY within the event rather
-  // than on a later, interruptible render. This is HARDENING, not a bug fix: the
-  // state machine is already correct (proven deterministically in jsdom — the input
-  // opens + survives a same-tick merge storm with or without flushSync). But on a
-  // severely CPU-starved main thread (GitHub's 2-core runner, mid agent-turn render
-  // storm) a deferred commit can be delayed long enough that a test's next action —
-  // or a real user's follow-up click — races the not-yet-mounted input. Committing
-  // in-handler shrinks that window to zero. Seeding draft from the current title
-  // (the store lock freezes this row in mergeFromServer, so the title can't shift).
+  // flushSync commits the editing state inside the click handler so the input mounts
+  // synchronously rather than on a later, interruptible render.
   const openRename = () => {
     flushSync(() => {
       setDraft(s.title);
@@ -124,17 +103,16 @@ const SessionRow = memo(function SessionRow({
     });
   };
 
-  // The three row actions address the SERVER, which the row's local key cannot do —
-  // they go through sessionActions, which owns that split. Why: PR #501.
+  // The row actions address the server through sessionActions, which owns the
+  // local-key/server-id split.
   const commitRename = () => {
-    sessionStore.clearEditing(s.id); // close the input (store-owned)
+    sessionStore.clearEditing(s.id);
     void commitRenameAction(s, draft);
   };
 
   const toggleStar = () => void toggleStarAction(s);
 
   const remove = () => {
-    // Universal confirm on delete; a STARRED conversation gets a stronger warning.
     const msg = s.starred
       ? `"${s.title}" is starred. Deleting destroys its sandbox and data permanently. Delete anyway?`
       : `Delete "${s.title}"? This destroys its sandbox and data permanently.`;
@@ -145,12 +123,11 @@ const SessionRow = memo(function SessionRow({
   return (
     <div
       data-testid="session-item"
-      // The SERVER's id, absent until the conversation is created. e2e cross-checks the
-      // sidebar against the server by this; the row's React key is `s.id`, which for a
-      // not-yet-created conversation is a local placeholder the server has never heard of.
+      // The server's id, absent until the conversation is created; e2e cross-checks the
+      // sidebar against the server by it.
       data-conversation-id={s.serverId}
-      // A conversation the server has not created yet (an unsent "New chat"). e2e uses this
-      // to tell an expected local-only row from a genuine UI/server divergence.
+      // Marks a conversation the server has not created yet, so e2e can tell a local-only
+      // row from a divergence.
       data-pending-create={s.serverId === undefined ? "true" : undefined}
       data-active={active}
       data-starred={s.starred ? "true" : undefined}
@@ -161,8 +138,7 @@ const SessionRow = memo(function SessionRow({
         (active ? "bg-accent font-medium" : "hover:bg-accent/60")
       }
     >
-      {/* Activity status on the LEFT (mockup 1a): a leading dot colored by the pod
-          lifecycle. A fixed-width slot so titles align whether or not a row has one. */}
+      {/* Leading status dot in a fixed-width slot so titles align whether or not a row has one. */}
       {!editing && (
         <span className="flex w-1 shrink-0 items-center justify-center">
           {s.status && <StatusDot status={s.status} />}
@@ -175,17 +151,8 @@ const SessionRow = memo(function SessionRow({
           autoFocus
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          // Commit on a genuine click-away, but NOT on a spurious re-render blur.
-          // Under merge-poll contention the sidebar reconciles mid-rename and the
-          // input transiently BLURS — focus lands on a SIBLING button IN THIS SAME ROW
-          // (the Star/Rename/Delete buttons re-render) — even though the user hasn't
-          // left. A synchronous onBlur commit there would commit + unmount the input
-          // under the user's cursor (the CI flake: fill succeeds, then Enter hits a
-          // detached node). So commit ONLY when focus moved to an element OUTSIDE this
-          // row (a real navigation away — the thread, another row, the composer). A
-          // blur with no relatedTarget, or one landing back inside this row, is a
-          // reconciliation artifact and is ignored. Enter/Escape remain the explicit
-          // commit/cancel paths, so nothing is lost.
+          // Commit only when focus moved outside this row; a reconcile-induced blur onto a
+          // sibling button is not a click-away.
           onBlur={(e) => {
             const movedOutOfRow =
               e.relatedTarget instanceof Node &&
@@ -220,9 +187,8 @@ const SessionRow = memo(function SessionRow({
         </Button>
       )}
 
-      {/* Provider "link plates" for any linked external resources (GitHub/Slack/…):
-          each badge sits in a bordered card chip, per mockup 1a. Hidden on hover so
-          the action overlay below reads clearly over the same space. */}
+      {/* Provider link plates for linked external resources, hidden on hover so the
+          action overlay reads clearly over the same space. */}
       {!editing && s.sources && s.sources.length > 0 && (
         <span className="flex shrink-0 items-center gap-1 group-hover:opacity-0">
           {s.sources.map((src) => (
@@ -236,15 +202,10 @@ const SessionRow = memo(function SessionRow({
         </span>
       )}
 
-      {/* Row actions — star / rename / delete. ABSOLUTELY positioned so they OVERLAY
-          the row's right edge (mockup 1a) instead of consuming width: the title gets
-          the full row, and these fade in on hover. The gradient blends the overlay
-          into the row background (accent when active/hovered). */}
+      {/* Row actions, absolutely positioned to overlay the row's right edge and fade in on hover. */}
       {!editing && (
         <div className="absolute inset-y-0 right-1 flex items-center gap-0.5 rounded-lg bg-gradient-to-l from-accent from-70% to-transparent pl-6 opacity-0 transition-opacity group-hover:opacity-100">
-          {/* Star — top-level only (subagents aren't independently retained). A
-              starred row keeps the gold star visible even off-hover, via the parent
-              group state below. */}
+          {/* Star is top-level only; subagents are not independently retained. */}
           {depth === 0 && (
             <Button
               variant="ghost"
@@ -252,8 +213,7 @@ const SessionRow = memo(function SessionRow({
               data-testid="session-star"
               aria-label={s.starred ? `Unstar ${s.title}` : `Star ${s.title}`}
               aria-pressed={s.starred ? true : false}
-              // Starred is server-owned: an unsent conversation has no row to set it on,
-              // so the control says so instead of lighting up and reverting. Why: PR #501.
+              // Starred is server-owned, so an unsent conversation cannot be starred.
               disabled={!isServerBacked(s)}
               title={isServerBacked(s) ? undefined : "Send a message first — an unsent conversation can't be starred"}
               onClick={toggleStar}
@@ -292,39 +252,26 @@ const SessionRow = memo(function SessionRow({
   );
 });
 
-// memo()'d: <Sidebar> is a direct child of <RuntimeProvider>, which re-renders on
-// EVERY AG-UI event during an agent turn (streaming reasoning, tool calls, run
-// status, the sandbox "Starting…" poll). It takes no props and reads only its own
-// sessionStore (useSessions), so memo makes it re-render ONLY on store changes — not
-// on every parent tick. That parent-render storm was the surviving rename-flake
-// disruptor: while the agent streamed, the constant <Sidebar> re-renders raced the
-// rename-open click's store update, so the input intermittently never mounted (CI
-// mode "input never appears"). With the merge frozen during edit (mergeFromServer)
-// AND the parent storm gone, the ONLY thing that re-renders the sidebar mid-rename is
-// the user's own setEditing/clearEditing — nothing can drop or detach the input.
+// memo()'d: <RuntimeProvider> re-renders on every AG-UI event during an agent turn,
+// and the sidebar reads only sessionStore, so this limits it to store changes.
 export const Sidebar = memo(function Sidebar() {
   const state = useSessions();
   const { currentId, editingId, scope, query, providerFilter, labelMode } = state;
-  // Hierarchy: each parent followed by its subagents (depth 1). filteredSessions
-  // applies Mine/provider/query; nestSubagents groups children under parents and
-  // AUTO-COLLAPSES a parent's subagents unless it (or a child) is the active
-  // conversation — so an inactive conversation's subagents don't clutter the list.
+  // filteredSessions applies Mine/provider/query; nestSubagents groups children under
+  // parents and collapses them unless the branch holds the active conversation.
   const rows = nestSubagents(filteredSessions(state), currentId);
-  // Split into STARRED / RECENT sections. Routing is per CONVERSATION, not per row, so a
-  // starred conversation can never also render in Recent. Why: PR #611.
+  // Routing is per conversation, so a starred conversation never also appears in Recent.
   const { starred: starredRows, recent: recentRows } = splitSections(rows);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
-  // On mobile the sidebar is an overlay drawer; picking a conversation (or starting a
-  // new one) changes currentId, so close the drawer then to reveal the thread. No-op
-  // on desktop (the drawer is always "closed"/in-flow there).
+  // On mobile the sidebar is an overlay drawer; close it when the conversation changes
+  // to reveal the thread.
   const drawer = useDrawer();
   useEffect(() => {
     mobileNav.close();
   }, [currentId]);
 
-  // How many advanced filters are "active" (non-default) — a badge on the toggle so
-  // the user knows a filter is narrowing the list even when the panel is collapsed.
+  // Count of non-default filters, shown as a badge on the toggle while the panel is collapsed.
   const activeFilters =
     (scope === "all" ? 1 : 0) + providerFilter.length + (labelMode !== "title" ? 1 : 0);
 
@@ -335,7 +282,7 @@ export const Sidebar = memo(function Sidebar() {
         "flex flex-col border-r border-sidebar-border bg-sidebar",
         // Mobile: off-canvas left drawer over the thread, below the h-11 header.
         "fixed bottom-0 left-0 top-11 z-40 w-[86vw] max-w-72 -translate-x-full shadow-xl transition-transform duration-200 ease-out",
-        // Desktop (desk+ (≥1200px)): the original static, in-flow column — unchanged.
+        // Desktop (desk, ≥1200px): a static in-flow column.
         "desk:static desk:h-full desk:w-64 desk:max-w-none desk:translate-x-0 desk:shadow-none desk:transition-none",
         drawer === "sessions" && "translate-x-0",
       )}
@@ -364,8 +311,8 @@ export const Sidebar = memo(function Sidebar() {
         />
       </div>
 
-      {/* Advanced filters — a collapsible below search holding Scope (Mine/All),
-          the linked-provider filter chips, and the Show (label-mode) control. */}
+      {/* Advanced filters: Scope (Mine/All), the linked-provider chips, and the Show
+          (label-mode) control. */}
       <div className="px-3 pb-2">
         <Button
           variant="ghost"
@@ -390,8 +337,7 @@ export const Sidebar = memo(function Sidebar() {
 
         {filtersOpen && (
           <div data-testid="filters-panel" className="mt-1 flex flex-col gap-2 rounded-md border bg-background/60 p-2 text-xs">
-            {/* Default — Mine / All (conversations are public; this is just a view;
-                Mine is the default). */}
+            {/* Default: Mine / All, a view filter over public conversations. */}
             <div className="flex items-center gap-2">
               <span className="w-12 shrink-0 text-muted-foreground">Default</span>
               <div data-testid="scope-toggle" className="flex flex-1 gap-1">
@@ -414,8 +360,8 @@ export const Sidebar = memo(function Sidebar() {
               </div>
             </div>
 
-            {/* Only — provider icon chips (multi-select) that FILTER the list: any
-                selected -> show only chats linked to one of them; none -> show all. */}
+            {/* Only: multi-select provider chips; any selected shows only chats linked to
+                one of them. */}
             <div className="flex items-center gap-2">
               <span className="flex w-12 shrink-0 items-center gap-1 text-muted-foreground">
                 Only
@@ -448,9 +394,8 @@ export const Sidebar = memo(function Sidebar() {
               </div>
             </div>
 
-            {/* Show — a segmented icon row picking WHAT EACH ROW DISPLAYS: the Scooter
-                mark = the conversation TITLE, or a provider = that provider's linked
-                resource name (rows without such a link fall back to the title). */}
+            {/* Show: what each row displays, the conversation title or a provider's
+                linked-resource name. */}
             <div className="flex items-center gap-2">
               <span className="flex w-12 shrink-0 items-center gap-1 text-muted-foreground">
                 Show
@@ -528,8 +473,8 @@ export const Sidebar = memo(function Sidebar() {
           />
         ))}
       </nav>
-      {/* The current conversation's external resources (GitHub PR / Slack thread
-          / …), collapsible. Hidden when there are none. */}
+      {/* The current conversation's external resources, collapsible and hidden when
+          there are none. */}
       <LinkedResources />
     </aside>
   );

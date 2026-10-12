@@ -7,8 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// convCR builds a Conversation CR the way the controller writes it: metadata.name is the
-// thread UUID, spec.sandboxRef is `conv-<shortId>`, status.hostIP is the owner pod.
+// convCR builds a Conversation CR as the controller writes it: the thread UUID name, a `conv-<shortId>` sandboxRef and the owner pod's hostIP.
 func convCR(name, sandboxRef, hostIP string) *unstructured.Unstructured {
 	o := map[string]interface{}{
 		"metadata": map[string]interface{}{"name": name},
@@ -24,10 +23,7 @@ func convCR(name, sandboxRef, hostIP string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: o}
 }
 
-// The broker addresses its approval-notify by the sandbox SHORT-ID (it only ever knows
-// `sandbox-{shortId}`), so a cache indexed by the thread UUID alone MISSES and the request
-// falls back to a random ready pod — where the raise is silently dropped and the user never
-// sees an Approve button. Both ids must resolve to the same owner.
+// The broker addresses conversations by the sandbox short-id, so both ids must resolve to the same owner.
 func TestHostFromIndexesShortIDAndUUID(t *testing.T) {
 	c := NewOwnershipCache()
 	c.observe(convCR("5e1949ce-1111-2222-3333-444455556666", "conv-2j8rsf", "10.42.0.7"))
@@ -40,8 +36,7 @@ func TestHostFromIndexesShortIDAndUUID(t *testing.T) {
 	}
 }
 
-// A CR whose sandboxRef isn't set yet (created but not provisioned) must not panic and must
-// not index a bogus alias — an empty or unprefixed key would shadow unrelated lookups.
+// A CR whose sandboxRef is not set yet must not panic and must not index a bogus alias.
 func TestHostFromWithoutSandboxRef(t *testing.T) {
 	c := NewOwnershipCache()
 	c.observe(convCR("uuid-no-ref", "", "10.42.0.8"))
@@ -52,7 +47,7 @@ func TestHostFromWithoutSandboxRef(t *testing.T) {
 	if _, ok := c.HostIP(""); ok {
 		t.Error("an empty key must never be indexed")
 	}
-	// A sandboxRef that doesn't carry the `conv-` prefix isn't a short-id; don't invent one.
+	// A sandboxRef without the `conv-` prefix is not a short-id.
 	c.observe(convCR("uuid-odd-ref", "something-else", "10.42.0.9"))
 	if _, ok := c.HostIP("something-else"); ok {
 		t.Error("a non conv- prefixed sandboxRef must not be indexed as a short-id")
@@ -62,8 +57,7 @@ func TestHostFromWithoutSandboxRef(t *testing.T) {
 	}
 }
 
-// Eviction must clear BOTH keys. A stale short-id alias left pointing at a dead pod is worse
-// than a miss: a miss falls back to a ready pod, but a stale alias routes to a black hole.
+// Eviction must clear both keys, since a stale alias routes to a dead pod.
 func TestForgetClearsBothKeys(t *testing.T) {
 	c := NewOwnershipCache()
 	cr := convCR("uuid-gone", "conv-abc123", "10.42.0.7")
@@ -76,8 +70,7 @@ func TestForgetClearsBothKeys(t *testing.T) {
 	if _, ok := c.HostIP("abc123"); ok {
 		t.Error("DELETED must clear the short-id key (a stale alias routes to a dead pod)")
 	}
-	// The alias must be GONE from the map, not merely dangling: a conversation reusing that
-	// UUID later (or the map growing forever) would otherwise resurrect the dead mapping.
+	// The alias must be gone from the map, not merely dangling.
 	c.mu.RLock()
 	_, leaked := c.aliases["abc123"]
 	c.mu.RUnlock()
@@ -86,9 +79,7 @@ func TestForgetClearsBothKeys(t *testing.T) {
 	}
 }
 
-// A DELETE event whose payload carries only metadata (no spec.sandboxRef — the watch does not
-// always deliver the full object) must STILL sweep the alias. Keying the cleanup off the ref in
-// the delete payload alone would leak the alias exactly in that case.
+// A DELETE event whose payload carries only metadata must still sweep the alias.
 func TestForgetWithoutSpecStillSweepsAlias(t *testing.T) {
 	c := NewOwnershipCache()
 	c.observe(convCR("uuid-gone", "conv-abc123", "10.42.0.7"))
@@ -122,15 +113,14 @@ func TestUnassignClearsBothKeys(t *testing.T) {
 	}
 }
 
-// End-to-end through the router's own resolution: the broker's short-id-addressed notify
-// must reach the OWNER pod, not the ClusterIP fallback (a random ready pod).
+// The broker's short-id-addressed notify must reach the owner pod, not the fallback.
 func TestResolveTargetByShortID(t *testing.T) {
 	cfg := config{namespace: "agent-sandbox", upstreamPort: 8080, clusterIPService: "agent-host"}
 	fallback := FallbackURL(cfg.clusterIPService, cfg.namespace, cfg.upstreamPort)
 	c := NewOwnershipCache()
 	c.observe(convCR("5e1949ce-1111-2222-3333-444455556666", "conv-2j8rsf", "10.42.0.7"))
 
-	// Exactly what the broker's _notify_host POSTs.
+	// What the broker's _notify_host POSTs.
 	r := httptest.NewRequest("POST", "/conversations/2j8rsf/aws-request", nil)
 	if u := resolveTarget(cfg, c, r, fallback); u.String() != "http://10.42.0.7:8080" {
 		t.Errorf("short-id aws-request -> %q, want the owner http://10.42.0.7:8080", u.String())

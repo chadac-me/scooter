@@ -1,8 +1,5 @@
-# services.sampleDevService — the PoC sample systemd service.
-#
-# A minimal service proving the systemd path end-to-end: it reaches `active`,
-# opens a TCP port, and the agent can `systemctl start/stop` it. Stands in for a
-# real collaborative service (Jupyter etc.) which reuses the same path later.
+# A minimal sample systemd service proving the systemd path end-to-end: it reaches
+# `active`, opens a TCP port, and the agent can `systemctl start/stop` it.
 
 { config, lib, pkgs, ... }:
 
@@ -21,10 +18,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # A tiny HTTP listener on cfg.port — Python's stdlib http.server, no app code
-    # to ship. Enough to prove: reaches `active`, opens the port, responds, and
-    # `systemctl start/stop` toggles it. Replace with a real unit (Jupyter, …)
-    # later; the shape (a wanted-by-multi-user systemd unit) is the same.
+    # Python's stdlib http.server, so there is no app code to ship.
     systemd.services.sample-dev-service = {
       description = "PoC sample dev service (HTTP on ${toString cfg.port})";
       wantedBy = [ "multi-user.target" ];

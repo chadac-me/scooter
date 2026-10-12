@@ -1,14 +1,9 @@
 /**
- * Shared e2e fixtures for the assistant-ui Thread.
- *
- * Provides:
- *   - real selectors for the assistant-ui DOM (aui-* classes / aria-labels)
- *   - a `chat` helper (send a message, wait for the assistant reply)
- *   - an AUTOMATIC "no error in the UI" assertion that runs after EVERY test
- *     (both the rendered error box and AG-UI/zod console errors). Tests never
- *     have to opt in — a surfaced error fails the test.
- *
- * The stack (agent-host fake mode + UI) is booted by playwright.config webServer.
+ * Shared e2e fixtures for the assistant-ui Thread: real selectors for the assistant-ui
+ * DOM, a `chat` helper that sends a message and waits for the reply, and an automatic
+ * "no error in the UI" assertion (rendered error box and AG-UI/zod console errors) that
+ * runs after every test. The stack (agent-host fake mode + UI) is booted by the
+ * playwright.config webServer.
  */
 
 import { test as base, expect, type Page, type Locator, type APIRequestContext } from "@playwright/test";
@@ -17,10 +12,8 @@ export const sel = {
   errorBox: ".aui-message-error-root",
   userMessage: ".aui-user-message-content",
   assistantMessage: ".aui-assistant-message-content, .aui-md", // styled content
-  // Count ONE node per tool call: the innermost rendered card — a provider card
-  // (slack/github/…) or the generic fallback. NOT the .aui-tool-group-root
-  // wrapper: groups now render EXPANDED (ToolGroupOpen), so the wrapper AND the
-  // inner fallback are both mounted at once — counting both double-counts.
+  // One node per tool call: the innermost rendered card, not the .aui-tool-group-root
+  // wrapper that is mounted alongside it.
   toolCall: '.aui-tool-fallback-root, [data-testid="provider-tool-card"]',
   composerInput: '[aria-label="Message input"]',
 };
@@ -38,9 +31,7 @@ export class Chat {
   }
 
   async send(text: string) {
-    // Wait until the composer is idle (no run in progress) — assistant-ui shows
-    // a Send button when idle and a Cancel/Stop button while running. Sending
-    // mid-run is dropped, so block until Send is available.
+    // Wait until the composer is idle (Send button visible); a message sent mid-run is dropped.
     await this.page
       .getByRole("button", { name: /send/i })
       .first()
@@ -49,22 +40,16 @@ export class Chat {
     await this.submit(text);
   }
 
-  /** Fill the composer and submit, VERIFYING the message actually left it.
-   *
-   *  The idle-wait above is best-effort (`.catch`), so a still-running composer silently
-   *  swallows the keystroke and KEEPS the text — which the next send's fill() then
-   *  overwrites, losing a turn with no error anywhere. An empty composer is the only
-   *  proof the turn left. Why: PR #544. */
+  /** Fill the composer and submit, verifying the message actually left it (an empty composer is the only proof the turn was accepted). */
   private async submit(text: string) {
     const input = this.input();
     await input.click();
     await input.fill(text);
     await input.press("Enter");
-    // Poll rather than re-press every tick: an Enter on text that is already mid-submit
-    // sends it TWICE, which is worse than the drop this guards. Why: PR #544.
+    // Poll rather than re-press every tick: an Enter on text already mid-submit sends it twice.
     for (let i = 0; i < 20; i++) {
       const left = await input.inputValue().catch(() => "");
-      if (left.trim() === "") return; // submitted
+      if (left.trim() === "") return;
       if (i > 0 && i % 4 === 0) {
         await input.click().catch(() => {});
         await input.press("Enter").catch(() => {});
@@ -93,19 +78,13 @@ export class Chat {
     return this.viewport().evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
   }
 
-  /** How much the viewport CAN scroll (scrollHeight - clientHeight). 0 == the thread
-   *  fits with nothing to scroll — a scroll-lock assertion would be vacuous. */
+  /** How much the viewport can scroll; 0 means a scroll-lock assertion would be vacuous. */
   async scrollableHeight(): Promise<number> {
     return this.viewport().evaluate((el) => el.scrollHeight - el.clientHeight);
   }
 
-  /** Deterministically settle the viewport at the bottom before asserting the
-   *  at-bottom state. assistant-ui's `isAtBottom` flag (which drives the arrow's
-   *  disabled state) updates from a SCROLL EVENT — after auto-scroll settles there
-   *  may be no further scroll event to fire, so the flag can trail the real position
-   *  (the CI-only "arrow still enabled at the bottom" flake). An explicit
-   *  scrollTo(bottom) forces a scroll event → the store recomputes; then poll the
-   *  the distance to confirm we're actually pinned. */
+  /** Settle the viewport at the bottom with an explicit scrollTo, so assistant-ui's
+   *  scroll-event-driven `isAtBottom` flag recomputes before the at-bottom state is asserted. */
   async settleAtBottom(px = 40): Promise<void> {
     await this.viewport().evaluate((el) =>
       el.scrollTo({ top: el.scrollHeight, behavior: "instant" as ScrollBehavior }),
@@ -113,35 +92,21 @@ export class Chat {
     await expect.poll(() => this.distanceFromBottom(), { timeout: 10_000 }).toBeLessThanOrEqual(px);
   }
 
-  /** The scroll-to-bottom arrow. assistant-ui's ScrollToBottom primitive DISABLES it
-   *  (CSS `disabled:invisible`) while pinned to the bottom and ENABLES it once the
-   *  user scrolls up — so its enabled/visible state is the authoritative "the lock
-   *  released" signal (more robust than a pixel threshold). */
+  /** The scroll-to-bottom arrow, which assistant-ui disables while pinned to the bottom
+   *  and enables once the user scrolls up. */
   scrollToBottomButton(): Locator {
     return this.page.locator(".aui-thread-scroll-to-bottom").first();
   }
 
-  /** Wait for an assistant reply containing `re` (default: any non-empty).
-   *  Generous timeout: a freshly-created conversation lazily spawns its bridge
-   *  on the first prompt, so the very first reply can be slower than later ones.
-   *
-   *  NOTE for MULTI-TURN loops: this matches the FIRST occurrence of `re`, which
-   *  a PRIOR turn's identical reply already satisfies (the fake agent says the same
-   *  thing every turn) — so it returns immediately and the next send can race an
-   *  unfinished run, dropping a turn. Use `sendTurn` (count-based) for >1 turn. */
+  /** Wait for an assistant reply containing `re`; this matches the first occurrence, which
+   *  a prior identical reply already satisfies, so use `sendTurn` for multi-turn loops. */
   async waitForReply(re: RegExp = /\S/, timeout = 45_000) {
     await expect(this.page.getByText(re).first()).toBeVisible({ timeout });
   }
 
-  /** Send one turn and wait until THIS turn's assistant reply has landed — by
-   *  waiting for the assistant-message count to grow past the pre-send baseline,
-   *  not for matching text (which a prior identical reply already satisfies). This
-   *  is the race-free primitive for multi-turn conversations: it guarantees the run
-   *  finished (a new assistant message exists) before returning, so the next send
-   *  can't be dropped mid-run. */
-  // TARGET-AWARE, like completeTurn/startLongRun: on a cluster a turn waits for a ready
-  // sandbox pod (cold boot, longer under CONVERSATION_POD_CAP=1) before the exec even starts.
-  // Fast keeps 45s so a genuine hang there still fails fast. Why: PR #720.
+  /** Send one turn and wait for the assistant-message count to grow past the pre-send
+   *  baseline, which proves this turn's run finished before the next send. */
+  // On the full target a turn first waits for a ready sandbox pod, so it gets a longer budget.
   async sendTurn(text: string, timeout = process.env.E2E_TARGET === "full" ? 120_000 : 45_000) {
     const before = await this.assistantMessages().count();
     await this.send(text);
@@ -150,25 +115,16 @@ export class Chat {
       .toBeGreaterThan(before);
   }
 
-  /** Send a message WITHOUT waiting for the idle Send button — for queueing behind an in-flight run
-   *  (the composer accepts input mid-run; the message becomes a QUEUED item). `send()` deliberately
-   *  waits for Send to be visible (idle), which would block here; this fills + submits immediately. */
+  /** Fill and submit without waiting for the idle Send button, so the message queues behind an in-flight run. */
   async sendWhileRunning(text: string) {
-    // Same verified submit as send(), minus the idle-wait: this one MEANS to type mid-run.
     await this.submit(text);
   }
 
-  /** Start a long in-flight run (the fake agent runs a real `sleep <sec>` in the sandbox) and wait
-   *  until the UI shows the working state — so a subsequent sendWhileRunning() genuinely queues. */
+  /** Start a long in-flight run (the fake agent runs a real `sleep <sec>` in the sandbox) and
+   *  wait until the UI shows the working state, so a subsequent sendWhileRunning() queues. */
   async startLongRun(sec = 20) {
     await this.send(`!sleep ${sec}`);
-    // 90s on the full target, 30s on fast. The run-status bar appears when the RUN starts,
-    // and on a cluster the exec first waits for a ready sandbox pod — on a fresh conversation
-    // that is a cold boot (5-25s, and longer while the shard's other specs contend for
-    // scheduling under CONVERSATION_POD_CAP=1). Observed on CI: three queue-durability tests
-    // failed together here, each with the bar simply not up yet, which then reads downstream
-    // as "the queue is broken". Fast keeps 30s — its run starts in milliseconds, so a longer
-    // budget there would only slow a genuine hang.
+    // On the full target the run first waits for a ready sandbox pod, which can be a cold boot.
     await expect(this.page.locator('[data-testid="run-status-bar"]')).toBeVisible({
       timeout: process.env.E2E_TARGET === "full" ? 90_000 : 30_000,
     });
@@ -178,31 +134,22 @@ export class Chat {
   queuedMessages(): Locator {
     return this.page.locator('[data-testid="queued-message"]');
   }
-  /** Wait until the run is genuinely OVER — not merely until the reply text appeared. `sendTurn`
-   *  returns when the assistant MESSAGE lands, but the run's terminal event trails it slightly, so a
-   *  "must be idle now" assertion made right after sendTurn races a still-finishing run. Poll the
-   *  run-status bar (the authoritative in-flight signal) instead. */
+  /** Wait until the run-status bar is gone, which is the authoritative run-over signal
+   *  (the reply text lands slightly before the terminal event). */
   async waitForIdle(timeout = 45_000) {
     await expect(this.page.locator('[data-testid="run-status-bar"]')).toHaveCount(0, { timeout });
   }
 
-  /** Send a turn and wait for it to COMPLETE (reply landed AND the run ended), tolerating a hostile
-   *  stream. Unlike `sendTurn`, this waits on the assistant-message COUNT and then on genuine idle —
-   *  and unlike `waitForIdle` alone it can't return early just because the run hasn't started yet
-   *  (which made corruption tests "pass through" in ~1.7s having done nothing). */
-  // The default is 60s on fast and 120s on the full target. Like sendTurn, this waits on a
-  // run that first needs a READY sandbox pod, and on a cluster that is a cold boot (5-25s,
-  // longer while the shard's other specs contend under CONVERSATION_POD_CAP=1) BEFORE the
-  // exec starts — and completeTurn then waits for the run to fully END on top of that.
-  // Observed on CI: cluster-stories' first turn failed at 59.4s, i.e. the 60s default, as
-  // test #1 on a freshly booted shard. Callers that pass an explicit timeout are unaffected.
+  /** Send a turn and wait for the reply to land and the run to end, without returning early
+   *  when the run has not started yet. */
+  // The full target's default budget covers a cold sandbox boot before the exec starts.
   async completeTurn(text: string, timeout = process.env.E2E_TARGET === "full" ? 120_000 : 60_000) {
     const before = await this.assistantMessages().count();
     await this.send(text);
-    // The run must actually BEGIN before we can meaningfully wait for it to end.
+    // The run must begin before waiting for it to end.
     await expect(this.page.locator('[data-testid="run-status-bar"]'))
       .toBeVisible({ timeout: 30_000 })
-      .catch(() => {}); // a very fast turn may finish before we look — the count poll below covers it
+      .catch(() => {}); // a very fast turn may finish before we look; the count poll below covers it
     await expect
       .poll(async () => this.assistantMessages().count(), { timeout })
       .toBeGreaterThan(before);
@@ -220,9 +167,8 @@ type Fixtures = {
   chat: Chat;
   /** Accumulates console errors for the no-error assertion. */
   consoleErrors: string[];
-  /** Auto: wipes server + client conversation state before each test so the
-   *  shared (single-process) webServer doesn't leak conversations between tests
-   *  and break absolute-count assertions. */
+  /** Auto: wipes server and client conversation state before each test so the shared
+   *  webServer does not leak conversations between tests. */
   cleanState: void;
   /** Auto: forwards browser telemetry spans to the test output (E2E_TELEMETRY=1). */
   telemetryForwarding: void;
@@ -233,9 +179,7 @@ export const test = base.extend<Fixtures>({
     const errors: string[] = [];
     page.on("console", (m) => {
       if (m.type() === "error") errors.push(m.text());
-      // Forward telemetry spans to the test output when E2E_TELEMETRY=1, so a failing
-      // spec shows the same conversation lifecycle the deployed traces do — without
-      // writing a bespoke probe spec for each investigation.
+      // Forward telemetry spans to the test output when E2E_TELEMETRY=1.
       if (process.env.E2E_TELEMETRY === "1" && m.text().startsWith("scooter.span")) {
         // eslint-disable-next-line no-console
         console.log(`  [browser] ${m.text()}`);
@@ -245,13 +189,8 @@ export const test = base.extend<Fixtures>({
     await use(errors);
   },
 
-  // Forward telemetry spans to the test output when E2E_TELEMETRY=1, so a failing spec
-  // shows the same conversation lifecycle the deployed traces do.
-  //
-  // auto:true is LOAD-BEARING. Playwright fixtures are LAZY — one instantiates only if a
-  // test destructures it. Hanging this off `consoleErrors` meant it never attached for the
-  // specs that do not request that fixture (stop-run among them), so the browser emitted
-  // the spans and nothing was listening.
+  // Forwards telemetry spans to the test output when E2E_TELEMETRY=1; auto:true because a
+  // Playwright fixture only instantiates when a test destructures it.
   telemetryForwarding: [
     async ({ page }, use) => {
       if (process.env.E2E_TELEMETRY === "1") {
@@ -267,25 +206,16 @@ export const test = base.extend<Fixtures>({
     { auto: true },
   ],
 
-  // Runs automatically (auto: true) before every test: the e2e webServer is one
-  // long-lived agent-host process whose conversation list is persisted + hydrated,
-  // so without a reset each test would see the previous tests' conversations.
+  // Runs before every test: the e2e webServer is one long-lived agent-host whose
+  // conversation list persists, so each test needs a reset.
   cleanState: [
     async ({ request, context, baseURL }, use) => {
       const base = baseURL ?? "http://localhost:5173";
-      // SAFETY (belt-and-braces). This fixture deletes EVERY conversation to give the shared local
-      // fake stack a clean slate. Run against a LIVE deployment that destroys real user data — which
-      // is exactly what this guard prevents.
-      //
-      // TWO independent gates, because one flag proved insufficient (the flag was added AFTER a run
-      // had already been launched without it):
-      //   1. RUN_LIVE_E2E=1 — the explicit "this is a live target" opt-out.
-      //   2. baseURL is not localhost — a structural check that cannot be forgotten. Any non-local
-      //      target hard-FAILS rather than silently skipping, so a spec that genuinely needs a wipe
-      //      can never quietly run it against a real deployment.
+      // This fixture deletes every conversation, so two gates protect live deployments:
+      // RUN_LIVE_E2E=1 skips the wipe, and a non-localhost baseURL fails hard.
       const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(base);
       if (process.env.RUN_LIVE_E2E === "1") {
-        await use(); // live target: create-your-own-conversations specs need no wipe at all
+        await use(); // live target: no wipe
         return;
       }
       if (!isLocal) {
@@ -295,46 +225,32 @@ export const test = base.extend<Fixtures>({
             `for live runs (which skips the wipe entirely).`,
         );
       }
-      // 1. Server: delete every known conversation, then POLL until the list is
-      //    actually empty. The delete + sandbox-destroy is async server-side, so
-      //    proceeding immediately races the next test's first /conversations
-      //    fetch (which would merge leftovers in). Poll to a true clean slate.
-      // FULL gets more attempts as well as a longer gap between them (see the delete pass
-      // below). A SUSPENDED conversation must be hydrated back into memory before it can be
-      // ended, and that revive can itself be waiting on a sandbox the cluster is busy
-      // replacing — 50 attempts at 1s was still timing out on a conversation that was not
-      // starred (the error would have said so), i.e. genuinely mid-teardown rather than
-      // undeletable. 150 attempts ≈ 150s covers it; fast keeps 50 at 100ms (~5s), which is
-      // ample for an in-process destroy.
+      // 1. Server: delete every known conversation, then poll until the list is actually
+      //    empty, because the destroy is async server-side.
+      // The full target gets more attempts because a suspended conversation must be hydrated
+      // before it can be ended.
       const attempts = process.env.E2E_TARGET === "full" ? 150 : 50;
       for (let i = 0; i < attempts; i++) {
         const res = await request.get(`${base}/conversations`);
         if (!res.ok()) {
-          // FAST: the single-process server is down — nothing to wipe, tests will say so.
+          // Fast: the single-process server is down, so there is nothing to wipe.
           if (process.env.E2E_TARGET !== "full") break;
-          // FULL: the router 502s the list when every upstream momentarily fails to answer
-          // (its all-upstreams-failed guard). Skipping the wipe on that transient hands the
-          // next test a dirty fleet — retry instead of silently doing nothing.
+          // Full: the router 502s the list when every upstream momentarily fails, so retry
+          // instead of skipping the wipe.
           await new Promise((r) => setTimeout(r, 1000));
           continue;
         }
         const convs = (await res.json()) as Array<{ id: string; starred?: boolean }>;
         if (convs.length === 0) {
-          // FAST: one empty read is authoritative — a single agent-host process.
+          // Fast: one empty read from the single agent-host process is authoritative.
           if (process.env.E2E_TARGET !== "full") break;
-          // FULL (multi-replica): an empty read is NOT proof of a clean slate. The router's
-          // GET /conversations fans out to the READY agent-host pods and degrades to a partial
-          // list when a pod is missing/slow — so a pod that briefly drops out of the endpoints
-          // takes its rows with it, and "empty" can mean "the pod still holding rows wasn't
-          // asked". Observed on CI: cleanState deleted 5 leftovers (all 204), read [], and 3 of
-          // them resurfaced 20s later from a pod the aggregate had skipped — failing the first
-          // spec on absolute row counts. Require the emptiness to be STABLE (3 consecutive
-          // empty reads, 1s apart) and go back to deleting if anything resurfaces.
+          // Full: the router's aggregated list can omit a skipped pod's rows, so require three
+          // consecutive empty reads before trusting it.
           let stable = true;
           for (let k = 0; k < 3; k++) {
             await new Promise((r) => setTimeout(r, 1000));
             const again = await request.get(`${base}/conversations`);
-            if (!again.ok()) continue; // transient read error — don't count it as dirty
+            if (!again.ok()) continue; // a transient read error is not evidence of a dirty slate
             const rows = (await again.json()) as Array<{ id: string }>;
             if (rows.length > 0) {
               stable = false;
@@ -342,29 +258,19 @@ export const test = base.extend<Fixtures>({
             }
           }
           if (stable) break;
-          continue; // rows resurfaced — loop back into the delete pass
+          continue; // rows resurfaced; back into the delete pass
         }
         await Promise.all(
           convs.map(async (c) => {
-            // UNSTAR FIRST. DELETE returns 409 on a starred conversation ("unstar before
-            // deleting"), so a test that stars one and then fails before unstarring leaves a row
-            // this loop can NEVER remove: it spins 50 times, gives up, and every later test
-            // inherits the leftover — which is exactly how sessions.spec.ts came to fail 8/10
-            // with "Expected 1, Received 2" and titles bleeding across tests.
-            // FULL: unstar UNCONDITIONALLY. `starred` comes from the aggregated list, which on a
-            // multi-replica fleet can omit or stale the flag for a row served by a pod that was
-            // briefly skipped — so trusting it means a genuinely starred conversation gets a bare
-            // DELETE, 409s, and survives every one of the 50 attempts. Observed on CI: one
-            // conversation held the whole shard hostage for 3 minutes and failed 6 later specs.
-            // The PATCH is idempotent and cheap, so guessing wrong costs nothing.
+            // Unstar first, since DELETE returns 409 on a starred conversation; on full the
+            // aggregated list can stale the flag, so unstar unconditionally.
             if (c.starred || process.env.E2E_TARGET === "full") {
               await request
                 .patch(`${base}/conversations/${c.id}/starred`, { data: { starred: false } })
                 .catch(() => undefined);
             }
             const del = await request.delete(`${base}/conversations/${c.id}`);
-            // A 409 means it was still starred when the DELETE landed (the unstar raced, or the
-            // flag arrived late). Unstar again and retry once — otherwise this row is immortal.
+            // A 409 means it was still starred when the DELETE landed, so unstar again and retry once.
             if (del.status() === 409) {
               await request
                 .patch(`${base}/conversations/${c.id}/starred`, { data: { starred: false } })
@@ -374,17 +280,10 @@ export const test = base.extend<Fixtures>({
             return del;
           }),
         );
-        // FULL: 1s, not 100ms, between delete passes. A conversation's destroy is async
-        // server-side (bridge stop + sandbox teardown), and a SUSPENDED one must first be
-        // hydrated back into memory before it can be ended — so it can still be listed for
-        // several seconds after a 204. At 100ms the 50 attempts burn out in ~5s, which is
-        // exactly what CI showed: four specs each failing in 6.2-6.6s naming the same
-        // conversation, one the previous test had suspended. 1s gives the loop ~50s, past
-        // the teardown. Fast keeps 100ms — its destroy is in-process and immediate.
+        // Full waits 1s between passes because a destroy can keep the row listed for several
+        // seconds after a 204.
         await new Promise((r) => setTimeout(r, process.env.E2E_TARGET === "full" ? 1000 : 100));
-        // FAIL LOUD on the last iteration: a fixture that cannot establish its precondition
-        // (e.g. an undeletable starred conversation returning DELETE 409s) must say so,
-        // not hand the next test a dirty slate.
+        // Fail loudly on the last iteration rather than hand the next test a dirty slate.
         if (i === attempts - 1) {
           const left = (await (await request.get(`${base}/conversations`)).json()) as Array<{
             id: string;
@@ -401,14 +300,10 @@ export const test = base.extend<Fixtures>({
           }
         }
       }
-      // Let the server settle after the destroys (bridge stop + sandbox teardown)
-      // so the next test's first prompt starts a clean, unstalled conversation.
+      // Let the server settle after the destroys so the next test's first prompt starts clean.
       await new Promise((r) => setTimeout(r, 300));
-      // 2. Client: clear persisted sessions on the origin. The server is empty
-      //    now (polled above), so loading the app to establish the origin can't
-      //    re-merge anything. Use a throwaway page, then close it and give its
-      //    AG-UI/SSE connection a beat to tear down so it doesn't race the next
-      //    test's first prompt against the shared single-process agent-host.
+      // 2. Client: clear persisted sessions on the origin via a throwaway page, then give
+      //    its SSE connection a beat to tear down.
       const blank = await context.newPage();
       await blank.goto(base);
       await blank.evaluate(() => {
@@ -431,10 +326,7 @@ export const test = base.extend<Fixtures>({
   },
 });
 
-/**
- * After every test: assert the UI surfaced no error. Runs automatically for all
- * specs that import `test` from this file.
- */
+/** After every test: assert the UI surfaced no error. */
 test.afterEach(async ({ page, consoleErrors }) => {
   // 1. No rendered error box.
   const boxes = page.locator(sel.errorBox);
@@ -464,12 +356,8 @@ test.afterEach(async ({ page, consoleErrors }) => {
 export { expect };
 
 /**
- * Fill a text input and PROVE the text landed in THAT input; re-fill if it did not.
- *
- * `fill()` focuses the element, then inserts the text into whatever holds focus AT INSERT
- * TIME — so the `autoFocus` composer, which re-grabs focus as a run settles, can swallow
- * the keystrokes. The target inputs are CONTROLLED, so losing that race leaves them empty
- * and later assertions silently measure an unfiltered list. Why: PR #525.
+ * Fill a text input and verify the text landed, re-filling if the autoFocus composer stole
+ * focus and swallowed the keystrokes.
  */
 export async function fillStable(input: Locator, value: string, timeout = 15_000): Promise<void> {
   const deadline = Date.now() + timeout;
@@ -491,22 +379,9 @@ export async function fillStable(input: Locator, value: string, timeout = 15_000
 }
 
 /**
- * Seed a conversation owned by `user` (null = unowned) via the API, the way the
- * ingress would (x-auth-user), and return the SERVER-minted id.
- *
- * BOTH targets now create through the conversation-ROUTER (fast runs it in
- * ROUTER_DEV_MODE in front of a single agent-host; full runs the real cluster router):
- *  - The router handles POST /conversations. `title` is DROPPED (only owner/model/parentId
- *    reach the create) — the row lands title-less, and the sidebar row is not listable
- *    until it exists in the store the router lists from: on full when a pod ADOPTS the CR,
- *    on fast the moment the row is inserted. Either way GET /conversations/:id
- *    hydrates-if-absent (management.ts) so a read makes the conversation materialise.
- *    So after creating, poll a read until it appears in the list the sidebar reads.
- *
- * Because the title does not survive the router path, callers must locate sidebar
- * rows by `[data-conversation-id="<id>"]`, NOT by title text. The trailing PATCH
- * still names the row (readable screenshots) but is best-effort: right after
- * creation the router can route it to an agent-host that has not hydrated it yet (404).
+ * Seed a conversation owned by `user` (null = unowned) through the conversation router, the
+ * way the ingress would (x-auth-user), and return the server-minted id; the title does not
+ * survive the router path, so callers locate sidebar rows by `[data-conversation-id]`.
  */
 export async function seedConversation(
   request: APIRequestContext,
@@ -518,18 +393,14 @@ export async function seedConversation(
   const r = await request.post(`${base}/conversations`, { data: { title }, headers });
   expect(r.ok(), `seed POST /conversations failed: ${r.status()}`).toBeTruthy();
   const { id } = (await r.json()) as { id: string };
-  // CLUSTER-HONEST BUDGET: adoption is one hydrate round-trip (a CR read + a
-  // Sandbox reconcile list) on whichever pod the fallback Service picks, then the
-  // aggregated fleet list must include the adopting pod's row. That is seconds on
-  // a healthy k3d, but controller assignment + the router's ownership-cache
-  // convergence can lag under load, so give it a 45s ceiling — a ceiling, not a
-  // cost: the fast stack passes on the first iteration.
+  // Adoption on a cluster can lag under load, so 45s is a ceiling; the fast stack passes on
+  // the first iteration.
   await expect
     .poll(
       async () => {
-        // Hydrate-if-absent: makes some pod adopt the CR so it becomes listable.
+        // Hydrate-if-absent makes some pod adopt the CR so it becomes listable.
         await request.get(`${base}/conversations/${id}`, { headers }).catch(() => undefined);
-        // Anonymous list — sees every conversation regardless of owner.
+        // The anonymous list sees every conversation regardless of owner.
         const list = await request.get(`${base}/conversations`);
         if (!list.ok()) return false;
         const rows = (await list.json()) as Array<{ id: string }>;
@@ -545,17 +416,13 @@ export async function seedConversation(
 }
 
 /**
- * A WHOLE-UI STATE SNAPSHOT — every surface that can independently go wrong, read in ONE pass.
- *
- * Why this exists: asserting one fact per test (does the queue row exist?) misses the failure mode
- * that actually bites — CROSS-COMPONENT DIVERGENCE, where the thread says one thing, the queue
- * another, the run-status bar a third, and the sidebar a fourth, all at the same instant. A
- * single-fact test passes straight through that. Snapshotting every surface and asserting
- * INVARIANTS BETWEEN them is what turns "the UI is unreliable" into a specific failing assertion.
+ * A whole-UI state snapshot: every surface that can independently go wrong, read in one pass.
+ * Asserting invariants between surfaces catches cross-component divergence (thread, queue,
+ * run-status bar and sidebar disagreeing at the same instant) that a single-fact assertion
+ * passes straight through.
  */
 export interface UiSnapshot {
-  /** Whether the CHAT view is mounted at all (composer present). False on the settings page, where
-   *  the chat-view invariants do not apply. */
+  /** Whether the chat view is mounted (composer present); the chat-view invariants do not apply on the settings page. */
   chatMounted: boolean;
   // thread
   userMessages: number;
@@ -563,8 +430,8 @@ export interface UiSnapshot {
   toolCards: number;
   lastUserText: string;
   // run state
-  running: boolean;          // the thinking indicator / run-status bar is up
-  composerSendable: boolean; // the Send button is offered (idle) — NOT the Stop button
+  running: boolean;          // the run-status bar is up
+  composerSendable: boolean; // the Send button is offered (idle)
   composerStop: boolean;
   runError: string | null;
   authError: boolean;
@@ -583,8 +450,7 @@ export interface UiSnapshot {
   selectedTab: string | null;
 }
 
-/** Read every UI surface at one instant. Never throws — a missing element is a null/0/false, so a
- *  snapshot is always comparable (that's the point: absence IS state). */
+/** Read every UI surface at one instant; a missing element reads as null/0/false so a snapshot is always comparable. */
 export async function snapshot(page: Page): Promise<UiSnapshot> {
   const count = (s: string) => page.locator(s).count();
   const visible = (s: string) => page.locator(s).first().isVisible().catch(() => false);
@@ -600,15 +466,10 @@ export async function snapshot(page: Page): Promise<UiSnapshot> {
     assistantMessages: await page.locator(sel.assistantMessage).count(),
     toolCards: await count(sel.toolCall),
     lastUserText: nUsers ? ((await users.nth(nUsers - 1).innerText().catch(() => "")) || "").trim() : "",
-    // ATOMIC RUN-STATE TRIPLE (same reasoning as the interrupt pair below). assertConsistent
-    // cross-checks all three against each other, and ComposerSendOrStop renders Send XOR Stop — so
-    // "both" is not a state the DOM can hold, only one a straddled read can invent. Why: PR #517.
-    // Target the COMPOSER's send button precisely (.aui-composer-send / aria-label "Send message").
-    // A loose getByRole(/send/i) also matches SIDEBAR row buttons named after the conversation title
-    // (e.g. "Delete baseline before simultaneous sends"), which produced a false "composer shows BOTH
-    // Send and Stop" whenever a message contained the word "send".
+    // One evaluate keeps the run-state triple mutually consistent, and the composer's send
+    // button is targeted precisely because sidebar row buttons can also match /send/i.
     ...(await page.evaluate(() => {
-      // Playwright's isVisible(): first match in document order, non-empty box, not visibility:hidden.
+      // Mirrors Playwright's isVisible(): first match, non-empty box, not visibility:hidden.
       const vis = (s: string): boolean => {
         const el = document.querySelector(s);
         if (!el) return false;
@@ -624,10 +485,7 @@ export async function snapshot(page: Page): Promise<UiSnapshot> {
     })),
     runError: await text('[data-testid="run-error-message"]'),
     authError: await visible('[data-testid="stream-auth-error-bar"]'),
-    // ATOMIC TRIPLE (same reasoning as the interrupt pair above). assertConsistent cross-checks
-    // queueBadge against queued.length *and* against selectedTab; read separately, a message
-    // draining from the queue between the three queries yields a badge/rows mismatch that never
-    // existed on screen. One evaluate keeps them mutually consistent.
+    // One evaluate keeps the badge, rows and selected tab mutually consistent.
     ...(await page.evaluate(() => {
       const txt = (sel: string) => document.querySelector(sel)?.textContent?.trim() || null;
       return {
@@ -640,12 +498,8 @@ export async function snapshot(page: Page): Promise<UiSnapshot> {
             ?.getAttribute("data-testid") ?? null,
       };
     })),
-    // ATOMIC PAIR. Read in ONE page.evaluate so the panel and its option count come from the SAME
-    // DOM state. As two sequential queries they can straddle a React re-render: an approval that
-    // resolves in between yields interruptOpen=true with interruptOptions=0 — a dead-end state the
-    // user never actually saw, which then trips the "un-answerable panel" invariant. The component
-    // itself cannot render empty (InterruptPanel returns null when nothing is pending), so any such
-    // reading is an artifact of non-atomic sampling, not a real UI state.
+    // One evaluate reads the panel and its option count from the same DOM state, since
+    // InterruptPanel cannot render empty.
     ...(await page.evaluate(() => {
       const panel = document.querySelector('[data-testid="interrupt-panel"]');
       return {
@@ -660,24 +514,14 @@ export async function snapshot(page: Page): Promise<UiSnapshot> {
   };
 }
 
-/** The CROSS-COMPONENT INVARIANTS that must hold at EVERY instant, whatever the app is doing.
- *  A violation here is exactly the "weird detached state" the user reports — two components
- *  disagreeing about the same reality. Call it after every step of every test. */
+/** The cross-component invariants that must hold at every instant; call it after every step of every test. */
 export function assertConsistent(s: UiSnapshot, when: string) {
-  // SCOPE: these are CHAT-VIEW invariants (composer Send/Stop, run status, queue badges). On a
-  // non-chat view — e.g. the settings page — none of those components are mounted, so asserting
-  // them is meaningless rather than merely redundant. Detect that and check only what applies.
+  // These are chat-view invariants, so a non-chat view such as the settings page has nothing to check.
   if (!s.chatMounted) return;
-  // Send and Stop are the SAME control in two states — never both, never neither.
+  // Send and Stop are the same control in two states, never both.
   expect(s.composerSendable && s.composerStop, `${when}: composer shows BOTH Send and Stop`).toBe(false);
-  // NOTE: "running => composer must NOT offer Send" is NOT an invariant here, though it is the
-  // obvious one to write. Scooter deliberately keeps the composer submittable DURING a run: a
-  // message sent mid-run is QUEUED (server-side priority queue), which is why
-  // useRepositoryRuntime passes isRunning=false to the external-store runtime unconditionally.
-  // assistant-ui would otherwise swallow the keystroke and the message would never reach the queue
-  // — the "messages sent while working don't show up" bug (#279). Asserting the opposite here
-  // contradicts the product and is what failed CI on main (concurrency-divergence.spec.ts:128).
-  // The real invariant is the one that still holds: an IDLE app must not present a Stop button.
+  // The composer stays submittable during a run (a mid-run message is queued), so the only
+  // running-state invariant is that an idle app must not show Stop.
   if (!s.running) {
     expect(s.composerStop, `${when}: no run in flight but the composer still shows Stop`).toBe(false);
   }
@@ -685,13 +529,11 @@ export function assertConsistent(s: UiSnapshot, when: string) {
   if (s.runError) {
     expect(s.running, `${when}: showing a terminal run error WHILE claiming to run`).toBe(false);
   }
-  // Badges must match the rows they count (a stale badge is the classic divergence) — but ONLY when
-  // the Queue tab is actually SELECTED. The badge is always visible; the rows only mount when that
-  // tab is open, so comparing them on any other tab compares a real count against an unmounted list.
+  // The badge must match the rows it counts, but the rows only mount while the Queue tab is selected.
   if (s.queueBadge && s.selectedTab === "right-panel-tab-queue") {
     expect(Number(s.queueBadge.replace(/\D/g, "")), `${when}: queue badge != queued rows`).toBe(s.queued.length);
   }
-  // An interrupt panel with no options is un-answerable — a dead-end state.
+  // An interrupt panel with no options is un-answerable.
   if (s.interruptOpen) {
     expect(s.interruptOptions, `${when}: interrupt panel open with NO options (un-answerable)`).toBeGreaterThan(0);
   }
@@ -701,8 +543,7 @@ export function assertConsistent(s: UiSnapshot, when: string) {
   }
 }
 
-/** Cross-check the DOM against the SERVER's own view — the only way to catch a UI that has silently
- *  detached from reality (renders fine, but no longer reflects what the agent-host actually has). */
+/** Cross-check the sidebar against the server's conversation list to catch a UI that has silently detached from reality. */
 export async function assertMatchesServer(
   page: Page,
   request: APIRequestContext,
@@ -711,19 +552,14 @@ export async function assertMatchesServer(
 ) {
   const base = baseURL ?? "http://localhost:5173";
   const res = await request.get(`${base}/conversations`);
-  if (!res.ok()) return; // server not reachable for this stack — skip rather than fail spuriously
+  if (!res.ok()) return; // server not reachable for this stack; skip rather than fail spuriously
   const convs = (await res.json()) as Array<{ id: string }>;
 
-  // Compare the actual IDS, not just counts — a matching count with different ids is exactly
-  // the silent detachment this guards against.
-  //
-  // A conversation the user has started but not yet sent in ("+ New conversation") is
-  // deliberately local-only: it is selected instantly, and the server assigns its real id on
-  // the first prompt. Those rows mark themselves data-pending-create and are expected to be
-  // absent server-side; every OTHER row must correspond to a real conversation.
+  // Compare ids, not counts; a row pending creation ("+ New conversation") is local-only until
+  // the first prompt and is expected to be absent server-side.
   const rows = await page.locator('[data-testid="session-item"]').evaluateAll((els) =>
     els.map((el) => ({
-      id: el.getAttribute("data-conversation-id") ?? "",  // the SERVER id; absent while pending
+      id: el.getAttribute("data-conversation-id") ?? "",  // the server id; absent while pending
       pending: el.getAttribute("data-pending-create") === "true",
       active: el.getAttribute("data-active") === "true",
     })),
@@ -732,22 +568,8 @@ export async function assertMatchesServer(
   let missing = rows.filter((r) => !r.pending && !serverIds.has(r.id)).map((r) => r.id);
   const notShown = convs.filter((c) => !rows.some((r) => r.id === c.id)).map((c) => c.id);
 
-  // FULL: a single list read is not proof. The router aggregates over the READY pods and
-  // degrades to a PARTIAL list when one is slow or missing (it even logs "all upstreams
-  // failed for conversation list"), so a row the sidebar legitimately holds can look absent
-  // server-side for one read. Observed on CI during a burst of pod churn: two specs failed
-  // this direction naming conversations that did exist. Re-read before failing, and only
-  // report the ids still missing on the confirming read.
-  // FULL: only THIS test's own conversation can be judged. The sidebar lists the whole
-  // shared fleet, and another spec's cleanState deleting its conversations is normal, expected
-  // traffic — the row lingers here for a refresh or two while the server has already dropped
-  // it. That is cross-spec coexistence, not the client/server detachment this guards against.
-  // Observed on CI across three branches: the offending row was titled "sleep 20", a
-  // conversation belonging to the queue/stop specs, which this test never created or touched.
-  //
-  // The ACTIVE row is the conversation the test is driving, so it is the one whose detachment
-  // would be this suite's bug — and it stays checked on both targets. On fast, where the
-  // backend is wiped and single-process, every row is still checked.
+  // Full: the sidebar lists the whole shared fleet and other specs' cleanState deletes are
+  // normal traffic, so only the active row (this test's own conversation) is judged.
   if (process.env.E2E_TARGET === "full") {
     const own = new Set(rows.filter((r) => r.active).map((r) => r.id));
     missing = missing.filter((id) => own.has(id));
@@ -755,14 +577,8 @@ export async function assertMatchesServer(
 
   let confirmed = missing;
   if (confirmed.length && process.env.E2E_TARGET === "full") {
-    // 20 attempts over ~30s, and an id is only CONFIRMED missing if it was absent from
-    // every SUCCESSFUL read. Five attempts over 5s was not enough: CI kept failing this
-    // direction naming two ids at a time, which is the signature of the aggregate being
-    // degraded (a whole pod's worth of rows missing at once), not of one stale row. A
-    // degraded aggregate can persist across a pod's readiness gap, which is longer than 5s.
-    //
-    // A read that FAILS is not evidence of absence — it is no evidence at all. Requiring a
-    // successful read means a run of 502s can no longer "confirm" that every id is gone.
+    // Full: the router's aggregate can be degraded across a pod's readiness gap, so an id is
+    // only confirmed missing if it was absent from every successful re-read.
     let goodReads = 0;
     for (let i = 0; i < 20 && confirmed.length; i++) {
       await new Promise((r) => setTimeout(r, 1500));
@@ -779,48 +595,36 @@ export async function assertMatchesServer(
     confirmed,
     `${when}: sidebar shows conversation(s) the server does not have: ${confirmed.join(", ")}`,
   ).toEqual([]);
-  // FAST ONLY. "The sidebar shows everything the server has" holds on the single-process,
-  // freshly-wiped stack, where the only conversations in existence are this test's. On the
-  // full target the server is a shared multi-replica fleet: it legitimately holds rows from
-  // OTHER specs running against the same backend, and the sidebar's default scope shows the
-  // user's own conversations rather than the whole fleet — so this direction reports normal
-  // cross-spec coexistence as a divergence.
-  // The `missing` direction above is the one that catches real detachment, and it stays on
-  // for both targets: a row the server does not have is always a bug.
+  // Fast only: on the full target the server holds other specs' rows and the sidebar shows
+  // the user's own scope, so this direction only holds on the single-process wiped stack.
   if (process.env.E2E_TARGET !== "full") {
     expect(
       notShown,
       `${when}: server has conversation(s) the sidebar does not show: ${notShown.join(", ")}`,
     ).toEqual([]);
   }
-  // At most one unsent "New chat" can be pending at a time — more means they are leaking.
+  // At most one unsent "New chat" can be pending at a time.
   expect(
     rows.filter((r) => r.pending).length,
     `${when}: more than one uncreated conversation in the sidebar`,
   ).toBeLessThanOrEqual(1);
 }
 
-/** Where step screenshots land. One directory per test run; each shot is prefixed with a monotonic
- *  index so the sequence reads in order. */
+/** Where step screenshots land; each shot carries a monotonic index so the sequence reads in order. */
 const SHOT_DIR = process.env.UI_SHOT_DIR ?? "test-results/ui-timeline";
 let shotSeq = 0;
 
-/** Capture the UI at this instant, named for the step. Screenshots make a NONDETERMINISTIC failure
- *  interpretable: an invariant tells you two components disagreed, the image tells you what the user
- *  would actually have been looking at. Enabled by default for live runs (UI_SHOTS=1); a failure to
- *  capture must never fail the test. */
+/** Capture the UI at this instant, named for the step, when UI_SHOTS=1; a failed capture never fails the test. */
 export async function shot(page: Page, when: string): Promise<void> {
   if (process.env.UI_SHOTS !== "1") return;
   const safe = when.replace(/[^a-z0-9]+/gi, "-").slice(0, 60);
   const idx = String(++shotSeq).padStart(3, "0");
   await page
     .screenshot({ path: `${SHOT_DIR}/${idx}-${safe}.png`, fullPage: false })
-    .catch(() => {}); /* never fail a test because a screenshot failed */
+    .catch(() => {});
 }
 
-/** snapshot + assertConsistent + a screenshot, in one call — the standard "check everything at this
- *  step" primitive. Captures the shot BEFORE asserting, so a failing step still leaves an image of
- *  the exact state that failed. */
+/** snapshot + assertConsistent + a screenshot in one call, capturing the shot before asserting so a failing step still leaves an image. */
 export async function checkpoint(page: Page, when: string): Promise<UiSnapshot> {
   const s = await snapshot(page);
   await shot(page, when);

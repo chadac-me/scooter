@@ -1,10 +1,8 @@
 /**
- * ServiceRows — the web-services grid (per-service status + start/stop/open). Used by
- * the Sandbox tab (SandboxPanel), which owns the data fetching + pod-status context.
- *
- * Explicit-start model: a stopped service shows Start; a running one shows Open (opens
- * /c/<id>/<name>/, reverse-proxied into the pod) + Stop. Each service is a card in a
- * two-column grid; `onAdd` renders a trailing dashed "add" card when provided.
+ * ServiceRows: the web-services grid (per-service status plus start/stop/open), used
+ * by the Sandbox tab, which owns the data fetching and pod-status context. A stopped
+ * service shows Start; a running one shows Open (/c/<id>/<name>/, reverse-proxied
+ * into the pod) and Stop. `onAdd` renders a trailing dashed "add" card when provided.
  */
 
 import { Notebook, SquareTerminal, Code, AppWindow, Power, ExternalLink, Plus, TriangleAlert } from "lucide-react";
@@ -13,9 +11,7 @@ import type { WebService } from "./client.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-/** Pick a glyph for a service from its name/label. Purely cosmetic — an unknown
- *  service falls back to a generic window icon, so a new service type never renders
- *  blank. */
+/** Pick a glyph for a service from its name/label, falling back to a generic window icon. */
 function serviceIcon(s: WebService): typeof AppWindow {
   const key = `${s.name} ${s.displayName}`.toLowerCase();
   if (/marimo|jupyter|notebook/.test(key)) return Notebook;
@@ -35,9 +31,7 @@ export function ServiceRows({
   starting: Record<string, boolean>;
   onStart: (name: string) => void;
   onStop?: (name: string) => void;
-  /** When set, render a trailing dashed "+ Service" card that calls this. Web
-   *  services are declared in-sandbox (not created from here), so this surfaces a
-   *  hint rather than a create form. */
+  /** When set, render a trailing dashed "+ Service" card that calls this. */
   onAdd?: () => void;
 }) {
   return (
@@ -77,10 +71,7 @@ export function ServiceRows({
               {s.displayName}
             </div>
 
-            {/* Advisory: this service declares more than the sandbox caps at. Shown
-                because an OOM kill leaves nothing in the service's own log, so without
-                it the failure is near-undiagnosable from inside the pod. Terse here,
-                full sentence on hover — the card is ~120px wide. */}
+            {/* Advisory that this service declares more than the sandbox caps at; terse here, full sentence on hover. */}
             {s.fitShort ? (
               <div
                 data-testid="service-fit"

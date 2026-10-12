@@ -1,15 +1,8 @@
-# The warm /nix/store PVC pool controller (Deployment + SA + RBAC).
-#
-# A leader-elected reconcile loop that keeps a pool of overlay-upper PVCs warmed against
-# the CURRENT sandbox image tag: tops up (warm Jobs), GCs retired tags, returns claimed
-# PVCs on suspend, recovers leaks. Runs ALONGSIDE the upstream agent-sandbox controller
-# (which owns the Sandbox→pod/PVC lifecycle — we install it from a release, don't fork).
-# The agent-host provisioner does the CLAIM (claimName swap). See
-# todo/docs/WARM_STORE_PVC_MANAGER.md.
-#
-# OFF by default (`scooter.warmStore.enable`): a fresh conversation always gets a
-# working (empty) overlay upper without it — the pool is a hit-rate optimization, not a
-# correctness dependency.
+# The warm /nix/store PVC pool controller (Deployment, SA and RBAC): a
+# leader-elected reconcile loop that keeps overlay-upper PVCs warmed against the
+# current sandbox image tag, GCs retired tags, returns claimed PVCs on suspend
+# and recovers leaks. The agent-host provisioner does the claim. Off by default,
+# since the pool is a hit-rate optimization and not a correctness dependency.
 
 { config, lib, ... }:
 
@@ -101,7 +94,7 @@ in
     (lib.mkIf wcfg.enable {
     kubernetes.resources = {
       # --- the pool StorageClass (Retain) ---------------------------------
-      # WaitForFirstConsumer: the PV records the topology the predicate reads back.
+      # WaitForFirstConsumer makes the PV record the topology the predicate reads back.
       storageClasses = lib.mkIf (wcfg.storageProvisioner != null) {
         ${wcfg.storageClass} = {
           metadata.name = wcfg.storageClass;
@@ -112,8 +105,6 @@ in
       };
 
       # --- SA + RBAC ------------------------------------------------------
-      # Manage pool PVCs, run warm Jobs, watch Sandboxes (return/leak signals) + pods
-      # (RWO bound-ness), and hold a leader-election Lease.
       serviceAccounts.warm-store-controller.metadata = {
         name = "warm-store-controller";
         namespace = cfg.namespace;
@@ -122,25 +113,22 @@ in
         metadata = { name = "warm-store-controller"; namespace = cfg.namespace; };
         rules = [
           { apiGroups = [ "" ]; resources = [ "persistentvolumeclaims" ]; verbs = [ "get" "list" "watch" "create" "update" "patch" "delete" ]; }
-          # jobs/status is a SEPARATE subresource — granting `jobs` does NOT imply it. The
-          # marker-check reader polls it (_job_result -> read_namespaced_job_status), so
-          # without it every clean-marker read 403s and resolves "unknown": the pool never
-          # returns a volume and never tops one up, while #399's back-off keeps it quiet.
+          # jobs/status is a separate subresource that the marker-check reader polls.
           { apiGroups = [ "batch" ]; resources = [ "jobs" "jobs/status" ]; verbs = [ "get" "list" "watch" "create" "delete" ]; }
-          # The upstream Sandbox CRs — READ-ONLY (return/leak signals; source of truth for suspended).
+          # Sandboxes are read for return/leak signals.
           { apiGroups = [ "agents.x-k8s.io" ]; resources = [ "sandboxes" ]; verbs = [ "get" "list" "watch" ]; }
-          # Pods — READ-ONLY: which PVCs are currently mounted (RWO single-attach truth).
+          # Pods are read to learn which PVCs are currently mounted.
           { apiGroups = [ "" ]; resources = [ "pods" ]; verbs = [ "get" "list" "watch" ]; }
           { apiGroups = [ "coordination.k8s.io" ]; resources = [ "leases" ]; verbs = [ "get" "list" "watch" "create" "update" ]; }
         ];
       };
-      # PVs and Nodes are CLUSTER-scoped — the namespaced Role above cannot grant them.
+      # PVs and Nodes are cluster-scoped, beyond the namespaced Role above.
       clusterRoles.warm-store-controller = {
         metadata.name = "warm-store-controller";
         rules = [
-          # patch = set/clear claimRef (the reservation); update = the ownership finalizer.
+          # patch sets/clears claimRef; update is for the ownership finalizer.
           { apiGroups = [ "" ]; resources = [ "persistentvolumes" ]; verbs = [ "get" "list" "watch" "patch" "update" ]; }
-          # Nodes: READ-ONLY — the predicate matches PV nodeAffinity against node labels.
+          # The predicate matches PV nodeAffinity against node labels.
           { apiGroups = [ "" ]; resources = [ "nodes" ]; verbs = [ "get" "list" "watch" ]; }
         ];
       };
@@ -173,10 +161,7 @@ in
                 command = [ "warm-store-controller" ];
                 env = [
                   { name = "NAMESPACE"; value = cfg.namespace; }
-                  # The pool version key is the sandbox image's TAG — the controller DERIVES it
-                  # from SANDBOX_IMAGE at runtime (imageTagOf), the same ref the provisioner
-                  # claims by, so they always agree even when a deploy rewrites …:latest →
-                  # …:git-<sha> (which a separately-computed SANDBOX_IMAGE_TAG would miss).
+                  # The controller derives the pool version key from this ref, the same one the provisioner claims by.
                   { name = "SANDBOX_IMAGE"; value = cfg.sandboxImage; }
                   { name = "WARM_STORE_MIN_READY"; value = toString wcfg.minReady; }
                   { name = "WARM_STORE_MAX_TOTAL"; value = toString wcfg.maxTotal; }
@@ -184,20 +169,16 @@ in
                   { name = "WARM_STORE_STORAGE_CLASS"; value = wcfg.storageClass; }
                   { name = "WARM_STORE_GOLDEN_EXPR"; value = wcfg.goldenExpr; }
                 ]
-                # The warm Job's systemd pod needs the SAME runtimeClass as the per-conversation
-                # sandboxes (crun) — non-privileged systemd PID 1 in a private cgroup ns. Omit
-                # when unset (cluster default).
+                # The warm Job's systemd pod needs the same runtimeClass as the per-conversation sandboxes.
                 ++ lib.optional (cfg.sandboxRuntimeClass != null)
                   { name = "SANDBOX_RUNTIME_CLASS"; value = cfg.sandboxRuntimeClass; }
                 ++ [
                   { name = "RECONCILE_INTERVAL_SECONDS"; value = toString wcfg.reconcileInterval; }
                   { name = "LEASE_DURATION_SECONDS"; value = toString wcfg.leaseSeconds; }
-                  # Pod name → the leader-election Lease holder identity.
+                  # The leader-election Lease holder identity.
                   { name = "POD_NAME"; valueFrom.fieldRef.fieldPath = "metadata.name"; }
                 ];
-                # The kubernetes client alone is ~76 MiB resident, so a 64Mi request was
-                # always below the floor: scheduled small, then permanently over its
-                # reservation and first in line for eviction.
+                # The kubernetes client alone needs more than a 64Mi request.
                 resources = lib.mkDefault {
                   requests = { cpu = "25m"; memory = "128Mi"; };
                   limits = { cpu = "50m"; memory = "256Mi"; };

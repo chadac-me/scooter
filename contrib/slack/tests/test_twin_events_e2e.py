@@ -1,25 +1,10 @@
-"""END-TO-END: a single Slack @mention dispatches to the agent EXACTLY ONCE,
-driven through the REAL /webhooks/slack HTTP endpoint — not the handlers in
-isolation.
+"""End-to-end: a single Slack mention dispatches to the agent exactly once.
 
-It still drives the real webhooks app (PR #588): the app is a check input, it
-discovers this contrib through the entry point, and the point of the test is the
-whole intake path — swapping in a bare FastAPI would drop the discovery + mount
-half of what it covers.
-
-WHY e2e and not unit: the previous dedup (#83) passed its unit tests yet killed
-Slack intake in prod, because the units mocked _handle_event / _handle_thread_message
-in isolation and never exercised the real twin-event delivery through the endpoint
-in BOTH arrival orders. These tests POST genuine Slack `event_callback` envelopes
-to the actual FastAPI app and fake ONLY the true external boundaries (the agent
-dispatch: send_message / create_conversation, the Slack Web API helpers, and db).
-
-Slack delivers ONE @mention as TWO events with DIFFERENT event_ids but the SAME
-message `ts`:
-  • an `app_mention` event   (the mention owner)
-  • a `message` event        (same text, raw `<@BOTID>` encoding)
-
-The agent must be prompted exactly once, regardless of which arrives first.
+Driven through the real webhooks app and its /webhooks/slack endpoint, which
+discovers this contrib through the entry point, faking only the agent dispatch, the
+Slack Web API helpers and the db. Slack delivers one mention as two events with
+different event_ids but the same message `ts` (an `app_mention` and a `message`),
+and the agent must be prompted exactly once whichever arrives first.
 """
 
 from __future__ import annotations
@@ -35,21 +20,21 @@ from scooter_contrib_slack import webhooks_handler as slack_h
 
 BOT = "UBOT"
 CHANNEL = "C123"
-TS = "1720368000.100200"          # the shared message ts of the twin events
-RAW_TEXT = f"<@{BOT}> please review the PR"   # the RAW form Slack actually sends
+TS = "1720368000.100200"          # the message ts the twin events share
+RAW_TEXT = f"<@{BOT}> please review the PR"   # the raw form Slack sends
 
 
 def _callback(event_type: str, event_id: str) -> dict:
     """A Slack Events API `event_callback` envelope for one twin event."""
     return {
         "type": "event_callback",
-        "event_id": event_id,          # DIFFERENT per twin (app_mention vs message)
+        "event_id": event_id,          # differs per twin
         "event": {
             "type": event_type,
             "user": "U1",
             "channel": CHANNEL,
             "text": RAW_TEXT,
-            "ts": TS,                  # SAME across the twins
+            "ts": TS,                  # shared across the twins
             "thread_ts": TS,
         },
     }
@@ -60,11 +45,7 @@ from contextlib import contextmanager
 
 @contextmanager
 def _env(existing: str | None = None):
-    """Drive the REAL app with a dispatch spy. `existing` = the conversation already
-    on this thread (None -> a mention CREATES one; a value -> it FORWARDS into it,
-    the follow-up-mention case). Yields (client, dispatched) where `dispatched`
-    collects every real agent dispatch (send/create) — the 'was the agent prompted?'
-    signal."""
+    """Drive the real app with a dispatch spy, yielding (client, dispatched); `existing` is the conversation already on the thread, if any."""
     dispatched: list[tuple] = []
 
     async def spy_send(conv, msg, *, priority=False, images=None, files=None, source=None):
@@ -73,36 +54,27 @@ def _env(existing: str | None = None):
 
     async def spy_create(message, *, title=None, on_created=None, owner=None, images=None, files=None, source=None):
         dispatched.append(("create", message, title))
-        # Exercise the real on_created anchor-registration hook (pre-run), like
-        # create_conversation does — so the test covers that path too.
+        # Exercise the real on_created hook as create_conversation does.
         if on_created is not None:
             await on_created("conv-new")
         return {"conversation_id": "conv-new", "result": "ok"}
 
-    # The handler dispatches via asyncio.create_task(coro) and returns without
-    # awaiting it. Under the sync TestClient that task may not finish before .post()
-    # returns, so we DRIVE the coro to completion synchronously right when it's
-    # "scheduled" — all its awaits are on AsyncMocks (send_message / create_conversation
-    # / db), which resolve immediately, so stepping the generator runs it to the end.
-    # This keeps dispatch deterministic AND still exercises the real endpoint + real
-    # _handle_event / _handle_mention / _handle_thread_message code paths.
+    # The handler dispatches via asyncio.create_task, so the coroutine is driven to completion synchronously; all its awaits are on AsyncMocks.
     def run_now(coro):
         try:
             while True:
                 coro.send(None)
         except StopIteration:
             pass
-        return AsyncMock()  # a stand-in task object (never inspected)
+        return AsyncMock()  # a stand-in task object
 
-    # Reset the module dedup state so tests don't leak into each other.
     slack_h._SEEN_EVENT_IDS.clear()
     slack_h._DISPATCHED_MESSAGES.clear()
 
     with (
-        # The two gates this contrib owns. The trigger pattern it keys on is the
-        # deployment's and is bound by the conftest, not set here (#577).
+        # The trigger pattern is bound by the conftest.
         patch.object(settings, "slack_enabled", True),
-        patch.object(settings, "slack_signing_secret", ""),   # bypass sig check
+        patch.object(settings, "slack_signing_secret", ""),
         patch("webhooks.app.db") as app_db,
         patch.object(slack_h, "db") as db,
         patch.object(slack_h, "send_message", side_effect=spy_send),
@@ -119,8 +91,6 @@ def _env(existing: str | None = None):
     ):
         app_db.init_db = AsyncMock()
         app_db.close_db = AsyncMock()
-        # existing=None -> mention CREATES a conversation; a value -> it FORWARDS
-        # into that existing one (the follow-up-mention path).
         db.lookup_conversation = AsyncMock(return_value=existing)
         db.get_conversation_for_resource = AsyncMock(return_value=existing)
         db.store_conversation = AsyncMock()
@@ -139,8 +109,7 @@ def env():
 
 @pytest.fixture
 def env_existing():
-    """Follow-up-mention case: a conversation already exists on the thread, so a
-    mention FORWARDS into it (and the message twin must not double-forward)."""
+    """Follow-up-mention case: a conversation already exists on the thread, so a mention forwards into it."""
     with _env(existing="conv-1") as e:
         yield e
 
@@ -153,7 +122,6 @@ def _post(client, envelope: dict):
 
 def test_twin_app_mention_then_message_dispatches_once(env):
     client, dispatched = env
-    # app_mention arrives FIRST (the owner), then the message twin.
     _post(client, _callback("app_mention", "ev_app"))
     _post(client, _callback("message", "ev_msg"))
     assert len(dispatched) == 1, dispatched
@@ -161,20 +129,16 @@ def test_twin_app_mention_then_message_dispatches_once(env):
 
 def test_twin_message_then_app_mention_dispatches_once(env):
     client, dispatched = env
-    # THE regression: the `message` twin arrives FIRST. It must NOT pre-empt the
-    # real dispatch — the app_mention that follows must still create the
-    # conversation. (#83 dropped it here → the mention was swallowed entirely.)
+    # The `message` twin arriving first must not pre-empt the app_mention's create.
     _post(client, _callback("message", "ev_msg"))
     _post(client, _callback("app_mention", "ev_app"))
     assert len(dispatched) == 1, dispatched
-    # And it was the CREATE (the real mention dispatch), not a plain forward.
     assert dispatched[0][0] == "create", dispatched
 
 
 def test_redelivered_app_mention_same_ts_dispatches_once(env):
     client, dispatched = env
-    # Slack redelivers the SAME app_mention with a NEW event_id (event_id dedup
-    # misses it); the ts-keyed mention dedup must still catch it.
+    # A redelivery with a new event_id is caught by the ts-keyed dedup.
     _post(client, _callback("app_mention", "ev_app_1"))
     _post(client, _callback("app_mention", "ev_app_2"))
     assert len(dispatched) == 1, dispatched
@@ -182,7 +146,6 @@ def test_redelivered_app_mention_same_ts_dispatches_once(env):
 
 def test_true_retry_same_event_id_dispatches_once(env):
     client, dispatched = env
-    # A pure retry (identical event_id) is caught by the existing event_id dedup.
     _post(client, _callback("app_mention", "ev_same"))
     _post(client, _callback("app_mention", "ev_same"))
     assert len(dispatched) == 1, dispatched
@@ -190,8 +153,7 @@ def test_true_retry_same_event_id_dispatches_once(env):
 
 def test_two_DISTINCT_mentions_each_dispatch(env):
     client, dispatched = env
-    # Two genuinely different mentions in the SAME channel (different ts) must BOTH
-    # dispatch — the dedup is per-message, not per-channel (the concern raised).
+    # The dedup is per message, not per channel.
     _post(client, _callback("app_mention", "ev_a"))
     second = _callback("app_mention", "ev_b")
     second["event"]["ts"] = "1720368999.500000"
@@ -200,37 +162,27 @@ def test_two_DISTINCT_mentions_each_dispatch(env):
     assert len(dispatched) == 2, dispatched
 
 
-# --- Follow-up mention into an EXISTING conversation (the reported duplicate) -----
-# Here a mention forwards (priority) into an already-active thread, and the twin
-# `message` event must NOT ALSO forward. Both orderings AND the case where Slack
-# strips/rewrites the mention out of the `message` twin's text (so the text-skip
-# can't catch it and the channel:ts backstop must).
+# --- Follow-up mention into an existing conversation -----
+# A mention forwards at priority into an active thread and the `message` twin must not also forward, in either order and even when Slack strips the mention from the twin's text.
 
 def _message_stripped(event_id: str) -> dict:
-    """A `message` twin whose text has NO mention marker (Slack sometimes delivers
-    the thread message with the <@BOT> already resolved away). The text-skip can't
-    catch this — only the channel:ts dedup can."""
+    """A `message` twin whose text has no mention marker, which only the channel:ts dedup can catch."""
     cb = _callback("message", event_id)
-    cb["event"]["text"] = "please review the PR"   # mention stripped
+    cb["event"]["text"] = "please review the PR"
     return cb
 
 
 def test_existing_conv_app_mention_then_message_forwards_once(env_existing):
     client, dispatched = env_existing
-    # app_mention forwards (priority) into the existing conv; the message twin (even
-    # with the mention stripped) must NOT forward a 2nd copy.
     _post(client, _callback("app_mention", "ev_app"))
     _post(client, _message_stripped("ev_msg"))
     assert len(dispatched) == 1, dispatched
-    assert dispatched[0][0] == "send" and dispatched[0][3] is True, dispatched  # priority forward
+    assert dispatched[0][0] == "send" and dispatched[0][3] is True, dispatched
 
 
 def test_existing_conv_message_FIRST_then_app_mention_forwards_once(env_existing):
     client, dispatched = env_existing
-    # THE order you asked about: the regular `message` webhook arrives FIRST (mention
-    # stripped, so the text-skip misses it) → it forwards as awareness AND records
-    # channel:ts. The app_mention that follows must then be dropped by the ts guard
-    # → still exactly ONE forward (no double dispatch).
+    # The stripped `message` twin forwards as awareness and records channel:ts, so the app_mention that follows is dropped.
     _post(client, _message_stripped("ev_msg"))
     _post(client, _callback("app_mention", "ev_app"))
     assert len(dispatched) == 1, dispatched
@@ -238,11 +190,9 @@ def test_existing_conv_message_FIRST_then_app_mention_forwards_once(env_existing
 
 def test_existing_conv_plain_followup_still_forwards(env_existing):
     client, dispatched = env_existing
-    # A genuine non-mention follow-up in the thread (distinct ts) still forwards for
-    # awareness — the dedup must not suppress real thread activity.
     msg = _callback("message", "ev_plain")
     msg["event"]["text"] = "here's an update, no action needed"
     msg["event"]["ts"] = "1720369100.700000"
     _post(client, msg)
     assert len(dispatched) == 1, dispatched
-    assert dispatched[0][0] == "send" and dispatched[0][3] is False, dispatched  # awareness (non-priority)
+    assert dispatched[0][0] == "send" and dispatched[0][3] is False, dispatched

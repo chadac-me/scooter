@@ -1,19 +1,15 @@
 /**
- * The marimo notebook TOOLS as pure handlers over a MarimoClient — the MCP layer
- * (index.ts) just wraps these with Zod schemas. Kept HTTP/MCP-free so they're
- * unit-testable against a fake client.
- *
- * The stable workhorse is `marimo_execute` (scratchpad). The cell tools
- * (`marimo_create_cell`, `marimo_run_cell`, `marimo_list_cells`) drive the
+ * The marimo notebook tools as pure handlers over a MarimoClient, which index.ts wraps
+ * with Zod schemas. `marimo_execute` runs the scratchpad; the cell tools drive the
  * version-pinned `marimo._code_mode` API by executing a snippet through the same
- * scratchpad — see codeMode.ts.
+ * scratchpad (see codeMode.ts).
  */
 
 import type { MarimoClient } from "./client.js";
 import { MarimoError } from "./types.js";
 import { createCellSnippet, runCellSnippet, listCellsSnippet, installSnippet, parseCodeModeResult } from "./codeMode.js";
 
-/** The MCP tool-result shape (mirrors agent-host's ToolResult). */
+/** The MCP tool-result shape, mirroring agent-host's ToolResult. */
 export interface ToolResult {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
@@ -22,11 +18,7 @@ export interface ToolResult {
 const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const err = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
-/** Turn any thrown error into an isError ToolResult with a helpful, actionable
- *  message (MarimoError carries a `kind` we can phrase around). `notebookUrl`, when
- *  known, is the URL to tell the USER to open — a marimo session only exists once a
- *  human has the notebook open in a browser (same as marimo-pair; there's no headless
- *  session). So the no-session message asks the agent to share that link. */
+/** Turn any thrown error into an isError ToolResult with an actionable message; `notebookUrl` is what the user must open, since a marimo session only exists once a browser has the notebook open. */
 function toErrorResult(e: unknown, notebookUrl?: string): ToolResult {
   if (e instanceof MarimoError) {
     switch (e.kind) {
@@ -62,21 +54,16 @@ export interface MarimoTools {
 }
 
 export interface MarimoToolsOptions {
-  /** The URL to tell the USER to open to start a notebook session (a session only
-   *  exists once a browser has it open). Surfaced in the no-session message. */
+  /** The URL the user must open to start a notebook session, surfaced in the no-session message. */
   notebookUrl?: string;
 }
 
-/** Build the tool handlers over a client. `client` is per-conversation (its target
- *  is the conversation's pod marimo) — the MCP layer constructs one per request. */
+/** Build the tool handlers over a per-conversation client. */
 export function createMarimoTools(client: MarimoClient, opts: MarimoToolsOptions = {}): MarimoTools {
   const sel = (a: { file?: string; session?: string }) => ({ file: a.file, sessionId: a.session });
   const onErr = (e: unknown) => toErrorResult(e, opts.notebookUrl);
 
-  /** Run a code-mode snippet + surface its marker result (or the raw stderr if the
-   *  op threw inside the kernel — e.g. a code-mode API drift). Returns the parsed
-   *  marker object (or null) alongside the ToolResult so callers can chain (e.g.
-   *  create → run) without re-parsing rendered text. */
+  /** Run a code-mode snippet and surface its marker result, returning the parsed marker object alongside the ToolResult so callers can chain. */
   async function runCodeMode(
     snippet: string,
     sel: { file?: string; sessionId?: string },
@@ -125,9 +112,9 @@ export function createMarimoTools(client: MarimoClient, opts: MarimoToolsOptions
       try {
         const created = await runCodeMode(createCellSnippet(args.code, args.name), sel(args), "create_cell");
         if (created.result.isError || !args.run) return created.result;
-        // Optionally run the freshly-created cell (create_cell is structural only).
+        // create_cell is structural only, so run the new cell on request.
         const cellId = created.parsed?.cell_id;
-        if (typeof cellId !== "string") return created.result; // no id recovered — leave it created, not run
+        if (typeof cellId !== "string") return created.result; // no id recovered, so leave it created
         const ran = await runCodeMode(runCellSnippet(cellId), sel(args), "run_cell");
         return ran.result.isError ? ran.result : ok(`create_cell + run ok: cell_id=${cellId}`);
       } catch (e) {

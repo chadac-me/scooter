@@ -1,11 +1,6 @@
-# echo's sandbox half — the reference for `contribs.<name>.sandbox.module`.
-#
-# A plain NixOS module, layered into the sandbox-os config at image build and
-# re-derived from the vendored source by every in-pod re-converge. Everything NixOS
-# offers is available: packages, systemd units, activation, environment.
-# contrib/aws/sandbox.nix is the real one (the `~/.aws/config` render + the awscli2
-# stub); this stays as the fixture for the DISABLED-contrib path, which a shipped
-# contrib cannot exercise. See #599.
+# echo's sandbox half: a plain NixOS module layered into the sandbox-os config at
+# image build and replayed by every in-pod re-converge, kept as the fixture for the
+# disabled-contrib path.
 { pkgs, ... }:
 
 {
@@ -15,7 +10,6 @@
     '')
   ];
 
-  # The marker dev-env-contrib-sandbox asserts on — cheap to evaluate, and it proves
-  # the module reached the sandbox config rather than merely being a valid file.
+  # The marker dev-env-contrib-sandbox asserts on.
   environment.etc."scooter/contrib-echo".text = "echo contrib sandbox module\n";
 }

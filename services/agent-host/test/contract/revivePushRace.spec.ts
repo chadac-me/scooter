@@ -1,17 +1,8 @@
 /**
- * Tier 1 — the controller's revive push must beat its own watch event.
- *
- * The cluster shape (e2e-full run 33024754713, the conversation-moves-pods story):
- * the controller writes hostPod=<new pod> generation=2 and POSTs /internal/revive
- * in the same tick. The new pod's CR watch has not yet delivered that write, so its
- * ownership cache still names the DEAD pod — and reviveFromMirror's fence read that
- * stale cache as "another pod owns it" and dropped the push. Silently, and nothing
- * re-pushes: the dangling run was never resumed nor terminated, and the browser sat
- * "Working…" until the 180s budget died.
- *
- * The fix: a push whose generation is NEWER than anything the watch has shown is a
- * stale CACHE, not a stale push — adopt the assignment and proceed. A push at or
- * below the observed generation stays fenced (that one really is stale).
+ * The controller's revive push can arrive before the new pod's CR watch delivers the
+ * assignment. A push whose generation is newer than anything the watch has shown means
+ * the cache is stale, so the pod adopts the assignment and proceeds; a push at or below
+ * the observed generation is the stale one and stays fenced.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -46,8 +37,7 @@ const seededStore = (id: string, events: AguiEvent[]) => {
   };
 };
 
-/** A run the dead pod started and never finished, plus the user's Stop marker —
- *  so the correct revive outcome is an APPENDED terminal, observable in the log. */
+/** A run the dead pod never finished plus the user's Stop marker, so a correct revive appends a terminal. */
 const DEAD_HOST_RUN: AguiEvent[] = [
   { type: "RUN_STARTED", threadId: "t1", runId: "r1", host: "dead-pod", gen: 1 },
   { type: "TOOL_CALL_START", toolCallId: "c1", toolCallName: "run: sleep 20" },
@@ -57,7 +47,7 @@ const DEAD_HOST_RUN: AguiEvent[] = [
 describe("reviveFromMirror vs a lagging ownership watch", () => {
   it("a push NEWER than the cached view is honored, not fenced (stale cache ≠ stale push) @proves", async () => {
     const guard = new OwnershipTracker("new-pod");
-    guard.observe("t1", { hostPod: "dead-pod", generation: 1 }); // the watch has NOT seen gen 2 yet
+    guard.observe("t1", { hostPod: "dead-pod", generation: 1 }); // the watch has not seen gen 2 yet
 
     const { store, dump } = seededStore("t1", [...DEAD_HOST_RUN]);
     const sessions = createSessionManager({
@@ -82,7 +72,7 @@ describe("reviveFromMirror vs a lagging ownership watch", () => {
 
   it("a push at or below the OBSERVED generation stays fenced (genuinely stale)", async () => {
     const guard = new OwnershipTracker("new-pod");
-    guard.observe("t1", { hostPod: "third-pod", generation: 3 }); // the CR moved on past this push
+    guard.observe("t1", { hostPod: "third-pod", generation: 3 }); // the CR has moved on past this push
 
     const { store, dump } = seededStore("t1", [...DEAD_HOST_RUN]);
     const sessions = createSessionManager({

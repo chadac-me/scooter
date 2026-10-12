@@ -1,14 +1,13 @@
 /**
- * scooter-remote-agent entrypoint (bring-your-own-Claude container).
+ * scooter-remote-agent entrypoint (the bring-your-own-Claude container).
  *
  *   scooter-remote-agent login                         one-time token entry (serves 127.0.0.1:34579
  *                                                       to paste a `claude setup-token`, exits when done)
  *   scooter-remote-agent --url <wss> --join <token>    run: ensure a Claude token (serving :34579 if
  *                                                       needed), then connect + drive
  *
- * The Claude subscription token (from `claude setup-token`, run on the user's own machine) lives
- * ONLY in the mounted volume; it never reaches scooter. The join token (--join) authenticates the
- * container TO scooter. See §H of the doc.
+ * The Claude subscription token lives only in the mounted volume and never reaches scooter;
+ * the join token authenticates the container to scooter.
  */
 
 import { readToken } from "./claudeCreds.js";
@@ -32,7 +31,7 @@ function parseArgs(argv: string[]): { cmd?: string; url?: string; join?: string;
   return out;
 }
 
-/** Ensure a Claude setup token: if none, serve the token-entry page + wait for the user to paste it. */
+/** Ensure a Claude setup token, serving the token-entry page until the user pastes one. */
 async function ensureLogin(): Promise<string> {
   let token = await readToken();
   if (token) return token;
@@ -61,9 +60,7 @@ async function main() {
     return;
   }
 
-  // A REGISTERED device needs no join token — that is the point of §P: the laptop reconnects
-  // after sleeping without the user re-minting anything. Only require --join when this container
-  // has never registered.
+  // A registered device needs no join token, so --join is only required when this container has never registered.
   const existing = await loadDeviceIdentity();
   if (!args.url || (!args.join && !existing)) {
     console.error("usage: scooter-remote-agent --url <wss://.../connect> --join <token>");
@@ -74,17 +71,10 @@ async function main() {
 
   const oauthToken = await ensureLogin();
 
-  // The controller's HTTP base, derived from the ws URL (ws→http, strip the connect path).
-  // The controller's HTTP base. The connect URL is  ws://host/byoc/ws/<session-id>  and the
-  // registration/challenge routes live at  /byoc/devices  and  /byoc/challenge  — i.e. a sibling
-  // of `ws`, not of the session id. Stripping only the LAST segment yielded /byoc/ws/devices,
-  // which 404s: the container then fell back to the join token and never registered a device key
-  // at all, silently disabling §P. Strip the whole `/ws/<id>` tail instead.
+  // The controller's HTTP base: the connect URL is ws://host/byoc/ws/<session-id> and the registration/challenge routes are siblings of `ws`, so strip the whole `/ws/<id>` tail.
   const httpBase = args.url.replace(/^ws/, "http").replace(/\/ws\/[^/]*\/?$/, "");
 
-  // REGISTER ONCE. Exchange the short-lived join token for a device key that authenticates
-  // indefinitely. If registration fails we still connect with the join token — degraded (it
-  // expires in ten minutes) but working, rather than refusing to start.
+  // Exchange the short-lived join token for a device key once; if registration fails, still connect with the join token.
   if (!existing && args.join) {
     const key = generateDeviceKey();
     try {
