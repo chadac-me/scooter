@@ -1,6 +1,4 @@
-/** Contract — the MCP registration: the tools show up on the server and dispatch to
- *  the handlers. Drives the real McpServer via an in-memory client/server transport
- *  pair, against a fake marimo http.Server. */
+/** Contract test for the MCP registration, driving the real McpServer over an in-memory transport pair against a fake marimo http.Server. */
 
 import { AddressInfo } from "node:net";
 import { createServer, type Server } from "node:http";

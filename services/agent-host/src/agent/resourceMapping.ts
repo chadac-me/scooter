@@ -1,19 +1,8 @@
 /**
- * Resource-mapping lookup — the FALLBACK source for a conversation's external
- * target (slack channel/thread, GitHub PR, GitLab MR, Jira issue) when the
- * conversation's link has no structured `ref`.
- *
- * The webhooks service records every trigger in its Postgres `conversation_map`
- * table (source, resource_type, resource_id, conversation_id, + slack_channel/
- * slack_ts). The agent-tools (slack_respond, etc.) prefer the link `ref`, but a
- * conversation created before `ref` existed has a ref-less link — so we read the
- * mapping straight from that Postgres table as the backup, keyed by the
- * conversation id. Read-only, best-effort: any DB error yields `undefined` (the
- * tool then reports it can't determine the target — never a wrong guess).
- *
- * We query the SAME shared Postgres the webhooks service writes; the agent-host
- * deployment is given read access (DSN/DB_* env). When no DB is configured, the
- * factory returns undefined and the tools fall back to `ref` alone.
+ * Resource-mapping lookup: the fallback source for a conversation's external target
+ * when its link has no structured `ref`, read from the webhooks service's
+ * `conversation_map` table on the shared Postgres. Read-only and best-effort: any DB
+ * error yields `undefined`, so a tool reports an unknown target rather than guess.
  */
 
 import { and, eq } from "drizzle-orm";
@@ -35,24 +24,14 @@ export interface ResourceLookupConfig {
 }
 
 export interface ResourceLookup {
-  /** The webhooks conversation_map row for this conversation + source, or
-   *  undefined if unmapped / on any DB error. */
+  /** The webhooks conversation_map row for this conversation and source, or undefined if unmapped or on any DB error. */
   lookup(conversationId: string, source: string): Promise<ResourceMapping | undefined>;
-  /** Close the pool (on shutdown). */
+  /** Close the pool on shutdown. */
   close(): Promise<void>;
 }
 
-/**
- * Build a Postgres-backed ResourceLookup. The pool is lazy (first query
- * connects); a connection/query failure is logged and swallowed (returns
- * undefined) so a DB blip never breaks a tool call — the tool just falls back to
- * "target unknown".
- */
+/** Build a Postgres-backed ResourceLookup whose failures are logged and swallowed so a DB blip never breaks a tool call. */
 export function createResourceLookup(config: ResourceLookupConfig): ResourceLookup {
-  // Hardened pool (idleTimeoutMillis + keepAlive) so a stale idle connection never
-  // hangs a query — see db/pgPool.ts. The Drizzle client is a thin typed wrapper over
-  // this same pool; a column rename in lib/sql (regenerated into @scooter/schema) is now
-  // a compile error here, not a silent runtime failure. Why: PR #392 chain.
   const pool = createPgPool("resourceLookup", { connectionString: config.dsn, max: 3 });
   const db = drizzle(pool);
 

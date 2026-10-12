@@ -1,5 +1,4 @@
-"""Scheduler service — a REST API for scheduled tasks + a background loop that fires
-due tasks by spawning a fresh Scooter conversation (agent-host /agui) per run."""
+"""Scheduler service: a REST API for scheduled tasks plus a background loop that fires due tasks by spawning a fresh conversation per run."""
 
 from __future__ import annotations
 
@@ -19,10 +18,6 @@ from .models import Run, Task, TaskCreate, TaskPatch
 from .spawn import spawn_conversation
 from .store import Store
 
-# Install the structured JSON handler on the ROOT logger, so our logger.info/debug
-# actually reach stdout — without this the root defaults to WARNING and everything below
-# it is silently dropped (only uvicorn's own logger prints). Level from LOG_LEVEL
-# (settings.log_level as the default), format from LOG_FORMAT (json in a container).
 configure_logging("scheduler", default_level=settings.log_level)
 
 logger = get_logger("app")
@@ -33,12 +28,9 @@ def _utcnow() -> datetime:
 
 
 async def _fire(store: Store, task, metrics: MetricsSink) -> None:
-    """Spawn one run for an ALREADY-CLAIMED task and record it. The task's
-    next_run_at was advanced atomically by claim_due (the double-fire guard), so
-    _fire must NOT reschedule — it only spawns + records the run."""
+    """Spawn one run for an already-claimed task and record it, without rescheduling since claim_due already advanced next_run_at."""
     start_ms = time.perf_counter() * 1000
     
-    # Record claim lag if available (claim_due attaches it as a transient attribute)
     if hasattr(task, "_claim_lag_ms"):
         metrics.claim_lag(lag_ms=task._claim_lag_ms)
     
@@ -65,18 +57,14 @@ async def _fire(store: Store, task, metrics: MetricsSink) -> None:
 
 
 async def _scheduler_loop(store: Store, metrics: MetricsSink, stop: asyncio.Event) -> None:
-    """Every tick, fire all due tasks. A missed window (service down) fires once on
-    recovery (next_run_at is in the past) then advances forward — no backfill storm."""
+    """Every tick, fire all due tasks; a missed window fires once on recovery, with no backfill storm."""
     tick_count = 0
     while not stop.is_set():
         outcome = "ok"
         try:
             now = _utcnow()
-            # Feed the observable gauges BEFORE claiming: claim_due advances next_run_at as
-            # it claims, so a backlog read after it has already been zeroed by the very tick
-            # that is meant to report it. A gauge refresh must never fail a tick — it is
-            # observability, not the job — so its failure is logged and swallowed here
-            # rather than flowing into `outcome`.
+            # The gauges are fed before claiming, since claim_due zeroes the backlog, and a
+            # gauge failure must never fail the tick.
             try:
                 enabled, disabled, backlog = await store.gauge_counts(now)
                 metrics.set_task_counts(enabled=enabled, disabled=disabled)
@@ -84,10 +72,7 @@ async def _scheduler_loop(store: Store, metrics: MetricsSink, stop: asyncio.Even
             except Exception:
                 logger.warning("gauge refresh failed — task gauges will report their last value", exc_info=True)
 
-            # claim_due ATOMICALLY claims + advances next_run_at, so with 2+ replicas
-            # each due task is fired by exactly one replica (no double-fire). If a
-            # spawn then fails, next_run_at has already advanced — the run is recorded
-            # 'failed' and we don't retry until the next cron window (at-most-once).
+            # Each due task is fired by exactly one replica, at most once per cron window.
             due = await store.claim_due(now)
             
             for task in due:
@@ -97,8 +82,7 @@ async def _scheduler_loop(store: Store, metrics: MetricsSink, stop: asyncio.Even
                     logger.exception("failed firing task", extra={"task_id": task.id})
                     outcome = "error"
             
-            # Run retention sweep roughly hourly (not every tick — tick is 30s by default).
-            # Check every ~120 ticks = 3600s = 1 hour (at default tick_seconds=30).
+            # The retention sweep runs every 120 ticks, roughly hourly at the default tick.
             tick_count += 1
             if settings.run_retention_days > 0 and tick_count % 120 == 0:
                 try:
@@ -119,8 +103,7 @@ async def _scheduler_loop(store: Store, metrics: MetricsSink, stop: asyncio.Even
             logger.exception("scheduler tick failed")
             outcome = "error"
         
-        # CRITICAL: increment scheduler_ticks_total EVERY tick, even if no tasks were due.
-        # This is the dead-loop detector — its absence means the tick loop is stuck.
+        # Counted every tick, even with no due tasks, since this is the dead-loop detector.
         metrics.tick_completed(outcome=outcome)
         
         with contextlib.suppress(asyncio.TimeoutError):
@@ -132,7 +115,6 @@ async def lifespan(app: FastAPI):
     store = Store(settings.dsn)
     app.state.store = store
     
-    # Initialize metrics (no-op if disabled)
     metrics = create_metrics(enabled=settings.otel_metrics_enabled)
     app.state.metrics = metrics
     
@@ -152,13 +134,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="agent-scheduler", version="0.1.0", lifespan=lifespan)
 
 
-# The task owner IS the request identity — a user can't create tasks owned by
-# someone else. The ingress sets x-auth-user (the identity the agent-host trusts);
-# the agent-host forwards it, sending an EMPTY x-auth-user for the anonymous /
-# unowned scope (a deployment with no ingress auth, like a personal cluster). That
-# is a VALID scope, not an error: an absent/empty header maps to the unowned bucket
-# ("" owner), matching the agent-host's Owner contract (null owner -> ""). We never
-# 401 here — the trust boundary is the ingress + the relay key, not this header.
+# The task owner is the forwarded x-auth-user identity, where an absent or empty header is
+# the valid anonymous "" scope rather than an error.
 def _owner(x_auth_user: str | None = Header(default=None)) -> str:
     return x_auth_user or ""
 
@@ -180,8 +157,7 @@ async def create_task(body: TaskCreate, owner: str = Depends(_owner)) -> Task:
     return Task.of(row)
 
 
-# Every route below scopes to `owner` — the authenticated x-auth-user identity. A task
-# belonging to someone else is reported 404, never 403: a 403 would confirm the id exists.
+# Every route below scopes to `owner`, reporting another owner's task as 404 rather than 403.
 @app.get("/tasks", response_model=list[Task], dependencies=[Depends(require_relay_key)])
 async def list_tasks(owner: str = Depends(_owner)) -> list[Task]:
     return [Task.of(r) for r in await app.state.store.list_tasks(owner)]
@@ -217,9 +193,7 @@ async def delete_task(task_id: str, owner: str = Depends(_owner)) -> None:
 
 @app.get("/tasks/{task_id}/runs", response_model=list[Run], dependencies=[Depends(require_relay_key)])
 async def list_runs(task_id: str, owner: str = Depends(_owner)) -> list[Run]:
-    # Check the task first so an unowned id 404s like every other route. Returning a bare
-    # [] would be indistinguishable from "your task, no runs yet" and still leaks nothing
-    # — but it would answer a question the caller has no right to ask.
+    # Checked first so an unowned id 404s like every other route.
     if await app.state.store.get_task(task_id, owner) is None:
         raise HTTPException(status_code=404, detail="task not found")
     return [Run.of(r) for r in await app.state.store.list_runs(task_id, owner)]
@@ -227,12 +201,7 @@ async def list_runs(task_id: str, owner: str = Depends(_owner)) -> list[Run]:
 
 @app.post("/tasks/{task_id}/run", response_model=Run, dependencies=[Depends(require_relay_key)])
 async def run_now(task_id: str, owner: str = Depends(_owner)) -> Run:
-    """Fire a task immediately (ad-hoc; also the smoke test). Does NOT change the
-    cron schedule's next_run_at beyond the normal advance.
-
-    Ownership matters most here: firing spawns a conversation as the task's OWNER, so an
-    unscoped run-now let any caller execute someone else's prompt under their identity.
-    """
+    """Fire a task immediately, owner-scoped since firing spawns a conversation as the task's owner."""
     row = await app.state.store.get_task(task_id, owner)
     if row is None:
         raise HTTPException(status_code=404, detail="task not found")

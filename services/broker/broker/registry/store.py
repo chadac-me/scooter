@@ -1,15 +1,8 @@
-"""Module registry store — the broker-side catalog of shareable modules.
+"""Module registry store: the broker-side catalog of shareable modules.
 
-A module has BOTH a stable numeric `id` and a unique `name`, and can be referenced by
-EITHER (GitHub-style). The NAME is the canonical human reference (globally unique,
-npm/crates style — the FIRST publisher owns a name; a re-publish by another owner is
-rejected); the numeric `id` is a secondary stable handle. A module = metadata
-(id/name/owner/description/visibility/version) + its Nix files (a JSON blob
-{filename: contents}). Backed by the shared broker Postgres (SQLAlchemy async),
-Authoritative: a failed publish PROPAGATES.
-
-Visibility ('private' | 'public') gates the CATALOG listing (own private + all
-public); the download path serves files for any ref (Nix isn't a secret).
+A module has a globally unique `name` owned by its first publisher and a stable numeric
+`id`, and can be referenced by either; it carries metadata plus its Nix files as a JSON
+blob. Visibility gates the catalog listing, while the download path serves any ref.
 """
 
 from __future__ import annotations
@@ -27,7 +20,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 @dataclass
 class Module:
-    """A registry module. `name` is the canonical ref; `id` is a stable numeric handle."""
+    """A registry module, where `name` is the canonical ref and `id` a stable numeric handle."""
 
     id: int
     name: str
@@ -40,7 +33,7 @@ class Module:
     updated_at: str = ""
 
     def summary(self) -> dict:
-        """Metadata WITHOUT the file blob — for list/catalog responses."""
+        """Metadata without the file blob, for catalog responses."""
         return {
             "id": self.id,
             "name": self.name,
@@ -61,7 +54,7 @@ class _ModuleRow(_Base):
     __tablename__ = "module_registry"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String, unique=True, index=True)  # globally unique
+    name: Mapped[str] = mapped_column(String, unique=True, index=True)
     owner: Mapped[str] = mapped_column(String, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     visibility: Mapped[str] = mapped_column(String, default="private", index=True)
@@ -86,15 +79,14 @@ def _to_module(row: _ModuleRow) -> Module:
 
 
 class ModuleRegistryStore:
-    """Persists registry modules. Async (asyncpg/aiosqlite)."""
+    """Persists registry modules."""
 
     def __init__(self, config: StoreConfig) -> None:
         self._engine: AsyncEngine
         self._engine, self._session = open_sessions(config)
 
     async def get(self, ref: str) -> Module | None:
-        """Resolve a module by EITHER its numeric id OR its name (GitHub-style). A
-        purely-numeric ref is looked up by id; otherwise by name."""
+        """Resolve a module by numeric id or by name."""
         async with self._session() as s:
             row = None
             if ref.isdigit():
@@ -104,13 +96,12 @@ class ModuleRegistryStore:
             return _to_module(row) if row else None
 
     async def get_files(self, ref: str) -> dict[str, str] | None:
-        """The files blob for the download path. None if the module doesn't exist."""
+        """The files blob, or None if the module does not exist."""
         m = await self.get(ref)
         return m.files if m else None
 
     async def list_visible(self, viewer: str, query: str = "") -> list[Module]:
-        """Modules VISIBLE to `viewer`: their own (any visibility) + all public.
-        Optional case-insensitive substring `query` over name + description."""
+        """Modules visible to `viewer` (their own plus all public), optionally filtered by a case-insensitive substring of name or description."""
         async with self._session() as s:
             stmt = select(_ModuleRow).where(
                 (_ModuleRow.owner == viewer) | (_ModuleRow.visibility == "public")
@@ -133,10 +124,7 @@ class ModuleRegistryStore:
         files: dict[str, str],
         now_iso: str = "",
     ) -> Module:
-        """Publish `name`: create it (minting a numeric id), or re-publish an existing
-        one (bumping version, id + name unchanged). NAME is globally unique — the FIRST
-        publisher owns it; a re-publish by a DIFFERENT owner is rejected. Owner is
-        stamped by the caller (the resolved identity), never a request field."""
+        """Create `name` or, for its owner, re-publish it with a bumped version, rejecting a different owner."""
         payload = json.dumps(files)
         async with self._session() as s, s.begin():
             row = (await s.execute(select(_ModuleRow).where(_ModuleRow.name == name))).scalar_one_or_none()

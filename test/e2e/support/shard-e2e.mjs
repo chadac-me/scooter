@@ -1,22 +1,11 @@
 #!/usr/bin/env node
 /**
- * Distribute the Playwright e2e spec FILES into N balanced shards for parallel CI
- * runners, weighted by per-file runtime.
- *
- * Weights come from (in priority order):
- *   1. A prior run's Playwright JSON report (env PRIOR_REPORT=path) — the "auto-measure
- *      from the last green run" source. We sum each spec file's test durations.
- *   2. A committed defaults file (test/e2e/shard-weights.json) — the fallback so the
- *      FIRST run (or a cache miss) still balances sensibly, and new specs get a value.
- *   3. A flat DEFAULT_WEIGHT for any spec absent from both.
- *
- * Bin-packing: Longest-Processing-Time-first (LPT) greedy — sort files heaviest-first,
- * assign each to the currently-lightest shard. Near-optimal makespan for this size.
- *
- * Output: prints a GitHub-Actions matrix include list as JSON to stdout, e.g.
- *   {"include":[{"shard":1,"specs":"a.spec.ts b.spec.ts"},{"shard":2,"specs":"c.spec.ts"}]}
- * Each `specs` is a space-joined list of spec FILE PATHS (relative to repo root),
- * ready to pass positionally to `playwright test`.
+ * Distribute the Playwright e2e spec files into N balanced shards for parallel CI runners,
+ * weighted by per-file runtime. Weights come from a prior run's Playwright JSON report
+ * (PRIOR_REPORT=path), then the committed test/e2e/shard-weights.json, then a flat
+ * DEFAULT_WEIGHT; packing is LPT greedy. Output is a GitHub-Actions matrix include list as
+ * JSON on stdout, each `specs` a space-joined list of repo-relative spec paths ready to
+ * pass positionally to `playwright test`.
  *
  * Usage:  node test/e2e/support/shard-e2e.mjs <N>
  *         SHARDS=<N> node test/e2e/support/shard-e2e.mjs
@@ -32,24 +21,21 @@ const E2E_DIR = join(HERE, ".."); // test/e2e
 const REPO_ROOT = join(E2E_DIR, "..", ".."); // scooter/
 const DEFAULTS_PATH = join(E2E_DIR, "shard-weights.json");
 
-const DEFAULT_WEIGHT = 30; // seconds — a middling spec, used when nothing else knows.
+const DEFAULT_WEIGHT = 30; // seconds; a middling spec
 
-/** Spec files Playwright would consider. Default (fast): every *.spec.ts in
- *  test/e2e — specs that self-skip via env stay in the list: they're cheap no-ops on
- *  a shard and enumerating them keeps this in lock-step with the suite.
- *  SPEC_SET=full: the full-target allowlist (test/e2e/full-specs.json) — the SAME
- *  file playwright.config.ts builds the `full` project's testMatch from, so CI's
- *  shard plan and the project definition cannot drift. */
+/** Spec files Playwright would consider: every *.spec.ts in test/e2e by default, or with
+ *  SPEC_SET=full the allowlist in test/e2e/full-specs.json that playwright.config.ts also
+ *  builds the `full` project from. */
 function specFiles() {
   if (process.env.SPEC_SET === "full") {
     return JSON.parse(readFileSync(join(E2E_DIR, "full-specs.json"), "utf8")).sort();
   }
   return readdirSync(E2E_DIR)
     .filter((f) => f.endsWith(".spec.ts"))
-    .sort(); // deterministic order → deterministic sharding for the same inputs
+    .sort(); // deterministic order, so deterministic sharding for the same inputs
 }
 
-/** Committed fallback weights: { "<spec-file>": seconds }. Missing file → {}. */
+/** Committed fallback weights, { "<spec-file>": seconds }; a missing file yields {}. */
 function committedWeights() {
   if (!existsSync(DEFAULTS_PATH)) return {};
   try {
@@ -59,10 +45,8 @@ function committedWeights() {
   }
 }
 
-/** Per-spec-file durations (seconds) parsed from a Playwright JSON report, or {} if
- *  the report is absent/unreadable. Sums every test's duration within a file, so a
- *  file's weight reflects its whole cost. Playwright's JSON `suites` tree carries a
- *  `file` per top-level suite and `results[].duration` (ms) per test spec. */
+/** Per-spec-file durations (seconds) summed from a Playwright JSON report, or {} if the
+ *  report is absent or unreadable. */
 function priorReportWeights(reportPath) {
   if (!reportPath || !existsSync(reportPath)) return {};
   let report;
@@ -95,7 +79,7 @@ function priorReportWeights(reportPath) {
   return out;
 }
 
-/** Resolve each spec file's weight: prior report → committed default → flat default. */
+/** Resolve each spec file's weight: prior report, then committed default, then flat default. */
 function resolveWeights(files, prior, committed) {
   const w = {};
   for (const f of files) {
@@ -106,13 +90,12 @@ function resolveWeights(files, prior, committed) {
   return w;
 }
 
-/** LPT greedy bin-packing into `n` shards. Returns an array of { specs: string[],
- *  total: number }, each `specs` holding the repo-relative spec paths. */
+/** LPT greedy bin-packing into `n` shards, returning { specs, total } per shard. */
 function packShards(files, weights, n) {
   const shards = Array.from({ length: n }, () => ({ specs: [], total: 0 }));
   const heaviestFirst = [...files].sort((a, b) => weights[b] - weights[a]);
   for (const f of heaviestFirst) {
-    // Assign to the currently-lightest shard (ties → lowest index for determinism).
+    // Assign to the currently-lightest shard (ties go to the lowest index for determinism).
     let lightest = 0;
     for (let i = 1; i < n; i++) if (shards[i].total < shards[lightest].total) lightest = i;
     shards[lightest].specs.push(`test/e2e/${f}`);
@@ -129,7 +112,7 @@ function main() {
   const weights = resolveWeights(files, prior, committed);
 
   const source = Object.keys(prior).length ? "prior-report" : Object.keys(committed).length ? "committed-defaults" : "flat-default";
-  const effN = Math.min(n, files.length) || 1; // don't create empty shards
+  const effN = Math.min(n, files.length) || 1; // do not create empty shards
   const shards = packShards(files, weights, effN)
     // Keep only non-empty shards (defensive; effN caps this already).
     .filter((s) => s.specs.length > 0);
@@ -137,7 +120,7 @@ function main() {
   const include = shards.map((s, i) => ({
     shard: i + 1,
     specs: s.specs.join(" "),
-    // Human-readable, not consumed by the matrix — handy in logs.
+    // Human-readable, not consumed by the matrix.
     est_seconds: Math.round(s.total),
   }));
 

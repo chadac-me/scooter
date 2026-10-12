@@ -1,10 +1,4 @@
-/**
- * Folding an event log into AG-UI messages for MESSAGES_SNAPSHOT.
- *
- * Replaying history event-by-event makes the client's applier rebuild the list
- * token by token, deep-cloning the whole array per emit — 15,062 clones for 4,000
- * events, measured. A snapshot is one pass.
- */
+/** Folding an event log into AG-UI messages for MESSAGES_SNAPSHOT. */
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 
@@ -37,8 +31,7 @@ describe("foldToMessages", () => {
   });
 
   it("REASONING becomes a reasoning message — the snapshot carries it, so it is not lost", () => {
-    // The applier drops LOCAL reasoning when the snapshot has its own, and keeps it
-    // otherwise. Emitting it here means the snapshot is the source of truth.
+    // The applier drops local reasoning when the snapshot carries its own.
     const out = foldToMessages([
       ev({ type: "REASONING_START", messageId: "r1" }),
       ev({ type: "REASONING_MESSAGE_CONTENT", messageId: "r1", delta: "thinking" }),
@@ -65,13 +58,7 @@ describe("foldToMessages", () => {
   });
 
   it("keeps TOOL_CALL_ARGS that arrive AFTER TOOL_CALL_END (the shell shape)", () => {
-    // The REAL order for a shell tool: the command is only known once
-    // terminal/create delivers it, which is after the tool call has been opened
-    // and closed. Captured from the cluster as START, END, ARGS, RESULT, and the
-    // live UI fold has its own test for it. Snapshotting `arguments` at END drops
-    // them here, so a conversation REHYDRATED from the log renders a shell card
-    // with no `$ <command>` body — while the same conversation followed live
-    // renders it fine. Why: PR #644.
+    // A shell tool's command arrives via terminal/create after the call has been opened and closed.
     const out = foldToMessages([
       ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" }),
       ev({ type: "TOOL_CALL_START", toolCallId: "t1", toolCallName: "run: echo hi" }),
@@ -84,8 +71,7 @@ describe("foldToMessages", () => {
   });
 
   it("folds streamed arg deltas that straddle TOOL_CALL_END", () => {
-    // Args stream as deltas, so a fold that patches the call must accumulate the
-    // ones after END too, not just replace with the last. Why: PR #644.
+    // Deltas after END accumulate rather than replacing the earlier ones.
     const out = foldToMessages([
       ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" }),
       ev({ type: "TOOL_CALL_START", toolCallId: "t1", toolCallName: "bash" }),
@@ -98,7 +84,7 @@ describe("foldToMessages", () => {
   });
 
   it("a tool call with no open assistant message still gets a carrier", () => {
-    // Otherwise the tool RESULT references a toolCallId the client never saw.
+    // Otherwise the tool result references a toolCallId the client never saw.
     const out = foldToMessages([
       ev({ type: "TOOL_CALL_START", toolCallId: "t9", toolCallName: "x" }),
       ev({ type: "TOOL_CALL_END", toolCallId: "t9" }),
@@ -109,9 +95,7 @@ describe("foldToMessages", () => {
   });
 
   it("a RESULT whose START/END are missing entirely still gets a carrier", () => {
-    // Found in the real log: one of 746 results had no START and no END — an
-    // interrupted run truncated mid-call. Without a synthesized call the client
-    // renders a dangling tool card.
+    // An interrupted run can truncate mid-call; without a synthesized call the client renders a dangling tool card.
     const out = foldToMessages([
       ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" }),
       ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "a1", delta: "x" }),
@@ -122,9 +106,7 @@ describe("foldToMessages", () => {
   });
 
   it("CONTENT with no preceding START still lands — losing a turn is the worse failure", () => {
-    // A log can begin mid-message: a truncated run, or a fire-and-forget append read
-    // before its START flushed. Caught by integrityRoute.spec, which appends exactly
-    // this shape.
+    // A log can begin mid-message after a truncated run or an append read before its START flushed.
     const out = foldToMessages([ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "do not lose me" })]);
     expect(out).toEqual([{ id: "u1", role: "assistant", content: "do not lose me" }]);
   });
@@ -143,7 +125,7 @@ describe("foldToMessages", () => {
 
   it("THE REAL CONVERSATION: folds 9704 events without losing turns", () => {
     const LOG = "/tmp/claude-1000/-home-chadac-code-github-com-chadac-scooter/b878834b-0733-464c-a5a9-e6f74aa3e41a/scratchpad/events.jsonl";
-    if (!existsSync(LOG)) return; // export-dependent; skipped when absent
+    if (!existsSync(LOG)) return;
     const events = readFileSync(LOG, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
     const out = foldToMessages(events);
     expect(out.length).toBeGreaterThan(100);
@@ -156,9 +138,7 @@ describe("foldToMessages", () => {
 
 describe("MESSAGE_EVENTS", () => {
   it("skips every event the applier deep-clones the message array for", () => {
-    // The snapshot only pays off if the replay then skips these. One left out —
-    // REASONING_END was, and it is 77% of a real log's non-message events — puts
-    // the per-event clone right back.
+    // Any event left out of the set puts the per-event clone back.
     const mutates = Object.values(EventType).filter(
       (t) => t !== EventType.MESSAGES_SNAPSHOT && /MESSAGE|REASONING|TOOL_CALL|TEXT|THINKING/.test(t),
     );
@@ -178,10 +158,7 @@ describe("windowed folds agree with the whole-log fold", () => {
   const ev = (o: Record<string, unknown>) => o as unknown as AguiEvent;
 
   it("ends the assistant turn, so a later tool call does not attach to it", () => {
-    // openAssistant must be cleared at TEXT_MESSAGE_END. While it was not, every
-    // tool call in a conversation attached to the last-opened assistant message
-    // (89 on one message in the real log), and folding a WINDOW of the same log
-    // produced different messages than folding all of it.
+    // openAssistant is cleared at TEXT_MESSAGE_END.
     const out = foldToMessages([
       ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" }),
       ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "a1", delta: "first" }),
@@ -195,8 +172,7 @@ describe("windowed folds agree with the whole-log fold", () => {
   });
 
   it("folds the same messages whether the log is split or whole", () => {
-    // The property the scroll-back paging depends on: a page boundary must not
-    // change what the fold produces.
+    // Scroll-back paging depends on a page boundary not changing what the fold produces.
     const log = [
       ev({ type: "RUN_STARTED", runId: "r1" }),
       ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" }),

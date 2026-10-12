@@ -1,26 +1,15 @@
 /**
- * Window a persisted AG-UI event log to its RECENT tail — for fast first-paint
- * when opening a long conversation.
- *
- * The UI folds events into messages (fromAgUiMessages), so a naive "last N events"
- * slice could start mid-message (a TEXT_MESSAGE_CONTENT with no START) and fold
- * into a broken message. We instead slice on RUN boundaries: a RUN_STARTED begins
- * a self-contained unit (the user's turn + the assistant's full response, incl.
- * tool calls + reasoning), so keeping whole runs guarantees every message and
- * tool call in the window is complete.
- *
- * Returns the events from the last `runs` RUN_STARTED markers onward (plus any
- * leading events before the first RUN_STARTED are dropped — they belong to older
- * runs). The tail folds identically to a full replay of those same runs, so the
- * UI can paint it now and then reconcile against the full integrity stream with no
- * visible change.
+ * Window a persisted AG-UI event log to its recent tail for fast first paint. The UI
+ * folds events into messages, so a naive "last N events" slice could start mid-message;
+ * slicing on run boundaries keeps every message and tool call in the window complete,
+ * and the tail folds identically to a full replay of those runs.
  */
 
 import type { AguiEvent } from "../bridge.js";
 
 /**
- * Keep the events belonging to the last `runs` runs. `runs <= 0` returns []. If
- * there are fewer than `runs` RUN_STARTED markers, the whole log is returned.
+ * Keep the events of the last `runs` runs; `runs <= 0` returns [] and fewer runs than asked
+ * for returns the whole log.
  */
 export function tailByRuns(events: AguiEvent[], runs: number): AguiEvent[] {
   if (runs <= 0) return [];
@@ -41,10 +30,8 @@ export function runCount(events: AguiEvent[]): number {
 }
 
 /**
- * Split a log into [older, recent] at the boundary that keeps the last `keepRuns`
- * runs verbatim (for compaction: summarize `older`, keep `recent`). `older` is
- * everything before the RUN_STARTED that begins the kept tail; `recent` is that tail.
- * If there are ≤ keepRuns runs, `older` is empty (nothing to summarize).
+ * Split a log into [older, recent] keeping the last `keepRuns` runs verbatim in `recent`;
+ * with no more than keepRuns runs, `older` is empty.
  */
 export function splitByRuns(events: AguiEvent[], keepRuns: number): { older: AguiEvent[]; recent: AguiEvent[] } {
   const ordered = orderByTime(events);
@@ -59,24 +46,21 @@ export function splitByRuns(events: AguiEvent[], keepRuns: number): { older: Agu
 }
 
 /**
- * STABLE-sort a log by each event's `ts` (epoch ms, stamped at emit). This makes
- * the tail window robust when append order diverges from real time — e.g. a
- * conversation that survived agent-host restarts, whose log concatenates runs from
- * separate processes. The sort is stable (ties keep append order) and events with
- * no `ts` (synthetic/legacy) keep their original position relative to their
- * neighbors, so a fully-unstamped log is returned unchanged. Exported for reuse.
+ * Stable-sort a log by each event's `ts`, so the tail window is robust when append order
+ * diverges from real time; events with no `ts` keep their position and a fully unstamped
+ * log is returned unchanged.
  */
 export function orderByTime(events: AguiEvent[]): AguiEvent[] {
-  // Fast path: nothing stamped → don't reorder (preserves legacy behavior exactly).
+  // Fast path: nothing stamped, so do not reorder.
   if (!events.some((e) => typeof e.ts === "number")) return events;
   return events
     .map((event, index) => ({ event, index }))
     .sort((a, b) => {
       const ta = a.event.ts;
       const tb = b.event.ts;
-      // Missing ts sorts as its neighbor (use index) so it never jumps the log.
+      // Missing ts sorts as its neighbor so it never jumps the log.
       if (typeof ta === "number" && typeof tb === "number" && ta !== tb) return ta - tb;
-      return a.index - b.index; // stable tie-break: keep append order
+      return a.index - b.index; // stable tie-break
     })
     .map((x) => x.event);
 }

@@ -1,8 +1,7 @@
 { lib, python3Packages, ... }:
 
-# scooter_lib — shared, service-agnostic library for the Python services
-# (logging convention, common config/auth primitives). Both extension-surface
-# libs (scooter_broker_lib / scooter_webhooks_lib) and the contribs build on it.
+# scooter_lib: the shared, service-agnostic library (logging convention, common
+# config/auth primitives) the extension-surface libs and the contribs build on.
 
 python3Packages.buildPythonPackage {
   pname = "scooter-lib";

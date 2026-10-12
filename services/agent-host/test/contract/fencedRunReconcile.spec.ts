@@ -1,15 +1,8 @@
 /**
- * Tier 1 — why a run truncated by an ownership fence is never reconciled.
- *
- * Live evidence (valhalla, 2026-09-02, conversation 9cb8bd61):
- *   - agent-host rolled out 10 times; the controller reassigned the conversation
- *     each time (generation 2 -> 11)
- *   - the outgoing pod's fence dropped 1,100 events INCLUDING the terminal
- *   - `reconcileDanglingRun` logged "nothing to settle" on every adopt, having
- *     read the WHOLE log (events_seen=10917) — so it is not reading a short tail
- *   - the conversation ended with 12 "acp prompt: sending" and 9 "returned"
- *
- * These tests pin the mechanism so a fix can be judged against it.
+ * Contract tests for runs truncated by an ownership fence. A fence can drop a
+ * run's terminal event, and a later completed run then buries the orphan below a
+ * RUN_FINISHED where the tail-only check cannot see it; adopting a conversation
+ * must close such orphans without touching a run that is genuinely in flight.
  */
 
 import { describe, it, expect } from "vitest";
@@ -41,22 +34,16 @@ describe("a fence-truncated run, alone at the tail", () => {
 });
 
 describe("a fence-truncated run followed by a later COMPLETED run", () => {
-  // This is the shape production actually produces. The fence truncates the run
-  // in flight; the user (or the resume path) then prompts again on the NEW owner
-  // and that run completes normally. The log now holds an orphan RUN_STARTED
-  // BELOW a RUN_FINISHED.
+  // The log holds an orphan RUN_STARTED below a RUN_FINISHED.
   const log = [...truncatedRun("fenced"), ...completeRun("later")];
 
   it("is INVISIBLE to danglingRunInfo — it stops at the first terminal from the end", () => {
-    // The scan returns null on the first RUN_FINISHED/RUN_ERROR it meets going
-    // backwards, so the orphan below it is never reached. This is why every
-    // production check logged "nothing to settle" despite reading 10,917 events.
+    // The scan returns null on the first terminal it meets going backwards, so the orphan below it is never reached.
     expect(danglingRunInfo(log, SELF)).toBeNull();
   });
 
   it("the orphan is really there — the log is NOT self-consistent", () => {
-    // What the UI replays: a RUN_STARTED with no matching terminal. Its `running`
-    // flag is a boolean, so this reads as "still running" forever.
+    // The UI's `running` flag is a boolean, so an unterminated RUN_STARTED reads as running forever.
     const started = log.filter((e) => e.type === "RUN_STARTED").map((e) => (e as { runId: string }).runId);
     const ended = new Set(
       log.filter((e) => e.type === "RUN_FINISHED" || e.type === "RUN_ERROR")
@@ -66,7 +53,6 @@ describe("a fence-truncated run followed by a later COMPLETED run", () => {
   });
 
   it("stays invisible however many complete runs pile on top", () => {
-    // Each subsequent turn buries it further — the conversation never self-heals.
     const deep = [...truncatedRun("fenced"), ...completeRun("a"), ...completeRun("b"), ...completeRun("c")];
     expect(danglingRunInfo(deep, SELF)).toBeNull();
   });
@@ -74,14 +60,10 @@ describe("a fence-truncated run followed by a later COMPLETED run", () => {
 
 describe("isOwnRun is not the cause", () => {
   it("a RUN_STARTED with no origin is not skipped", () => {
-    // Origin is OPTIONAL on the event: bridge.ts stamps host/gen when `selfPod` is
-    // configured (multi-replica) and emits a bare `{ type, threadId, runId }`
-    // otherwise. Unstamped therefore reads as foreign, so it cannot be what
-    // suppresses detection here.
+    // bridge.ts stamps host/gen only when `selfPod` is configured, and an unstamped event reads as foreign.
     const noOrigin = truncatedRun("fenced");
     expect(danglingRunInfo(noOrigin, SELF)).not.toBeNull();
-    // Even claiming to be the same pod at the same generation only matters when the
-    // event actually carries that origin:
+    // Claiming the same pod and generation only matters when the event carries that origin.
     const withOrigin = [ev({ type: "RUN_STARTED", threadId: "c", runId: "r", host: SELF.host, gen: SELF.gen })];
     expect(danglingRunInfo(withOrigin, SELF)).toBeNull();
   });
@@ -89,14 +71,12 @@ describe("isOwnRun is not the cause", () => {
 
 describe("orphanRuns — the heal-on-adopt input", () => {
   it("finds an orphan buried under a later completed run", () => {
-    // The case danglingRunInfo structurally cannot see.
     const log = [...truncatedRun("fenced"), ...completeRun("later")];
     expect(danglingRunInfo(log, SELF)).toBeNull();
     expect(orphanRuns(log)).toEqual([{ runId: "fenced", threadId: "c" }]);
   });
 
   it("finds EVERY orphan, in log order", () => {
-    // 9cb8bd61's real shape: 12 runs started, 9 returned.
     const log = [
       ...completeRun("a"), ...truncatedRun("run-5480af92"), ...completeRun("b"),
       ...truncatedRun("run-35ee5950"), ...completeRun("c"), ...truncatedRun("run-418ed982"),
@@ -120,10 +100,7 @@ describe("orphanRuns — the heal-on-adopt input", () => {
   });
 
   it("does NOT report a run THIS pod is still executing", () => {
-    // The nightly e2e-full shape. A conversation is created, its first prompt starts a
-    // run on this pod, and the controller assigns the conversation ~3s LATER — while
-    // that run is still in flight. The run is open, but it is ours and live, not an
-    // orphan. Without `self` the sweep closed it and the UI went idle mid-run.
+    // The controller may assign the conversation while this pod's first run is still in flight; that run is ours and live, not an orphan.
     const live = [ev({ type: "RUN_STARTED", threadId: "c", runId: "live", host: SELF.host })];
     expect(orphanRuns(live), "no self -> unknown origin, still an orphan").toEqual([
       { runId: "live", threadId: "c" },
@@ -132,15 +109,13 @@ describe("orphanRuns — the heal-on-adopt input", () => {
   });
 
   it("still reports an open run a DIFFERENT pod started", () => {
-    // The #459 case must keep working: a rollout replaces the pod, so the orphan's
-    // host is the dead one and the adopting pod closes it.
+    // A rollout replaces the pod, so the orphan's host is the dead one and the adopting pod closes it.
     const foreign = [ev({ type: "RUN_STARTED", threadId: "c", runId: "dead", host: "old-pod" })];
     expect(orphanRuns(foreign, SELF)).toEqual([{ runId: "dead", threadId: "c" }]);
   });
 
   it("still reports our own run from an EARLIER generation", () => {
-    // Same pod name, but the conversation was assigned away and back: that run was
-    // stranded by the round trip even though the host matches.
+    // The conversation was assigned away and back, so the run was stranded even though the host matches.
     const stale = [
       ev({ type: "RUN_STARTED", threadId: "c", runId: "stale", host: SELF.host, gen: SELF.gen - 1 }),
     ];
@@ -154,9 +129,7 @@ describe("orphanRuns — the heal-on-adopt input", () => {
   });
 
   it("healing the log makes it readable — the UI's running flag settles", () => {
-    // The whole point: after the adopting pod closes the orphans, replaying the
-    // log leaves `running` false. Mirrors integrityAgent.trackRunning, which flips
-    // on ANY terminal regardless of runId — so no UI change is needed.
+    // Mirrors integrityAgent.trackRunning, which flips on any terminal regardless of runId.
     const log = [
       ...completeRun("a"), ...truncatedRun("orphan-1"),
       ...completeRun("b"), ...truncatedRun("orphan-2"),
@@ -177,8 +150,7 @@ describe("orphanRuns — the heal-on-adopt input", () => {
   });
 
   it("is idempotent — a second adopt finds nothing left to close", () => {
-    // Rollouts reassign repeatedly (9cb8bd61: 10x in a day). Healing must not
-    // append a duplicate terminal every time.
+    // Healing must not append a duplicate terminal on every reassignment.
     const log = [...truncatedRun("fenced"), ...completeRun("later")];
     const once = [
       ...log,
@@ -190,10 +162,7 @@ describe("orphanRuns — the heal-on-adopt input", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// End-to-end through the real SessionManager: adopting a conversation whose log
-// carries buried orphans must leave that log self-consistent.
-// ---------------------------------------------------------------------------
+// --- Through the real SessionManager: adopting a conversation with buried orphans leaves the log self-consistent ---
 
 import { vi } from "vitest";
 import { createSessionManager } from "../../src/session/manager.js";
@@ -236,9 +205,6 @@ const openRuns = (log: AguiEvent[]) => {
 
 describe("adopting a conversation heals a fenced hand-off", () => {
   it("closes an orphan buried under a later completed run @proves", async () => {
-    // Exactly the production shape: the fence truncated `fenced`, the next turn
-    // completed on top, and the tail-only check has reported "nothing to settle"
-    // on every adopt since.
     const { store, dump } = seededStore("t1", [
       ...truncatedRun("fenced"),
       ...completeRun("later"),
@@ -259,8 +225,7 @@ describe("adopting a conversation heals a fenced hand-off", () => {
   });
 
   it("does NOT close the run that is genuinely dangling at the tail", async () => {
-    // The tail run belongs to the resume path (it re-drives the work). Closing it
-    // here would tell the UI the turn ended while the agent carries on.
+    // The tail run belongs to the resume path, which re-drives the work.
     const { store, dump } = seededStore("t1", [
       ...completeRun("earlier"),
       ...truncatedRun("still-running"),
@@ -279,7 +244,6 @@ describe("adopting a conversation heals a fenced hand-off", () => {
   });
 
   it("is idempotent across repeated reassignments", async () => {
-    // 9cb8bd61 was reassigned 10x in a day; healing must not stack duplicates.
     const { store, dump } = seededStore("t1", [
       ...truncatedRun("fenced"), ...completeRun("later"),
     ] as never);
@@ -296,18 +260,9 @@ describe("adopting a conversation heals a fenced hand-off", () => {
   });
 
   it("does NOT close the pod's OWN run that is still in flight @proves", async () => {
-    // Nightly e2e-full, 2026-09-25, conversation bb44a473 (run 36105978997):
-    //   07:24:28.721  bridge  acp prompt: sending      run-2e16e909
-    //   07:24:31.465  controller  assigned  generation 1
-    //   07:24:31.467  manager  closed runs left open by a hand-off  [run-2e16e909]
-    //   07:24:54.316  bridge  acp prompt: returned     stop_reason end_turn
-    // The sweep closed a run that had 23 more seconds to live, on the FIRST
-    // assignment — no hand-off had happened at all. The UI's run bar cleared, and
-    // every spec that observes an in-flight run (stop, queue, priority pill) failed.
-    // 76 such closes in that one nightly, across the 4 shards.
+    // The first assignment can land while this pod's own run is still in flight.
     const { store, dump } = seededStore("t1", [
-      // No `gen`: the run started BEFORE the conversation was ever assigned, which
-      // is exactly when this fires.
+      // No `gen`: the run started before the conversation was ever assigned.
       ev({ type: "RUN_STARTED", threadId: "c", runId: "live", host: "new-pod" }),
       ev({ type: "TEXT_MESSAGE_START", messageId: "m", role: "assistant" }),
     ] as never);

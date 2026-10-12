@@ -1,5 +1,4 @@
-"""Entrypoint — the elect → reconcile loop. Only reconciles while holding the leader
-Lease; otherwise idles (a standby replica). Signal-drains cleanly."""
+"""Entrypoint: the elect-then-reconcile loop, which only reconciles while holding the leader Lease."""
 
 from __future__ import annotations
 
@@ -18,19 +17,16 @@ from .loop import reconcile_once, reap_orphans, autoscale_once, AutoscaleState
 from . import rows as conversation_rows
 
 logger = logging.getLogger(__name__)
-# Every line from this module carries component="app"; the loop/leader/k8s modules bind
-# their own. Passed on each call via extra= (the stdlib has no per-logger default fields).
 _C = {"component": "app"}
 
 
 def run(cfg: Config, stop: threading.Event) -> None:
     k8s = ControllerK8s(cfg.namespace)
-    # Mirrors phase onto agent_host.conversations. None when no DSN is configured, in which case the
-    # controller behaves exactly as it did before it had a database. Why: PR #654.
+    # None when no DSN is configured, in which case nothing is mirrored to the row.
     rows = conversation_rows.from_env()
     elector = LeaderElector(cfg.namespace, cfg.lease_name, cfg.identity, cfg.lease_seconds)
     autoscale_state = AutoscaleState()
-    # /metrics on every replica (leader or standby) so a scrape target is always up.
+    # /metrics on every replica so a scrape target is always up.
     metrics.serve(cfg.metrics_port, stop)
     was_leader = False
     while not stop.is_set():
@@ -40,8 +36,7 @@ def run(cfg: Config, stop: threading.Event) -> None:
                 if not was_leader:
                     logger.info("became leader", extra={**_C, "identity": cfg.identity})
                 reconcile_once(k8s, cfg.pod_cap, rows=rows)
-                # Reap orphaned Sandboxes (no owning Conversation) — leader-only, same tick.
-                # A reaper failure must NOT abort assignment reconcile, so guard it separately.
+                # Guarded separately so a reaper failure does not abort assignment.
                 if cfg.reap_orphans:
                     try:
                         reap_orphans(k8s, cfg.orphan_grace_seconds)
@@ -50,8 +45,7 @@ def run(cfg: Config, stop: threading.Event) -> None:
                             "orphan-reaper pass failed",
                             extra={**_C, "will_retry_next_tick": True},
                         )
-                # Autoscale the agent-host fleet to fit demand + export the metric. Leader-only
-                # (single writer of replicas). Guarded so a scale failure can't abort the tick.
+                # Guarded so a scale failure does not abort the tick.
                 if cfg.autoscale:
                     try:
                         m = autoscale_once(k8s, cfg, autoscale_state, time.monotonic())
@@ -65,6 +59,7 @@ def run(cfg: Config, stop: threading.Event) -> None:
                 logger.info("lost leadership", extra={**_C, "identity": cfg.identity})
             was_leader = leader
         except Exception:  # a transient k8s error must not kill the loop
+
             logger.exception("reconcile tick failed", extra=_C)
         stop.wait(cfg.reconcile_interval)
 

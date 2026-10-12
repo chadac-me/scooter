@@ -1,9 +1,4 @@
-"""Thin k8s access for the warm-store controller — pool PVCs (by label), per-conversation
-Sandboxes, the clean-shutdown marker, warm Jobs, and the leader-election Lease. Mirrors the
-409/404 tolerance mirroring the agent-host's session/k8sProvisioner.ts.
-
-Pure decisions live in reconcile.py; this is the imperative shell the LOOP uses.
-"""
+"""Thin k8s access for the warm-store controller: pool PVCs and PVs, per-conversation Sandboxes, the clean-shutdown marker, warm Jobs and the leader-election Lease."""
 
 from __future__ import annotations
 
@@ -27,16 +22,15 @@ from .reconcile import PoolPvc, SandboxRef, WarmJobStatus
 
 logger = logging.getLogger("k8s")
 
-# Sandbox CR coordinates (agent-sandbox upstream, v1beta1).
+# The upstream agent-sandbox Sandbox CR.
 SANDBOX_GROUP = "agents.x-k8s.io"
 SANDBOX_VERSION = "v1beta1"
 SANDBOX_PLURAL = "sandboxes"
 
-# Pool PVC labels. LBL_WARM_STORE / ANN_LAST_USED come from allocate.py — one definition
-# shared by the PVC and PV layers so they cannot drift.
+# Pool PVC labels; LBL_WARM_STORE and ANN_LAST_USED are shared with the PV layer via allocate.py.
 LBL_POOL_STATE = "scooter.io/pool-state"   # warming|ready|claimed|retiring
 LBL_CLAIMED_BY = "scooter.io/claimed-by"   # conv id when claimed
-LBL_WARM_PVC = "scooter.io/warm-pvc"       # on a warm Job: the PVC name it warms (PVC↔Job link)
+LBL_WARM_PVC = "scooter.io/warm-pvc"       # on a warm Job: the PVC name it warms
 POOL_SELECTOR = LBL_POOL_STATE             # any PVC carrying a pool-state is a pool PVC
 
 # The clean-shutdown marker the sandbox writes into the overlay upper on graceful stop.
@@ -65,32 +59,26 @@ def _apis() -> tuple[client.CoreV1Api, client.CustomObjectsApi, client.BatchV1Ap
 
 @dataclass
 class ControllerK8s:
-    """Imperative k8s ops the reconcile LOOP uses. Pure decisions live in reconcile.py.
+    """Imperative k8s ops the reconcile loop uses.
 
-    :param namespace: the k8s namespace all operations target (pool PVCs, Sandboxes, Jobs).
+    :param namespace: the k8s namespace all operations target.
     :param warm_job_image: sandbox image the warm Job boots.
     :param warm_golden_expr: the golden Nix expression the warm Job builds into the overlay.
     :param overlay_storage: size of each pool PVC.
+    :param runtime_class: a cgroup-delegating RuntimeClass for the warm Job's systemd pod, matching the per-conversation sandboxRuntimeClass (empty means the cluster default).
+    :param pool_storage_class: the pool StorageClass, which must have reclaimPolicy Retain or nothing is ever recycled.
     """
 
     namespace: str
     warm_job_image: str = ""
     warm_golden_expr: str = ""
     overlay_storage: str = "20Gi"
-    # RuntimeClass for the warm Job's systemd-PID-1 pod (e.g. "crun") — a cgroup-delegating
-    # runtime so systemd gets a writable cgroup subtree WITHOUT privileged (which would force
-    # the host cgroup ns and let the sandbox churn the node's /kubepods tree — the host-logout
-    # bug). MUST match the per-conversation sandboxRuntimeClass. Empty → cluster default.
     runtime_class: str = ""
-    # Pool StorageClass. MUST be reclaimPolicy: Retain, or deleting a PVC destroys its PV
-    # and nothing is ever recycled.
     pool_storage_class: str = ""
 
     # --- observe -----------------------------------------------------------
     def list_pool_pvcs(self) -> list[PoolPvc]:
-        """Every pool PVC (carries a pool-state label), read into the pure PoolPvc shape.
-        `bound_to_pod` is derived from a live-pod scan (a pod mounting the claim); a `warming`
-        PVC's `warm_job_status` from its linked warm Job (→ promote to ready / discard)."""
+        """Every pool PVC as a PoolPvc, with `bound_to_pod` from a live-pod scan and `warm_job_status` from the linked warm Job."""
         core, _, _, _ = _apis()
         bound = self._claim_names_bound_to_live_pods()
         warm_status = self._warm_job_status_by_pvc()
@@ -110,18 +98,13 @@ class ControllerK8s:
                     last_used=annotations.get(ANN_LAST_USED),
                     bound_to_pod=name in bound,
                     warm_job_status=warm_status.get(name),
-                    # A PVC mid-deletion still lists (its finalizer holds it) with its labels
-                    # intact — reconcile must recognise it as already-resolved and not re-act.
                     terminating=pvc.metadata.deletion_timestamp is not None,
                 )
             )
         return out
 
     def _warm_job_status_by_pvc(self) -> dict[str, WarmJobStatus]:
-        """PVC name → its warm Job's terminal state ("succeeded"|"failed"|"running"), via the
-        LBL_WARM_PVC link. A PVC with no warm Job (Job GC'd after ttl) is absent → the loop
-        treats it as still warming until GC/timeout — safe (a stuck warming PVC is bounded by
-        the Job's activeDeadline; a promoted one is already `ready`, not `warming`)."""
+        """PVC name to its warm Job's state via the LBL_WARM_PVC link; a PVC whose Job was GC'd is absent and reads as still warming."""
         _, _, batch, _ = _apis()
         out: dict[str, WarmJobStatus] = {}
         for job in batch.list_namespaced_job(self.namespace, label_selector="app=warm-store-seed").items:
@@ -138,9 +121,7 @@ class ControllerK8s:
         return out
 
     def list_sandboxes(self) -> list[SandboxRef]:
-        """Per-conversation Sandboxes, into the pure SandboxRef shape. `clean_unmount` is
-        resolved from the clean-shutdown marker on a suspended sandbox's PVC (see
-        read_clean_marker) — only meaningful when suspended."""
+        """Per-conversation Sandboxes as SandboxRefs, resolving the unmount marker only for suspended ones."""
         _, custom, _, _ = _apis()
         resp = custom.list_namespaced_custom_object(
             SANDBOX_GROUP, SANDBOX_VERSION, self.namespace, SANDBOX_PLURAL
@@ -156,25 +137,12 @@ class ControllerK8s:
         return out
 
     def read_unmount_marker(self, conv_id: str) -> str:
-        """Resolve the overlay's clean-shutdown marker on a suspended conv's claimed PVC, as a
-        TRI-STATE: "clean" (marker present), "unclean" (the check ran and the marker was
-        DEFINITIVELY absent), or "unknown" (could not determine). The overlay upper is RWO +
-        single-attach, so the marker can't be read while a pod holds it — this is only called
-        after the pod is gone.
-
-        A failure to READ is NOT evidence the volume is dirty, so it maps to "unknown" (the loop
-        then backs off and retries, never deletes). Two "unknown" cases matter especially:
-          - the PVC is already TERMINATING: we must NOT spawn a marker-check Job against it (that
-            Job can never schedule — the claim is being deleted — so it would time out and, under
-            the old code, be misread as "unclean" → another delete → the self-sustaining spin);
-          - the claimed PVC can't be found: nothing to read, and nothing to delete.
-        """
+        """Resolve the clean-shutdown marker on a suspended conversation's claimed PVC as "clean", "unclean" (definitively absent) or "unknown", where a failure to read, a missing claim or a terminating PVC is unknown rather than evidence of dirtiness."""
         pvc = self._pool_pvc_claimed_by(conv_id)
         if pvc is None:
-            # Can't locate the claim → cannot decide, and there is nothing to return/discard.
             return "unknown"
         if pvc.metadata.deletion_timestamp is not None:
-            # Already being deleted — do NOT create a doomed marker-check Job; it is resolved.
+            # A check Job against a terminating claim could never schedule.
             logger.info(
                 "clean-marker skipped: claim is terminating",
                 extra={"conversation_id": conv_id, "pvc": pvc.metadata.name},
@@ -191,22 +159,8 @@ class ControllerK8s:
 
     # --- apply -------------------------------------------------------------
     def warm_new(self, image_tag: str) -> None:
-        """Create a fresh `warming` PVC + launch a warm Job that boots the sandbox image,
-        builds warm_golden_expr into the overlay upper, then powers off. On Job success the
-        loop relabels the PVC `ready`.
-
-        The Job pod:
-          - an initContainer writes `<upper>/.warm-request` (the golden expr) to the PVC so
-            the image's scooter-warm-store-seed unit fires (it's ConditionPathExists-gated);
-          - the sandbox container boots systemd → overlay-store-setup mounts the upper →
-            the seed unit builds the golden expr into it, stamps the clean marker, poweroffs.
-        RestartPolicy=OnFailure + backoffLimit so a flaky warm retries; a hard failure leaves
-        the PVC `warming` (never relabeled `ready`) → GC'd next pass.
-        """
+        """Create a fresh `warming` PVC and launch a warm Job that boots the sandbox image, builds warm_golden_expr into the overlay upper and powers off."""
         core, _, batch, _ = _apis()
-        # A unique-ish suffix without Date/random (kept deterministic-friendly): the pool
-        # size is small and the controller is single-writer (leader), so an index derived
-        # from the current pool count is adequate; k8s generateName guarantees uniqueness.
         pvc_name = self.create_pool_pvc(
             image_tag,
             generate_name=f"warm-store-{_tag_slug(image_tag)}-",
@@ -215,8 +169,7 @@ class ControllerK8s:
         batch.create_namespaced_job(self.namespace, self._warm_job_manifest(pvc_name, image_tag))
 
     def _warm_job_manifest(self, pvc_name: str, image_tag: str) -> client.V1Job:
-        """The warm Job: initContainer seeds the .warm-request, sandbox container boots +
-        warms + poweroffs. See warm_new + modules/sandbox-os/warm-store-seed.nix."""
+        """The warm Job: an initContainer writes the .warm-request the image's seed unit is gated on, then the sandbox container boots, warms and powers off."""
         upper = "/nix/.scooter-rw"
         expr = self.warm_golden_expr
         init = client.V1Container(
@@ -229,8 +182,7 @@ class ControllerK8s:
         sandbox = client.V1Container(
             name="sandbox",
             image=self.warm_job_image,
-            # systemd PID 1 needs a writable cgroup + mount caps for the overlay; matches
-            # the per-conversation sandbox securityContext (crun runtimeClass adds the rest).
+            # systemd PID 1 needs SYS_ADMIN for the overlay mount, as in the per-conversation sandbox.
             security_context=client.V1SecurityContext(
                 capabilities=client.V1Capabilities(add=["SYS_ADMIN"])
             ),
@@ -244,22 +196,16 @@ class ControllerK8s:
         return client.V1Job(
             metadata=client.V1ObjectMeta(
                 generate_name=f"warm-{_tag_slug(image_tag)}-",
-                # LBL_WARM_PVC links this Job to the PVC it warms so the loop can resolve each
-                # warming PVC's Job terminal state (→ promote to ready / discard on failure).
                 labels={LBL_WARM_STORE: image_tag, LBL_WARM_PVC: pvc_name, "app": "warm-store-seed"},
             ),
             spec=client.V1JobSpec(
                 backoff_limit=2,
-                # Give the warm build room; the controller GCs a stuck warming PVC anyway.
                 active_deadline_seconds=1800,
                 ttl_seconds_after_finished=300,
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(labels={"app": "warm-store-seed"}),
                     spec=client.V1PodSpec(
                         restart_policy="OnFailure",
-                        # crun (or whatever the sandboxes use) so systemd PID 1 gets its writable
-                        # cgroup subtree in a PRIVATE cgroup ns — not privileged (which would let
-                        # it churn the host /kubepods tree → node destabilization). None → default.
                         runtime_class_name=self.runtime_class or None,
                         init_containers=[init],
                         containers=[sandbox],
@@ -279,8 +225,7 @@ class ControllerK8s:
         )
 
     def relabel(self, pvc: str, state: str, labels: dict[str, str | None]) -> None:
-        """Patch a pool PVC's labels (set pool-state + any extras; a None value REMOVES the
-        label — a JSON-merge-patch null on metadata.labels)."""
+        """Patch a pool PVC's pool-state and extra labels, where a None value removes the label."""
         core, _, _, _ = _apis()
         patch_labels: dict[str, str | None] = {LBL_POOL_STATE: state, **labels}
         core.patch_namespaced_persistent_volume_claim(
@@ -288,7 +233,7 @@ class ControllerK8s:
         )
 
     def delete_pvc(self, pvc: str) -> None:
-        """Delete a pool PVC (GC / unclean return / LRU evict). 404-tolerant."""
+        """Delete a pool PVC, tolerating a 404."""
         core, _, _, _ = _apis()
         try:
             core.delete_namespaced_persistent_volume_claim(pvc, self.namespace)
@@ -297,11 +242,9 @@ class ControllerK8s:
                 raise
 
     # --- PV placement: pre-create the PVC the vct will adopt, pre-bound via claimRef.
-    # See PR #403 and todo/draft/WARM_STORE_PV_OWNERSHIP.md.
 
     def iter_pool_pvs(self) -> Iterator[PoolPv]:
-        """Pool PVs, most-recently-used first. Sorted client-side (the k8s API has no
-        server-side sort); nodeAffinity passed through verbatim. PR #403."""
+        """Pool PVs, most-recently-used first, with nodeAffinity passed through verbatim."""
         core, _, _, _ = _apis()
         items = list(core.list_persistent_volume(label_selector=LBL_WARM_STORE).items)
         items.sort(key=self._recency_key, reverse=True)
@@ -337,8 +280,7 @@ class ControllerK8s:
 
     @staticmethod
     def _recency_key(pv) -> str:
-        """When this PV was last handed out. Our annotation first (it tracks ALLOCATION),
-        then k8s's phase-transition time, then "" — unknown sorts oldest under reverse."""
+        """When this PV was last handed out: the last-used annotation, else the phase-transition time, else "" (which sorts oldest)."""
         annotations = (pv.metadata.annotations or {})
         stamp = annotations.get(ANN_LAST_USED)
         if stamp:
@@ -346,17 +288,15 @@ class ControllerK8s:
         transition = getattr(pv.status, "last_phase_transition_time", None) if pv.status else None
         if transition is None:
             return ""
-        # rfc3339 strings sort lexicographically; datetimes need normalising to the same.
+        # A datetime is normalised to the rfc3339 string form so it sorts with the rest.
         return transition if isinstance(transition, str) else transition.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def list_pool_pvs(self) -> list[PoolPv]:
-        """Materialised iter_pool_pvs, for callers that genuinely need the whole pool
-        (reclaim sweeps every Released volume; placement does not)."""
+        """Materialised iter_pool_pvs."""
         return list(self.iter_pool_pvs())
 
     def list_nodes(self) -> list[Node]:
-        """Schedulable nodes, reduced to the labels a PV's nodeAffinity can match on.
-        Cordoned nodes are excluded — a PV pinned to one would place an unschedulable pod."""
+        """Nodes reduced to the labels a PV's nodeAffinity can match on, with cordoned ones flagged unschedulable."""
         core, _, _, _ = _apis()
         out: list[Node] = []
         for n in core.list_node().items:
@@ -367,8 +307,7 @@ class ControllerK8s:
         return out
 
     def list_pending_uppers(self) -> list[PendingSandbox]:
-        """Running Sandboxes whose `scooter-rw` PVC does not exist yet — the window before
-        the vct provisions. Missing it is harmless: the conversation gets a fresh upper."""
+        """Running Sandboxes whose `scooter-rw` PVC does not exist yet."""
         core, custom, _, _ = _apis()
         existing = {
             pvc.metadata.name
@@ -382,19 +321,17 @@ class ControllerK8s:
             if (cr.get("spec", {}).get("operatingMode", "Running") != "Running"):
                 continue
             name, image_tag = self._sandbox_identity(cr)
-            # Only Sandboxes that actually declare a scooter-rw vct want an upper.
             vcts = cr.get("spec", {}).get("volumeClaimTemplates") or []
             if not any((v.get("metadata") or {}).get("name") == "scooter-rw" for v in vcts):
                 continue
             pvc_name = f"scooter-rw-{name}"
             if pvc_name in existing:
-                continue  # already provisioned or already placed
+                continue
             out.append(PendingSandbox(sandbox=name, image_tag=image_tag, pvc_name=pvc_name))
         return out
 
     def reserve_pv(self, pv: str, pvc_name: str, sandbox: str) -> None:
-        """Pre-bind `pv` to `pvc_name` and create that PVC so the vct adopts it.
-        claimRef FIRST — reversed, the PVC could bind some other volume. PR #403."""
+        """Pre-bind `pv` to `pvc_name` via claimRef first, then create that PVC so the vct adopts it."""
         core, _, _, _ = _apis()
         core.patch_persistent_volume(
             pv,
@@ -405,7 +342,7 @@ class ControllerK8s:
                 },
             },
         )
-        # 409 = already created; the claimRef above still decides which PV it gets.
+        # On a 409 the claimRef above still decides which PV the existing PVC gets.
         try:
             core.create_namespaced_persistent_volume_claim(
                 self.namespace,
@@ -434,17 +371,7 @@ class ControllerK8s:
         generate_name: str | None = None,
         extra_labels: dict[str, str] | None = None,
     ) -> str:
-        """THE one way a volume enters the pool. Returns the PVC name.
-
-        Every pool volume must be created here so it cannot miss the two things that make
-        it poolable: the POOL StorageClass (Retain — on the default Delete class the PV is
-        destroyed with its PVC and the pool can never grow) and the warm-store label.
-
-        The PV is labelled separately once it exists: WaitForFirstConsumer means there is
-        no PV to label yet, and a dynamically-provisioned PV does NOT inherit its PVC's
-        labels (verified). adopt_bound_pvs does that on a later pass — without it a volume
-        created here survives its PVC but is invisible to iter_pool_pvs, which is worse
-        than not pooling it at all. PR #403."""
+        """The one way a volume enters the pool: a PVC on the pool StorageClass with the warm-store label, returning its name (adopt_bound_pvs labels the PV once it exists)."""
         core, _, _, _ = _apis()
         meta = client.V1ObjectMeta(
             labels={LBL_WARM_STORE: image_tag, **(extra_labels or {})},
@@ -464,11 +391,7 @@ class ControllerK8s:
         return pvc.metadata.name
 
     def adopt_bound_pvs(self, pvcs: list[str]) -> None:
-        """Label the PVs behind pool PVCs, so iter_pool_pvs can see them.
-
-        A dynamically-provisioned PV carries none of its PVC's labels, and does not exist
-        at all until WaitForFirstConsumer binds it — so this runs on a later pass, once the
-        volume is real. Idempotent; 404s are ignored (the PVC went away first)."""
+        """Label the PVs behind pool PVCs so iter_pool_pvs can see them, since a dynamically-provisioned PV inherits no labels and only exists once bound."""
         core, _, _, _ = _apis()
         for pvc_name in pvcs:
             try:
@@ -479,7 +402,7 @@ class ControllerK8s:
                     continue
                 pv = core.read_persistent_volume(pv_name)
                 if (pv.metadata.labels or {}).get(LBL_WARM_STORE) == tag:
-                    continue  # already adopted
+                    continue
                 core.patch_persistent_volume(pv_name, {"metadata": {"labels": {LBL_WARM_STORE: tag}}})
                 logger.info("adopted a PV into the pool", extra={"pv": pv_name, "pvc": pvc_name})
             except client.ApiException as e:
@@ -487,17 +410,15 @@ class ControllerK8s:
                     raise
 
     def grow_pool(self, pvc_name: str, image_tag: str) -> None:
-        """Add a volume to the pool under the name the sandbox's vct will adopt, so a
-        cold-pool conversation warms a POOL volume instead of a throwaway one."""
+        """Add a pool volume under the name the sandbox's vct will adopt."""
         try:
             self.create_pool_pvc(image_tag, name=pvc_name)
         except client.ApiException as e:
-            if e.status != 409:  # the vct beat us to the name; it owns the volume now
+            if e.status != 409:  # the vct beat us to the name
                 raise
 
     def release_pv(self, pv: str) -> None:
-        """Return `pv` to the pool by clearing spec.claimRef — k8s will not rebind a
-        Released PV while it still names its late PVC. Also the reservation rollback."""
+        """Return `pv` to the pool by clearing spec.claimRef, since k8s will not rebind a Released PV that still names its late PVC."""
         core, _, _, _ = _apis()
         try:
             core.patch_persistent_volume(pv, {"spec": {"claimRef": None}})
@@ -516,8 +437,7 @@ class ControllerK8s:
 
     # --- helpers -----------------------------------------------------------
     def _claim_names_bound_to_live_pods(self) -> set[str]:
-        """PVC names currently mounted by a non-terminal pod (the RWO single-attach truth —
-        a claimed PVC is only reclaimable once no pod holds it)."""
+        """PVC names currently mounted by a non-terminal pod."""
         core, _, _, _ = _apis()
         bound: set[str] = set()
         for pod in core.list_namespaced_pod(self.namespace).items:
@@ -529,19 +449,14 @@ class ControllerK8s:
         return bound
 
     def _pool_pvc_claimed_by(self, conv_id: str):
-        """The pool PVC object claimed by this conversation, or None. Returns the object (not
-        just the name) so callers can inspect metadata.deletion_timestamp (terminating?)."""
+        """The pool PVC object claimed by this conversation, or None."""
         core, _, _, _ = _apis()
         sel = f"{LBL_POOL_STATE}=claimed,{LBL_CLAIMED_BY}={conv_id}"
         items = core.list_namespaced_persistent_volume_claim(self.namespace, label_selector=sel).items
         return items[0] if items else None
 
     def _marker_result(self, pvc: str) -> str:
-        """Check for CLEAN_MARKER_PATH on `pvc` via a short-lived reader Job that mounts it RO
-        and tests the file. TRI-STATE: "clean" (Job Completed → marker present), "unclean" (Job
-        Failed → the file was definitively absent), "unknown" (the Job never reached a terminal
-        state within the deadline — e.g. it could not schedule). Only a DEFINITIVE Failed maps
-        to unclean; a timeout is unknown so the loop backs off instead of destroying the PVC."""
+        """Test for CLEAN_MARKER_PATH on `pvc` via a short-lived read-only reader Job: Completed is "clean", Failed is "unclean", and a timeout is "unknown"."""
         _, _, batch, _ = _apis()
         job = client.V1Job(
             metadata=client.V1ObjectMeta(generate_name="warm-marker-check-"),
@@ -575,17 +490,12 @@ class ControllerK8s:
             ),
         )
         created = batch.create_namespaced_job(self.namespace, job)
-        # The loop polls the Job to Complete/Failed; kept simple here (the caller is off the
-        # hot path). Complete → marker present (clean); Failed → absent (unclean); neither
-        # within the deadline → unknown (back off, do not delete).
         return {"succeeded": "clean", "failed": "unclean"}.get(
             _job_result(created.metadata.name, self.namespace), "unknown"
         )
 
     def _sandbox_identity(self, cr: dict) -> tuple[str, str]:
-        """(conv_id, image_tag) for a Sandbox CR. conv_id == the Sandbox NAME (what the
-        provisioner uses for the pooled PVC's claimed-by label); image_tag == the tag portion
-        of the sandbox container image ref."""
+        """(conv_id, image_tag) for a Sandbox CR: its name and the tag of its container image."""
         name = cr["metadata"]["name"]
         image = ""
         try:
@@ -595,21 +505,18 @@ class ControllerK8s:
         return name, _tag_of(image)
 
 
-# --- module-level pure helpers (unit-testable without k8s) ------------------
+# --- module-level pure helpers ---------------------------------------------
 
 def _now_rfc3339() -> str:
-    """UTC rfc3339, for the last-used LRU stamp."""
+    """UTC rfc3339, for the last-used stamp."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _tag_of(image_ref: str) -> str:
-    """The tag portion of an OCI ref — the part after the LAST ':' that isn't a port. Mirrors
-    the kubenix `lib.last (splitString ":" ...)` so the controller and the module agree on the
-    version key. A ref with no tag → "" (won't match any warmed PVC → falls back to a fresh vct)."""
+    """The tag portion of an OCI ref, matching the kubenix `lib.last (splitString ":" ...)` split, or "" when untagged."""
     if not image_ref:
         return ""
-    # Strip any digest first; then the last ':' segment is the tag (a registry :port has a '/'
-    # after it, so a segment containing '/' is not a tag).
+    # After stripping any digest, the last ':' segment is the tag unless it contains a '/' (a registry port).
     ref = image_ref.split("@", 1)[0]
     last = ref.rsplit(":", 1)
     if len(last) == 2 and "/" not in last[1]:
@@ -618,8 +525,7 @@ def _tag_of(image_ref: str) -> str:
 
 
 def _tag_slug(image_tag: str) -> str:
-    """A DNS-1123-safe slug of an image tag for PVC/Job names (tags can carry '.', '_', etc.).
-    Lowercase alnum + '-'; collapse the rest to '-'; trim; bound length."""
+    """A DNS-1123-safe slug of an image tag for PVC and Job names."""
     out = []
     for ch in image_tag.lower():
         out.append(ch if (ch.isalnum() or ch == "-") else "-")
@@ -628,11 +534,7 @@ def _tag_slug(image_tag: str) -> str:
 
 
 def _job_result(name: str, namespace: str, timeout_s: float = 60.0, clock=time) -> str:
-    """Poll a Job to terminal state as a TRI-STATE: "succeeded" (Completed), "failed"
-    (definitively Failed), or "unknown" (neither within the deadline — e.g. the pod could not
-    schedule because its claim is terminating). Used by the marker-check reader Job: a timeout
-    must NOT be read as "failed" (which the caller maps to unclean → delete) — it is unknown, so
-    the caller backs off instead of destroying a volume it never actually inspected."""
+    """Poll a Job to "succeeded", "failed" or, when it reaches neither within the deadline, "unknown"."""
     _, _, batch, _ = _apis()
     deadline = clock.time() + timeout_s
     while clock.time() < deadline:

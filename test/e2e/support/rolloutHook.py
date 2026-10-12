@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """Cluster-mutation hook for the e2e-full rollout/move stories.
 
-The browser can't run kubectl, so specs POST here to disturb the cluster
-mid-conversation (the CI browser step runs this next to the port-forward):
-
-  POST /restart        rollout-restart the agent-host Deployment and wait.
-  POST /move/<thread>  delete the pod hosting <thread>'s conversation — the
-                       "scale-down/rollout kills the owner mid-run" event, on
-                       demand. The controller then reassigns; the test asserts
-                       the UI keeps working.
-
-Deliberately boring: stdlib only, shells out to kubectl on PATH, plain-text
-responses, exits with the parent step.
+The browser cannot run kubectl, so specs POST here to disturb the cluster mid-conversation:
+POST /restart rollout-restarts the agent-host Deployment and waits, and POST /move/<thread>
+deletes the pod hosting <thread>'s conversation so the controller reassigns it. Stdlib only,
+shells out to kubectl on PATH, plain-text responses.
 """
 
 import json
@@ -21,10 +14,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 NS = "agent-sandbox"
 
-
 def sh(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, timeout=180)
-
 
 class Hook(BaseHTTPRequestHandler):
     def _reply(self, code: int, body: str) -> None:
@@ -58,7 +49,6 @@ class Hook(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"[rollout-hook] {fmt % args}", file=sys.stderr)
-
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8898

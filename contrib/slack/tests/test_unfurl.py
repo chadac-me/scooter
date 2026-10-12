@@ -1,9 +1,4 @@
-"""Scooter's own Slack status messages suppress link/media unfurl.
-
-The "on it — follow along: <chat url|View conversation>" post (and its edits) carry a
-chat URL / PR link; Slack's default unfurl renders a big useless preview card. Assert
-both post + update send unfurl_links/unfurl_media = False.
-"""
+"""Scooter's own Slack status messages suppress link and media unfurl on both post and update."""
 
 import json
 
@@ -11,12 +6,8 @@ import httpx
 
 from scooter_contrib_slack import responses as slack_resp
 
-# asyncio_mode = "auto" (pyproject) — `async def test_*` run without extra markers.
-
-
 def _capture(monkeypatch, captured: dict):
-    """Route the module's httpx.AsyncClient through a MockTransport that records the
-    request body and returns a Slack-OK response."""
+    """Route the module's httpx.AsyncClient through a MockTransport that records the request body."""
     real_client = httpx.AsyncClient
 
     def handler(req: httpx.Request) -> httpx.Response:

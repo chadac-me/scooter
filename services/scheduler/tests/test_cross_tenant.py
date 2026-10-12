@@ -1,9 +1,4 @@
-"""Tier 1 — cross-tenant isolation: user B must not see or mutate user A's task.
-
-Deliberately uses TWO identities. test_api.py drives everything as a single user
-(AUTH = alice), which is why it never noticed that the read/write paths ignore
-x-auth-user entirely.
-"""
+"""Tier 1: cross-tenant isolation, where user B must not see or mutate user A's task."""
 
 import httpx
 import pytest
@@ -66,7 +61,6 @@ async def test_cannot_read_another_users_task(client, alice_task):
 async def test_cannot_patch_another_users_task(client, alice_task):
     r = await client.patch(f"/tasks/{alice_task}", json={"prompt": "PWNED"}, headers=BOB)
     assert r.status_code == 404
-    # ...and the original prompt is untouched.
     check = await client.get(f"/tasks/{alice_task}", headers=ALICE)
     assert check.json()["prompt"] == "alice secret prompt"
 
@@ -87,7 +81,7 @@ async def test_cannot_read_another_users_runs(client, alice_task):
 
 @pytest.mark.asyncio
 async def test_cannot_trigger_another_users_task(client, alice_task):
-    """run-now on someone else's task would spawn a conversation as THEM."""
+    """run-now on someone else's task would spawn a conversation as them."""
     r = await client.post(f"/tasks/{alice_task}/run", headers=BOB)
     assert r.status_code == 404
 
@@ -104,14 +98,13 @@ async def test_owner_still_has_full_access(client, alice_task):
 
 @pytest.mark.asyncio
 async def test_anonymous_is_a_scope_not_a_wildcard(client, alice_task):
-    """No x-auth-user maps to the unowned ("") bucket — which must NOT see alice's
-    tasks. Otherwise a deployment without ingress auth silently reads everything."""
-    r = await client.get("/tasks")  # no x-auth-user at all
+    """No x-auth-user maps to the unowned ("") bucket, which must not see alice's tasks."""
+    r = await client.get("/tasks")
     assert r.status_code == 200
     assert [t["title"] for t in r.json()] == []
     assert (await client.get(f"/tasks/{alice_task}")).status_code == 404
 
-    # ...and the anonymous bucket is usable in its own right.
+    # The anonymous bucket is usable in its own right.
     mine = await client.post("/tasks", json={"title": "anon", "prompt": "p", "cron": "0 9 * * *"})
     assert mine.status_code == 200
     assert mine.json()["owner"] == ""

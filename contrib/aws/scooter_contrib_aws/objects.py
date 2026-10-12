@@ -1,9 +1,4 @@
-"""aws's own authz object namespace.
-
-The OBJECT half of a tuple belongs to the provider — only aws knows that a registry
-alias means `aws_account:<alias>`, which is why aws seeds its own approver tuples
-rather than the core doing it. The USER half is generic and comes from the surface.
-"""
+"""aws's own authz object namespace; the object half of a tuple belongs to the provider, the user half to the surface."""
 
 from __future__ import annotations
 

@@ -1,16 +1,11 @@
-# Composition test for local-modules.nix — the agent's OWN locally-authored modules.
-#
-# Pure EVAL (no VM): seed a fixture dir of *.nix files, evaluate local-modules with
-# SCOOTER_LOCAL_MODULES_DIR (the test-only hook) pointing at it, and assert it imports
-# every *.nix. Also assert the fail-safe: with the dir absent it imports nothing.
-#
-# The full in-pod build+switch (agent edits /etc/scooter/modules -> scooter-apply-module)
-# is exercised in the Tier-2 cluster tier; this proves the enumerate+import LOGIC fast.
+# Pure eval (no VM) for local-modules.nix, the agent's own locally-authored
+# modules: with SCOOTER_LOCAL_MODULES_DIR pointing at a fixture dir it imports every
+# *.nix there, and with the dir absent it imports nothing.
 
 { pkgs, lib, sandboxModule ? null }:
 
 let
-  # A fixture dir of two agent-authored modules + a NON-.nix file (must be ignored).
+  # Two agent-authored modules plus a non-.nix file that must be ignored.
   fixture = pkgs.runCommand "local-modules-fixture" { } ''
     mkdir -p $out
     printf '%s' '{ ... }: { environment.etc."scooter-local-alpha".text = "a"; }' > $out/alpha.nix
@@ -26,7 +21,7 @@ pkgs.runCommand "dev-env-local-modules"
   export NIX_STORE_DIR=$TMPDIR/store
   export NIX_STATE_DIR=$TMPDIR/state
 
-  # (1) With the dir override -> imports both *.nix, ignores the .md.
+  # (1) With the dir override, both *.nix are imported and the .md is ignored.
   imported=$(SCOOTER_LOCAL_MODULES_DIR="${fixture}" \
     nix eval --impure --offline --extra-experimental-features 'nix-command flakes' --json --expr '
       let
@@ -39,7 +34,7 @@ pkgs.runCommand "dev-env-local-modules"
   echo "$imported" | grep -q beta.nix  || { echo "FAIL: beta.nix not imported"; exit 1; }
   if echo "$imported" | grep -q README; then echo "FAIL: non-.nix README was imported"; exit 1; fi
 
-  # (2) Fail-safe: the dir absent -> imports NOTHING.
+  # (2) With the dir absent, nothing is imported.
   empty=$(SCOOTER_LOCAL_MODULES_DIR="$TMPDIR/does-not-exist" \
     nix eval --impure --offline --extra-experimental-features 'nix-command flakes' --json --expr '
       let

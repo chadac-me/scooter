@@ -1,25 +1,10 @@
 /**
- * IntegrityAgent — an @ag-ui/client AbstractAgent whose RENDER source is the
- * agent-host's integrity stream, not /agui.
- *
- * WHY: to see a conversation live regardless of WHO drove the run (this tab, a
- * webhook/Slack, another tab), the open view must render from the single ordered
- * per-conversation event log the server persists — GET /conversations/:id/
- * events.integrity — which carries EVERY run's events. assistant-ui renders
- * whatever an AbstractAgent produces, so we subclass it: `run()` returns a
- * CONTINUOUS Observable of the log's events, and the base-class applier folds
- * them into `messages` with FULL FIDELITY (text, tool calls, reasoning) — the
- * identical rendering path as a locally-driven run, with no second reducer.
- *
- * The integrity stream's inner events ARE @ag-ui/core BaseEvents already (the
- * bridge emits them; agui/server just encodes them). So mapping the envelope to a
- * BaseEvent is: strip the checksum wrapper, take `frame.event`. No field remap.
- *
- * Sends do NOT go through the render source. A prompt is a fire-and-forget
- * POST /agui (the server drives the run regardless of SSE consumption); the reply
- * re-enters through the same continuous integrity subscription. One writer → no
- * two-writers race. Interrupts ride the log's RUN_FINISHED(outcome=interrupt) and
- * are answered by a POST /agui with resume[] (see submitResume).
+ * IntegrityAgent is an @ag-ui/client AbstractAgent whose render source is the
+ * agent-host's per-conversation integrity stream (GET /conversations/:id/events.integrity)
+ * rather than the /agui response, so the open view shows every run regardless of who drove it.
+ * The stream's frames carry @ag-ui/core BaseEvents already, and the base-class applier folds
+ * them into `messages`. Sends are fire-and-forget POST /agui calls whose replies re-enter
+ * through the same subscription, and interrupts are answered through submitResume.
  */
 
 import { AbstractAgent, type RunAgentInput } from "@ag-ui/client";
@@ -31,27 +16,15 @@ import { AWAITING_ID, hasId, type MaybeConversationId } from "./conversation.js"
 import { ATTR, record } from "./telemetry.js";
 
 export interface IntegrityAgentConfig extends AgentHostConfig {
-  /** The SERVER's conversation id, or AWAITING_ID before the server has created it.
-   *
-   *  AWAITING_ID rather than undefined so `serverId ?? localKey` is a COMPILE ERROR — that
-   *  substitution is what streamed a local placeholder at the server and produced a
-   *  404-reconnect storm. Narrow with hasId(). While awaiting: renderPump does not
-   *  connect, run() is empty, and send/cancel throw. */
+  /** The server's conversation id, or AWAITING_ID until the server has created it; narrow with hasId(). */
   conversationId: MaybeConversationId;
   /** Per-conversation model, sent as the X-Agent-Model header on POST /agui. */
   model?: string;
   /** Injectable fetch (tests). */
   fetchImpl?: typeof fetch;
-  /** IDLE-WATCHDOG threshold (ms). If a run appears RUNNING but the stream has
-   *  gone silent for this long, force a reconnect — the re-fold from the persisted
-   *  log re-derives the correct state (healing a DROPPED live RUN_FINISHED /
-   *  PERMISSION_RESOLVED that left the UI stuck "busy" — the "agent seems dead"
-   *  class). Default 25s; small values in tests. 0 disables. See
-   *  todo/docs/SSE_RESILIENCE.md. */
+  /** Idle-watchdog threshold in ms: a run that looks running while the stream stays silent this long forces a reconnect (default 25s, 0 disables). */
   idleReconnectMs?: number;
-  /** Delay between cancel() 404-retries (ms). The production default (700ms × 9
-   *  attempts ≈ 5.6s) outlasts a slow controller assignment tick; tests pass a
-   *  small value so the persistent-404 path stays fast. */
+  /** Delay in ms between cancel() 404 retries. */
   cancelRetryDelayMs?: number;
 }
 
@@ -67,10 +40,7 @@ interface IntegrityFrame {
   event?: Record<string, unknown>;
 }
 
-/** A pending interrupt parsed from the log's RUN_FINISHED(outcome=interrupt).
- *  Shape mirrors the bridge's AguiInterrupt (id/reason/message + metadata.options),
- *  which assistant-ui's runtime stores under an assistant message's
- *  metadata.custom.agui.interrupts. */
+/** A pending interrupt parsed from the log's RUN_FINISHED(outcome=interrupt), mirroring the bridge's AguiInterrupt shape. */
 export interface PendingInterrupt {
   id: string;
   reason: string;
@@ -82,8 +52,7 @@ export interface PendingInterrupt {
 /** Result of reading one integrity SSE connection to completion. */
 type ConnectionOutcome = "not-found" | "closed" | "error" | "auth-error";
 
-/** A stable empty-queue reference (so getQueuedMessages returns the SAME array
- *  each idle call — a fresh [] every render would defeat React memoization). */
+/** A stable empty-queue reference so getQueuedMessages keeps the same identity across idle calls. */
 const EMPTY_QUEUE: ReadonlyArray<{ id: string; text: string; priority: number }> = [];
 const EMPTY_INTERRUPTS: readonly PendingInterrupt[] = [];
 
@@ -95,78 +64,45 @@ export class IntegrityAgent extends AbstractAgent {
   private readonly controllers = new Set<AbortController>();
   /** Stops the render-pump reconnect loop (see renderPump), called on dispose. */
   private stopPump?: () => void;
-  /** ALL unanswered interrupts (approvals) the conversation is paused on, keyed by interrupt id —
-   *  goose tool-permission requests AND broker (ext-) approvals, treated UNIFORMLY. An interrupt is
-   *  ADDED when its RUN_FINISHED(outcome=interrupt) arrives and REMOVED only by a matching
-   *  PERMISSION_RESOLVED. Crucially, run boundaries (RUN_STARTED / a plain RUN_FINISHED) do NOT clear
-   *  it — an approval is a HUMAN decision that outlives the agent's runs. (The old split — a
-   *  run-scoped `logInterrupts` cleared on RUN_STARTED + a separate `externalInterrupts` map — dropped
-   *  goose approvals whenever a new run started, a second interrupt arrived, or answers came out of
-   *  order. See integrityAgent.interrupts.stress.test.ts.) Goose answers ALSO persist
-   *  PERMISSION_RESOLVED (bridge.ts), so this settles both kinds correctly on replay.
-   *  The base AbstractAgent applier does NOT track interrupts, so the pump surfaces this set for
-   *  RuntimeProvider to fold into the trailing assistant message's status/metadata. */
+  /** Every unanswered interrupt the conversation is paused on, keyed by id; added on RUN_FINISHED(outcome=interrupt) and removed only by a matching PERMISSION_RESOLVED, never by run boundaries. */
   private pendingApprovals = new Map<string, PendingInterrupt>();
 
-  /** True while a connection is REPLAYING the persisted log (before its `synced`
-   *  marker). The render pump suppresses per-event thread updates during replay so
-   *  a long history paints in ONE shot (landing at the latest message) instead of
-   *  visibly building top-down. Flips false at `synced`, then live events render
-   *  per-event as usual. */
+  /** True while a connection is replaying the persisted log, so the render pump paints the history once at `synced` instead of per event. */
   private replaying = false;
   isReplaying(): boolean {
     return this.replaying;
   }
 
-  /** Which FOLD the current `messages` belong to. Each connection re-folds from an
-   *  empty accumulator over the server's trailing window, so a re-fold's list is
-   *  legitimately SHORTER than the one before it (paged-in older history is gone;
-   *  opened-but-empty messages the live fold kept are dropped). A consumer that
-   *  suppresses shrinking lists must reset its high-water mark when this changes, or
-   *  it latches and never renders again. Why: PR #641. */
+  /** Which fold the current `messages` belong to; each connection re-folds from empty, so a consumer that suppresses shrinking lists must reset its high-water mark when this changes. */
   private foldEpoch = 0;
   foldGeneration(): number {
     return this.foldEpoch;
   }
 
-  /** True while a goose RUN is in flight (a real turn — NOT an out-of-band `ext-`
-   *  interrupt run). Derived from the log: RUN_STARTED -> true, RUN_FINISHED /
-   *  RUN_ERROR -> false. Drives the composer's Stop button + the thinking
-   *  indicator. `ext-*` runs (broker interrupts) are ignored — they don't mean the
-   *  agent is thinking. */
+  /** True while a goose run is in flight, derived from RUN_STARTED/RUN_FINISHED/RUN_ERROR and ignoring out-of-band `ext-` runs. */
   private running = false;
   runIsActive(): boolean {
     return this.running;
   }
-  /** Wall-clock (ms) of the last frame received on the live stream — the
-   *  idle-watchdog forces a reconnect if `running` is true but this hasn't moved
-   *  for idleReconnectMs (a dropped terminal event left the UI stuck "busy"). */
+  /** Wall-clock ms of the last frame received on the live stream, read by the idle watchdog. */
   private lastActivityAt = Date.now();
-  private livenessHealed = false; // F2: one-shot liveness reconnect tracker
+  private livenessHealed = false; // one-shot guard for the liveness reconnect
 
-  // The tool call currently in flight during the active run (its name, e.g. "bash"),
-  // and the ts of the last RUN_STARTED — so the UI can show WHAT it's doing and for
-  // how long (a bare pulsing dot doesn't reveal that it's stuck on a long tool call).
+  // The in-flight tool call's name and the last RUN_STARTED's ts, so the UI can show what the run is doing and for how long.
   private activeToolName: string | null = null;
   private runStartedAt: number | null = null;
-  /** The in-flight tool call's name (e.g. "bash"), or null when the run is between
-   *  tool calls / not running. */
+  /** The in-flight tool call's name, or null between tool calls or when not running. */
   activeTool(): string | null {
     return this.running ? this.activeToolName : null;
   }
-  /** Epoch ms of the current run's RUN_STARTED, or null when not running — lets the
-   *  UI show elapsed time so a long silent tool call is visibly "still working". */
+  /** Epoch ms of the current run's RUN_STARTED, or null when not running. */
   runStartedAtMs(): number | null {
     return this.running ? this.runStartedAt : null;
   }
 
-  /** Update `running` (+ the active tool name / run-start ts) from a single log
-   *  event, ignoring out-of-band `ext-` runs. Returns true if anything the UI shows
-   *  changed (so the caller can nudge subscribers). */
+  /** Update `running`, the active tool name and the run-start ts from one log event, returning true if anything the UI shows changed. */
   private trackRunning(e: BaseEvent): boolean {
-    // The Stop button is gated on `running`, which ONLY these events move. If a cancel
-    // returns 202 but the bar never clears, either the terminal event never arrives here
-    // or it arrives and is ignored — this span says which.
+    // Only these events move `running`, which gates the Stop button, so record each one.
     const t = (e as unknown as { type?: string }).type;
     if (t === "RUN_STARTED" || t === "RUN_FINISHED" || t === "RUN_ERROR") {
       record("run.state_event", {
@@ -188,7 +124,6 @@ export class IntegrityAgent extends AbstractAgent {
       this.activeToolName = null;
       this.runStartedAt = null;
     } else if (ev.type === "TOOL_CALL_START") {
-      // A tool is now executing — surface its name until it ends.
       this.activeToolName = typeof ev.toolCallName === "string" ? ev.toolCallName : "tool";
     } else if (ev.type === "TOOL_CALL_END") {
       this.activeToolName = null;
@@ -196,8 +131,7 @@ export class IntegrityAgent extends AbstractAgent {
     return this.running !== before.running || this.activeToolName !== before.tool;
   }
 
-  // Context-window fill from the latest CONTEXT_USAGE event (used/total tokens), so
-  // the UI can show a fill bar. Persisted + replayed, so it survives a refresh.
+  // Context-window fill from the latest CONTEXT_USAGE event, persisted and replayed so it survives a refresh.
   private contextUsedTokens: number | null = null;
   private contextWindow: number | null = null;
   /** Context-fill fraction 0..1 (usedTokens / contextWindow), or null if unknown. */
@@ -205,8 +139,7 @@ export class IntegrityAgent extends AbstractAgent {
     if (this.contextUsedTokens == null || !this.contextWindow) return null;
     return Math.min(1, this.contextUsedTokens / this.contextWindow);
   }
-  /** {used, total} tokens for a tooltip, or null. Cached so an unchanged reading keeps
-   *  its identity — useState bails out only on Object.is. */
+  /** {used, total} tokens for a tooltip, cached so an unchanged reading keeps its identity for useState. */
   contextTokens(): { used: number; total: number } | null {
     if (this.contextUsedTokens == null || !this.contextWindow) return null;
     const c = this.lastContextTokens;
@@ -223,33 +156,17 @@ export class IntegrityAgent extends AbstractAgent {
     return this.contextUsedTokens !== before;
   }
 
-  // SYSTEM messages (platform-injected: webhook events, scheduler fires, background-
-  // job completions, broker errors). The @ag-ui applier ignores SYSTEM_MESSAGE
-  // (bespoke), so we track them here — but they render INLINE in the thread at their
-  // chronological position (as an auto-collapsed event chip, not a user bubble), so
-  // each records `afterIndex`: the number of real messages folded BEFORE it arrived.
-  // RuntimeProvider splices the chip into the message list at that index.
+  // Platform-injected SYSTEM_MESSAGE events, which the @ag-ui applier ignores; each records the real message it followed so RuntimeProvider can splice its chip inline at that position.
   private systemMessages: Array<{ id: string; source: string; text: string; afterMessageId: string | null }> = [];
-  /** The id of the most recent REAL (user/assistant) message START seen in the raw
-   *  event stream — the chronological anchor for a system message. Read from the raw
-   *  stream (not the folded list) because the base applier's fold is async, so
-   *  `this.messages` lags the events in a synchronous burst. */
+  /** The id of the most recent real message start seen in the raw event stream, the chronological anchor for a system message. */
   private lastMessageId: string | null = null;
-  /** All system messages in the conversation, each with `afterMessageId` — the id of
-   *  the real message it followed in the log (null = before any message) — so the UI
-   *  can interleave it inline at the right spot. Deduped by messageId so a re-replay
-   *  doesn't double them. */
+  /** All system messages in the conversation, each with the id of the real message it followed (null = before any message), deduped by id. */
   getSystemMessages(): ReadonlyArray<{ id: string; source: string; text: string; afterMessageId: string | null }> {
     return this.systemMessages;
   }
   private trackSystemMessage(e: BaseEvent): boolean {
     const ev = e as unknown as { type?: string; messageId?: string; toolCallId?: string; source?: string; text?: string };
-    // The anchor is the id of the LAST TOP-LEVEL folded message before a
-    // SYSTEM_MESSAGE, so the chip splices AFTER it. The base applier folds BOTH a
-    // TEXT_MESSAGE (id=messageId) AND EACH tool call (id=toolCallId) as SEPARATE
-    // top-level messages — so a system message following a run of tool calls must
-    // anchor to the LAST TOOL CALL, not the text before it (else the chip renders
-    // ABOVE those tool cards — the subagent-result-chip-order bug).
+    // The base applier folds each text message and each tool call as a separate top-level message, so the anchor is whichever of those started last.
     if (ev.type === "TEXT_MESSAGE_START" && ev.messageId) {
       this.lastMessageId = ev.messageId;
       return false;
@@ -267,39 +184,25 @@ export class IntegrityAgent extends AbstractAgent {
     return true;
   }
 
-  /** The last RUN_ERROR's message (null if the current/last run didn't error).
-   *  The base @ag-ui/client applier delegates RUN_ERROR to an `onRunErrorEvent`
-   *  callback and appends NO message — so a failed run would otherwise just go
-   *  silent (the spinner clears with no explanation). We track the message here so
-   *  RuntimeProvider can surface it as a visible banner. This is the UI half of the
-   *  hydrate-silent-drop fix (the server now EMITS + PERSISTS RUN_ERROR; this is
-   *  what renders it). Cleared when a new (non-ext) RUN_STARTED begins. */
+  /** The last RUN_ERROR's message, or null; the base applier appends no message for RUN_ERROR, so RuntimeProvider renders this as a banner until the next non-ext RUN_STARTED clears it. */
   private lastRunError: string | null = null;
   getRunError(): string | null {
     return this.lastRunError;
   }
 
-  /** Set while the server is AUTO-RETRYING a transiently-failed run (agent process died / went
-   *  silent / ACP threw), from RUN_RETRYING events. Drives the "retrying (n/N)…" banner. Cleared the
-   *  moment the retry's RUN_STARTED lands (success) OR a terminal RUN_ERROR replaces it (exhausted).
-   *  null = not retrying. See the bridge pump's death-retry loop. */
+  /** The server's auto-retry progress from RUN_RETRYING events, cleared by the retry's RUN_STARTED or a terminal RUN_ERROR; null when not retrying. */
   private retrying: { attempt: number; max: number } | null = null;
   getRunRetrying(): { attempt: number; max: number } | null {
     return this.retrying;
   }
 
-  /** Set when the live stream is rejected with an AUTH failure (401/403) — an
-   *  expired ingress/auth session in front of the agent-host. Distinct from a
-   *  normal drop: retrying won't help until the user re-authenticates, so the UI
-   *  must SURFACE it (a durable banner) instead of silently reconnecting forever.
-   *  Cleared the moment a (re)connection succeeds. */
+  /** True when the live stream was rejected with 401/403, which the UI surfaces durably until a reconnection succeeds. */
   private streamAuthError = false;
   getStreamAuthError(): boolean {
     return this.streamAuthError;
   }
 
-  /** Update `lastRunError` + the auto-retry state from a single log event, ignoring out-of-band
-   *  `ext-` runs (a broker interrupt isn't a run failure). Returns true if either changed. */
+  /** Update `lastRunError` and the retry state from one log event, ignoring `ext-` runs; returns true if either changed. */
   private trackRunError(e: BaseEvent): boolean {
     const ev = e as unknown as { type?: string; runId?: string; message?: string; attempt?: number; max?: number };
     const isExt = typeof ev.runId === "string" && ev.runId.startsWith("ext-");
@@ -307,16 +210,14 @@ export class IntegrityAgent extends AbstractAgent {
     let next = this.lastRunError;
     const beforeRetry = this.retrying;
     if (ev.type === "RUN_STARTED") {
-      next = null; // a fresh run — clear the stale error
-      this.retrying = null; // the retry (or a normal run) started — stop showing "retrying…"
+      next = null; // a fresh run clears the stale error
+      this.retrying = null; // a run started, so stop showing "retrying"
     } else if (ev.type === "RUN_RETRYING") {
-      // The server is about to re-drive a transiently-failed run. Show "retrying (n/N)…" — NOT the
-      // terminal error banner (that RUN_ERROR was the death; this supersedes it until we know the
-      // outcome). Don't clear lastRunError here: if all retries fail, the final RUN_ERROR stands.
+      // Show "retrying (n/N)" without clearing lastRunError, so the final RUN_ERROR stands if every retry fails.
       this.retrying = { attempt: ev.attempt ?? 1, max: ev.max ?? 1 };
     } else if (ev.type === "RUN_ERROR") {
       next = ev.message ?? "The run failed.";
-      this.retrying = null; // a terminal error replaces the retrying state (exhausted or non-retryable)
+      this.retrying = null; // a terminal error ends the retrying state
     }
     const retryChanged =
       (beforeRetry?.attempt !== this.retrying?.attempt) || (beforeRetry?.max !== this.retrying?.max);
@@ -325,34 +226,23 @@ export class IntegrityAgent extends AbstractAgent {
     return true;
   }
 
-  /** The messages currently QUEUED behind the active run (empty if none). The
-   *  bridge run-queue lives server-side; it emits a QUEUE_UPDATED snapshot on the
-   *  integrity stream whenever the queue changes, so a refreshing/reattaching UI
-   *  re-derives the queue from the log instead of losing it (it used to be
-   *  client-only and vanished on refresh). Latest-snapshot-wins. */
+  /** The messages queued behind the active run, from the server's latest QUEUE_UPDATED snapshot. */
   private queued: ReadonlyArray<{ id: string; text: string; priority: number }> = [];
   /** Where the painted window starts in the log (1 = the whole log is loaded). */
   private historyCursor = 1;
   private olderInFlight: Promise<number> | undefined;
   getQueuedMessages(): ReadonlyArray<{ id: string; text: string; priority: number }> {
-    // INVARIANT: the queue only holds items WHILE a run is draining them. If the
-    // run is idle, there is nothing queued — regardless of the last QUEUE_UPDATED
-    // we folded. This self-heals a MISSED clearing snapshot (QUEUE_UPDATED([]) that
-    // never reached the live client after a run finished), which otherwise left a
-    // phantom "message stuck in the queue" in the sidebar until a refresh.
+    // The queue only holds items while a run is draining them, so an idle run reports empty even if the clearing QUEUE_UPDATED never arrived.
     return this.running ? this.queued : EMPTY_QUEUE;
   }
 
-  /** messageId -> its attached image refs (from MESSAGE_IMAGES). The base applier
-   *  ignores that bespoke event, so we track it here and let the render pump enrich
-   *  the folded user messages, so an image renders live + after a refresh. */
+  /** messageId -> its attached image refs from MESSAGE_IMAGES, which the base applier ignores. */
   private messageImages = new Map<string, Array<{ assetId: string; mimeType: string; url: string }>>();
   getMessageImages(messageId: string): Array<{ assetId: string; mimeType: string; url: string }> | undefined {
     return this.messageImages.get(messageId);
   }
 
-  /** Record a MESSAGE_IMAGES event's refs keyed by its messageId. Returns true if
-   *  it added anything (nudge subscribers to re-render with the image). */
+  /** Record a MESSAGE_IMAGES event's refs keyed by messageId; returns true if it added anything. */
   private trackImages(e: BaseEvent): boolean {
     const ev = e as unknown as { type?: string; messageId?: string; images?: Array<{ assetId: string; mimeType: string; url: string }> };
     if (ev.type !== "MESSAGE_IMAGES" || !ev.messageId || !ev.images?.length) return false;
@@ -360,8 +250,7 @@ export class IntegrityAgent extends AbstractAgent {
     return true;
   }
 
-  /** Update `queued` from a QUEUE_UPDATED snapshot. Returns true if it changed
-   *  (shallow: length or any id/text differs) so the caller can nudge subscribers. */
+  /** Update `queued` from a QUEUE_UPDATED snapshot; returns true if it changed. */
   private trackQueue(e: BaseEvent): boolean {
     const ev = e as unknown as { type?: string; items?: Array<{ id: string; text: string; priority: number }> };
     if (ev.type !== "QUEUE_UPDATED") return false;
@@ -374,9 +263,7 @@ export class IntegrityAgent extends AbstractAgent {
     return true;
   }
 
-  /** Capture the snapshot's paging cursor. The server paints only the trailing
-   *  window; `fromSeq` is where that window starts, so older history is everything
-   *  before it. Absent means the snapshot IS the whole log. */
+  /** Capture the snapshot's paging cursor: `fromSeq` is where the server's trailing window starts, and its absence means the snapshot is the whole log. */
   private trackHistoryCursor(e: BaseEvent): boolean {
     const ev = e as unknown as { type?: string; fromSeq?: number };
     if (ev.type !== "MESSAGES_SNAPSHOT") return false;
@@ -391,10 +278,7 @@ export class IntegrityAgent extends AbstractAgent {
     return this.historyCursor > 1;
   }
 
-  /** Fetch the next older page and PREPEND it. Returns the number of messages
-   *  added (0 when there is nothing more, or on failure — best-effort, like the
-   *  seed). Concurrent calls collapse onto the in-flight one so a scroll that
-   *  keeps firing does not stack requests. */
+  /** Fetch the next older page and prepend it, returning the number of messages added; concurrent calls collapse onto the in-flight request. */
   async loadOlderHistory(): Promise<number> {
     const id = this.cfg.conversationId;
     if (!this.hasOlderHistory() || !hasId(id)) return 0;
@@ -412,7 +296,6 @@ export class IntegrityAgent extends AbstractAgent {
         const older = body.messages ?? [];
         this.historyCursor = body.done ? 1 : (body.fromSeq ?? 1);
         if (older.length === 0) return 0;
-        // Prepend: older history goes BEFORE what is already rendered.
         this.setMessages([...older, ...this.messages] as never);
         this.notifyMessages();
         return older.length;
@@ -426,11 +309,9 @@ export class IntegrityAgent extends AbstractAgent {
     return run;
   }
 
-  /** The interrupt(s) the conversation is currently paused on (empty if none) —
-   *  the run-scoped set PLUS any still-open external (broker) interrupts. */
+  /** The interrupts the conversation is currently paused on, empty if none. */
   getPendingInterrupts(): readonly PendingInterrupt[] {
-    // Stable identity when empty (the common case): the caller feeds this straight to
-    // useState, which bails out only on Object.is — a fresh [] re-renders every notify.
+    // A stable identity when empty, because the caller feeds this to useState which bails out only on Object.is.
     if (this.pendingApprovals.size === 0) return EMPTY_INTERRUPTS;
     const next = [...this.pendingApprovals.values()];
     if (
@@ -444,13 +325,7 @@ export class IntegrityAgent extends AbstractAgent {
   }
   private lastInterrupts: readonly PendingInterrupt[] = EMPTY_INTERRUPTS;
 
-  /** Update the unified pendingInterrupts map from a single log event:
-   *   - RUN_FINISHED(outcome=interrupt) ADDS each interrupt (goose OR ext-) by id;
-   *   - PERMISSION_RESOLVED removes the interrupt with that id;
-   *   - run boundaries (RUN_STARTED / a plain RUN_FINISHED) change NOTHING.
-   *  So an unanswered approval survives new runs, other interrupts, and out-of-order
-   *  answers — it disappears ONLY when explicitly resolved. Both kinds persist a
-   *  PERMISSION_RESOLVED (bridge.ts), so replay settles both. See the stress test. */
+  /** Update the pending-interrupt map from one log event: RUN_FINISHED(outcome=interrupt) adds each interrupt by id, PERMISSION_RESOLVED removes one, and run boundaries change nothing. */
   private trackInterrupt(e: BaseEvent): void {
     const ev = e as unknown as {
       type?: string;
@@ -464,29 +339,21 @@ export class IntegrityAgent extends AbstractAgent {
       if (!ev.toolCallId) return;
       this.pendingApprovals.delete(ev.toolCallId);
     } else if (ev.type === "RUN_FINISHED" && ev.outcome?.type === "interrupt" && Array.isArray(ev.outcome.interrupts)) {
-      // ADD each interrupt (goose or ext-) keyed by id. Do NOT clear anything already pending: a
-      // RUN_FINISHED for run A must not drop run B's still-open approval, and a normal RUN_FINISHED
-      // (no interrupt) is a no-op here — approvals are settled only by PERMISSION_RESOLVED.
+      // Add without clearing, since approvals are settled only by PERMISSION_RESOLVED.
       for (const it of ev.outcome.interrupts) this.pendingApprovals.set(it.id, it);
     } else {
-      return; // RUN_STARTED, plain RUN_FINISHED, and everything else: no interrupt-set change.
+      return; // nothing else changes the interrupt set
     }
-    // A RUN_FINISHED(interrupt) usually produces NO message change through the base applier (empty
-    // state => no AgentStateMessage), so the render subscribers wouldn't otherwise refresh to show
-    // the interrupt. Nudge them when the pending SET changes (by content, not just count — an
-    // add+remove that nets the same size must still repaint) so RuntimeProvider surfaces/clears it.
+    // The base applier produces no message change for a RUN_FINISHED(interrupt), so nudge subscribers whenever the pending set's content changes.
     if (before !== this.pendingSignature()) this.notifyMessages();
   }
 
-  /** A stable signature of the pending-interrupt set (sorted ids), so a change-nudge fires on ANY
-   *  content change — not just a size change (which would miss an add+remove of equal count). */
+  /** A stable signature of the pending-interrupt set (sorted ids), so a change-nudge fires on any content change. */
   private pendingSignature(): string {
     return [...this.pendingApprovals.keys()].sort().join(",");
   }
 
-  /** Fire onMessagesChanged on every subscriber with the current snapshot. Used to
-   *  nudge the render pump for changes the base applier doesn't itself signal
-   *  (interrupt set changes, and the once-per-replay `synced` render). */
+  /** Fire onMessagesChanged on every subscriber with the current snapshot, for changes the base applier does not itself signal. */
   private notifyMessages(): void {
     for (const s of this.subscribers) {
       s.onMessagesChanged?.({ messages: this.messages, state: this.state, agent: this } as never);
@@ -494,47 +361,20 @@ export class IntegrityAgent extends AbstractAgent {
   }
 
   constructor(config: IntegrityAgentConfig) {
-    // The base class wants a string thread id. Before creation there is none — pass the
-    // empty string, which is never a valid conversation id, rather than leaking the
-    // AWAITING_ID marker into a library that would stringify it.
+    // The base class wants a string thread id, so pass the empty string until the server has created the conversation.
     super({ threadId: hasId(config.conversationId) ? config.conversationId : "" });
     this.cfg = config;
     this.base = config.baseUrl.replace(/\/$/, "");
-    // Bind to globalThis: an unbound `fetch` reference invoked as `this.doFetch(...)`
-    // throws "Illegal invocation" in the browser (fetch needs its Window/global as
-    // receiver). Tests inject fetchImpl, so this only bites at runtime — which is
-    // exactly why the render pump + send silently no-op'd in the UI while unit
-    // tests stayed green.
+    // Bound to globalThis because an unbound `fetch` invoked as `this.doFetch(...)` throws "Illegal invocation" in the browser.
     this.doFetch = config.fetchImpl ?? globalThis.fetch.bind(globalThis);
   }
 
-  /**
-   * Update the per-conversation model IN PLACE (the X-Agent-Model header on the
-   * next send). The model does NOT affect the render source (the integrity stream
-   * carries the same events regardless), so switching it must NOT tear down the
-   * agent / render pump — the caller keeps the SAME agent instance and just calls
-   * this. (Recreating the agent on a model switch races the next send's events in
-   * a slow environment and drops the reply — the model-switch-mid-conversation
-   * bug.)
-   */
+  /** Update the per-conversation model in place; the render source is unaffected, so the caller keeps the same agent instance. */
   setModel(model?: string): void {
     this.cfg.model = model;
   }
 
-  /**
-   * Re-point this agent at the conversation id the SERVER assigned. A conversation seeded
-   * locally is created on its first send, and the server picks the id; the agent was built
-   * with the local one.
-   *
-   * Reads of cfg.conversationId happen at call time, so send/cancel follow immediately. The
-   * integrity stream does NOT: renderPump() already opened it on the old id, and it would
-   * keep reading a conversation nothing writes to any more — the run's events (including the
-   * RUN_FINISHED that a cancel produces) would never arrive, leaving the Stop button dead
-   * and the status bar stuck. So drop the open stream; the pump reconnects on the new id.
-   */
-  /** The server id, or throw. For ACTIONS (send/cancel/resume) whose caller has already
-   *  ensured the conversation exists — a throw here is a programming error, not a state to
-   *  render, and is far better than silently addressing a placeholder. */
+  /** The server id for an action whose caller has already ensured the conversation exists, or throw. */
   #requireId(op: string): string {
     const id = this.cfg.conversationId;
     if (!hasId(id)) {
@@ -543,40 +383,31 @@ export class IntegrityAgent extends AbstractAgent {
     return id;
   }
 
-  /** The conversation this agent is currently folding, or AWAITING_ID before the
-   *  server has issued one. For telemetry that fires outside a request (a render-side
-   *  event has no URL to infer it from). */
+  /** The conversation this agent is folding, or AWAITING_ID before the server has issued one. */
   currentConversationId(): MaybeConversationId {
     return this.cfg.conversationId;
   }
 
+  /** Re-point this agent at the id the server assigned and drop the open stream so the pump reconnects on it. */
   setConversationId(conversationId: string): void {
     if (conversationId === this.cfg.conversationId) return;
-    // The moment a conversation stops being local and becomes the server's. Both ids are
-    // recorded because this is precisely where a trace would otherwise break in two.
+    // Both ids are recorded because this is where a trace would otherwise break in two.
     record("conversation.id_assigned", {
       [ATTR.conversationKey]: hasId(this.cfg.conversationId) ? this.cfg.conversationId : "(awaiting-id)",
       [ATTR.conversationId]: conversationId,
     });
     this.cfg.conversationId = conversationId;
-    // Drop the live connection(s). Each reconnect recomputes the URL, so the pump comes
-    // back on the new conversation; leaving them open would keep folding a conversation
-    // nothing writes to any more.
+    // Each reconnect recomputes the URL, so aborting brings the pump back on the new conversation.
     for (const c of this.controllers) c.abort();
     this.controllers.clear();
   }
 
   /**
-   * The RENDER source: a CONTINUOUS Observable of the conversation's events from
-   * GET /conversations/:id/events.integrity. Emits each frame's inner event
-   * (already a BaseEvent) and does NOT complete while the stream is open, so the
-   * runtime keeps rendering live. `input` is ignored — the log is the source of
-   * truth, not a per-run request. Reconnects on drop.
+   * The render source: a continuous Observable of the conversation's events from
+   * GET /conversations/:id/events.integrity that ignores `input` and reconnects on drop.
    */
   run(_input: RunAgentInput): Observable<BaseEvent> {
-    // Nothing to stream until the server has created the conversation. Returning an EMPTY
-    // observable (rather than streaming a placeholder id) is the fix for the 404-reconnect
-    // storm: there is no conversation yet, so there are no events yet.
+    // There are no events until the server has created the conversation.
     if (!hasId(this.cfg.conversationId)) return EMPTY;
     const url = `${this.base}/conversations/${encodeURIComponent(this.cfg.conversationId)}/events.integrity`;
     const headers: Record<string, string> = {
@@ -584,14 +415,7 @@ export class IntegrityAgent extends AbstractAgent {
       ...(this.cfg.token ? { Authorization: `Bearer ${this.cfg.token}` } : {}),
     };
 
-    // A CONTINUOUS cold Observable: one SSE connection, reconnecting on drop and
-    // re-replaying the full log each time. Kept for the run() contract (a caller
-    // reading events off a single connection). The render pump does NOT subscribe
-    // to this directly — a reconnect re-replays every event, and the base applier
-    // would then DOUBLE-APPLY the replay into the SAME accumulator (doubling
-    // tool-call args like '{"cmd":"ls"}{"cmd":"ls"}' and duplicating messages —
-    // the page-refresh replay bug). The pump instead runs its OWN reconnect loop
-    // that re-seeds the accumulator per physical connection; see renderPump.
+    // One SSE connection that re-replays the full log on each reconnect; the render pump does not subscribe here because the base applier would double-apply each replay into the same accumulator (see renderPump).
     return new Observable<BaseEvent>((subscriber) => {
       const controller = new AbortController();
       this.controllers.add(controller);
@@ -620,11 +444,7 @@ export class IntegrityAgent extends AbstractAgent {
     });
   }
 
-  /**
-   * Read a single integrity SSE connection to completion, invoking `onEvent` for
-   * each inner BaseEvent. Returns "not-found" (conversation not yet created — the
-   * caller should back off), "closed" (stream ended normally), or "error".
-   */
+  /** Read one integrity SSE connection to completion, invoking `onEvent` per inner BaseEvent and reporting how it ended. */
   private async readConnection(
     url: string,
     headers: Record<string, string>,
@@ -635,17 +455,13 @@ export class IntegrityAgent extends AbstractAgent {
     try {
       const res = await this.doFetch(url, { headers, signal: controller.signal });
       if (res.status === 404) return "not-found"; // created on first prompt
-      // 401/403: an expired ingress/auth session in front — retrying won't help
-      // until the user re-authenticates. Surfaced durably, not silently retried.
+      // 401/403 means an expired auth session that retrying cannot fix.
       if (res.status === 401 || res.status === 403) return "auth-error";
       if (!res.ok || !res.body) return "error";
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
-      // Race each read against the abort signal: a STALLED body (a stream that
-      // never emits and never closes — the "agent seems dead" wedge) must still be
-      // abortable so the idle-watchdog can force a reconnect. A polyfilled/mock
-      // ReadableStream may not honor the fetch signal itself, so we honor it here.
+      // Race each read against the abort signal so a stalled body stays abortable even when the ReadableStream ignores the fetch signal.
       const aborted = new Promise<{ aborted: true }>((resolve) => {
         if (controller.signal.aborted) return resolve({ aborted: true });
         controller.signal.addEventListener("abort", () => resolve({ aborted: true }), { once: true });
@@ -663,12 +479,9 @@ export class IntegrityAgent extends AbstractAgent {
         while ((idx = buf.indexOf("\n\n")) !== -1) {
           const raw = buf.slice(0, idx);
           buf = buf.slice(idx + 2);
-          // F1: Reset lastActivityAt on ANY frame (including heartbeats `: ping\n\n`),
-          // not just data: lines — heartbeats prove the connection is alive.
+          // Any frame, including a heartbeat, proves the connection is alive.
           this.lastActivityAt = Date.now();
-          // F2: LIVE frames (not replay) arriving → reset the liveness one-shot so a
-          // NEW silence can trigger. Replay frames (during reconnect resync) don't
-          // count as "alive" — they're historical; only post-synced live frames do.
+          // Only live frames re-arm the liveness one-shot, since replayed frames are historical.
           if (!this.replaying) this.livenessHealed = false;
           const line = raw.split("\n").find((l) => l.startsWith("data:"));
           if (!line) continue;
@@ -678,8 +491,7 @@ export class IntegrityAgent extends AbstractAgent {
           } catch {
             continue; // skip a malformed frame, keep the stream alive
           }
-          // `synced` marks replay-complete (no event) → the pump can render once
-          // now and go live per-event; before it, we're still replaying history.
+          // `synced` marks the end of replay, after which live events follow.
           if (frame.kind === "synced") {
             onSynced?.();
           } else if (frame.kind === "event" && frame.event) {
@@ -694,53 +506,15 @@ export class IntegrityAgent extends AbstractAgent {
   }
 
   /**
-   * The RENDER PUMP. Folds the integrity stream into `messages` with FULL FIDELITY
-   * using the base-class applier, but with EXACTLY ONE subscription per SSE
-   * connection — so every event is applied ONCE.
-   *
-   * TWO duplication traps this avoids:
-   *
-   *   1. AbstractAgent.runAgent subscribes to run() TWICE per run (sequential
-   *      connect + apply passes; refCount drops to 0 between them, so share()
-   *      cannot collapse them) — two streams, every event folded twice. We do NOT
-   *      use runAgent; we drive the protected `apply` + `processApplyEvents` (the
-   *      same fold runAgent uses) over ONE connection Observable ourselves.
-   *
-   *   2. The integrity stream REPLAYS the full log on every (re)connect. Folding
-   *      every reconnect's replay into the SAME applier accumulator would double
-   *      tool-call args ('{"cmd":"ls"}{"cmd":"ls"}') and duplicate messages (the
-   *      page-refresh replay bug). So each PHYSICAL connection gets its OWN fold,
-   *      seeded from an EMPTY message list (setMessages([]) before starting), and
-   *      the replay rebuilds identical state instead of appending to it.
-   *
-   * `processApplyEvents` writes `this.messages` and fires each subscriber's
-   * onMessagesChanged, so callers keep observing via `subscribe({...})` as before.
-   * Returns a teardown; also torn down by dispose().
-   *
-   * ONE LONG-LIVED CONNECTION, reconnect only on a real DROP. The server holds the
-   * integrity stream open indefinitely (it forwards live appends), so a healthy
-   * connection NEVER completes — the fold subscription over it stays live for the
-   * whole conversation and applies each event exactly once as it arrives.
-   *
-   * The earlier design deferred a fresh fold per connection and drove reconnection
-   * with rxjs `repeat({delay})`. But `processApplyEvents(apply(conn$))` completes
-   * when its SOURCE conn$ completes, and rxjs `repeat` — on that completion —
-   * unsubscribes the (still-open) connection and re-subscribes after the delay. The
-   * result was a ~500ms teardown/re-replay churn on an OPEN stream: every reconnect
-   * did setMessages([]) then re-folded the log from empty, and a reconnect that
-   * raced a mid-run append (e.g. the SECOND turn's reply) rebuilt state from a log
-   * snapshot that did not yet contain those in-flight events — dropping the reply
-   * (observed: users=2, assistants=1). So we do NOT use repeat. We run our own
-   * reconnect loop that seeds setMessages([]) ONCE per PHYSICAL connection and only
-   * loops when readConnection actually returns (drop / 404 backoff) — the fresh
-   * fold that guards the double-apply replay bug still happens on every real
-   * (re)connect, just never on a healthy open stream.
+   * The render pump folds the integrity stream into `messages` through the base-class
+   * applier with exactly one subscription per SSE connection, so every event is applied once.
+   * Each physical connection gets its own fold seeded from an empty message list, because the
+   * server replays the full log on every (re)connect. A healthy connection never completes, and
+   * the loop reconnects only when readConnection returns. Returns a teardown, also run by dispose().
    */
   renderPump(): () => void {
     const input = this.prepareRunAgentInput();
-    // Recomputed per CONNECTION, not captured once: setConversationId() can re-point this
-    // agent at the id the server assigned, and a reconnect must follow it. A URL captured
-    // here would keep the pump reading the conversation the UI has already left.
+    // Recomputed per connection because setConversationId() can re-point the agent mid-stream.
     const streamUrl = (): string | undefined =>
       hasId(this.cfg.conversationId)
         ? `${this.base}/conversations/${encodeURIComponent(this.cfg.conversationId)}/events.integrity`
@@ -753,33 +527,20 @@ export class IntegrityAgent extends AbstractAgent {
     let closed = false;
     let connSub: Subscription | undefined;
     let controller: AbortController | undefined;
-    // Set by the idle-watchdog when IT forced the disconnect, so the loop reconnects
-    // IMMEDIATELY (skipping the normal drop-backoff) — we WANT to re-fold the log now.
+    // Set by the idle watchdog when it forced the disconnect, so the loop reconnects without the drop backoff.
     let watchdogForced = false;
-    // True once seedTail() has painted the recent tail. Used to SKIP the first
-    // connection's blank-to-[] so the seeded tail stays on screen while the full log
-    // replays (renders are suppressed until `synced` anyway), instead of flashing
-    // empty then repainting — which made the fast first paint invisible.
+    // True once seedTail() painted the recent tail, so the first connection keeps it on screen through the replay.
     let seeded = false;
 
     const loop = async () => {
       let notFoundDelay = 500;
       let firstConn = true;
-        /** Consecutive ticks spent waiting for a server id — sampled into a span so a
-         *  pump that never connects is visible instead of silent. */
+        /** Consecutive ticks spent waiting for a server id, sampled into a span. */
         let waitTicks = 0;
       while (!closed) {
-        // No server id yet: there is nothing to connect to, so wait BEFORE doing any
-        // per-connection work. This must be the FIRST thing in the loop body — the reset
-        // below wipes the folded messages, and spinning through it every tick while
-        // waiting for an id repeatedly blanked the transcript. That is what left the
-        // Stop button's run state unrecoverable (stop-run 2/6).
-        //
-        // The pump's START is deliberately NOT deferred: bisection showed that breaks the
-        // same spec, whether the deferral is a poll or an immediate signal.
+        // Wait for a server id before any per-connection work, because the reset below wipes the folded messages.
         if (!hasId(this.cfg.conversationId)) {
-          // Sampled: the loop spins at 50ms, so record the FIRST wait and then every 20th
-          // (~1s) — enough to show "still waiting" without burying the output.
+          // Sampled: record the first wait and then every 20th tick (~1s).
           if (waitTicks === 0 || waitTicks % 20 === 0) {
             record("stream.awaiting_id", { wait_ticks: waitTicks });
           }
@@ -789,64 +550,38 @@ export class IntegrityAgent extends AbstractAgent {
         }
         if (waitTicks > 0) {
           record("stream.id_arrived", { wait_ticks: waitTicks });
-            // SEED NOW. seedTail() runs once at start-up and returns immediately when
-            // there is no id yet, so on a BRAND-NEW conversation it never ran at all —
-            // and events emitted before this stream went live had no catch-up. The UI
-            // then rendered nothing, not even the user's own message.
-            //
-            // Seeding HERE, on the id's arrival, is the fix that does not touch when the
-            // pump starts: deferring the pump is documented above as bisected-and-wrong,
-            // and it measured worse (8 -> 13 cluster failures) when tried.
+            // Seed here on the id's arrival, since seedTail() returned early at start-up when there was no id yet.
             if (!seeded) seeded = await this.seedTail().catch(() => false);
           waitTicks = 0;
         }
-        // Fresh fold per PHYSICAL connection: reset to empty so the full-log
-        // replay rebuilds identical state rather than doubling onto the previous
-        // connection's fold (the page-refresh double-apply bug). A `Subject`
-        // carries this connection's events into ONE apply/processApplyEvents
-        // subscription; it completes only when the connection actually ends.
-        // EXCEPTION: on the FIRST connection right after seedTail() painted, keep the
-        // seeded tail visible — the fold rebuilds `messages` from empty internally and
-        // renders are suppressed until `synced`, so blanking here would only flash the
-        // fast first paint away. Later reconnects always reset (no seed to preserve).
+        // Reset to empty so the replay rebuilds identical state instead of doubling onto the previous fold, except that the first connection after seedTail() keeps the seeded tail visible.
         if (firstConn && seeded) {
-          // The applier still folds from empty; we just don't wipe the VISIBLE tail.
+          // The applier still folds from empty without wiping the visible tail.
           this.messages = [];
         } else {
           this.setMessages([]);
         }
         const isFirstConnection = firstConn;
         firstConn = false;
-        // A fresh connection re-replays the whole log; recompute pending interrupts from scratch.
-        // Each interrupt's RUN_FINISHED(interrupt) re-adds it and any settling PERMISSION_RESOLVED
-        // re-removes it, in log order — so a still-open approval (goose or broker) survives the reload
-        // and a resolved one stays gone.
+        // A fresh connection replays the whole log, so pending interrupts are recomputed from scratch in log order.
         this.pendingApprovals.clear();
-        // Re-derived from the replayed log (a trailing RUN_ERROR re-sets it, an
-        // intervening RUN_STARTED clears it) — reset so a reconnect doesn't keep a
-        // stale error the newer history has moved past.
+        // Re-derived from the replayed log.
         this.lastRunError = null;
-        // Likewise re-derive the queue from the log's last QUEUE_UPDATED snapshot.
+        // Re-derived from the log's last QUEUE_UPDATED snapshot.
         this.queued = [];
         // The new replay's snapshot carries its own window start.
         this.historyCursor = 1;
-        // System messages are re-derived from the replayed log too (reset so a
-        // reconnect rebuilds the list instead of doubling it). The anchor resets with
-        // them so positions re-derive from an empty fold.
+        // System messages and their anchor are re-derived from the replayed log too.
         this.systemMessages = [];
         this.lastMessageId = null;
         // Entering (re)replay: suppress per-event renders until `synced`.
         this.replaying = true;
-        // A new fold starts here — the accumulator restarts from empty, so consumers
-        // must not compare its length against the previous fold's. Why: PR #641.
+        // A new fold starts here, so consumers must not compare its length against the previous fold's.
         this.foldEpoch++;
         controller = new AbortController();
         this.controllers.add(controller);
         const events$ = new Subject<BaseEvent>();
-        // The applier's fold is async (concatMap over the event stream); it drains
-        // buffered events even after the source completes. Track that completion so
-        // we DON'T tear the fold down mid-flight (which would drop the tail of the
-        // replay and leave `messages` empty/partial — the failure this guards).
+        // The applier's fold is async and drains buffered events after the source completes, so track its completion rather than tearing it down mid-flight.
         const folded = new Promise<void>((resolve) => {
           connSub = this.processApplyEvents(
             input,
@@ -861,8 +596,7 @@ export class IntegrityAgent extends AbstractAgent {
         let framesThisConnection = 0;
         record("stream.connect", {
           [ATTR.conversationId]: hasId(this.cfg.conversationId) ? this.cfg.conversationId : "(awaiting-id)",
-          // A RECONNECT (false) is the interesting case: the visible transcript was just
-          // reset and replayed, which is what "it restarted" looks like to a user.
+          // A reconnect (false) is what "it restarted" looks like to a user.
           "stream.first_connection": isFirstConnection,
         });
         const url = streamUrl() as string; // non-undefined: guarded at the loop head
@@ -871,10 +605,9 @@ export class IntegrityAgent extends AbstractAgent {
           headers,
           controller,
           (e) => {
-            // The stream is alive — reset the idle-watchdog clock.
+            // Reset the idle-watchdog clock.
             this.lastActivityAt = Date.now();
-            // FIRST FRAME separates "connected but silent" from "delivering": a UI that looks
-            // frozen while the server streams shows a connect with no first_frame.
+            // The first frame separates "connected but silent" from "delivering".
             if (framesThisConnection === 0) {
               record("stream.first_frame", {
                 [ATTR.conversationId]: hasId(this.cfg.conversationId) ? this.cfg.conversationId : "(awaiting-id)",
@@ -882,55 +615,33 @@ export class IntegrityAgent extends AbstractAgent {
               });
             }
             framesThisConnection++;
-            // Track the pending interrupt as it rides the log: a RUN_STARTED means the
-            // (resumed) run is live again — clear any pending; a RUN_FINISHED with an
-            // interrupt outcome pauses the run awaiting a user answer. The base
-            // applier ignores this, so we surface it via getPendingInterrupts().
+            // The base applier ignores interrupts, so they are tracked here and surfaced via getPendingInterrupts().
             this.trackInterrupt(e);
-            // Track run-in-flight for the Stop button / thinking indicator. The
-            // base applier doesn't signal this, so nudge subscribers on a change
-            // (suppressed during replay — the final `synced` render carries it).
+            // The base applier does not signal these states either, so nudge subscribers on a change (suppressed during replay).
             let changed = this.trackRunning(e);
-            // Track a RUN_ERROR message so a failed run surfaces a visible banner
-            // instead of silently clearing (the base applier renders no message for
-            // RUN_ERROR). Same nudge discipline as trackRunning.
             changed = this.trackRunError(e) || changed;
-            // Track the QUEUE_UPDATED snapshot so queued-behind-a-run messages render
-            // durably (they used to be client-only and vanished on refresh).
             changed = this.trackQueue(e) || changed;
-            // Track image refs (MESSAGE_IMAGES) so a user message's images render
-            // live + survive a refresh (the base applier ignores this bespoke event).
             changed = this.trackImages(e) || changed;
-            // Track context-window fill (CONTEXT_USAGE) for the fill bar.
             changed = this.trackContext(e) || changed;
-            // Track SYSTEM messages (hidden behind a toggle in the thread).
             changed = this.trackSystemMessage(e) || changed;
-            // Where the painted window starts, for the scroll-back paging.
             changed = this.trackHistoryCursor(e) || changed;
             if (changed && !this.replaying) this.notifyMessages();
             events$.next(e);
           },
           () => {
-            // A successful (re)connect that reached `synced` — clear any prior auth
-            // error (the session is valid again).
+            // Reaching `synced` means the session is valid again.
             if (this.streamAuthError) {
               this.streamAuthError = false;
               this.notifyMessages();
             }
-            // Replay complete: the whole history is folded. Flip out of replay and
-            // render once — but the base applier's fold is async, so wait a macrotask
-            // for its buffered per-event notifications to drain FIRST (they observe
-            // isReplaying()===true and are suppressed), then flip + render the final
-            // history in one shot. A macrotask (not microtask) clears the concatMap
-            // fold queue reliably.
+            // Wait a macrotask for the async fold's buffered per-event notifications to drain before flipping out of replay and rendering the history in one shot.
             setTimeout(() => {
               this.replaying = false;
               this.notifyMessages();
             }, 0);
           },
         );
-        // The connection ended — signal end-of-events and WAIT for the fold to
-        // finish applying everything buffered before deciding whether to reconnect.
+        // Signal end-of-events and wait for the fold to finish before deciding whether to reconnect.
         events$.complete();
         await folded;
         connSub?.unsubscribe();
@@ -948,44 +659,29 @@ export class IntegrityAgent extends AbstractAgent {
         });
 
         if (outcome === "auth-error") {
-          // Expired ingress/auth session (401/403). Retrying immediately won't help
-          // until the user re-authenticates, so SURFACE it (a durable banner) and
-          // back off long — but keep polling so it self-clears once auth is renewed
-          // (e.g. the ingress refreshes the session), no reload required.
+          // An expired auth session: surface it and back off long, but keep polling so it self-clears once auth is renewed.
           if (!this.streamAuthError) {
             this.streamAuthError = true;
             this.notifyMessages();
           }
           if (!closed) await delay(5000);
         } else if (outcome === "not-found") {
-          // Conversation not created yet — back off with exponential delay.
+          // Not created yet, so back off exponentially.
           await delay(notFoundDelay);
           notFoundDelay = Math.min(notFoundDelay * 2, 5000);
         } else if (watchdogForced) {
-          // The idle-watchdog forced this reconnect (a wedged/stalled stream) —
-          // reconnect NOW to re-fold the persisted log and heal stuck state.
+          // The watchdog forced this reconnect, so re-fold now.
           watchdogForced = false;
           notFoundDelay = 500;
         } else {
-          // A real drop/error: brief pause, then reconnect + re-replay.
+          // A real drop: brief pause, then reconnect.
           notFoundDelay = 500;
           if (!closed) await delay(500);
         }
       }
     };
 
-    // IDLE WATCHDOG: if the UI is in a NON-idle state (a run "running", or an
-    // interrupt pending) but the stream has gone silent, force a reconnect by
-    // aborting the current connection. The reconnect re-folds from the PERSISTED
-    // log (which HAS the dropped terminal frame — RUN_FINISHED / PERMISSION_RESOLVED
-    // — that the LIVE stream missed), re-deriving the correct state. This is the
-    // general cure for the "agent seems dead" class. 0 disables.
-    //
-    // A `running` run re-arms every idle window (a hung run should keep retrying).
-    // A pending INTERRUPT only fires ONCE per distinct pending set: a single
-    // re-fold heals a dropped PERMISSION_RESOLVED; if it's still pending after
-    // that, the approval is genuinely open (a real user prompt) and we must NOT
-    // churn a reconnect every T seconds while the user decides.
+    // Idle watchdog: when a run is running or an interrupt is pending but the stream has gone silent, abort the connection so the reconnect re-folds the persisted log (0 disables).
     const idleMs = this.cfg.idleReconnectMs ?? 25_000;
     let watchdog: ReturnType<typeof setInterval> | undefined;
     if (idleMs > 0) {
@@ -996,27 +692,19 @@ export class IntegrityAgent extends AbstractAgent {
         const silentMs = Date.now() - this.lastActivityAt;
         if (silentMs < idleMs) return; // stream is alive
         const pending = this.getPendingInterrupts();
-        // Key the pending set so a NEW interrupt re-arms the one-shot heal.
+        // A new interrupt re-arms the one-shot heal.
         const interruptKey = pending.length ? pending.map((i) => i.id).sort().join(",") : null;
         const runStuck = this.running;
+        // A pending interrupt heals once per distinct pending set, so a genuinely open approval does not churn reconnects.
         const interruptStuck = interruptKey !== null && interruptKey !== healedInterruptKey;
-        // F2: LIVENESS check fires even when idle (running===false, no interrupts).
-        // Heartbeats arrive every ~25s (configurable via idleMs); if NO frame
-        // (event OR heartbeat) for >2× the expected interval, the connection is
-        // dead — reconnect ONCE. This is SEPARATE from the runStuck/interruptStuck
-        // checks (which solve different problems: a LIVE stream that dropped a
-        // terminal event). One-shot: if we already reconnected for silence and the
-        // stream is STILL silent (e.g. a legitimately pending approval with no
-        // heartbeats), don't churn reconnects.
+        // Liveness: with no frame or heartbeat for more than two expected intervals the connection is dead, so reconnect once.
         const livenessWindowMs = idleMs * 2.4; // 2.4× interval = >2 missed pings
         const connectionDead = silentMs >= livenessWindowMs && !this.livenessHealed;
         if (!runStuck && !interruptStuck && !connectionDead) return;
         if (interruptStuck) healedInterruptKey = interruptKey;
-        // Any reconnect (runStuck/interruptStuck/connectionDead) resets the liveness
-        // one-shot: we just reconnected, so the connection is fresh — don't fire
-        // liveness again until activity resumes and silence recurs.
+        // Any reconnect resets the liveness one-shot until activity resumes and silence recurs.
         this.livenessHealed = true;
-        // Stuck or dead: nudge the loop to reconnect + re-fold from the log.
+        // Abort so the loop reconnects and re-folds from the log.
         this.lastActivityAt = Date.now(); // avoid re-firing while the reconnect runs
         watchdogForced = true; // reconnect promptly (no drop-backoff delay)
         controller?.abort();
@@ -1024,14 +712,10 @@ export class IntegrityAgent extends AbstractAgent {
       (watchdog as { unref?: () => void }).unref?.();
     }
 
-    // F3: VISIBILITYCHANGE handler forces a reconnect when the tab becomes visible.
-    // Browsers throttle background-tab timers, so a backgrounded tab can miss the
-    // watchdog window entirely. When the tab returns to foreground, force a
-    // reconnect + re-fold so the user sees current state, not stale pre-background.
+    // Browsers throttle background-tab timers, so a tab returning to the foreground forces a resync instead of trusting the watchdog.
     const handleVisibilityChange = () => {
       if (typeof document === "undefined") return; // SSR guard
       if (document.visibilityState === "visible" && !closed && controller) {
-        // Tab just became visible — force a resync.
         this.lastActivityAt = Date.now(); // avoid double-fire from watchdog
         watchdogForced = true;
         controller.abort();
@@ -1053,17 +737,7 @@ export class IntegrityAgent extends AbstractAgent {
     };
     this.stopPump?.();
     this.stopPump = stop;
-    // FAST FIRST PAINT: fetch the recent tail and fold it now, so a long
-    // conversation shows its latest context immediately instead of waiting for the
-    // whole integrity log to stream. The loop below then re-folds the full log from
-    // empty and reconciles (identical fidelity — the tail used the same applier).
-    // Wait for the server id BEFORE seeding, then seed, then loop — the original
-    // ordering, just deferred until there is something to address.
-    //
-    // Gating INSIDE the loop instead (an earlier attempt) skipped seedTail entirely, so
-    // `seeded` stayed false and the first real connection wiped the visible transcript
-    // rather than preserving the seeded tail. seedTail runs once, before the loop; the
-    // gate has to sit before it, not inside what follows it.
+    // Fast first paint: seed the recent tail, then let the loop re-fold the full log from empty.
     void this.seedTail()
       .then((ok) => {
         seeded = ok;
@@ -1074,10 +748,7 @@ export class IntegrityAgent extends AbstractAgent {
     return stop;
   }
 
-  /** Fetch the last N runs of the log (GET …/tail) and fold them into
-   *  `agent.messages` via the SAME base applier, then notify — a fast, faithful
-   *  first paint before the full replay. Best-effort: any failure just skips the
-   *  seed and the full replay paints as before. */
+  /** Fetch the last N runs of the log and fold them into `messages` through the same base applier for a fast first paint; any failure skips the seed. */
   private async seedTail(limit = 300): Promise<boolean> {
     try {
       if (!hasId(this.cfg.conversationId)) return false; // nothing to seed from yet
@@ -1089,24 +760,19 @@ export class IntegrityAgent extends AbstractAgent {
       const body = (await res.json()) as { events?: BaseEvent[] };
       const events = body.events ?? [];
       if (events.length === 0) return false;
-      // Fold the tail in a THROWAWAY clone first, so a fold that yields nothing
-      // renderable (e.g. the tail's final run is still in-flight — no RUN_FINISHED —
-      // so the base applier produces no message state) can't blank the real thread.
-      // Adopt + paint only if the fold actually produced messages.
+      // Fold in a throwaway clone first so a tail that yields nothing renderable cannot blank the real thread.
       const folded = await this.foldTail(events);
       if (folded.length === 0) return false; // nothing renderable → let the full replay paint
       this.setMessages(folded as never);
       this.notifyMessages();
       return true;
     } catch {
-      /* best-effort — the full replay will paint */
+      /* the full replay will paint */
       return false;
     }
   }
 
-  /** Fold tail events into messages in a THROWAWAY clone (no effect on this
-   *  agent's messages/subscribers). Returns the folded messages — possibly empty
-   *  when the window has no complete, renderable run. */
+  /** Fold tail events in a throwaway clone and return the folded messages, possibly empty. */
   private async foldTail(events: BaseEvent[]): Promise<unknown[]> {
     const scratch = this.clone();
     scratch.setMessages([]);
@@ -1123,12 +789,7 @@ export class IntegrityAgent extends AbstractAgent {
     return scratch.messages as unknown[];
   }
 
-  /**
-   * Send a prompt as a FIRE-AND-FORGET POST /agui (threadId = conversationId,
-   * X-Agent-Model header from config.model). Does NOT read the response SSE — the
-   * reply comes back via `run()`'s integrity subscription. Resolves once the POST
-   * is accepted (not when the run finishes).
-   */
+  /** Send a prompt as a fire-and-forget POST /agui; the reply arrives through the integrity subscription, so this resolves once the POST is accepted. */
   async send(
     text: string,
     opts?: {
@@ -1137,10 +798,7 @@ export class IntegrityAgent extends AbstractAgent {
       files?: Array<{ name: string; data: string; mimeType: string }>;
     },
   ): Promise<void> {
-    // With images and/or files, send a multimodal content-parts array (text + image +
-    // file parts) the agent-host normalizer splits; without either, a plain string (the
-    // unchanged path). File parts carry base64 bytes the agent-host materializes into the
-    // sandbox at /workspace/uploads/<name>; images ride as vision blocks.
+    // Images or files make the content a multimodal parts array the agent-host normalizer splits; otherwise it is a plain string.
     const hasImages = !!opts?.images?.length;
     const hasFiles = !!opts?.files?.length;
     const content =
@@ -1155,52 +813,24 @@ export class IntegrityAgent extends AbstractAgent {
       threadId: this.#requireId("send"),
       runId: `send-${this.#requireId("send")}-${text.length}`,
       messages: [{ id: `u-${text.length}`, role: "user", content }],
-      // When the user sends WHILE a run is active (a loop they want to interrupt),
-      // the caller passes priority so the agent-host FORCE-INTERRUPTS the running
-      // turn (bridge "thinking" policy — cancels at the next tool boundary). Without
-      // it the message queues behind the never-ending turn and is never delivered
-      // (the uninterruptible-polling-loop bug).
+      // A priority tells the agent-host to interrupt the running turn at its next tool boundary instead of queueing behind it.
       ...(opts?.priority ? { priority: opts.priority } : {}),
     });
   }
 
-  /**
-   * Answer pending interrupt(s): POST /agui with { resume: [...] } (the existing
-   * resume path). The continued run streams back through the integrity source.
-   */
+  /** Answer pending interrupts with POST /agui { resume }, whose continued run streams back through the integrity source. */
   async submitResume(entries: readonly ResumeEntry[]): Promise<void> {
     await this.postAgui({ threadId: this.#requireId("submit a resume"), resume: [...entries] });
   }
 
-  /** Stop the running turn — the Stop button. POSTs the agent-host cancel
-   *  endpoint, which ends the in-flight run (kills the active tool call, ACP
-   *  session/cancel, emits RUN_FINISHED{cancelled}); the terminal event then
-   *  arrives via the integrity stream and flips `running` false. This method is
-   *  ONLY responsible for the POST landing — it does NOT wait for the run to
-   *  actually stop (that reconciliation lives in RuntimeProvider off the stream).
-   *
-   *  Crucially it does NOT swallow errors: if the POST itself fails (network
-   *  down, non-2xx), it THROWS so the caller can tell the user "couldn't send
-   *  stop" instead of the button looking dead while nothing happened. A stop the
-   *  user can't tell landed is a broken control (the Stop-no-feedback bug). */
+  /** Stop the running turn by POSTing the cancel endpoint; the terminal event arrives via the integrity stream, and a failed POST throws so the caller can tell the user. */
   async cancel(): Promise<void> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(this.cfg.token ? { Authorization: `Bearer ${this.cfg.token}` } : {}),
     };
     const url = `${this.base}/conversations/${encodeURIComponent(this.#requireId("cancel"))}/cancel`;
-    // RETRY a 404. In the first ~1-2s of a conversation the controller has not assigned
-    // an owner yet, so the router's CR-watch cache has no hostIP and the POST falls back
-    // to a random pod that does not hold the conversation — observed as an immediate
-    // Stop 404ing (nginx: POST …/cancel 404 in the SAME second as the run's first
-    // prompt) while the run kept going and the status bar never cleared. The
-    // conversation demonstrably exists — this client is streaming it — so a 404 here is
-    // the assignment window, not absence. The router's cache usually converges in ~a
-    // second — but on a loaded cluster the controller tick itself can take 3-4s (CI run
-    // 33024754713: created 00:09:25.0, assigned 00:09:28.4, while 4×700ms retries gave
-    // up at +2.1s and the Stop was lost). Retry across ~5.5s to outlast a slow tick.
-    // Other failures still throw immediately: cancel must never silently do nothing
-    // (#347).
+    // A 404 in the first seconds of a conversation is the controller's assignment window rather than absence, so retry it while other failures throw immediately.
     let last = 0;
     for (let attempt = 0; attempt < 9; attempt++) {
       if (attempt > 0) await delay(this.cfg.cancelRetryDelayMs ?? 700);
@@ -1213,8 +843,7 @@ export class IntegrityAgent extends AbstractAgent {
     throw new Error(`cancel request failed: ${last}`);
   }
 
-  /** Fire-and-forget POST /agui; deliberately does NOT consume the response body,
-   *  but DOES cancel it (see below). */
+  /** Fire-and-forget POST /agui that cancels the response body instead of reading it. */
   private async postAgui(body: Record<string, unknown>): Promise<void> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -1222,24 +851,15 @@ export class IntegrityAgent extends AbstractAgent {
       ...(this.cfg.token ? { Authorization: `Bearer ${this.cfg.token}` } : {}),
       ...(this.cfg.model ? { "X-Agent-Model": this.cfg.model } : {}),
     };
-    // Do not await/read the SSE stream — the run drives server-side and its
-    // events return via the integrity subscription. We only ensure the POST is
-    // accepted.
     const res = await this.doFetch(`${this.base}/agui`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
     }).catch(() => {
-      /* the integrity stream is the source of truth; a failed POST surfaces there
-         (no RUN_STARTED) rather than here. Best-effort. */
+      /* a failed POST surfaces on the integrity stream as a missing RUN_STARTED */
       return null;
     });
-    // POST /agui is ITSELF an SSE endpoint: the server streams the whole run's
-    // events into this response until RUN_FINISHED. We render off the integrity
-    // stream, so nothing here needs those bytes — but leaving the body unread lets
-    // it fill the per-stream and then the connection-level HTTP/2 flow-control
-    // window, which stalls EVERY other stream on the connection (notably
-    // events.integrity). Cancel it so the window stays open.
+    // POST /agui streams the whole run as SSE, and an unread body would fill the HTTP/2 flow-control window and stall every other stream on the connection.
     res?.body?.cancel().catch(() => {});
   }
 

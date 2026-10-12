@@ -1,16 +1,4 @@
-"""Datadog provider — two-key header auth + http-proxy target + enable gating.
-
-Datadog needs TWO headers (DD-API-KEY + DD-APPLICATION-KEY) on every request.
-Proves: the source emits a multi-header credential that injects BOTH onto the
-outbound request; the provider proxies to the configured site and is enabled only
-when both keys are present.
-
-These drive the provider through the ENVIRONMENT rather than by patching a
-settings singleton, which is what the broker app's copy of this file did. That is
-the point of the move: the contrib reads DATADOG_* itself, so the test now covers
-the real configuration path end to end — including that the variable names are
-the ones a deployment already sets. Why: PR #573.
-"""
+"""Datadog provider: two-key header auth, the http-proxy target and enable gating, driven through the environment."""
 
 from __future__ import annotations
 
@@ -64,9 +52,7 @@ def test_site_defaults_to_us(monkeypatch):
 
 @pytest.mark.parametrize("site", [" datadoghq.eu ", ".datadoghq.eu"])
 def test_site_is_normalised(monkeypatch, site):
-    # A stray leading dot or whitespace in a manifest must not produce
-    # https://api..datadoghq.eu — the request would fail with a DNS error that
-    # says nothing about the config that caused it.
+    # A stray leading dot or whitespace must not produce https://api..datadoghq.eu.
     monkeypatch.setenv("DATADOG_API_KEY", "k")
     monkeypatch.setenv("DATADOG_APP_KEY", "a")
     monkeypatch.setenv("DATADOG_SITE", site)
@@ -76,15 +62,12 @@ def test_site_is_normalised(monkeypatch, site):
 
 
 def test_provider_disabled_without_both_keys(monkeypatch):
-    # Only the API key -> still disabled (the app key is required too).
     monkeypatch.setenv("DATADOG_API_KEY", "k")
     assert datadog().enabled is False
 
-    # Neither key -> disabled.
     monkeypatch.delenv("DATADOG_API_KEY")
     assert datadog().enabled is False
 
-    # Both keys -> enabled.
     monkeypatch.setenv("DATADOG_API_KEY", "k")
     monkeypatch.setenv("DATADOG_APP_KEY", "a")
     assert datadog().enabled is True
@@ -92,8 +75,6 @@ def test_provider_disabled_without_both_keys(monkeypatch):
 
 def test_reads_the_env_vars_the_manifests_already_inject(monkeypatch):
     # modules/broker.nix injects DATADOG_API_KEY / DATADOG_APP_KEY from secrets.
-    # If this contrib read anything else, a deployed broker would silently lose
-    # its datadog provider on upgrade — with no error, just a missing route.
     monkeypatch.setenv("DATADOG_API_KEY", "from-secret")
     monkeypatch.setenv("DATADOG_APP_KEY", "also-from-secret")
 

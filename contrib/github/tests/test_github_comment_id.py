@@ -1,17 +1,4 @@
-"""A forwarded GitHub comment must carry the id of the comment it came from.
-
-Slack has had this since `message_ts:` — the agent reacts 👀 to the SPECIFIC
-message so the human sees an acknowledgment seconds after they post, instead of
-silence until the run finishes. GitHub had no equivalent: an issue_comment
-forward named the PR but never the comment, so there was nothing for the agent
-to react to and no acknowledgment was possible at all.
-
-The id is ALL the handler adds. Which endpoint that id belongs to, when to react
-and with what live in the scooter-github skill: this forwarder stays a data pipe
-with no behavior of its own (PR #528), and the last two tests pin that boundary.
-
-Moved here with the handler (PR #591).
-"""
+"""A forwarded GitHub comment carries the id of the comment it came from, and nothing more; what to do with it is the scooter-github skill's business."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -80,15 +67,13 @@ class TestTheIdIsCarried:
 
     @pytest.mark.asyncio
     async def test_a_line_comment_still_says_to_reply_in_thread(self, forwarded):
-        """The id must not displace the in_reply_to instruction — acknowledging a
-        comment is not answering it."""
+        """The id must not displace the in_reply_to instruction."""
         await gh._handle_review_comment(review_comment(cid=555))
         assert "in_reply_to=555" in forwarded.call_args[0][1]
 
 
 class TestTheHandlerStaysADataPipe:
-    """No endpoints, no commands, no react-first policy in the forwarder — that
-    knowledge belongs to the skill, which can be corrected without a redeploy."""
+    """No endpoints, no commands, no react-first policy in the forwarder."""
 
     @pytest.mark.asyncio
     async def test_no_reaction_endpoint_is_baked_into_a_pr_comment(self, forwarded):

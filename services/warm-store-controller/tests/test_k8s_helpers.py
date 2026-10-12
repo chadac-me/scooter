@@ -1,22 +1,21 @@
-"""Tier 1 — the PURE module-level helpers in k8s.py (no cluster). These are the
-version-key + naming correctness points the pool hinges on."""
+"""Tier 1: the pure module-level helpers in k8s.py, no cluster."""
 
 from warm_store_controller.k8s import _tag_of, _tag_slug
 
 
-# --- _tag_of: must agree with the kubenix `lib.last (splitString ":" ...)` split ---
+# --- _tag_of: agrees with the kubenix `lib.last (splitString ":" ...)` split ---
 
 def test_tag_of_simple():
     assert _tag_of("agent-sandbox-os:latest") == "latest"
 
 
 def test_tag_of_registry_with_port():
-    # A registry :port must NOT be mistaken for the tag (the port segment has a '/').
+    # A registry port is not a tag.
     assert _tag_of("localhost:5000/agent-sandbox-os:scooter-git-abc123") == "scooter-git-abc123"
 
 
 def test_tag_of_registry_port_no_tag():
-    # ref ending at the repo (no tag) → "" (won't match any warmed PVC).
+    # An untagged ref yields "".
     assert _tag_of("localhost:5000/agent-sandbox-os") == ""
 
 
@@ -25,7 +24,7 @@ def test_tag_of_no_tag():
 
 
 def test_tag_of_digest_stripped():
-    # A digest is not a tag; strip @sha256:... first.
+    # A digest is not a tag.
     assert _tag_of("agent-sandbox-os:latest@sha256:deadbeef") == "latest"
 
 

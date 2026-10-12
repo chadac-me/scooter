@@ -1,16 +1,9 @@
-"""Auto-linking: when an agent creates a PR / MR / issue THROUGH the broker's
-http-proxy, associate it with the agent's conversation — no agent effort required.
+"""Auto-linking: a PR, MR or issue the agent creates through the http-proxy is associated with its conversation.
 
-The http-proxy already knows (a) the request path + method, (b) the upstream
-response, and (c) the conversation id (from the SA token → Identity). A provider
-(github/gitlab/jira) declares LinkRules for its own create endpoints; when a
-matching request returns 2xx, the transport extracts the created resource and
-POSTs it to the agent-host's /conversations/{id}/links. Provider-specific
-knowledge (which paths, which response shape) stays in the providers; the
-mechanism here is generic.
-
-Best-effort throughout: a link that can't be built/posted is logged and dropped —
-it must never break the proxied API call the agent actually made.
+A provider declares LinkRules for its create endpoints; when a matching proxied
+request returns 2xx, the created resource is POSTed to the agent-host's
+/conversations/{id}/links. Best-effort throughout, so a link that cannot be built
+or posted never breaks the proxied call.
 """
 
 from __future__ import annotations
@@ -29,8 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Link:
-    """A resource to associate with a conversation (matches the agent-host
-    POST /conversations/{id}/links body)."""
+    """A resource to associate with a conversation, in the agent-host's POST /conversations/{id}/links shape."""
 
     source: str          # "github" | "gitlab" | "jira"
     resource_type: str   # "pr" | "mr" | "issue"
@@ -40,10 +32,7 @@ class Link:
 
 @dataclass(frozen=True)
 class LinkRule:
-    """Match a proxied create request and extract the created resource from the
-    2xx response JSON. `method` + `path_pattern` (a regex matched against the
-    proxied path, WITHOUT the /{provider}/ prefix) gate it; `extract` turns the
-    parsed response body into a Link (or None to skip)."""
+    """Match a proxied create request by method and path regex (without the /{provider}/ prefix) and extract the created resource from its response."""
 
     method: str
     path_pattern: re.Pattern[str]
@@ -62,8 +51,7 @@ def _links_url(agent_host_url: str, conversation_id: str) -> str:
 
 
 async def post_link(agent_host_url: str, conversation_id: str, link: Link) -> None:
-    """POST a link to the agent-host. Best-effort — never raises to the caller
-    (used by the auto-link injector, where a failure must not break the proxy)."""
+    """POST a link to the agent-host, best-effort and never raising."""
     if not agent_host_url or not conversation_id:
         return
     payload = {
@@ -111,9 +99,7 @@ async def post_link(agent_host_url: str, conversation_id: str, link: Link) -> No
 
 
 async def create_link(agent_host_url: str, conversation_id: str, link: Link) -> None:
-    """Attach a link to the conversation, RAISING on failure. Used by the broker's
-    explicit POST /link endpoint (an agent asking to link something) — unlike the
-    best-effort injector, the caller wants to know if it didn't take."""
+    """Attach a link to the conversation, raising on failure."""
     if not agent_host_url:
         raise RuntimeError("agent-host URL not configured (AGENT_HOST_URL)")
     if not conversation_id:
@@ -130,7 +116,7 @@ async def create_link(agent_host_url: str, conversation_id: str, link: Link) -> 
 
 
 async def list_links(agent_host_url: str, conversation_id: str) -> list[dict]:
-    """List the conversation's current links (agent-host GET /links)."""
+    """The conversation's current links from the agent-host."""
     if not agent_host_url or not conversation_id:
         return []
     async with httpx.AsyncClient(timeout=10) as client:

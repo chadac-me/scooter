@@ -1,20 +1,7 @@
 /**
- * Regression — end() must fence the writes that race it, or the conversation
- * comes back from the dead.
- *
- * end() is not atomic: it awaits bridge.stop(), provisioner.destroy() and
- * store.removeConversation() in sequence. A resume nudge (the dangling-run
- * reconcile fires `void prompt(..., "resume")`) that started before the DELETE
- * is still holding the Entry across that window, and revive()'s awaited
- * `saveMeta(entry)` then writes the meta row back AFTER removeConversation
- * dropped it. The conversation is now readable again — GET /conversations/:id
- * hydrates it and answers 200 forever — with a pod the DELETE was meant to
- * reclaim still running. Why: PR #549.
- *
- * Caught by the nightly flake run: sessions.spec.ts "deleting a conversation
- * removes it from the list" polled for a 404 and got 200 for the full 30s, the
- * resurrected row wearing the resume nudge as its title. The gate below makes
- * that interleaving deterministic instead of one-in-five.
+ * end() fences the writes that race it. It awaits bridge.stop(), provisioner.destroy()
+ * and store.removeConversation() in sequence, so a revive() still in flight across
+ * that window must not write the meta row back or leave its resumed pod behind.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -41,9 +28,7 @@ function makeFakeBridge() {
   };
 }
 
-/** A provisioner whose resume() parks on a gate the test opens by hand, so
- *  revive() is guaranteed to still be mid-flight when end() runs. `live` tracks
- *  the pods it believes exist, so a test can assert the DELETE reclaimed them. */
+/** A provisioner whose resume() parks on a hand-opened gate, with `live` tracking the pods it believes exist. */
 function gatedProvisioner() {
   let open!: () => void;
   const gate = new Promise<void>((r) => {
@@ -100,8 +85,7 @@ describe("end() vs a concurrent revive", () => {
         metas.map((m) => m.id),
         "a late saveMeta must not resurrect the row the DELETE removed",
       ).not.toContain(conv.id);
-      // The point of the DELETE is reclaiming the pod; a revive that resumed one
-      // after end()'s destroy must clean up after itself or it leaks silently.
+      // A revive that resumed a pod after end()'s destroy must clean it up itself.
       expect([...live], "the DELETE must leave no sandbox behind").toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -124,9 +108,7 @@ describe("end() vs a concurrent revive", () => {
       open();
       await revived;
 
-      // This is the assertion the e2e test makes through the HTTP route: the read
-      // path hydrates-if-absent, so a surviving row (or CR) reads as a live
-      // conversation rather than a 404.
+      // The read path hydrates-if-absent, so a surviving row would read as a live conversation.
       expect(
         await sessions.ensureReadable(conv.id),
         "an ended conversation must not be hydratable again",
@@ -153,8 +135,7 @@ describe("end() vs a concurrent revive", () => {
       open();
       await revived;
 
-      // The fence is keyed per conversation; a blanket "stop persisting" would
-      // pass the tests above and silently stop saving everything else.
+      // The fence is keyed per conversation.
       expect(sessions.get(keep.id), "the other conversation is untouched").toBeDefined();
       expect(await sessions.ensureReadable(keep.id)).toBe(true);
     } finally {

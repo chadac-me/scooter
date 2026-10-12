@@ -1,14 +1,8 @@
 /**
- * Tier 1 contract — McpServerRegistry over a fake exec client, and the pure
- * resolver that turns its descriptors into `new_session` mcpServers entries.
- *
- * The registry reads the in-pod discovery manifest the `mcpServers` NixOS option
- * renders (see modules/sandbox-os/mcp-servers.nix) and drives the units through
- * `scooter-mcp`, which persists autostart intent for boot restore. Shaped after
- * WebServiceRegistry — the differences it encodes are what this asserts:
- *   - a server that is not RUNNING is not offered (a dead entry poisons newSession);
- *   - the offered set has a FINGERPRINT, so the bridge can tell when to rebuild.
- * See issue #520.
+ * McpServerRegistry over a fake exec client, and the resolver that turns its descriptors
+ * into `new_session` mcpServers entries. The registry reads the in-pod manifest the
+ * `mcpServers` NixOS option renders and drives the units through `scooter-mcp`; the
+ * offered set carries a fingerprint so the bridge can tell when to rebuild a session.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -63,8 +57,7 @@ describe("parseMcpManifest", () => {
   });
 
   it("tolerates a missing or garbage manifest rather than throwing", () => {
-    // The pod may be ContainerCreating or asleep; a throw here would take down the
-    // run that merely wanted to know what servers exist.
+    // The pod may be ContainerCreating or asleep.
     expect(parseMcpManifest("")).toEqual([]);
     expect(parseMcpManifest("not json")).toEqual([]);
     expect(parseMcpManifest("{}")).toEqual([]);
@@ -94,9 +87,7 @@ describe("McpServerRegistry", () => {
   });
 
   it("does not cache an EMPTY read, so a slow pod is retried", async () => {
-    // Same trap WebServiceRegistry hit: the pod is still ContainerCreating, the
-    // download throws, and caching that [] makes the conversation believe forever
-    // that it has no MCP servers.
+    // Caching an empty read from a pod still ContainerCreating would hide its servers forever.
     let manifest = "";
     const exec = fakeExec({ download: vi.fn(async () => manifest) });
     const reg = make(exec);
@@ -138,8 +129,7 @@ describe("McpServerRegistry", () => {
   });
 
   it("starts a stopped server through scooter-mcp, not raw systemctl", async () => {
-    // Via the CLI so the autostart intent is persisted to the workspace PVC — that
-    // is what brings the server back after a suspend/resume pod recreate.
+    // The CLI persists the autostart intent to the workspace PVC for boot restore.
     const calls: string[][] = [];
     const exec = fakeExec({
       execute: vi.fn(async (req: { command: string; args?: string[] }) => {
@@ -182,8 +172,7 @@ describe("offeredMcpServers", () => {
   });
 
   it("refuses a server calling itself scooter-env", () => {
-    // scooter-env is the agent-host's own in-process endpoint. A sandbox-declared
-    // server taking that name would replace the platform tools with its own.
+    // scooter-env is the agent-host's own in-process endpoint.
     expect(offeredMcpServers([entry({ name: "scooter-env" })], urlFor)).toEqual([]);
   });
 
@@ -206,9 +195,7 @@ describe("fingerprintOffered", () => {
   });
 
   it("changes when a server's PORT moves, which is what auto-assignment does", () => {
-    // Adding a name that sorts earlier renumbers the others. The URL the agent was
-    // given is then stale, so this must read as a change or the session keeps
-    // talking to a port nothing is listening on.
+    // Adding a name that sorts earlier renumbers the others, so the URL the agent was given goes stale.
     const before = fingerprintOffered(offeredMcpServers([entry({})], urlFor));
     const after = fingerprintOffered(offeredMcpServers([entry({ port: 9701 })], urlFor));
     expect(before).not.toBe(after);
@@ -221,12 +208,10 @@ describe("fingerprintOffered", () => {
   });
 });
 
-// --- the credential-in-headers case (issue #700) ------------------------------------
+// --- the credential-in-headers case -------------------------------------------------
 //
-// A conversation token is minted per session and its `iat` differs every time. If the
-// fingerprint covered header VALUES, every mint would look like a changed offered-server
-// set and rebuild the agent session — each rebuild minting a fresh token and triggering
-// the next, forever.
+// A conversation token is minted per session with a fresh `iat`, so a fingerprint over
+// header values would rebuild the session on every mint, forever.
 describe("fingerprintOffered with credential headers", () => {
   const withHeader = (value: string) => [
     { type: "http" as const, name: "scooter-env", url: "http://h/mcp", headers: [{ name: "Authorization", value }] },

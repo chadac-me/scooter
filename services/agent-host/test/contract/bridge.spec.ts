@@ -1,8 +1,6 @@
 /**
- * Tier 1 contract test — ACP -> AG-UI mapping (docs/DESIGN.md §4c).
- *
- * RED against the Design interfaces. Drives a fake ACP agent emitting scripted
- * session/update notifications; asserts the exact AG-UI event sequence.
+ * Contract test for the ACP -> AG-UI mapping: a fake ACP agent emits scripted
+ * session/update notifications and the exact AG-UI event sequence is asserted.
  */
 
 import { describe, it, expect } from "vitest";
@@ -29,8 +27,7 @@ const collect = (bridge: ReturnType<typeof createSessionBridge>) => {
   return events;
 };
 
-/** Persisted events = the broadcast stream PLUS persist-only events (the user's
- *  own prompt). What the durable log / history replay sees. */
+/** Persisted events: the broadcast stream plus the persist-only events the durable log sees. */
 const collectPersist = (bridge: ReturnType<typeof createSessionBridge>) => {
   const events: AguiEvent[] = [];
   bridge.onEvent((e) => events.push(e));
@@ -40,11 +37,7 @@ const collectPersist = (bridge: ReturnType<typeof createSessionBridge>) => {
 
 describe("ACP -> AG-UI bridge", () => {
   it("mints UNIQUE run/message ids across separate bridge instances (a restart must not reuse run-1/msg-1)", async () => {
-    // The bug: module-global counters (run-1, msg-1, …) reset to 0 on every
-    // agent-host restart, so a revived conversation re-minted ids that COLLIDED
-    // with ones already in its log — the UI folds by messageId + keys runs by
-    // runId, so unrelated turns merged (doubled args, scrambled runs, history that
-    // won't render while a live run is going). IDs must be unique across instances.
+    // Ids must stay unique across bridge instances, because the UI folds by messageId and keys runs by runId.
     const idsFrom = async (): Promise<string[]> => {
       const agent = createFakeAcpAgent();
       agent.setScript([
@@ -71,16 +64,13 @@ describe("ACP -> AG-UI bridge", () => {
     const first = new Set(await idsFrom());
     const second = new Set(await idsFrom());
     expect(first.size).toBeGreaterThan(0);
-    // ZERO overlap — no id from the first bridge is reused by the second.
+    // No id from the first bridge is reused by the second.
     const overlap = [...second].filter((id) => first.has(id));
     expect(overlap, `ids reused across restart: ${overlap.join(", ")}`).toEqual([]);
   });
 
   it("surfaces a shell command from terminal/create as TOOL_CALL_ARGS (goose's shell shape)", async () => {
-    // Real goose's shell tool carries the command in terminal/create, NOT in the
-    // tool_call's rawInput (which is empty), then hands off a live terminal. The
-    // bridge must correlate the terminal-create command to the tool call by
-    // terminalId and emit it as the tool call's args, so the UI can show `$ <cmd>`.
+    // Goose's shell tool carries the command in terminal/create rather than the tool_call's rawInput, so the bridge correlates by terminalId and emits it as the tool call's args.
     const tick = () => new Promise((r) => setTimeout(r, 5));
     const agent = createFakeAcpAgent();
     agent.gate(); // hold the run so we can interleave terminal/create + the handoff
@@ -95,11 +85,11 @@ describe("ACP -> AG-UI bridge", () => {
     void bridge.prompt({ threadId: "t1", text: "ls it" });
     await tick();
 
-    // tool_call with NO rawInput (goose doesn't put the command here).
+    // The tool_call carries no rawInput.
     agent.emit({ sessionUpdate: "tool_call", toolCallId: "c1", title: "run: ls -la", kind: "execute", status: "pending" } as never);
-    // terminal/create — the command lives HERE. `sh -c "ls -la"` collapses to `ls -la`.
+    // The command lives on terminal/create, and `sh -c "ls -la"` collapses to `ls -la`.
     agent.terminalCreated("term-1", "sh", ["-c", "ls -la"]);
-    // The handoff update carrying the terminalId — this is where the bridge looks it up.
+    // The handoff update carrying the terminalId the bridge looks up.
     agent.emit({ sessionUpdate: "tool_call_update", toolCallId: "c1", status: "completed", content: [{ type: "terminal", terminalId: "term-1" }] } as never);
     await tick();
 
@@ -132,10 +122,7 @@ describe("ACP -> AG-UI bridge", () => {
     await bridge.start();
     await bridge.prompt({ threadId: "t1", text: "hi" });
 
-    // BROADCAST (what the UI gets): NO user message — the UI already renders the
-    // message it sent, so re-broadcasting it would echo a duplicate. QUEUE_UPDATED
-    // snapshots (enqueue then drain-to-empty) bracket the run but are orthogonal to
-    // the message mapping under test, so filter them out here (covered separately).
+    // The broadcast carries no user message, and the QUEUE_UPDATED snapshots covered elsewhere are filtered out here.
     expect(broadcast.filter((e) => e.type !== "QUEUE_UPDATED").map((e) => e.type)).toEqual([
       "RUN_STARTED",
       "TEXT_MESSAGE_START",
@@ -150,8 +137,7 @@ describe("ACP -> AG-UI bridge", () => {
       ),
     ).toEqual(["assistant"]); // no "user" on the broadcast
 
-    // PERSISTED (history replay): the user's prompt IS in the durable log, as a
-    // user message, so switching to / reviving the conversation shows it.
+    // The durable log does carry the user's prompt as a user message, so history replay shows it.
     const userStart = persisted.find(
       (e) => e.type === "TEXT_MESSAGE_START" && (e as { role?: string }).role === "user",
     );
@@ -188,8 +174,7 @@ describe("ACP -> AG-UI bridge", () => {
       acpClient: acpClientFromTransport(agent.transport, exec),
     });
     const events = collect(bridge); // broadcast (what the @ag-ui client sees)
-    // PERMISSION_RESOLVED is persist-only (not a standard AG-UI event) -> separate
-    // persist collector.
+    // PERMISSION_RESOLVED is persist-only, so it needs its own collector.
     const persisted: AguiEvent[] = [];
     bridge.onPersist((e) => persisted.push(e));
     // The request rides RUN_FINISHED's interrupt outcome; answer when it appears.
@@ -206,15 +191,13 @@ describe("ACP -> AG-UI bridge", () => {
     await bridge.start();
     await bridge.prompt({ threadId: "t1", text: "grant S3 access" });
 
-    // The run PAUSED with an interrupt, then RESUMED (a second RUN_STARTED) and
-    // FINISHED for real.
+    // The run paused with an interrupt, then resumed with a second RUN_STARTED and finished.
     const interrupt = events.find(
       (e) => e.type === "RUN_FINISHED" && e.outcome?.type === "interrupt",
     );
     expect(interrupt).toBeTruthy();
     expect(events.filter((e) => e.type === "RUN_STARTED").length).toBe(2); // paused + resumed
-    // PERMISSION_RESOLVED must NOT hit the @ag-ui-validated broadcast stream
-    // (it's not a standard event type — the client would reject it).
+    // PERMISSION_RESOLVED is not a standard AG-UI event and must not reach the validated broadcast stream.
     expect(events.some((e) => e.type === "PERMISSION_RESOLVED")).toBe(false);
     const resolved = persisted.find((e) => e.type === "PERMISSION_RESOLVED") as
       | { optionId: string | null }
@@ -240,8 +223,7 @@ describe("ACP -> AG-UI bridge", () => {
     const events = collect(bridge);
 
     let answered: string | null | undefined;
-    // No goose run involved — raise an out-of-band interrupt (e.g. a broker AWS
-    // request) and answer it via answerPermission.
+    // Raise an out-of-band interrupt with no goose run involved and answer it via answerPermission.
     bridge.raiseInterrupt({
       id: "aws-req-1",
       message: "Approve AWS access to dev?",
@@ -289,7 +271,7 @@ describe("ACP -> AG-UI bridge", () => {
     const intr = events.find((e) => e.type === "RUN_FINISHED" && e.outcome?.type === "interrupt");
     const meta = (intr as { outcome: { interrupts: Array<{ metadata?: Record<string, unknown> }> } })
       .outcome.interrupts[0].metadata;
-    // Both the extra metadata AND the options survive the merge.
+    // Both the extra metadata and the options survive the merge.
     expect(meta?.aws).toBe(true);
     expect(meta?.requestId).toBe("aws-req-2");
     expect(Array.isArray(meta?.options)).toBe(true);
@@ -355,7 +337,7 @@ describe("ACP -> AG-UI bridge", () => {
 
     // The title is reported once, marker text removed.
     expect(titles).toEqual(["Fix the parser"]);
-    // The displayed assistant text contains the reply but NOT the marker.
+    // The displayed assistant text contains the reply without the marker.
     const shown = broadcast
       .filter((e): e is { type: "TEXT_MESSAGE_CONTENT"; messageId: string; delta: string } => e.type === "TEXT_MESSAGE_CONTENT")
       .map((e) => e.delta)
@@ -391,14 +373,11 @@ describe("ACP -> AG-UI bridge", () => {
   });
 
   it("emits TOOL_CALL_RESULT when the result rides rawOutput (the claude-sdk path)", async () => {
-    // The claude-sdk provider maps a tool_result's content to `rawOutput`, NOT
-    // `content` (its adapter). The bridge must treat rawOutput as real result content
-    // too — else EVERY claude MCP tool result is dropped (no TOOL_CALL_RESULT), which
-    // is why a marimo_embed island never reached the UI. Regression for that fix.
+    // The claude-sdk provider puts a tool_result's content in rawOutput rather than content, and the bridge must treat it as real result content.
     const agent = createFakeAcpAgent();
     agent.setScript([
       { emit: { sessionUpdate: "tool_call", toolCallId: "e1", title: "marimo_embed", rawInput: { code: "mo.md('hi')" } } },
-      // status completed, NO content — the result is in rawOutput (claude shape).
+      // Completed with no content: the result rides rawOutput.
       { emit: { sessionUpdate: "tool_call_update", toolCallId: "e1", status: "completed", rawOutput: "```marimo-embed\nBASE64\n```" } },
       { finish: { stopReason: "end_turn" } },
     ]);
@@ -422,10 +401,7 @@ describe("ACP -> AG-UI bridge", () => {
   });
 
   it("emits TOOL_CALL_ARGS from the tool_call_update when the initial tool_call had no rawInput", async () => {
-    // The real-world goose shape: the tool_call arrives with NO rawInput (empty
-    // card), and the actual args (the shell command / the slack text) come on a
-    // later tool_call_update. We must still surface them ONCE — this is the "empty
-    // tool card" bug.
+    // Goose's tool_call arrives with no rawInput and the real args come on a later tool_call_update, which must still surface exactly once.
     const agent = createFakeAcpAgent();
     agent.setScript([
       { emit: { sessionUpdate: "tool_call", toolCallId: "tc9", title: "Shell" } }, // no rawInput
@@ -444,16 +420,12 @@ describe("ACP -> AG-UI bridge", () => {
     await bridge.prompt({ threadId: "t1", text: "run it" });
 
     const args = events.filter((e) => e.type === "TOOL_CALL_ARGS") as Array<{ toolCallId: string; delta: string }>;
-    // Exactly ONE args event (not zero, not one-per-update), carrying the command.
+    // Exactly one args event, carrying the command.
     expect(args).toHaveLength(1);
     expect(args[0].toolCallId).toBe("tc9");
     expect(args[0].delta).toContain("echo hi");
 
-    // And EXACTLY ONE result — from the `completed` update, NOT the args-only
-    // `in_progress` one. A premature (empty) result on the in_progress update
-    // stamps the folded UI part with a result, so a still-running tool renders as
-    // already complete (no spinner while e.g. `sleep 20` runs). The result must be
-    // the real content, and it must arrive after the args.
+    // Exactly one result, from the completed update and after the args, so a still-running tool does not render as complete.
     const results = events.filter((e) => e.type === "TOOL_CALL_RESULT") as Array<{ toolCallId: string; content: string }>;
     expect(results).toHaveLength(1);
     expect(results[0].toolCallId).toBe("tc9");
@@ -461,15 +433,7 @@ describe("ACP -> AG-UI bridge", () => {
   });
 
   it("a TERMINAL HANDOFF update does NOT complete the tool call — only the later finish does", async () => {
-    // THE real-goose shell shape (captured live): the shell tool hands off a live
-    // terminal, marking the update status="completed" the instant the terminal is
-    // created — but the COMMAND runs async in it and only finishes on a LATER
-    // update. Sequence: tool_call(Shell) -> update{completed, no content} ->
-    // update{completed, content:[{terminalId,type:"terminal"}]}  (command STARTED,
-    // not done) -> ... -> update{completed, no content}  (the REAL finish).
-    // A premature TOOL_CALL_RESULT on the terminal-handoff folds a result onto the
-    // part, so a long command (sleep 30) renders as already complete — no spinner.
-    // We must emit EXACTLY ONE result, at the final update.
+    // Goose's shell tool marks the terminal-handoff update completed while the command still runs, so only the final update may produce the single TOOL_CALL_RESULT.
     const agent = createFakeAcpAgent();
     agent.setScript([
       { emit: { sessionUpdate: "tool_call", toolCallId: "sh1", title: "Shell" } },
@@ -488,10 +452,10 @@ describe("ACP -> AG-UI bridge", () => {
     await bridge.start();
     await bridge.prompt({ threadId: "t1", text: "run sleep" });
 
-    // EXACTLY ONE result — the terminal handoff must not count as the finish.
+    // Exactly one result, because the terminal handoff does not count as the finish.
     const results = events.filter((e) => e.type === "TOOL_CALL_RESULT");
     expect(results).toHaveLength(1);
-    // And it must come AFTER the START (the tool ran, then finished).
+    // The result comes after the start.
     const types = events.map((e) => e.type);
     expect(types.indexOf("TOOL_CALL_START")).toBeLessThan(types.indexOf("TOOL_CALL_RESULT"));
   });
@@ -530,10 +494,7 @@ describe("ACP -> AG-UI bridge", () => {
   });
 
   it("serializes concurrent prompts — no RUN_FINISHED with a text message still open", async () => {
-    // The webhook bug: a second prompt arriving while a run is in flight clobbered
-    // the single RunState, so the first run's open text message never got its END
-    // and RUN_FINISHED fired with it open (the @ag-ui client rejects that). Two
-    // overlapping prompts must produce TWO well-formed runs, one after the other.
+    // Two overlapping prompts must produce two well-formed runs, one after the other.
     const agent = createFakeAcpAgent();
     agent.setScript([
       { emit: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "reply" } } },
@@ -548,12 +509,12 @@ describe("ACP -> AG-UI bridge", () => {
     const events = collect(bridge);
     await bridge.start();
 
-    // Fire two prompts WITHOUT awaiting the first — they overlap.
+    // Fire two prompts without awaiting the first so they overlap.
     const p1 = bridge.prompt({ threadId: "t1", text: "first" });
     const p2 = bridge.prompt({ threadId: "t1", text: "second" });
     await Promise.all([p1, p2]);
 
-    // Invariant: every RUN_FINISHED is emitted with NO text message open.
+    // Every RUN_FINISHED is emitted with no text message open.
     const open = new Set<string>();
     for (const e of events) {
       if (e.type === "TEXT_MESSAGE_START") open.add(e.messageId);
@@ -562,15 +523,14 @@ describe("ACP -> AG-UI bridge", () => {
         expect(open.size, `RUN_FINISHED while text open: ${[...open]}`).toBe(0);
       }
     }
-    // And both runs actually ran (two RUN_STARTED / two RUN_FINISHED).
+    // Both runs actually ran.
     expect(events.filter((e) => e.type === "RUN_STARTED")).toHaveLength(2);
     expect(events.filter((e) => e.type === "RUN_FINISHED")).toHaveLength(2);
   });
 });
 
 describe("revive history reinjection", () => {
-  // An ACP client that records the prompt ContentBlock[] of every prompt() call,
-  // so we can assert what goose actually received. Emits nothing + ends the turn.
+  // An ACP client that records the prompt ContentBlock[] of every prompt() call, emits nothing and ends the turn.
   function recordingClient() {
     const prompts: Array<Array<{ type: string; text?: string }>> = [];
     const client: AcpClient = {
@@ -722,7 +682,7 @@ describe("system messages (platform-injected, non-human)", () => {
     expect(sys, "a system-sourced prompt must persist a SYSTEM_MESSAGE").toBeDefined();
     expect(sys?.source).toBe("github");
     expect(sys?.text).toBe("a github event");
-    // And it must NOT ALSO show up as a normal user text message (that's the whole point).
+    // It must not also appear as a normal user text message.
     const userStart = persisted.find(
       (e) => e.type === "TEXT_MESSAGE_START" && (e as { role?: string }).role === "user",
     );
@@ -791,7 +751,7 @@ describe("bridge run queue + cancel", () => {
     await tick();
     await tick();
     await tick();
-    // The priority prompt ran BEFORE the normal one (which was queued earlier).
+    // The priority prompt ran before the earlier-queued normal one.
     expect(order[0]).toBe("first (running)");
     expect(order.indexOf("priority")).toBeLessThan(order.indexOf("normal"));
     expect(events.filter((e) => e.type === "RUN_STARTED").length).toBe(3);
@@ -816,9 +776,7 @@ describe("bridge run queue + cancel", () => {
     void bridge.prompt({ threadId: "t1", text: "queued msg" });
     await tick();
 
-    // A snapshot showing the queued message is now on the stream (durable — it
-    // rides the same integrity path a refresh replays), so it no longer lives only
-    // in client memory.
+    // A snapshot showing the queued message is on the stream, which the integrity path replays on refresh.
     const withItem = queueSnaps().find((s) => s.items.some((i) => i.text === "queued msg"));
     expect(withItem).toBeDefined();
     expect(withItem!.items.map((i) => i.text)).toContain("queued msg");
@@ -828,8 +786,7 @@ describe("bridge run queue + cancel", () => {
     await tick();
     await tick();
 
-    // The LAST snapshot is empty — the queue drained (the message is now a normal
-    // user turn), so the UI clears its queued list.
+    // The last snapshot is empty because the queue drained, so the UI clears its queued list.
     const snaps = queueSnaps();
     expect(snaps.at(-1)!.items).toEqual([]);
   });
@@ -845,15 +802,12 @@ describe("bridge run queue + cancel", () => {
     await tick();
     expect(bridge.shouldYieldToQueue()).toBe(false); // nothing queued yet
 
-    // A NORMAL queued prompt does NOT trigger yield (it just waits its turn).
+    // A normal queued prompt does not trigger a yield.
     void bridge.prompt({ threadId: "t1", text: "normal follow-up" });
     await tick();
     expect(bridge.shouldYieldToQueue()).toBe(false);
 
-    // A PRIORITY_INTERRUPT item (e.g. a subagent result) DOES. Check IMMEDIATELY
-    // (before the next microtask lets the pump/preemption promote it out of the
-    // queue) — with no tool in flight the item would otherwise preempt instantly;
-    // shouldYieldToQueue reflects "a priority item is waiting to be delivered".
+    // A PRIORITY_INTERRUPT item does, checked before the next microtask lets the pump promote it out of the queue.
     void bridge.prompt({ threadId: "t1", text: "subagent result" }, { priority: PRIORITY_INTERRUPT, interrupt: "thinking" });
     expect(bridge.shouldYieldToQueue()).toBe(true);
 
@@ -878,8 +832,7 @@ describe("bridge run queue + cancel", () => {
     await bridge.start();
     void bridge.prompt({ threadId: "t1", text: "first (running)" });
     await tick();
-    // Three messages fired while the first run is in flight — they all queue at the
-    // normal tier and must coalesce into a SINGLE follow-up run.
+    // Three messages fired while the first run is in flight all queue at the normal tier and must coalesce into one follow-up run.
     void bridge.prompt({ threadId: "t1", text: "msg A" });
     void bridge.prompt({ threadId: "t1", text: "msg B" });
     void bridge.prompt({ threadId: "t1", text: "msg C" });
@@ -891,12 +844,9 @@ describe("bridge run queue + cancel", () => {
     await tick();
     await tick();
 
-    // TWO runs total: the gated first one, then ONE batched run for A+B+C (not
-    // three separate runs — that's the "answer msg 1, get confused by stale msg 2"
-    // problem this fixes).
+    // Two runs total: the gated first one, then one batched run for A+B+C.
     expect(events.filter((e) => e.type === "RUN_STARTED").length).toBe(2);
-    // History stays faithful: each original message is persisted as its own user
-    // message (goose received them combined, but the transcript shows all three).
+    // Each original message is still persisted as its own user message.
     expect(userTexts).toContain("msg A");
     expect(userTexts).toContain("msg B");
     expect(userTexts).toContain("msg C");
@@ -922,8 +872,7 @@ describe("bridge run queue + cancel", () => {
     await tick();
     await tick();
 
-    // Three runs: gated first, the priority one (its own tier), and the two normals
-    // batched into one. Priority never merges with normal messages.
+    // Three runs: the gated first, the priority one, and the two normals batched into one.
     expect(events.filter((e) => e.type === "RUN_STARTED").length).toBe(3);
   });
 
@@ -943,7 +892,7 @@ describe("bridge run queue + cancel", () => {
 
     // Killed the active terminal + told goose to stop.
     expect(agent.killCount()).toBe(1);
-    // The run ended as a CLEAN cancelled RUN_FINISHED, not a RUN_ERROR.
+    // The run ended as a cancelled RUN_FINISHED, not a RUN_ERROR.
     const fin = events.find((e) => e.type === "RUN_FINISHED") as { cancelled?: boolean } | undefined;
     expect(fin).toBeTruthy();
     expect(fin?.cancelled).toBe(true);
@@ -984,11 +933,11 @@ describe("bridge run queue + cancel", () => {
     expect(events.filter((e) => e.type === "RUN_STARTED").length).toBe(2);
   });
 
-  // --- graduated interrupt LEVELS (tool-call / thinking / timeout) -------------
+  // --- graduated interrupt levels (tool-call / thinking / timeout) -------------
 
   it('interrupt "tool-call" cancels IMMEDIATELY (kills the running tool call)', async () => {
     const agent = createFakeAcpAgent();
-    // Emit a tool_call (a tool is now in flight), then gate — the run hangs mid-tool.
+    // Emit a tool_call, then gate so the run hangs mid-tool.
     agent.setScript([
       { emit: { sessionUpdate: "tool_call", toolCallId: "tc1", title: "run: sleep 999" } as never },
       { finish: { stopReason: "end_turn" } },
@@ -1000,7 +949,7 @@ describe("bridge run queue + cancel", () => {
     void bridge.prompt({ threadId: "t1", text: "long tool" });
     await tick();
 
-    // A tool-call-level priority prompt preempts NOW, even though a tool is running.
+    // A tool-call-level priority prompt preempts now, even with a tool running.
     void bridge.prompt({ threadId: "t1", text: "stop now" }, { priority: 10, interrupt: "tool-call" });
     await tick();
     await tick();
@@ -1012,7 +961,7 @@ describe("bridge run queue + cancel", () => {
 
   it('interrupt "thinking" DEFERS while a tool call is in flight, then fires at the tool boundary', async () => {
     const agent = createFakeAcpAgent();
-    // A tool call starts (in flight); the run gates BEFORE the tool's result.
+    // A tool call starts and the run gates before the tool's result.
     agent.setScript([
       { emit: { sessionUpdate: "tool_call", toolCallId: "tc1", title: "run: build" } as never },
       { finish: { stopReason: "end_turn" } },
@@ -1024,8 +973,7 @@ describe("bridge run queue + cancel", () => {
     void bridge.prompt({ threadId: "t1", text: "building" });
     await tick();
 
-    // A thinking-level priority prompt arrives while the tool is in flight — it must
-    // NOT cancel yet (don't kill the build to preempt idle thinking).
+    // A thinking-level priority prompt arriving while a tool is in flight must not cancel yet.
     void bridge.prompt({ threadId: "t1", text: "job done" }, { priority: 10, interrupt: "thinking" });
     await tick();
     await tick();
@@ -1041,10 +989,7 @@ describe("bridge run queue + cancel", () => {
   });
 
   it('interrupt "thinking" ESCALATES to a hard cancel if the tool call never yields (timeout fallback)', async () => {
-    // A "thinking" interrupt defers while a tool is in flight — but a tool that NEVER
-    // finishes (a real `sleep 3600`, not a short poll) would defer forever. With a
-    // priorityInterruptMs set, the fallback timer hard-cancels after the timeout so
-    // the user's interrupting message can't be stuck behind a non-yielding tool.
+    // With priorityInterruptMs set, a deferred "thinking" interrupt hard-cancels after the timeout when the tool never finishes.
     const agent = createFakeAcpAgent();
     agent.setScript([
       { emit: { sessionUpdate: "tool_call", toolCallId: "tc1", title: "run: sleep 3600" } as never },
@@ -1059,8 +1004,7 @@ describe("bridge run queue + cancel", () => {
 
     // "thinking" priority arrives while the (never-completing) tool is in flight.
     void bridge.prompt({ threadId: "t1", text: "cancel that" }, { priority: 10, interrupt: "thinking" });
-    // The tool NEVER emits a result — so the boundary cancel can't fire. Wait past
-    // the fallback timeout: the hard cancel must fire anyway.
+    // The tool never emits a result, so waiting past the fallback timeout must trigger the hard cancel.
     await new Promise((r) => setTimeout(r, 60));
     agent.releaseGate();
     await tick();
@@ -1072,7 +1016,7 @@ describe("bridge run queue + cancel", () => {
 
   it('interrupt "thinking" cancels IMMEDIATELY when NO tool call is in flight (idle thinking)', async () => {
     const agent = createFakeAcpAgent();
-    // No tool call — the run is just "thinking" (gated with nothing in flight).
+    // No tool call: the run is gated with nothing in flight.
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);
     agent.gate();
     const bridge = mkBridge(agent);
@@ -1090,20 +1034,11 @@ describe("bridge run queue + cancel", () => {
     expect(fin?.cancelled).toBe(true);
   });
 
-  // ---------------------------------------------------------------------------
-  // SUSPEND / REVIVE teardown of the queue. The reported bug: "the message I send
-  // disappears, appears in the queue tab, but never gets flushed."
-  //
-  // suspend() does `await entry.bridge?.stop(); entry.bridge = undefined` — the
-  // whole closure (and with it `queue`) is dropped, and revive() builds a BRAND-NEW
-  // bridge with a fresh empty queue. So the teardown itself must leave no wreckage:
-  //   1. the queued prompt's promise must SETTLE (it used to leak, hanging an
-  //      awaiting caller forever), and
-  //   2. the LAST persisted QUEUE_UPDATED must be EMPTY (a stale one made a
-  //      reattaching UI re-derive a phantom queue entry no pump would ever drain).
-  // Preserving the message itself is the MANAGER's job (suspend drains it onto the
-  // conversation meta, revive re-enqueues it) — see suspendedRevive.spec.ts.
-  // ---------------------------------------------------------------------------
+  // --- suspend / revive teardown of the queue ----------------------------------
+  // suspend() drops the whole bridge closure with its queue and revive() builds a
+  // fresh one, so stop() must settle every queued prompt's promise and leave an
+  // empty QUEUE_UPDATED as the log's last snapshot. Preserving the message itself
+  // is the manager's job, covered in suspendedRevive.spec.ts.
 
   it("stop() SETTLES queued prompts instead of abandoning their promises", async () => {
     const agent = createFakeAcpAgent();
@@ -1112,13 +1047,11 @@ describe("bridge run queue + cancel", () => {
     const bridge = mkBridge(agent);
     await bridge.start();
 
-    // The RUNNING prompt is NOT rejected by drainQueue (its promise settles through
-    // the pump when its own run ends) — but the gated fake never finishes it here, so
-    // catch defensively rather than leak a pending promise into the next test.
+    // The running prompt is not rejected by drainQueue, but the gated fake never finishes it, so catch to avoid leaking a pending promise.
     void bridge.prompt({ threadId: "t1", text: "running" }).catch(() => {});
     await tick();
 
-    // This one is QUEUED behind the gated run when the suspend lands.
+    // This one is queued behind the gated run when the suspend lands.
     let settled: "resolved" | "rejected" | "pending" = "pending";
     const queued = bridge
       .prompt({ threadId: "t1", text: "queued at suspend" })
@@ -1126,13 +1059,12 @@ describe("bridge run queue + cancel", () => {
       .catch(() => { settled = "rejected"; });
     await tick();
 
-    // Suspend tears the bridge down (manager.suspend: bridge.stop() then drop it).
+    // Suspend tears the bridge down (manager.suspend calls bridge.stop() then drops it).
     await bridge.stop();
     await tick();
     await tick();
 
-    // A caller awaiting prompt() must not hang forever on a bridge that no longer
-    // exists — the queue item can never run, so its promise has to settle (reject).
+    // The queued item can never run, so its promise has to settle.
     await Promise.race([queued, tick().then(() => tick())]);
     expect(
       settled,
@@ -1141,14 +1073,10 @@ describe("bridge run queue + cancel", () => {
   });
 
   it("drainQueue() captures the IN-FLIGHT batch, not just what's still waiting", async () => {
-    // The mid-run suspend (what the e2e actually does: suspend while `!sleep 20` runs).
-    // The pump SPLICES a batch out of `queue` before running it, so an in-flight message
-    // is in NEITHER `queue` nor anywhere else. drainQueue() reading only `queue` returned
-    // [] and the user's message was destroyed — while its run, killed with the pod, threw
-    // and surfaced as "prompt failed: the conversation was suspended...".
+    // The pump splices the running batch out of `queue`, so a mid-run suspend must capture the in-flight message too.
     const agent = createFakeAcpAgent();
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);
-    agent.gate(); // hold the FIRST prompt in flight — it is the running batch
+    agent.gate(); // hold the first prompt in flight as the running batch
     const bridge = mkBridge(agent);
     await bridge.start();
 
@@ -1165,11 +1093,7 @@ describe("bridge run queue + cancel", () => {
     ).toContain("in flight when suspended");
 
     await tick();
-    // ...but it must NOT be rejected here. An in-flight item is a run already
-    // executing; the pump settles it. Rejecting it too turned a NORMAL turn into a
-    // RUN_ERROR whenever a suspend landed just as a run was finishing (CI caught this
-    // as "prompt failed: the conversation was suspended before this queued message
-    // could run" on a plain first turn).
+    // An in-flight item is a run already executing and the pump settles it, so it must not be rejected here.
     expect(rejected, "drainQueue must not reject an ALREADY-RUNNING prompt").toBe(false);
   });
 
@@ -1181,9 +1105,7 @@ describe("bridge run queue + cancel", () => {
     const events = collect(bridge);
     await bridge.start();
 
-    // Attach catch handlers: stop() now REJECTS abandoned queue items (that's the
-    // fix — the promise used to leak), so a bare `void` here would surface as an
-    // unhandled rejection in this test. Production callers all `await` prompt().
+    // stop() rejects abandoned queue items, so attach catch handlers to avoid unhandled rejections.
     void bridge.prompt({ threadId: "t1", text: "running" }).catch(() => {});
     await tick();
     void bridge.prompt({ threadId: "t1", text: "phantom queued msg" }).catch(() => {});
@@ -1194,16 +1116,13 @@ describe("bridge run queue + cancel", () => {
         type: "QUEUE_UPDATED";
         items: Array<{ id: string; text: string; priority: number }>;
       }>;
-    // Precondition: the queued message IS in the latest snapshot.
+    // Precondition: the queued message is in the latest snapshot.
     expect(snaps().at(-1)!.items.map((i) => i.text)).toContain("phantom queued msg");
 
     await bridge.stop();
     await tick();
 
-    // The durable log's LAST word on the queue must be "empty". Otherwise a UI that
-    // reattaches after the revive folds the stale snapshot and renders a queued
-    // bubble that no pump will ever drain (it self-heals ONLY while the run is idle —
-    // once the revived conversation starts a run, the phantom reappears).
+    // The log's last queue snapshot must be empty, or a UI reattaching after the revive renders a queued bubble no pump will drain.
     expect(
       snaps().at(-1)!.items,
       "a torn-down bridge must leave an EMPTY queue snapshot, not a stale one",
@@ -1216,8 +1135,7 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
   const mkBridge = (
     agent: ReturnType<typeof createFakeAcpAgent>,
     firstActivityTimeoutMs: number,
-    // The agent subprocess's stderr tail — where the provider writes the diagnostic
-    // that explains a run which produced nothing (issue #560).
+    // The agent subprocess's stderr tail, where the provider writes the diagnostic for a run that produced nothing.
     stderr?: string[],
     retry?: { deathRetryMax: number; deathRetryBaseMs: number },
   ) => {
@@ -1235,8 +1153,7 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
 
   it("fires RUN_ERROR when a run emits NO ACP activity within the timeout (dead-on-arrival hang)", async () => {
     const agent = createFakeAcpAgent();
-    // Empty script + gate: prompt() emits nothing, then hangs — dead on arrival,
-    // exactly like the agent wedged on a model-provider credential failure.
+    // An empty script plus a gate: prompt() emits nothing and hangs.
     agent.setScript([]);
     agent.gate();
     const bridge = mkBridge(agent, 30); // 30ms so the test is fast
@@ -1251,17 +1168,12 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
     expect(started.length).toBe(1);
     expect(runError).toBeDefined();
     expect(runError!.code).toBe("no_activity_timeout");
-    // EXACTLY ONE terminal event — the watchdog's cancel makes the gated prompt()
-    // resolve, but st.terminated must suppress a second RUN_FINISHED/RUN_ERROR.
+    // Exactly one terminal event: the watchdog's cancel resolves the gated prompt(), but st.terminated suppresses a second one.
     const terminals = events.filter((e) => e.type === "RUN_ERROR" || e.type === "RUN_FINISHED");
     expect(terminals.length).toBe(1);
   });
 
   it("does NOT blame credentials for a dead-on-arrival run — it names the candidates", async () => {
-    // The message used to assert ONE cause ("this usually means a model/credential
-    // error"). During a real outage the token was fine and the cause was a sandbox
-    // image left behind by a platform upgrade, so the assertion sent the diagnosis
-    // down the wrong path for hours. Issue #560.
     const agent = createFakeAcpAgent();
     agent.setScript([]);
     agent.gate();
@@ -1278,9 +1190,7 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
   });
 
   it("surfaces the provider's own diagnostic in the dead-on-arrival error", async () => {
-    // The `[ede_diagnostic]` line exists ONLY on the provider subprocess's stderr —
-    // ACP reports nothing for a run that never spoke. Without it the user (and the
-    // operator reading the logs) has no thread to pull. Issue #560.
+    // The `[ede_diagnostic]` line exists only on the provider subprocess's stderr, since ACP reports nothing for a run that never spoke.
     const agent = createFakeAcpAgent();
     agent.setScript([]);
     agent.gate();
@@ -1298,12 +1208,7 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
   });
 
   it("carries a LATE diagnostic into the next attempt's message", async () => {
-    // The ordering that makes this necessary: the watchdog gives up at 60s, the
-    // abandoned stream rejects only AFTERWARDS, and the wedged session is dropped in
-    // between — so the cause of attempt N is in hand only by attempt N+1, on a client
-    // that no longer exists. Keeping it on the bridge is what makes the claude-code
-    // path (an in-process provider, with no stderr for the host to tail) work at all.
-    // This is the incident's own shape: retry after retry, each dead on arrival.
+    // The cause of attempt N arrives only after the watchdog gives up and the wedged session is dropped, so the bridge keeps it for attempt N+1.
     const agent = createFakeAcpAgent();
     agent.setScript([]);
     agent.gate();
@@ -1333,7 +1238,7 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
     expect(
       providerDiagnostic(["boom: [ede_diagnostic] stop_reason=null", "some later error line"]),
     ).toContain("ede_diagnostic");
-    // No signature → the most recent error-ish line is better than nothing.
+    // Without the signature the most recent error-ish line is used.
     expect(providerDiagnostic(["ok", "connect ECONNREFUSED"])).toBe("connect ECONNREFUSED");
     const long = `x [ede_diagnostic] ${"y".repeat(500)}`;
     expect(providerDiagnostic([long])!.length).toBeLessThanOrEqual(301);
@@ -1352,7 +1257,7 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
     const events = collect(bridge);
     await bridge.start();
     await bridge.prompt({ threadId: "t1", text: "hello?" });
-    // Wait PAST the timeout to prove it was disarmed, not merely not-yet-fired.
+    // Wait past the timeout to prove the watchdog was disarmed.
     await tick(60);
 
     expect(events.some((e) => e.type === "RUN_ERROR")).toBe(false);
@@ -1361,11 +1266,7 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
   });
 
   it("RETRIES a wedged run whose prompt() never settles (a stalled agent must not hold the pump)", async () => {
-    // The nightly flake this came from: the watchdog fired, said retryable: true, and the
-    // retry NEVER RAN — `runPrompt` was still awaiting a prompt() that would not settle, and
-    // the pump performs the retry. So the turn was lost and every later message queued behind
-    // a run that could not end. `ignoreCancel` is the real shape: an agent stalled inside a
-    // model call has no terminal to kill and never answers session/cancel.
+    // `ignoreCancel` models an agent stalled inside a model call that never answers session/cancel, so the retry must run while attempt 1's prompt() is still pending.
     const agent = createFakeAcpAgent();
     agent.setScript([]);
     agent.gate({ ignoreCancel: true });
@@ -1377,8 +1278,7 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
     await tick(120); // attempt 1's watchdog → backoff → attempt 2 STARTS
 
     expect(events.filter((e) => e.type === "RUN_ERROR").length).toBeGreaterThanOrEqual(1);
-    // The point of the test: a second attempt was actually driven, with attempt 1's prompt()
-    // STILL pending (the gate was never released).
+    // A second attempt was driven while attempt 1's prompt() was still pending.
     expect(events.some((e) => e.type === "RUN_RETRYING")).toBe(true);
     expect(agent.startedCount()).toBeGreaterThanOrEqual(2);
     agent.releaseGate();
@@ -1407,7 +1307,7 @@ describe("bridge liveness watchdog (livenessProbeMs)", () => {
       config: { cwd: "/workspace", skillsDir: "/skills", agent: { command: "fake", args: [], env: {} }, sandbox: { name: "s", namespace: "ns" } },
       exec,
       acpClient: acpClientFromTransport(agent.transport, exec),
-      // DOA watchdog off so it can't be the one firing — isolate the liveness probe.
+      // The DOA watchdog is off so only the liveness probe can fire.
       firstActivityTimeoutMs: 0,
       livenessProbeMs,
     });
@@ -1416,9 +1316,7 @@ describe("bridge liveness watchdog (livenessProbeMs)", () => {
 
   it("fires RUN_ERROR when the agent PROCESS dies mid-run (a definitive wedge)", async () => {
     const agent = createFakeAcpAgent();
-    // Emit one chunk (the run is alive), GATE so prompt() hangs, then simulate the
-    // agent process crashing/exiting — isAlive() flips false. The probe observes a
-    // dead agent and force-terminates so the queue can drain.
+    // Emit one chunk, gate so prompt() hangs, then kill the agent process so the probe observes isAlive() false and force-terminates.
     agent.setScript([
       { emit: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "working on it" } } },
     ]);
@@ -1436,8 +1334,7 @@ describe("bridge liveness watchdog (livenessProbeMs)", () => {
     const runError = events.find((e) => e.type === "RUN_ERROR") as { code?: string } | undefined;
     expect(runError).toBeDefined();
     expect(runError!.code).toBe("agent_process_died");
-    // EXACTLY ONE terminal — the guard's cancel resolves the gated prompt; the
-    // terminated flag must suppress a second terminal.
+    // Exactly one terminal event: the guard's cancel resolves the gated prompt, and the terminated flag suppresses a second.
     const terminals = events.filter((e) => e.type === "RUN_ERROR" || e.type === "RUN_FINISHED");
     expect(terminals.length).toBe(1);
     agent.releaseGate();
@@ -1445,9 +1342,7 @@ describe("bridge liveness watchdog (livenessProbeMs)", () => {
 
   it("does NOT fire for a LONG SILENT but ALIVE run (a long tool call is healthy, not a wedge)", async () => {
     const agent = createFakeAcpAgent();
-    // A single tool call that runs for a long time: one chunk, then GATE — no more
-    // ACP updates flow while the command runs. The old silence-based watchdog would
-    // wrongly kill this. The liveness probe must NOT: the agent is alive.
+    // One chunk then a gate models a long tool call, and silence while the agent is alive must not fire the probe.
     agent.setScript([
       { emit: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "running a 10-minute build" } } },
     ]);
@@ -1457,7 +1352,7 @@ describe("bridge liveness watchdog (livenessProbeMs)", () => {
     await bridge.start();
     void bridge.prompt({ threadId: "t1", text: "build the world" });
 
-    // Many probe cycles pass with the run silent but the agent ALIVE.
+    // Many probe cycles pass with the run silent but the agent alive.
     await tick(200);
     expect(events.some((e) => e.type === "RUN_ERROR")).toBe(false);
     agent.releaseGate();
@@ -1519,7 +1414,7 @@ describe("bridge auto-retry on transient agent death (exponential backoff)", () 
 
   it("RETRIES after the agent process dies, then SUCCEEDS when it heals (RUN_RETRYING then a clean finish)", async () => {
     const agent = createFakeAcpAgent();
-    // First run: emit a chunk (alive), gate so prompt hangs, then die → watchdog fires agent_process_died.
+    // Emit a chunk, gate so the prompt hangs, then die so the probe fires agent_process_died.
     agent.setScript([{ emit: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "start" } } }]);
     agent.gate();
     const bridge = mkBridge(agent);
@@ -1530,7 +1425,7 @@ describe("bridge auto-retry on transient agent death (exponential backoff)", () 
     await tick(15);
     agent.die();               // process crash
     await tick(60);            // liveness probe (30ms) observes it → RUN_ERROR(agent_process_died) + retryable
-    // Before the retry re-runs, heal the agent + give it a finishing script so the retry completes.
+    // Heal the agent and give it a finishing script before the retry re-runs.
     agent.heal();
     agent.releaseGate();
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);
@@ -1558,13 +1453,13 @@ describe("bridge auto-retry on transient agent death (exponential backoff)", () 
 
     agent.die();
     await tick(50); // run 1 dies → retryable
-    // Heal + let everything finish; the retry of "first" AND the queued "second" must both run.
+    // Heal and let everything finish: the retry of "first" and the queued "second" must both run.
     agent.heal();
     agent.releaseGate();
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);
     await tick(100);
 
-    // The second prompt was NOT lost to the death — it entered the fake's prompt() (started).
+    // The second prompt entered the fake's prompt() despite the death.
     expect(agent.startedCount()).toBeGreaterThanOrEqual(2);
     await bridge.stop();
   });
@@ -1623,12 +1518,8 @@ describe("clarifyRunError (context-overflow → clear message)", () => {
 });
 
 /**
- * A WEDGED SESSION must not be retried through.
- *
- * Conversation af7fe988 died this way: a cancel left the SDK session broken, and the
- * pump re-drove the SAME cached session 5 times. Every attempt was dead-on-arrival
- * ([ede_diagnostic] result_type=user, no ACP activity), and the user's message was
- * re-persisted on each one — 6 copies in the log for a single prompt.
+ * A wedged session must not be retried through: each dead-on-arrival attempt
+ * mints a fresh session and the user's message is persisted once.
  */
 describe("a wedged run recreates the agent session", () => {
   const mk = (agent: ReturnType<typeof createFakeAcpAgent>, over: Record<string, unknown> = {}) => {
@@ -1637,8 +1528,7 @@ describe("a wedged run recreates the agent session", () => {
     const bridge = createSessionBridge({
       config: { cwd: "/w", skillsDir: "/s", agent: { command: "f", args: [], env: {} }, sandbox: { name: "s", namespace: "ns" } },
       exec,
-      // A FACTORY: each call is a fresh session. Counting calls tells us whether the
-      // pump re-initialized or reused the wedged one.
+      // A factory whose call count tells whether the pump re-initialized or reused the wedged session.
       acpClient: () => {
         made++;
         return Promise.resolve(acpClientFromTransport(agent.transport, exec));
@@ -1668,8 +1558,7 @@ describe("a wedged run recreates the agent session", () => {
     agent.setScript([]);
     agent.gate();
     const { bridge } = mk(agent);
-    // onPersist, not onEvent: the user's message is written to the LOG, and it is the
-    // log that a retry was duplicating.
+    // onPersist rather than onEvent, because the user's message is written to the log.
     const seen: Array<{ type: string; delta?: string }> = [];
     bridge.onPersist((e: { type: string; delta?: string }) => seen.push(e));
     await bridge.start();
@@ -1681,13 +1570,11 @@ describe("a wedged run recreates the agent session", () => {
   });
 });
 
-// --- the RUN_STARTED ORIGIN STAMP ----------------------------------------------------------
+// --- the RUN_STARTED origin stamp ----------------------------------------------------------
 //
-// isOwnRun compares a run's origin to the pod reading it, and BOTH halves have to be stamped for
-// it to work. These tests pin the EPOCH half, which nothing else covers: a pod NAME alone cannot
-// distinguish this process from the previous one under the same StatefulSet name, so a `gen`-less
-// RUN_STARTED makes a run stranded by that earlier process read as "ours, still executing" — and
-// both consumers skip a run they think is their own, so it is never healed.
+// isOwnRun compares a run's origin to the pod reading it, and these tests pin the epoch half of
+// the stamp because a pod name alone cannot distinguish this process from its predecessor under
+// the same StatefulSet name.
 
 describe("RUN_STARTED origin stamp", () => {
   const mkBridge = (agent: ReturnType<typeof createFakeAcpAgent>, deps: Record<string, unknown>) => {
@@ -1699,15 +1586,12 @@ describe("RUN_STARTED origin stamp", () => {
       ...deps,
     } as never);
   };
-  // onEvent only (`collect`, not `collectPersist`): RUN_STARTED goes out on BOTH channels,
-  // so subscribing to both would count every run twice.
+  // RUN_STARTED goes out on both channels, so only onEvent is subscribed to avoid counting every run twice.
   const starts = (events: AguiEvent[]) =>
     events.filter((e) => e.type === "RUN_STARTED") as Array<{ host?: string; gen?: number }>;
 
   it("carries the epoch, and re-reads it PER RUN", async () => {
-    // Per run, not per bridge: a conversation reassigned away and back mid-session must
-    // stamp the epoch each run actually started under, or the second run inherits the
-    // first's claim and the stamp lies in exactly the case it exists for.
+    // The epoch is read per run, so a conversation reassigned away and back mid-session stamps the epoch each run started under.
     let generation: number | undefined = 5;
     const agent = createFakeAcpAgent();
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);
@@ -1727,9 +1611,7 @@ describe("RUN_STARTED origin stamp", () => {
   });
 
   it("omits the epoch when none is observed — and isOwnRun then falls back to the host name", async () => {
-    // The boot window: this pod knows its name but not yet which epoch it holds. Stamping a
-    // guess is worse than stamping nothing — an invented epoch makes a run foreign to its own
-    // pod — so the epoch is absent and the name alone decides.
+    // During boot the pod knows its name but not its epoch, so the epoch is absent and the name alone decides.
     const agent = createFakeAcpAgent();
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);
     const bridge = mkBridge(agent, { selfPod: "agent-host-0", generation: () => undefined });
@@ -1752,7 +1634,7 @@ describe("RUN_STARTED origin stamp", () => {
     await bridge.prompt({ threadId: "t1", text: "go" } as never);
 
     const [started] = starts(events);
-    // Same pod NAME both times: only the epoch separates these two verdicts.
+    // Same pod name both times, so only the epoch separates the two verdicts.
     expect(isOwnRun(started, { host: "agent-host-0", gen: 7 })).toBe(false);
     expect(isOwnRun(started, { host: "agent-host-0", gen: 5 })).toBe(true);
   });

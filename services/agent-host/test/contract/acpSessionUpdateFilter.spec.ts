@@ -1,13 +1,8 @@
 /**
- * session/update variants the pinned ACP SDK can't parse.
- *
- * Goose emits `session_info_update` / `usage_update`; the SDK
- * (@zed-industries/agent-client-protocol 0.4.5, the package's FINAL release —
- * it was renamed, so there is no newer version to bump to) validates the whole
- * notification against a closed zod union first. An unknown variant fails that
- * parse, the SDK rejects the notification with -32602 and console.errors it, and
- * `normalizeUpdate`'s `default:` branch never gets a say. These specs pin the
- * premise, the fix, and the salvage.
+ * session/update variants the pinned ACP SDK cannot parse. Goose emits
+ * `session_info_update` and `usage_update`, which the SDK's closed zod union rejects
+ * with -32602 before `normalizeUpdate` sees them, so a stream filter drops them first
+ * and salvages `usage_update` as context_usage.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -36,8 +31,7 @@ const notification = (update: Record<string, unknown>) => ({
 
 describe("the premise: the pinned SDK rejects unknown session/update variants", () => {
   it("throws on usage_update and session_info_update, accepts a known variant", () => {
-    // If this ever STOPS throwing the SDK has learned these variants and the
-    // filter's variant set should be widened rather than left to drop them.
+    // If this stops throwing, the SDK has learned these variants and the filter's set should widen.
     expect(() =>
       sessionNotificationSchema.parse(notification({ sessionUpdate: "usage_update", used: 1, size: 2 }).params),
     ).toThrow();
@@ -52,18 +46,13 @@ describe("the premise: the pinned SDK rejects unknown session/update variants", 
   });
 
   it("SDK_SESSION_UPDATE_VARIANTS is EXACTLY what the SDK's schema accepts", () => {
-    // The whole filter rests on this set, and it fails in both directions:
-    //   - a variant listed here that the SDK rejects is passed through -> -32602 returns
-    //   - a variant MISSING here that the SDK accepts is dropped -> we silently lose real
-    //     updates (tool calls, message chunks), which is far worse than the log volume
-    // So derive the truth from the SDK's own zod union instead of trusting a comment:
-    // an SDK bump that changes the union fails HERE rather than in production.
+    // Derived from the SDK's own zod union so an SDK bump that changes it fails here.
     const union = sessionNotificationSchema.shape.update as unknown as {
       _def: { options: Array<{ shape: { sessionUpdate: { _def: { value: string } } } }> };
     };
     const fromSdk = union._def.options.map((o) => o.shape.sessionUpdate._def.value);
 
-    expect(fromSdk.length).toBeGreaterThan(0); // the introspection itself still works
+    expect(fromSdk.length).toBeGreaterThan(0);
     expect([...SDK_SESSION_UPDATE_VARIANTS].sort()).toEqual([...fromSdk].sort());
   });
 });
@@ -77,8 +66,7 @@ describe("unsupportedSessionUpdate", () => {
   });
 
   it("never swallows a message with an id", () => {
-    // A request expects a response; dropping one would HANG the agent rather
-    // than lose an update — strictly worse than the -32602 this fixes.
+    // A request expects a response, and dropping one would hang the agent.
     const request = { ...notification({ sessionUpdate: "usage_update" }), id: 7 };
     expect(unsupportedSessionUpdate(request)).toBeUndefined();
   });
@@ -104,7 +92,7 @@ describe("contextUsageFromUsageUpdate", () => {
   });
 
   it("returns undefined rather than a wrong context bar when the shape differs", () => {
-    // An agent that disagrees with the spec must yield NO reading, not a bogus one.
+    // An agent that disagrees with the spec yields no reading, not a bogus one.
     expect(contextUsageFromUsageUpdate(dropped({ sessionUpdate: "usage_update", used: 1 }))).toBeUndefined();
     expect(
       contextUsageFromUsageUpdate(dropped({ sessionUpdate: "usage_update", used: 1, size: 0 })),
@@ -143,8 +131,7 @@ describe("filterUnsupportedSessionUpdates", () => {
     const seen: string[] = [];
     const dropped: string[] = [];
     const stream = filterUnsupportedSessionUpdates(raw, (d) => dropped.push(d.variant));
-    // The SDK console.errors "Error handling notification" for every rejected
-    // notification — that log line IS the reported error volume.
+    // The SDK console.errors "Error handling notification" for every rejected notification.
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       new ClientSideConnection(() => fakeClient((v) => seen.push(v)), stream);
@@ -201,8 +188,6 @@ describe("handleDroppedSessionUpdate (what client.ts does with a dropped update)
   });
 
   it("salvages usage_update as the context_usage the bridge already renders", () => {
-    // goose has never had a context fill bar, and this is why: the SDK rejected the
-    // notification carrying it. Salvaging turns a pure loss into the existing feature.
     const emit = vi.fn();
     const handle = handleDroppedSessionUpdate({ emit, log: vi.fn() });
 
@@ -216,8 +201,6 @@ describe("handleDroppedSessionUpdate (what client.ts does with a dropped update)
   });
 
   it("logs an unhandled variant ONCE, not once per notification", () => {
-    // Logging every occurrence is exactly the behaviour this change removes — it would
-    // trade a -32602 error line for an equally frequent info line.
     const log = vi.fn();
     const emit = vi.fn();
     const handle = handleDroppedSessionUpdate({ emit, log });

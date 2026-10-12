@@ -1,9 +1,6 @@
 /**
- * Tier 1 contract test — skills -> .goosehints assembly + injection.
- *
- * Proves: the agent identity (Scooter) + markdown skills are assembled into a
- * .goosehints file in the conversation cwd (which goose reads), frontmatter is
- * stripped, and adding a skill file is all it takes (no rebuild).
+ * Skills to .goosehints assembly: the agent identity and the markdown skills are
+ * assembled into a .goosehints file in the conversation cwd, with frontmatter stripped.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -33,19 +30,15 @@ describe("agent skills -> .goosehints", () => {
   });
 
   it("identityPrompt steers the agent away from the host-reading `tree`/`read_image` tools", () => {
-    // goose's `tree`/`read_image` developer tools run in the agent-host pod, not
-    // the sandbox, and can't be disabled via config (goose wipes available_tools).
-    // The instruction is the only guard — it must be present and name the fix.
+    // goose's `tree`/`read_image` developer tools run in the agent-host pod and cannot be disabled via config, so the instruction is the only guard.
     const p = identityPrompt();
     expect(p).toContain("tree");
     expect(p).toContain("read_image");
-    expect(p).toMatch(/shell|ls|find/); // points at the sandbox-routed alternative
+    expect(p).toMatch(/shell|ls|find/);
   });
 
   it("identityPrompt warns against scanning the whole filesystem + points at run_background (P2)", () => {
-    // A NixOS box: /nix/store is huge, so `grep -r … /` never finishes and hits
-    // the P0 timeout. The prompt must steer to /workspace-scoped searches and
-    // run_background for long jobs — proactive avoidance, not just the timeout catch.
+    // /nix/store is huge, so the prompt steers to /workspace-scoped searches and run_background for long jobs.
     const p = identityPrompt();
     expect(p).toContain("/workspace");
     expect(p).toMatch(/nix\/store/);
@@ -69,7 +62,7 @@ describe("agent skills -> .goosehints", () => {
     expect(hints).toContain("You are Scooter");
     expect(hints).toContain("# Skills");
     expect(hints).toContain("The main repo is github.com/acme/app");
-    // frontmatter (name:/triggers:) must NOT leak into the prompt
+    // Frontmatter must not leak into the prompt.
     expect(hints).not.toContain("triggers:");
   });
 

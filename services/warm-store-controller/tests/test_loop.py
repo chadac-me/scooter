@@ -1,5 +1,4 @@
-"""Tier 1 — the reconcile LOOP against a fake k8s (in-memory PVCs + Sandboxes). No cluster.
-Locks that the loop lists → reconciles → applies each action to the ControllerK8s."""
+"""Tier 1: the reconcile loop against a fake k8s with in-memory PVCs and Sandboxes, no cluster."""
 
 from warm_store_controller.loop import reconcile_once
 from warm_store_controller.reservations import Reservations
@@ -10,8 +9,7 @@ OLD = "000oldtag0000"
 
 
 class FakeK8s:
-    """In-memory pool PVCs + Sandboxes. Records every applied action for assertions.
-    warm_new/relabel/delete_pvc mutate the in-memory PVC set so a follow-up pass sees them."""
+    """In-memory pool PVCs and Sandboxes, recording every applied action and mutating the PVC set so a follow-up pass sees it."""
 
     def __init__(self, pvcs, sandboxes):
         self._pvcs = {p.name: p for p in pvcs}
@@ -24,7 +22,7 @@ class FakeK8s:
     def list_pool_pvcs(self):
         return list(self._pvcs.values())
 
-    # The PV layer is not what these tests cover; an empty pool makes it a no-op.
+    # An empty PV pool makes the placement phase a no-op.
     def list_pending_uppers(self):
         return []
 
@@ -92,8 +90,7 @@ def test_loop_discards_unclean_return():
 
 
 def test_loop_does_not_redelete_terminating_pvc():
-    # The whole loop, end to end: a claimed PVC that is already Terminating, with an `unclean`
-    # sandbox, must NOT be deleted again (the spin that pinned pool volumes in Terminating).
+    # A claimed PVC that is already Terminating is not deleted again, even with an `unclean` sandbox.
     k = FakeK8s(
         [PoolPvc("p1", TAG, "claimed", claimed_by="conv-a", bound_to_pod=False, terminating=True)],
         [SandboxRef("conv-a", TAG, suspended=True, unmount_marker="unclean")],
@@ -103,7 +100,7 @@ def test_loop_does_not_redelete_terminating_pvc():
 
 
 def test_loop_unknown_marker_does_not_delete():
-    # A suspended sandbox whose marker read was inconclusive → the loop backs off, no delete.
+    # An inconclusive marker read backs off with no delete.
     k = FakeK8s(
         [PoolPvc("p1", TAG, "claimed", claimed_by="conv-a", bound_to_pod=False)],
         [SandboxRef("conv-a", TAG, suspended=True, unmount_marker="unknown")],
@@ -125,6 +122,5 @@ def test_loop_one_bad_action_does_not_abort_pass():
             raise RuntimeError("boom")
 
     k = Boom([PoolPvc("r-old", OLD, "ready")], [])
-    # retired-tag delete raises; the pass still completes (min_ready top-up still runs).
     reconcile_once(k, cfg(min_ready=1), Reservations(), {})
-    assert k.warmed == [TAG]  # top-up applied despite the delete failure
+    assert k.warmed == [TAG]

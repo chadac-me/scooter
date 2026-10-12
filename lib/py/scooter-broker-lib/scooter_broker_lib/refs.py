@@ -1,22 +1,9 @@
 """Linked-resource URL -> the structured target a reply tool needs.
 
-A port of services/agent-host/src/agent/resourceRef.ts, which exists because ONE
-resource is written in two shapes by two writers: the webhooks handlers post a
-structured `ref`, while the broker's auto-link injector posts url+title only — and the
-latter is the majority of real rows. A tool that only read `ref` would find nothing for
-most conversations.
-
-HOST-AGNOSTIC BY DESIGN. The link's `source` already names the provider, and checking
-the host would break every self-hosted GitHub Enterprise and GitLab install. These
-parsers look only at the path shape.
-
-THEY RETURN None RATHER THAN GUESS. A wrong target comments on someone else's PR, which
-is worse than no tool at all (PR #571).
-
-These live in the shared lib rather than in each contrib because the grammar is the
-URL's, not the integration's, and three contribs would otherwise carry three copies of
-the same four regexes — the duplication the agent-host version avoided by having one
-module. A contrib adds only what is genuinely its own (e.g. jira's issue-key grammar).
+A link row may carry a structured `ref` or only url+title, so a tool must parse the
+URL. The parsers look only at the path shape (the link's `source` names the provider
+and self-hosted installs have arbitrary hosts) and return None rather than guess,
+since a wrong target comments on someone else's PR.
 """
 
 from __future__ import annotations
@@ -35,7 +22,7 @@ class GithubTarget:
 
 @dataclass(frozen=True)
 class GitlabTarget:
-    # The project PATH — GitLab accepts it URL-encoded in place of the numeric id.
+    # The project path, which GitLab accepts URL-encoded in place of the numeric id.
     project_id: str
     iid: str
     is_mr: bool
@@ -47,8 +34,7 @@ class JiraTarget:
 
 
 _DIGITS = re.compile(r"^\d+$")
-# Exported: jira's conversation_map resource_id is a BARE key, so the contrib needs
-# the same grammar to recognise one.
+# Exported because jira's conversation_map resource_id is a bare key.
 ISSUE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
 _ISSUE_KEY = ISSUE_KEY_RE
 
@@ -67,8 +53,7 @@ def _segments(url: str | None) -> list[str] | None:
 
 
 def parse_github_url(url: str | None) -> GithubTarget | None:
-    """`https://<host>/<owner>/<repo>/(pull|issues)/<number>`, plus any suffix such as
-    `/files` or `#issuecomment-…`. The HOST is not checked — Enterprise hosts differ."""
+    """`https://<host>/<owner>/<repo>/(pull|issues)/<number>` with any suffix, host unchecked."""
     segs = _segments(url)
     if not segs or len(segs) < 4:
         return None
@@ -81,12 +66,7 @@ def parse_github_url(url: str | None) -> GithubTarget | None:
 
 
 def parse_gitlab_url(url: str | None) -> GitlabTarget | None:
-    """`https://<host>/<group>/…/<project>/-/(merge_requests|issues)/<iid>`.
-
-    The `/-/` separator is OPTIONAL (older URLs omit it) and the project path may nest
-    subgroups, so the KIND segment — not a fixed position — is what splits project from
-    iid.
-    """
+    """`https://<host>/<group>/…/<project>/-/(merge_requests|issues)/<iid>`, where the kind segment splits project from iid because `/-/` is optional and subgroups nest."""
     segs = _segments(url)
     if not segs:
         return None
@@ -99,7 +79,7 @@ def parse_gitlab_url(url: str | None) -> GitlabTarget | None:
     if not _DIGITS.match(iid):
         return None
     path = [s for s in segs[:at] if s != "-"]
-    if len(path) < 2:  # need at least namespace/project
+    if len(path) < 2:
         return None
     return GitlabTarget(project_id="/".join(path), iid=iid, is_mr=segs[at] == "merge_requests")
 
@@ -122,10 +102,7 @@ def parse_jira_url(url: str | None) -> JiraTarget | None:
 
 
 # --- the conversation_map `resource_id` shapes ------------------------------------
-#
-# The webhooks handlers' own `_resource_id()` spellings. A link row may carry either
-# this short form or the html_url for the SAME resource (issue #563), so both are
-# accepted everywhere a target is resolved.
+# The webhooks handlers' own `_resource_id()` spellings, accepted alongside the html_url form.
 
 _GITHUB_SHORT = re.compile(r"^([^/]+)/(.+)#(\d+)$")
 _GITLAB_MR = re.compile(r"^(.+)!(\d+)$")
@@ -141,11 +118,7 @@ def parse_github_resource_id(resource_id: str) -> GithubTarget | None:
 
 
 def parse_gitlab_resource_id(resource_id: str) -> GitlabTarget | None:
-    """`<repo>!<iid>` (MR) or `<repo>#<iid>` (issue), or a web_url.
-
-    URL FIRST: a web_url ending in a `#<n>` fragment would otherwise match the
-    `<repo>#<iid>` shape and yield the whole URL as the project path.
-    """
+    """`<repo>!<iid>` (MR) or `<repo>#<iid>` (issue), or a web_url, tried first because a `#<n>` fragment would otherwise match the issue shape."""
     from_url = parse_gitlab_url(resource_id)
     if from_url:
         return from_url

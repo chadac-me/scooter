@@ -1,6 +1,4 @@
-/**
- * UI unit test — the Subagents panel view (pure) + subagentsOf selector.
- */
+/** The Subagents panel view (pure) and the subagentsOf selector. */
 
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";

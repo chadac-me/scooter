@@ -1,18 +1,9 @@
 """Shared async-DB plumbing: the broker DSN, and the one place an engine is built.
 
-Every broker store — the module registry, static shares, aws's permission requests,
-and whatever a contrib owns next — reaches the SAME database (`broker` on the shared
-Postgres) and needs the same reconnect guards, so the assembly lives here rather than
-inside any one of them. It lived in `broker.aws.store` until PR #622, which meant
-`broker/core/app.py`, `registry/` and `shares/` each imported the aws subsystem just
-to open a connection — and aws's provider cannot become a contrib while they do.
-
-`pool_pre_ping` + `pool_recycle` are not tuning. Without them the pool hands out a
-connection a Postgres restart/failover has already closed; the request dies with
-asyncpg "connection is closed" and the service stays broken until it is ITSELF
-restarted (webhooks learned this in production). Every store opening its engine
-through `open_sessions` is what makes that structural instead of a list of files
-someone has to remember to extend — the list had already missed shares/store.py.
+Every broker store reaches the same `broker` database and needs the same reconnect
+guards (`pool_pre_ping` and `pool_recycle`, without which a connection Postgres
+already closed is handed out and the service stays broken until restarted), so
+every store opens its engine through `open_sessions`.
 """
 
 from __future__ import annotations
@@ -26,27 +17,21 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-# Under typical idle-timeout windows (and the resilience test's 3600s ceiling).
+# Under typical idle-timeout windows.
 POOL_RECYCLE_SECONDS = 1800
 
 
 @dataclass
 class StoreConfig:
-    """DSN assembly mirroring the webhooks DatabaseSettings: an explicit `dsn`
-    wins; otherwise, when `db_password` is set, build
-    postgresql+asyncpg://{user}:{pw}@{host}:{port}/{name}. Default = SQLite.
-
-    The password arrives as its own component so a k8s secretKeyRef can supply it
-    without a full connection string — password included — in the manifest.
-    """
+    """DSN assembly: an explicit `dsn` wins, otherwise a Postgres DSN is built from the components when `db_password` (its own field so a secretKeyRef can supply it) is set."""
 
     dsn: str = "sqlite+aiosqlite:////tmp/broker-aws.db"
     db_host: str = "agent-shared-db.agent-manager.svc.cluster.local"
     db_port: int = 5432
-    db_user: str = "webhooks"   # shared instance's user; DB name differs
+    db_user: str = "webhooks"   # the shared instance's user
     db_password: str = ""
-    db_name: str = "broker"     # SEPARATE database on the shared Postgres
-    db_sslmode: str = ""        # "require" etc.; empty = no ssl param
+    db_name: str = "broker"     # a separate database on the shared Postgres
+    db_sslmode: str = ""        # "require" etc.; empty adds no ssl param
 
     def resolved_dsn(self) -> str:
         if self.db_password and not self.dsn.startswith("postgresql"):
@@ -54,9 +39,7 @@ class StoreConfig:
                 f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
                 f"@{self.db_host}:{self.db_port}/{self.db_name}"
             )
-            # asyncpg takes ssl as a query param, not libpq's sslmode= — same
-            # mapping as webhooks/scheduler. Dropping it connects in cleartext to a
-            # server the deployment asked to reach over TLS, and says nothing.
+            # asyncpg takes ssl as a query param, not libpq's sslmode=.
             if self.db_sslmode:
                 dsn += f"?ssl={self.db_sslmode}"
             return dsn
@@ -66,12 +49,7 @@ class StoreConfig:
 def open_sessions(
     config: StoreConfig,
 ) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
-    """The engine + session factory for `config`, with the reconnect guards applied.
-
-    Both are returned: a store works through the sessionmaker and disposes of the
-    engine. `expire_on_commit=False` so a dataclass built from a row stays readable
-    once the transaction has closed.
-    """
+    """The engine and session factory for `config` with the reconnect guards applied; `expire_on_commit=False` keeps a row readable after its transaction closes."""
     engine = create_async_engine(
         config.resolved_dsn(),
         echo=False,

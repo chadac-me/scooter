@@ -1,17 +1,13 @@
 /**
- * Mobile navigation state — which off-canvas drawer is open on a narrow viewport.
- *
- * The desktop shell is a three-column row (sessions | thread | right panel). Below
- * the `md` breakpoint the two fixed-width side columns would leave the thread no
- * room, so each collapses into an overlay drawer toggled from the header; the thread
- * + composer take the full width. Desktop (≥1200px) ignores all of this — the CSS
- * `desk:` variants pin both panels back in-flow regardless of the drawer state here.
- *
- * Same dependency-free useSyncExternalStore store as view.ts (no router/context).
+ * Mobile navigation state: which off-canvas drawer is open on a narrow viewport. Below
+ * the `md` breakpoint the two side columns collapse into overlay drawers toggled from
+ * the header and the thread takes the full width; desktop (≥1200px) ignores this state
+ * because the CSS `desk:` variants pin both panels back in-flow. Same dependency-free
+ * useSyncExternalStore store as view.ts.
  */
 import { useSyncExternalStore } from "react";
 
-/** Which drawer is open. Only one at a time; "none" is the resting state. */
+/** Which drawer is open; "none" is the resting state. */
 export type Drawer = "none" | "sessions" | "panel";
 
 let drawer: Drawer = "none";
@@ -34,8 +30,7 @@ export const mobileNav = {
       emit();
     }
   },
-  /** Toggle a drawer: open it, or close it if it's already the open one. Lets the
-   *  same header button that opens a drawer also collapse it. */
+  /** Open a drawer, or close it if it is already the open one. */
   toggle(d: Exclude<Drawer, "none">) {
     drawer = drawer === d ? "none" : d;
     emit();
@@ -58,13 +53,10 @@ export function useDrawer(): Drawer {
   return useSyncExternalStore(subscribe, () => snapshot, () => snapshot);
 }
 
-// The custom `desk` breakpoint is 1200px (see --breakpoint-desk in globals.css);
-// "mobile" is anything below it. Keeping the JS query one hair under 1200 (1199.98)
-// matches the CSS `desk:` cutover exactly, so the drawer behavior and the panel
-// visibility never disagree at the boundary.
+// 1199.98 matches the CSS `desk:` cutover (--breakpoint-desk in globals.css) exactly, so drawer behavior and panel visibility agree at the boundary.
 const MOBILE_QUERY = "(max-width: 1199.98px)";
 
-/** True on viewports below the `md` breakpoint. Re-renders on viewport change. */
+/** True on viewports below the desk breakpoint; re-renders on viewport change. */
 export function useIsMobile(): boolean {
   return useSyncExternalStore(
     (cb) => {

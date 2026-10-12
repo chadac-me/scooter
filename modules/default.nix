@@ -1,16 +1,7 @@
 { config, lib, ... }:
 
-# kubenix module entry for kubenix-agent-manager.
-#
-# Design stage: option signatures + resource shapes only (no rendered values
-# committed yet). Generates the agent-sandbox CRs and platform Deployments.
-#
-# Composed of:
-#   ./sandbox-template.nix  — SandboxTemplate (generic body) + optional WarmPool
-#   ./conversation.nix      — per-conversation cold Sandbox (SA + 2 PVCs)
-#   ./agent-host.nix        — the agent-host Deployment (runs goose per convo)
-#   ./broker.nix            — (post-PoC) credential broker, lifted from openhands-nix
-#   ./webhooks.nix          — (post-PoC) spawn-from-conversation
+# kubenix module entry: the agent-sandbox CR generators (the generic template and
+# warm pool, the per-conversation cold Sandbox) and the agent-host Deployment.
 
 let
   inherit (lib) mkOption types;
@@ -19,10 +10,8 @@ in
   imports = [
     ./sandbox-template.nix
     ./conversation.nix
-    # conversation.nix renders the contributed sandbox-pod parts, so the options
-    # must be declared in THIS tree too — it does not import platform.nix. Without
-    # it `mkConversation` is an eval error, which is what it was: it read
-    # `broker.aws.enable`, an option only platform.nix declares. Why: PR #640.
+    # conversation.nix renders the contributed sandbox-pod parts, so their options
+    # must be declared in this tree too.
     ./sandbox-pod.nix
     ./agent-host.nix
   ];

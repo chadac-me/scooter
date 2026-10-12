@@ -1,28 +1,16 @@
 /**
- * The BYOC controller's HTTP surface — routing only, no transport specifics.
+ * The BYOC controller's HTTP surface, a pure request->response function so every route and
+ * rejection is contract-testable without sockets; index.ts binds it to node:http and ws.
  *
- * Kept as a pure request->response function (rather than an http.Server) so every route, and in
- * particular every REJECTION, is contract-testable without sockets or ports. index.ts binds this to
- * node:http + ws.
- *
- * THE AUTH SPLIT (§L Q3) is the thing to get right here:
- *
- *   POST /byoc/sessions             MINT — AUTHED. Needs a resolved user; a session must be
- *                                   owner-bound or resolve-by-owner has no key and anyone could
- *                                   mint. Served from the authed UI surface, NOT the /byoc/ ingress.
- *   GET  /byoc/ws/:id               CONNECT — UNAUTHENTICATED at the ingress, because the user's
- *                                   container cannot carry a browser session. Its only defence is
- *                                   the join token: signature, expiry, audience, and owner-matches-
- *                                   session. Same model as the webhooks receiver, which is
- *                                   deliberately unauthenticated and verifies an HMAC instead.
+ *   POST /byoc/sessions             mint, authed: served from the UI surface, not the /byoc/ ingress
+ *   GET  /byoc/ws/:id               connect, unauthenticated at the ingress; the join token is the gate
  *   POST /byoc/:id/prompt           in-cluster, from any agent-host replica
- *   POST /byoc/:id/permission/:pid  ditto — unblocks a pending permission
- *   POST /byoc/:id/exec/:xid        ditto — Channel B result
+ *   POST /byoc/:id/permission/:pid  in-cluster, unblocks a pending permission
+ *   POST /byoc/:id/exec/:xid        in-cluster, a Channel B result
  *   GET  /byoc/status?owner=…       the UI badge
  *
- * Routes are matched EXACTLY, with no catch-all: an unauthenticated surface should 404 anything it
- * does not explicitly serve rather than fall through to a handler that assumes it was reached
- * through the authed path.
+ * Routes are matched exactly with no catch-all, so the unauthenticated surface 404s anything
+ * it does not explicitly serve.
  */
 
 import type { SessionRegistry } from "./sessionRegistry.js";
@@ -35,7 +23,7 @@ export interface ByocRequest {
   method: string;
   path: string;
   body?: unknown;
-  /** The resolved user, present ONLY on the authed surface (the UI's mint call). */
+  /** The resolved user, present only on the authed surface. */
   user?: { id: string };
 }
 
@@ -50,30 +38,26 @@ export interface ByocServerConfig {
   registry: SessionRegistry;
   relay: RunRelay;
   secret: string;
-  /** Device-key auth (§P). Optional so a deployment can run token-only during rollout. */
+  /** Device-key auth, optional so a deployment can run token-only. */
   devices?: DeviceAuth;
 }
 
 export interface ByocServer {
   handle(req: ByocRequest): Promise<ByocResponse>;
-  /** Gate the WS upgrade on /byoc/ws/:id with a JOIN TOKEN (first connect / no device yet). */
+  /** Gate the WS upgrade on /byoc/ws/:id with a join token. */
   authorizeUpgrade(sessionId: string, token: string): { ok: true; owner: string } | { ok: false; reason: string };
-  /** Gate a reconnect with a DEVICE SIGNATURE (§P) — no join token, valid indefinitely. */
+  /** Gate a reconnect with a device signature, which needs no join token. */
   authorizeDevice(
     deviceId: string,
     nonce: string,
     signature: string,
   ): Promise<{ ok: true; owner: string } | { ok: false; reason: string }>;
-  /** Record a REJECTED connection attempt so the Settings UI can show it (via /byoc/status).
-   *  The observed failure mode: a container's token auth failed and NOTHING said so on either
-   *  end — the container fast-looped in silence and the UI showed a clean "disconnected".
-   *  Owner attribution is best-effort: a device id maps through the store; an invalid token's
-   *  claims are decoded UNVERIFIED — acceptable for a diagnostic label, never for authz. */
+  /** Record a rejected connection attempt for /byoc/status, with best-effort owner attribution that decodes an invalid token's claims unverified (a diagnostic label, never an authz input). */
   noteAuthFailure(info: { deviceId?: string | null; token?: string; reason: string }): Promise<void>;
   close(): void;
 }
 
-/** Decode a JWT's claims WITHOUT verifying — diagnostics only (see noteAuthFailure). */
+/** Decode a JWT's claims without verifying, for diagnostics only. */
 function decodeClaimsUnverified(token: string): { owner?: string } | null {
   try {
     const payload = token.split(".")[1];
@@ -86,40 +70,20 @@ function decodeClaimsUnverified(token: string): { owner?: string } | null {
 
 export function createServer(config: ByocServerConfig): ByocServer {
   const { registry, relay, secret, devices } = config;
-  // owner -> the most recent rejected connection attempt. In-memory on purpose: this is a
-  // diagnostic surface (like the socket itself), not durable state; a controller restart
-  // clearing it is fine — the container will either connect or fail again within minutes.
+  // owner -> the most recent rejected connection attempt, in-memory because it is diagnostic.
   const authFailures = new Map<string, { reason: string; at: string }>();
-  // sessionId -> the waiting readers of that session's inbound tunnel stream. One subscription
-  // to the relay feeds them all, so a reconnecting agent-host does not stack listeners.
+  // sessionId -> the waiting readers of that session's inbound tunnel stream, fed by one relay subscription.
   const tunnelReaders = new Map<string, Set<(f: WireFrame | null) => void>>();
   const tunnelQueues = new Map<string, WireFrame[]>();
-  /** sessionId -> how many frames have been TRIMMED off the front of its queue. A reader's
-   *  cursor is an absolute sequence number, so it must subtract this to index the array;
-   *  without it, trimming would silently skip or replay frames. */
+  /** sessionId -> how many frames have been trimmed off the front of its queue, which a reader subtracts from its absolute cursor to index the array. */
   const tunnelTrimmed = new Map<string, number>();
-  /** Frames kept per session. Generous for in-flight MCP, small enough to bound memory. */
+  /** Frames kept per session, enough for in-flight MCP while bounding memory. */
   const TUNNEL_QUEUE_MAX = 512;
-  // ALWAYS QUEUE, then wake the readers. The previous shape handed a frame directly to the
-  // waiting reader and deleted it — but a reader only re-registers on its NEXT loop iteration,
-  // so every frame arriving in that window (a microtask later) went to the queue while the
-  // just-woken reader was already past its queue check. The container sends open/chunk/end back
-  // to back, so `open` was delivered and `end` was stranded. Queue-then-wake has no such window.
-  //
-  // WAKE EVERY READER, not just one. ALL of an owner's conversations share ONE container
-  // session, and each conversation's agent-host bridge starts its OWN reader on it. Waking a
-  // single reader (`[...waiting][0]`) handed each frame to whichever reader happened to be
-  // first, and a frame for conversation A delivered to conversation B's reader matches no
-  // stream there and is dropped — so the SDK that sent it waited out its full 30s
-  // CONNECT_TIMEOUT. Observed live: 2 conversations, 1 session, every MCP call timing out.
-  // Each reader now sees every frame and ignores the ones whose stream it does not own.
+  // Queue first, then wake every reader: all of an owner's conversations share one session, and each reader ignores frames whose stream it does not own.
   relay.onTunnelFrame((sessionId, frame) => {
     const q = tunnelQueues.get(sessionId) ?? [];
     q.push(frame);
-    // BOUNDED. With a per-reader cursor nothing shifts the queue, so a long-lived
-    // session would grow it without limit. MCP frames are small and only useful
-    // for the moments around their request, so keep a recent window: a reader
-    // that falls this far behind has already timed out its stream.
+    // Keep a recent window only, since a reader this far behind has already timed out its stream.
     if (q.length > TUNNEL_QUEUE_MAX) {
       const drop = q.length - TUNNEL_QUEUE_MAX;
       q.splice(0, drop);
@@ -138,18 +102,9 @@ export function createServer(config: ByocServerConfig): ByocServer {
   /** One session's inbound tunnel frames, as an async iterable the shell serves as SSE. */
   const tunnelStream = (sessionId: string): AsyncIterable<WireFrame> => ({
     async *[Symbol.asyncIterator]() {
-      // PER-READER CURSOR. The queue is shared by every reader on this session, so
-      // `q.shift()` let the first reader to wake consume a frame meant for another
-      // conversation. Each reader instead advances its own position and sees every frame.
-      // An ABSOLUTE sequence number, not an array index: the queue is trimmed from the
-      // front, so an index would drift. `trimmed` converts it to a position.
+      // Per-reader absolute sequence number, converted to an array index via `trimmed`.
       let seq = 0;
-      // Set while parked. A consumer that stops iterating (breaks out, or its SSE
-      // response closes) would otherwise leave this resolve in the readers set with
-      // its promise never settled -- a handle that keeps the process alive. Harmless
-      // while one reader was woken and deleted per frame; REACHABLE now that every
-      // reader is woken, so a second reader can sit parked forever. Observed as a
-      // vitest run that passed every test and never exited.
+      // Set while parked, so `finally` can drop a reader that stopped iterating and would otherwise keep the process alive.
       let parked: ((f: WireFrame | null | undefined) => void) | undefined;
       try {
         for (;;) {
@@ -162,8 +117,7 @@ export function createServer(config: ByocServerConfig): ByocServer {
             seq += 1;
             continue;
           }
-          // Wait to be woken, then loop back to drain the queue (never consume the frame
-          // here — that is what created the lost-frame window).
+          // Wait to be woken, then loop back to drain the queue.
           const woken = await new Promise<WireFrame | null | undefined>((resolve) => {
             parked = resolve;
             const set = tunnelReaders.get(sessionId) ?? new Set();
@@ -187,7 +141,7 @@ export function createServer(config: ByocServerConfig): ByocServer {
 
       if (parts[0] !== "byoc") return { status: 404, json: { error: "not found" } };
 
-      // POST /byoc/sessions — MINT (authed).
+      // POST /byoc/sessions: mint (authed).
       if (req.method === "POST" && parts.length === 2 && parts[1] === "sessions") {
         if (!req.user?.id) {
           return { status: 401, json: { error: "authentication required to mint a BYOC session" } };
@@ -196,9 +150,8 @@ export function createServer(config: ByocServerConfig): ByocServer {
         return { status: 200, json: minted };
       }
 
-      // --- Device auth (§P) ---
-      // POST /byoc/devices — REGISTER. On the unauthenticated ingress on purpose: the container
-      // has no browser session, and the short-lived join token is the gate.
+      // --- Device auth ---
+      // POST /byoc/devices: register, on the unauthenticated ingress because the container has no browser session and the join token is the gate.
       if (req.method === "POST" && parts.length === 2 && parts[1] === "devices") {
         if (!devices) return { status: 404, json: { error: "device auth not enabled" } };
         const body = req.body as { joinToken?: string; publicKey?: string; label?: string };
@@ -211,14 +164,13 @@ export function createServer(config: ByocServerConfig): ByocServer {
           : { status: 401, json: { error: res.reason } };
       }
 
-      // GET /byoc/challenge — a single-use nonce for a container to sign. Unauthenticated: a nonce
-      // is useless without the matching private key, and issuing one leaks nothing.
+      // GET /byoc/challenge: a single-use nonce for a container to sign, unauthenticated because a nonce is useless without the matching private key.
       if (req.method === "GET" && parts.length === 2 && parts[1] === "challenge") {
         if (!devices) return { status: 404, json: { error: "device auth not enabled" } };
         return { status: 200, json: devices.challenge() };
       }
 
-      // GET /byoc/devices — the settings list. AUTHED: a device list is per-user.
+      // GET /byoc/devices: the per-user settings list (authed).
       if (req.method === "GET" && parts.length === 2 && parts[1] === "devices") {
         if (!devices) return { status: 404, json: { error: "device auth not enabled" } };
         if (!req.user?.id) return { status: 401, json: { error: "authentication required" } };
@@ -226,7 +178,7 @@ export function createServer(config: ByocServerConfig): ByocServer {
         return { status: 200, json: list };
       }
 
-      // DELETE /byoc/devices/:id — deregister. AUTHED, and scoped to the caller's own devices.
+      // DELETE /byoc/devices/:id: deregister (authed, scoped to the caller's own devices).
       if (req.method === "DELETE" && parts.length === 3 && parts[1] === "devices") {
         if (!devices) return { status: 404, json: { error: "device auth not enabled" } };
         if (!req.user?.id) return { status: 401, json: { error: "authentication required" } };
@@ -242,31 +194,23 @@ export function createServer(config: ByocServerConfig): ByocServer {
         if (!session) {
           return { status: 200, json: { status: "disconnected", lastAuthFailure: authFailures.get(owner) ?? null } };
         }
-        // THREE states, not two: "minted" (session exists, container has not dialled in yet) is
-        // distinct from "disconnected" (nothing minted). The UI needs the difference to say
-        // "waiting for your container" rather than "not set up".
+        // "minted" (session exists, container not yet dialled in) is distinct from "disconnected" (nothing minted).
         return {
           status: 200,
           json: {
             sessionId: session.sessionId,
             status: session.online ? "connected" : "minted",
-            // The most recent REJECTED attempt, so "connected: false" can say WHY instead of
-            // looking identical to "the user never started a container".
+            // The most recent rejected attempt, so a disconnected status can say why.
             lastAuthFailure: authFailures.get(owner) ?? null,
           },
         };
       }
 
-      // GET /byoc/:id/tunnel — the agent-host's INBOUND stream for container-initiated frames
-      // (MCP over the wire). The agent-host otherwise reaches this controller over HTTP/SSE PER
-      // PROMPT, so it has no channel for a stream the CONTAINER opens: exec frames only work
-      // because they arrive during a prompt, and tunnel frames are deliberately kept out of run
-      // streams (a run's stream is the conversation's transcript). This is that channel — one
-      // long-lived SSE per session, replies go back via POST /byoc/:id/tunnel/:streamId.
+      // GET /byoc/:id/tunnel: the agent-host's inbound stream for container-initiated frames, one long-lived SSE per session, with replies via POST /byoc/:id/tunnel/:streamId.
       if (req.method === "GET" && parts.length === 3 && parts[2] === "tunnel") {
         const sessionId = parts[1];
         if (!registry.resolveBySession(sessionId)) {
-          // A dead stream would leave the agent-host waiting on frames that can never arrive.
+          // A stream for an unknown session would leave the agent-host waiting on frames that can never arrive.
           return { status: 404, json: { error: "unknown session" } };
         }
         return { status: 200, stream: tunnelStream(sessionId) };
@@ -280,27 +224,16 @@ export function createServer(config: ByocServerConfig): ByocServer {
           return { status: 404, json: { error: "unknown session" } };
         }
 
-        // Every ACP REQUEST the agent-host makes — initialize, new_session, prompt, cancel,
-        // kill_terminals — comes through here. They are NOT all prompts: routing them all to a
-        // "prompt" verb was fine on the wire (the frame carries its own `type`), but only if the
-        // relay forwards the WHOLE frame. It used to forward `payload` under a hardcoded
-        // type:"prompt", so an initialize/new_session arrived at the container as a prompt with
-        // no sessionId and no text — `prompt acp-session=undefined text=""` — and the ACP
-        // handshake never completed, so no run could start.
+        // Every ACP request the agent-host makes comes through the "prompt" verb, and the frame carries its own `type`.
         if (req.method === "POST" && verb === "prompt" && parts.length === 3) {
           const session = registry.resolveBySession(sessionId);
-          // 503, never a hang: the agent-host transport turns a non-OK into a CLOSED transport,
-          // which the bridge surfaces as RUN_ERROR ("your Claude is offline") instead of leaving
-          // the user watching a spinner on a run that can never finish.
+          // A 503 becomes a closed transport that the bridge surfaces as RUN_ERROR, never a hang.
           if (!session?.online) return { status: 503, json: { error: "container not connected" } };
-          // Forward the frame's own type + payload, so initialize/new_session/cancel reach the
-          // container as themselves rather than as an empty prompt.
+          // Forward the frame's own type and payload so initialize/new_session/cancel reach the container as themselves.
           const frame = req.body as { type?: string; id?: string; payload?: unknown };
           return {
             status: 200,
-            // Pass the CALLER'S frame id through — the agent-host correlates the ack by it.
-            // Dropping it here (and re-minting in the relay) hung every real run at
-            // `initialize` while curl probes looked healthy.
+            // The caller's frame id passes through because the agent-host correlates the ack by it.
             stream: relay.request(sessionId, frame?.type ?? "prompt", (frame?.payload ?? {}) as never, frame?.id),
           };
         }
@@ -311,8 +244,7 @@ export function createServer(config: ByocServerConfig): ByocServer {
           return res.ok ? { status: 204 } : { status: 409, json: { error: res.reason } };
         }
 
-        // POST /byoc/:id/tunnel/:streamId — the agent-host's REPLY into a container-opened
-        // tunnel stream (a response chunk, or the close that ends it).
+        // POST /byoc/:id/tunnel/:streamId: the agent-host's reply into a container-opened tunnel stream.
         if (req.method === "POST" && verb === "tunnel" && parts.length === 4) {
           const streamId = parts[3];
           const r = relay.answerTunnel(sessionId, streamId, req.body as WireFrame);
@@ -332,12 +264,10 @@ export function createServer(config: ByocServerConfig): ByocServer {
     authorizeUpgrade(sessionId, token) {
       const session = registry.resolveBySession(sessionId);
       if (!session) return { ok: false, reason: "unknown session" };
-      // verifyJoinToken checks signature (constant-time), expiry, AND audience — the audience being
-      // `byoc` is what stops a token minted for the retired webhooks bridge from working here.
+      // verifyJoinToken checks signature, expiry and audience.
       const verified = verifyJoinToken(token, secret);
       if (!verified.ok) return { ok: false, reason: verified.reason };
-      // And the token's owner must own THIS session: /byoc/ws/:id is reachable by anyone, so a
-      // caller holding a valid token of their own must not attach to someone else's session.
+      // The token's owner must own this session, or a caller with a valid token of their own could attach to someone else's session.
       if (verified.claims.owner !== session.owner) return { ok: false, reason: "owner mismatch" };
       return { ok: true, owner: session.owner };
     },
@@ -346,7 +276,7 @@ export function createServer(config: ByocServerConfig): ByocServer {
       const owner = info.deviceId
         ? await devices?.ownerOf(info.deviceId)
         : decodeClaimsUnverified(info.token ?? "")?.owner;
-      if (!owner) return; // unattributable — the warn log still has the raw event
+      if (!owner) return; // unattributable; the warn log still has the raw event
       authFailures.set(owner, { reason: info.reason, at: new Date().toISOString() });
     },
 

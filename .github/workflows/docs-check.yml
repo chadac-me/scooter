@@ -1,8 +1,6 @@
 name: Docs validation (PR check)
 
-# Validate that mkdocs builds successfully on PRs, before merge. The actual deployment
-# to GitHub Pages happens only on main (via docs.yml). This catches broken refs/config
-# early without waiting for merge.
+# Validate that mkdocs builds on PRs; deployment happens only on main via docs.yml.
 on:
   pull_request:
     paths:

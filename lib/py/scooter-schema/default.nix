@@ -1,11 +1,7 @@
 { lib, python3Packages, ... }:
 
-# scooter_schema — GENERATED SQLAlchemy models for the shared databases.
-#
-# The per-database model modules (webhooks/scheduler/broker/byoc) are generated
-# from lib/sql/<db>/schema.sql by `just db-generate` (sqlacodegen). This package
-# just ships them + the runtime ownership guard, so the Python services import one
-# consistent set of models instead of hand-writing their own.
+# scooter_schema: the SQLAlchemy models generated from lib/sql/<db>/schema.sql by
+# `just db-generate`, plus the runtime ownership guard.
 
 python3Packages.buildPythonPackage {
   pname = "scooter-schema";
@@ -22,9 +18,7 @@ python3Packages.buildPythonPackage {
   nativeCheckInputs = with python3Packages; [
     pytestCheckHook
   ];
-  # Importing each generated module proves the generation produced valid models
-  # (SQLAlchemy resolves the columns/constraints) — a cheap guard against broken
-  # or drifted output slipping through.
+  # Importing each generated module proves the generation produced valid models.
   pythonImportsCheck = [
     "scooter_schema.webhooks"
     "scooter_schema.scheduler"

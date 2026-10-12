@@ -1,21 +1,11 @@
-"""Sandbox-side AWS tools — credential_process helper + request CLI.
+"""Sandbox-side AWS tools: the credential_process helper and the request CLI.
 
-DESIGN BOILERPLATE. These ship in the SANDBOX image (not the broker pod) and call
-the broker with the pod's projected SA token (same auth as agent-broker.sh:
-BROKER_URL + /var/run/secrets/broker/token). Two entry points:
-
-  scooter-aws-credentials --profile <name>
-      AWS credential_process helper. Resolves <profile> -> account -> the
-      conversation's ACTIVE permission request, prints the credential_process
-      JSON. If no active grant: exit non-zero with a verbose, actionable error
-      (how to run `scooter-aws request …`). No caching.
-
-  scooter-aws <request|status|accounts|revoke> …
-      The request/management CLI the agent (via a skill) uses to ASK for access.
-
-~/.aws/config is generated at sandbox start (entrypoint) from the account
-ConfigMap: one [profile <name>] per enabled account, each with
-  credential_process = scooter-aws-credentials --profile <name>
+These ship in the sandbox image and call the broker with the pod's projected SA
+token. `scooter-aws-credentials --profile <name>` resolves the conversation's active
+grant for the profile and prints credential_process JSON, failing closed otherwise;
+`scooter-aws <request|escalate|status|accounts|refresh|revoke>` is the CLI the agent
+uses to ask for access. ~/.aws/config is rendered at sandbox start with one profile
+per enabled account.
 """
 
 import argparse
@@ -54,8 +44,7 @@ def _token() -> str:
 
 
 def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
-    """Call the broker's aws provider routes (prefix /aws/aws/...) with the SA
-    token. Returns (status_code, parsed_json)."""
+    """Call the broker's aws provider routes (prefix /aws/aws/...) with the SA token, returning (status_code, parsed_json)."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         f"{_broker_base()}/aws/aws/{path.lstrip('/')}",
@@ -66,10 +55,7 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         with urllib.request.urlopen(req) as resp:
             return resp.status, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
-        # Finding #27: a non-JSON error body was dropped to {} — losing the only
-        # human-readable detail (e.g. a plain-text 502 / proxy error). Read the
-        # body ONCE, try JSON, and on failure preserve the raw text so the caller
-        # can surface it instead of a bare status with no explanation.
+        # A non-JSON error body is kept as raw text so the caller can surface it.
         raw = b""
         try:
             raw = e.read() or b""
@@ -83,15 +69,7 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
 
 # --- credential_process helper ------------------------------------------
 def credentials_main(argv: list[str] | None = None) -> int:
-    """`scooter-aws-credentials --profile <name>` — AWS credential_process helper.
-
-    Resolves <profile> -> the conversation's most recent ACTIVE request for it.
-    Active: print the credential_process JSON, return 0. Otherwise: write a
-    verbose, actionable error to stderr and return 1 (fail closed). No cache.
-
-    Also `--render-config <accounts.json>`: print ~/.aws/config from the registry
-    (used by the sandbox entrypoint — keeps the render in one place).
-    """
+    """`scooter-aws-credentials --profile <name>`, the AWS credential_process helper; `--render-config <accounts.json>` prints ~/.aws/config instead."""
     ap = argparse.ArgumentParser(prog="scooter-aws-credentials")
     ap.add_argument("--profile")
     ap.add_argument("--render-config", help="print ~/.aws/config from an accounts.json registry")
@@ -106,8 +84,7 @@ def credentials_main(argv: list[str] | None = None) -> int:
         ap.error("--profile is required")
     profile = args.profile
 
-    # Find an active request for this profile/account. (List endpoint is the
-    # audit query scoped to the caller's conversation by the broker.)
+    # The list endpoint is scoped to the caller's conversation by the broker.
     status, body = _call("GET", f"requests?target_account={profile}")
     active = None
     if status == 200:
@@ -117,7 +94,7 @@ def credentials_main(argv: list[str] | None = None) -> int:
         sys.stderr.write(_not_granted_message(profile))
         return 1
 
-    # Re-fetch the single request to get fresh credentials (status carries them).
+    # The single-request status carries fresh credentials.
     status, req = _call("GET", active["request_id"])
     creds = (req or {}).get("credentials")
     if status != 200 or not creds:
@@ -135,18 +112,7 @@ def credentials_main(argv: list[str] | None = None) -> int:
 
 
 def _pick_active_request(requests: list, profile: str) -> dict | None:
-    """Pick the request whose credentials the AWS SDK should use for `profile`.
-
-    The broker can hold MULTIPLE 'active' requests for one account: a re-request
-    creates a new one, and zombie requests can linger in 'active' when the sweep
-    can't tear down their IAM role (teardown AccessDenied — see the bug report). The
-    list is oldest-first, so taking the FIRST match hands the SDK the OLDEST request,
-    whose STS token expired hours ago → ExpiredTokenException.
-
-    Instead: among the active requests for this account, prefer those NOT past their
-    STS `expires_at`, and pick the NEWEST by `requested_at` (most likely to have — or
-    be refreshable to — a live token). Fall back to the newest active regardless of
-    expiry (the broker auto-refreshes on status(), so even a lapsed one may re-vend)."""
+    """Pick the newest active request for `profile`, preferring one whose STS token has not expired."""
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).isoformat()
@@ -188,9 +154,7 @@ def cli_main(argv: list[str] | None = None) -> int:
     p_req.add_argument("--managed", action="append", default=[], help="managed policy ARN (repeatable)")
     p_req.add_argument("--justification", required=True)
 
-    # escalate: expand an existing grant. Same shape as `request` + the parent request id.
-    # The broker links it (parent_request_id) and, once approved, supersedes the parent so
-    # exactly one grant is live per account (no zombie grants).
+    # escalate has the shape of request plus the parent request id, which the broker supersedes once this is approved.
     p_esc = sub.add_parser("escalate", help="request MORE permissions, expanding an existing request")
     p_esc.add_argument("request_id", help="the existing request to expand (its request_id)")
     p_esc.add_argument("--profile", required=True, help="account profile/alias (same account as the parent)")
@@ -241,15 +205,11 @@ def cli_main(argv: list[str] | None = None) -> int:
             "managed_policy_arns": args.managed,
             "justification": args.justification,
         }
-        # escalate expands an EXISTING request: link the parent so the broker supersedes it
-        # once this is approved (one live grant per account). Same route shape otherwise.
         route = "request"
         if args.cmd == "escalate":
             route = "escalate"
             req_body["parent_request_id"] = args.request_id
-        # A link to THIS conversation (where the human approves) — the agent-host
-        # injects CONVERSATION_URL into the sandbox. Lets the approval UI / the
-        # requester jump straight to the request.
+        # The agent-host injects CONVERSATION_URL into the sandbox so the request links back to where the human approves.
         conv_url = os.environ.get("CONVERSATION_URL")
         if conv_url:
             req_body["conversation_url"] = conv_url
@@ -259,9 +219,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             if body.get("status") == "active":
                 print(f"requested: {rid} — AUTO-APPROVED (read-only). Credentials are ready; use `aws --profile {args.profile} …`.")
             else:
-                # Requesting does NOT pause the agent and there is NO auto-notify on
-                # grant — so tell the agent explicitly to WAIT + POLL (a common failure
-                # is re-requesting in a loop or giving up). See skills/scooter-aws.md.
+                # Requesting neither pauses the agent nor notifies it on grant, so it is told to wait and poll.
                 msg = (
                     f"requested: {rid} (status: {body['status']}). A human must approve this "
                     f"in this conversation — you are NOT notified automatically.\n"
@@ -282,11 +240,7 @@ def cli_main(argv: list[str] | None = None) -> int:
 
 # --- helpers (shared) ----------------------------------------------------
 def render_aws_config(account_registry: dict[str, dict], *, helper_path: str = "scooter-aws-credentials") -> str:
-    """Render ~/.aws/config: one [profile <name>] per ENABLED account, each with
-    `credential_process = {helper_path} --profile <name>` (+ region). Generated at
-    sandbox start from the account ConfigMap — no static keys, single source of
-    truth with the broker's registry.
-    """
+    """Render ~/.aws/config with one [profile <name>] per enabled account, each using `credential_process = {helper_path} --profile <name>`."""
     blocks: list[str] = []
     for name, acct in account_registry.items():
         if not acct.get("enabled", False):

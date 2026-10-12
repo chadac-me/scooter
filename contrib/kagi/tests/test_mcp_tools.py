@@ -1,10 +1,4 @@
-"""Kagi's `kagi_web_search` tool (issue #700, porting PR #698).
-
-Kagi's own quirk is the one to protect: its result rows are TYPED, and the row that is
-not a result carries no url. Everything else about search behaviour is shared with
-brave and tested once, against the shared helpers
-(lib/py/scooter-broker-lib/tests/test_search.py).
-"""
+"""Kagi's `kagi_web_search` tool, whose typed result rows are the part specific to it; the shared search behaviour is tested in lib/py/scooter-broker-lib/tests/test_search.py."""
 
 from __future__ import annotations
 
@@ -59,8 +53,7 @@ def _data(*rows: dict) -> httpx.Response:
 
 
 async def test_the_related_searches_row_is_FILTERED_OUT():
-    """`t: 1` is a related-searches row with a `list` and no url. Without the `t == 0`
-    filter it renders as a hit the agent cannot follow. Why: PR #698."""
+    """`t: 1` is a related-searches row with a `list` and no url, which the `t == 0` filter drops."""
     ctx = _ctx(
         _data(
             {"t": 0, "title": "A real hit", "url": "https://x.test/a", "snippet": "about a"},
@@ -74,8 +67,7 @@ async def test_the_related_searches_row_is_FILTERED_OUT():
 
 
 async def test_only_result_rows_count_toward_the_cap():
-    """The filter runs BEFORE the cap, so a page padded with non-result rows still
-    yields a full list rather than a short one."""
+    """The filter runs before the cap."""
     rows = []
     for i in range(MAX_RESULTS):
         rows.append({"t": 1, "list": ["noise"]})
@@ -101,8 +93,7 @@ async def test_an_upstream_failure_is_reported_VERBATIM():
 # --- the provider wiring ----------------------------------------------------------
 
 def test_the_scheme_word_is_part_of_the_value(monkeypatch):
-    """Kagi wants `Authorization: Bot <token>`. kind="bearer" would send
-    "Bearer <token>" and earn a 401, so the prefix travels in the value."""
+    """Kagi wants `Authorization: Bot <token>`, so the prefix travels in the value."""
     monkeypatch.setenv("KAGI_API_KEY", "secret")
     provider = kagi()
     assert provider.enabled
@@ -112,8 +103,7 @@ def test_the_scheme_word_is_part_of_the_value(monkeypatch):
 
 
 def test_no_key_means_no_provider_and_no_bare_Bot_header(monkeypatch):
-    """`"Bot "` with nothing after it is a credential-shaped empty string — the guard
-    keeps the value empty so a misread `enabled` cannot send one."""
+    """The value stays empty rather than a bare `"Bot "`."""
     monkeypatch.setenv("KAGI_API_KEY", "")
     provider = kagi()
     assert provider.enabled is False
@@ -128,13 +118,6 @@ def test_it_ships_tools_and_NO_raw_proxy_route(monkeypatch):
 
 
 async def test_the_tool_is_named_for_its_provider_so_a_sibling_can_coexist():
-    """The name is the whole reason several search providers can be enabled at once.
-
-    Tool names are flat and global — the broker refuses to start on a duplicate
-    (broker/mcp/routes.py) — so a bare `web_search` would make kagi and every
-    sibling search contrib mutually exclusive. That exclusivity was an artifact of the
-    name, not a real constraint; nothing stops a deployment from wanting two indexes.
-    Asserted against the SERVER's registry, because that is the name the agent is shown.
-    """
+    """Tool names are flat and global, so a bare `web_search` would make the search contribs mutually exclusive."""
     names = {t.name for t in await kagi_tools.mcp.list_tools(run_middleware=False)}
     assert names == {"kagi_web_search"}

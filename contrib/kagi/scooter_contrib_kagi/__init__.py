@@ -1,1 +1,1 @@
-"""Kagi Search contrib — the agent's `web_search` tool, backed by Kagi."""
+"""Kagi Search contrib: the agent's `kagi_web_search` tool."""

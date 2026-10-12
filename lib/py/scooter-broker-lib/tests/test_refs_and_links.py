@@ -1,9 +1,4 @@
-"""The URL/id parsers and the link-resolution mechanics (issue #700).
-
-Ported from the agent-host's resourceRef/agentTools specs along with the code. Every
-case below is one a wrong answer would turn into a comment on the wrong resource, which
-is why the parsers return None rather than guess (PR #571).
-"""
+"""The URL/id parsers and the link-resolution mechanics, which return None rather than guess."""
 
 from __future__ import annotations
 
@@ -24,10 +19,9 @@ from scooter_broker_lib.refs import (
 @pytest.mark.parametrize("url,expected", [
     ("https://github.com/o/r/pull/7", ("o", "r", 7)),
     ("https://github.com/o/r/issues/7", ("o", "r", 7)),
-    # a suffix is common: /files, a #issuecomment anchor, a query
     ("https://github.com/o/r/pull/7/files", ("o", "r", 7)),
     ("https://github.com/o/r/pull/7#issuecomment-1", ("o", "r", 7)),
-    # ENTERPRISE host — checking the host would break every self-hosted install
+    # The host is not checked, so Enterprise installs work.
     ("https://github.acme.internal/o/r/pull/7", ("o", "r", 7)),
 ])
 def test_github_urls_parse(url, expected):
@@ -46,8 +40,7 @@ def test_github_non_targets_return_none(url):
 
 
 def test_github_resource_id_accepts_both_shapes():
-    """ONE resource, two spellings: conversation_map holds `o/r#7`, resource_links
-    holds the html_url (issue #563)."""
+    """One resource, two spellings: conversation_map holds `o/r#7`, resource_links holds the html_url."""
     short = parse_github_resource_id("o/r#7")
     url = parse_github_resource_id("https://github.com/o/r/pull/7")
     assert (short.owner, short.repo, short.number) == ("o", "r", 7)
@@ -59,9 +52,9 @@ def test_github_resource_id_accepts_both_shapes():
 @pytest.mark.parametrize("url,expected", [
     ("https://gitlab.com/g/p/-/merge_requests/3", ("g/p", "3", True)),
     ("https://gitlab.com/g/p/-/issues/3", ("g/p", "3", False)),
-    # the /-/ separator is OPTIONAL — older URLs omit it
+    # The /-/ separator is optional.
     ("https://gitlab.com/g/p/merge_requests/3", ("g/p", "3", True)),
-    # SUBGROUPS nest arbitrarily, so the kind segment splits project from iid
+    # Subgroups nest arbitrarily.
     ("https://gitlab.com/g/sub/deeper/p/-/merge_requests/3", ("g/sub/deeper/p", "3", True)),
 ])
 def test_gitlab_urls_parse(url, expected):
@@ -86,8 +79,7 @@ def test_gitlab_resource_id_shapes():
 
 
 def test_gitlab_resource_id_tries_the_URL_first():
-    """A web_url ending in a `#<n>` fragment would otherwise match `<repo>#<iid>` and
-    yield the whole URL as the project path."""
+    """A web_url ending in a `#<n>` fragment would otherwise match `<repo>#<iid>`."""
     t = parse_gitlab_resource_id("https://gitlab.com/g/p/-/merge_requests/3#note_9")
     assert t.project_id == "g/p"
     assert t.is_mr is True
@@ -115,8 +107,7 @@ def _link(source="github", **over):
 
 
 def test_links_for_preserves_order_which_is_OLDEST_FIRST():
-    """listLinks orders by insert id, so the resource the conversation was STARTED from
-    must stay first — it wins over one the agent created later."""
+    """listLinks orders by insert id, so the resource the conversation was started from stays first."""
     rows = [_link(url="first"), _link(source="slack"), _link(url="second")]
     assert [l["url"] for l in links_for(rows, "github")] == ["first", "second"]
 
@@ -133,8 +124,7 @@ def test_first_target_takes_the_FIRST_complete_one():
 
 
 def test_first_target_SKIPS_an_incomplete_link_without_mixing_fields():
-    """THE rule, and why `resolve` takes a whole link: half a ref plus half of another
-    once produced an owner from one repo and a number from another."""
+    """Fields are never mixed across links."""
     rows = [_link(url=""), _link(url="real")]
     assert first_target(rows, "github", lambda l: l["url"] or None) == "real"
 
@@ -153,23 +143,17 @@ def test_first_target_ignores_other_sources():
     ("something_else", None), ("", None),
 ])
 def test_resource_type_is_refuses_to_guess(spelling, expected):
-    """Each writer spells it differently, so matching one spelling is wrong — and an
-    UNRECOGNISED one must return None so the caller falls back to something it trusts,
-    rather than defaulting to MR and commenting on the wrong object."""
+    """An unrecognised spelling returns None so the caller falls back to something it trusts."""
     assert resource_type_is(spelling, truthy=("merge_request", "merge_requests", "mr"),
                             falsy=("issue", "issues")) is expected
 
 
-# --- the conversation_map fallback shapes (issue #700) -----------------------------
-#
-# The broker turns each conversation_map row into a link whose `url` carries the raw
-# resource_id (broker/mcp/routes.py `_resource_map`). That only works because the
-# resource-id parsers try the short form FIRST and then fall back to the URL parser —
-# which is what lets every contrib resolve both shapes with ONE call.
+# --- the conversation_map fallback shapes -----------------------------
+# The broker turns each conversation_map row into a link whose `url` carries the raw resource_id, so the parsers must accept both shapes.
 
 @pytest.mark.parametrize("raw,expected", [
-    ("o/r#7", ("o", "r", 7)),                              # a conversation_map row
-    ("https://github.com/o/r/pull/7", ("o", "r", 7)),       # a resource_links row
+    ("o/r#7", ("o", "r", 7)),
+    ("https://github.com/o/r/pull/7", ("o", "r", 7)),
 ])
 def test_one_github_call_covers_both_row_shapes(raw, expected):
     t = parse_github_resource_id(raw)
@@ -187,5 +171,5 @@ def test_one_gitlab_call_covers_both_row_shapes(raw, expected):
 
 
 def test_a_github_resource_id_that_is_neither_shape_is_none():
-    """So a garbage mapping row is SKIPPED rather than resolving to a wrong target."""
+    """A garbage mapping row is skipped rather than resolving to a wrong target."""
     assert parse_github_resource_id("not-a-resource") is None

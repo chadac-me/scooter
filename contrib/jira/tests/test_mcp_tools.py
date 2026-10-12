@@ -1,9 +1,4 @@
-"""Jira's agent tool (issue #700).
-
-Ported from services/agent-host/test/contract/agentTools.spec.ts with the code. A
-handler is a plain async function over a ToolContext, so these need no broker, no HTTP
-and no Kubernetes — fakes for `upstream` and `links` are enough.
-"""
+"""Jira's agent tool, tested as a plain async function over a ToolContext with fakes for `upstream` and `links`."""
 
 from __future__ import annotations
 
@@ -68,7 +63,7 @@ async def test_the_gate_OPENS_on_a_browse_url():
 
 
 async def test_comment_posts_to_rest_v2():
-    """v2, not v3: v2 accepts a plain-text `body` where v3 requires ADF."""
+    """v2 accepts a plain-text `body` where v3 requires ADF."""
     ctx = _ctx(links=[_link(ref={"issueKey": "ENG-1"})])
     res = await tools.jira_comment(body="hi", ctx=ctx)
     assert res.is_error is False
@@ -88,11 +83,10 @@ async def test_comment_surfaces_a_failure_VERBATIM():
     assert res.is_error is True and "issue does not exist" in res.text
 
 
-# --- the conversation_map fallback (issue #700) ------------------------------------
+# --- the conversation_map fallback ------------------------------------
 
 async def test_a_BARE_issue_key_resolves():
-    """jira's conversation_map resource_id IS the key, where a resource_links row holds
-    the browse URL. The broker feeds both through the link's `url`, so both must work."""
+    """jira's conversation_map resource_id is the bare key, fed through the link's `url` like a browse URL."""
     ctx = _ctx(links=[_link(url="ENG-12")])
     assert (await tools.jira_target(ctx)).issue_key == "ENG-12"
 
@@ -102,12 +96,11 @@ async def test_a_bare_key_is_upcased():
 
 
 async def test_a_non_key_string_does_NOT_resolve():
-    """A garbage mapping row must be skipped, not turned into a wrong issue key."""
+    """A garbage mapping row is skipped, not turned into a wrong issue key."""
     assert await tools.jira_target(_ctx(links=[_link(url="just some text")])) is None
 
 
 async def test_a_real_link_WINS_over_the_appended_mapping_row():
-    """The broker appends mapping rows AFTER the real links, and first_target takes the
-    first complete target — so position is the whole precedence rule."""
+    """The broker appends mapping rows after the real links, so position is the precedence rule."""
     ctx = _ctx(links=[_link(ref={"issueKey": "REAL-1"}), _link(url="FALLBACK-2")])
     assert (await tools.jira_target(ctx)).issue_key == "REAL-1"

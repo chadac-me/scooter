@@ -1,12 +1,6 @@
 /**
- * Tier 1 — the container's connect URL (§P).
- *
- * WHY THIS FILE EXISTS. The controller authorizes the WS UPGRADE, before any application message
- * can be sent, so credentials must ride on the URL. The first wiring put them in a hello FRAME —
- * the controller read query params, the container sent a message, and device auth silently never
- * engaged: every reconnect quietly fell back to the join token and died once it expired. Both
- * sides were individually correct; the SEAM was wrong. Exactly the failure mode that has bitten
- * this project twice already.
+ * Tier 1: the container's connect URL. The controller authorizes the WS upgrade before any
+ * application message can be sent, so the credentials must ride on the URL.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -48,17 +42,17 @@ describe("container connect URL", () => {
     );
     expect(u.searchParams.get("deviceId")).toBe("dev-1");
     expect(u.searchParams.get("nonce")).toBe("nonce-xyz");
-    // The signature must actually verify against the stored public half — the controller will.
+    // The signature must verify against the stored public half, as the controller checks.
     const sig = u.searchParams.get("signature") ?? "";
     expect(
       cryptoVerify(null, Buffer.from("nonce-xyz"), createPublicKey(key.publicKeyPem), Buffer.from(sig, "base64")),
     ).toBe(true);
-    // The bearer token is NOT sent once a device key exists — that is the point of §P.
+    // The bearer token is not sent once a device key exists.
     expect(u.searchParams.get("token")).toBeNull();
   });
 
   it("a registered container whose CHALLENGE fetch fails falls back to the join token", async () => {
-    // Controller mid-rollout. Degrading to the (short-lived) token beats refusing to connect.
+    // Degrading to the short-lived token beats refusing to connect.
     await saveDeviceIdentity({ deviceId: "dev-1", ...generateDeviceKey() });
     const u = new URL(
       await buildConnectUrl({
@@ -98,16 +92,9 @@ describe("container connect URL", () => {
 });
 
 /**
- * WIRING — does the client actually USE buildConnectUrl?
- *
- * The tests above prove buildConnectUrl builds the right URL. They do NOT prove the client dials
- * it: a rebase reverted `new WebSocket(connectUrl)` back to `new WebSocket(deps.url)` and every
- * one of them still passed, because they call the builder directly. Device auth would have
- * silently never engaged — credentials in a hello frame the controller never reads, since it
- * authorizes the UPGRADE before any message exists.
- *
- * Same shape as services/byoc-controller/test/wiring.spec.ts: assert on the source, because the
- * composition is the thing that broke and importing the module would open a real socket.
+ * Wiring: the client must actually dial the URL buildConnectUrl builds. This asserts on
+ * the source, as services/byoc-controller/test/wiring.spec.ts does, because importing the
+ * module would open a real socket.
  */
 describe("client wiring", () => {
   const SRC = readFileSync(
@@ -123,8 +110,7 @@ describe("client wiring", () => {
   });
 
   it("does NOT put device credentials in the hello frame", () => {
-    // The controller reads query params at the upgrade; a deviceId in the hello is dead code that
-    // looks like working auth.
+    // The controller reads query params at the upgrade, so a deviceId in the hello is dead code that looks like working auth.
     const hello = SRC.match(/ws!\.send\(JSON\.stringify\(\{[^}]*protocolVersion[^}]*\}\)\)/s);
     expect(hello, "hello frame not found").toBeTruthy();
     expect(hello![0]).not.toMatch(/deviceId/);

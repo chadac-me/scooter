@@ -1,9 +1,4 @@
-"""Trigger policy — the rules four handlers each had their own copy of.
-
-These were byte-identical private functions in github/gitlab/jira/slack, so a fix
-to one silently left three behind, and a contrib handler couldn't reach any of them
-without importing the webhooks app. Why: PR #577.
-"""
+"""The trigger policy every handler applies identically."""
 
 from __future__ import annotations
 
@@ -42,7 +37,6 @@ def test_mentions_are_case_insensitive(cfg):
 
 def test_strip_mention_leaves_the_message(cfg):
     assert policy.strip_mention("@agent  fix the flake  ") == "fix the flake"
-    # Nothing to strip is not an error — the text forwards unchanged.
     assert policy.strip_mention("fix the flake") == "fix the flake"
 
 
@@ -60,7 +54,7 @@ def test_ignored_users_match_case_insensitively_and_ignore_spacing(cfg):
 
 
 def test_an_empty_drop_list_ignores_nobody(cfg):
-    # Including the empty username: a blank entry must not become a wildcard.
+    # A blank entry must not become a wildcard.
     cfg.ignore_usernames = ""
     assert not policy.is_ignored_user("alice")
     assert not policy.is_ignored_user("")
@@ -73,8 +67,7 @@ def test_a_list_of_only_separators_ignores_nobody(cfg):
 
 
 def test_the_drop_list_is_re_read_when_it_changes(cfg):
-    # Parsed per distinct value, so a settings change at runtime takes effect —
-    # snapshotting it at init() would silently keep the old list.
+    # Parsed per distinct value, so a settings change at runtime takes effect.
     assert not policy.is_ignored_user("noisy")
     cfg.ignore_usernames = "noisy"
     assert policy.is_ignored_user("noisy")

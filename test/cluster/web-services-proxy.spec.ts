@@ -1,20 +1,11 @@
 /**
- * Tier 2 — the web-service reverse proxy against a REAL cluster pod.
+ * Tier 2: the web-service reverse proxy against a real cluster pod.
  *
- * Proves the whole proxy stack end-to-end on real infra: provision a sandbox,
- * declare + start a web service INSIDE the pod, then drive the production proxy
- * (createWebServiceProxy + WebServiceRegistry + resolvePodTarget) mounted on a
- * real http.Server and assert it forwards HTTP — and a WebSocket upgrade — into
- * the pod's service.
- *
- * The proxy + registry run IN-PROCESS here (like the other cluster specs drive the
- * provisioner directly), pointed at the real provisioned pod via connectSandbox /
- * resolvePodTarget. This exercises real pod-IP resolution, real exec (manifest
- * read + systemctl), and the real HTTP/WS proxy against a real listener — the same
- * modules the deployed agent-host wires together.
- *
- * Gated: RUN_CLUSTER_TESTS=1. Reaches the pod IP directly, so it assumes a local
- * cluster whose pod network is routable from the test host (k3s/kind/k3d).
+ * Provisions a sandbox, declares and starts a web service inside the pod, then drives the
+ * production proxy (createWebServiceProxy, WebServiceRegistry, resolvePodTarget) in-process on
+ * a real http.Server and asserts it forwards HTTP and a WebSocket upgrade into the pod's
+ * service. Gated on RUN_CLUSTER_TESTS=1; it reaches the pod IP directly, so the pod network
+ * must be routable from the test host.
  */
 
 import { createServer, request, type Server } from "node:http";
@@ -36,10 +27,7 @@ const IMAGE = process.env.SANDBOX_IMAGE ?? "agent-sandbox-os:latest";
 
 const SELECTOR = (id: string) => `agents.x-k8s.io/sandbox-name=conv-${id}`;
 
-// A sub-path-aware fake service (python http.server) + its discovery manifest,
-// installed into the pod at runtime — stands in for a real marimo/webServices unit
-// so the test doesn't depend on marimo being enabled/built in the image. Serves
-// 200 under /c/<id>/demo and echoes an `upgrade` (WebSocket).
+// A sub-path-aware fake service installed into the pod at runtime, serving 200 under /c/<id>/demo.
 const DEMO_PORT = 9931;
 function demoServerPy(id: string): string {
   return [
@@ -70,16 +58,14 @@ maybe("web-service reverse proxy (real pod)", () => {
     provisioner = createK8sProvisioner({ namespace: NS, sandboxImage: IMAGE });
     ref = await provisioner.create(id);
 
-    // Wait for the pod Ready + exec-able.
+    // Wait for the pod to be Ready.
     await cluster.waitFor<{ status: { conditions: Array<{ type: string; status: string }> } }>(
       "Sandbox", `conv-${id}`,
       (s) => !!s.status?.conditions?.some((c) => c.type === "Ready" && c.status === "True"),
       180_000, NS,
     );
 
-    // Seed the pod: the discovery manifest the registry reads + a startable unit.
-    // We write the manifest, drop the python server, and create a transient systemd
-    // unit `webservice-demo` (NOT started yet — explicit-start).
+    // Seed the pod with the discovery manifest the registry reads and a startable unit.
     const py = demoServerPy(id);
     const manifest = JSON.stringify({
       services: [{ name: "demo", displayName: "Demo", port: DEMO_PORT, basePath: `/c/${id}/demo`, unit: "webservice-demo" }],
@@ -87,8 +73,7 @@ maybe("web-service reverse proxy (real pod)", () => {
     await cluster.exec(SELECTOR(id), ["mkdir", "-p", "/run/scooter"], NS);
     await cluster.exec(SELECTOR(id), ["sh", "-c", `cat > /run/scooter/web-services.json <<'EOF'\n${manifest}\nEOF`], NS);
     await cluster.exec(SELECTOR(id), ["sh", "-c", `cat > /run/scooter/demo.py <<'EOF'\n${py}\nEOF`], NS);
-    // A transient unit named exactly like the option's unit, so systemctl
-    // is-active/start behave as in production. Not started here.
+    // A transient unit named like the option's unit, not started yet.
     await cluster.exec(
       SELECTOR(id),
       ["sh", "-c",
@@ -98,8 +83,7 @@ maybe("web-service reverse proxy (real pod)", () => {
       NS,
     );
 
-    // Build the production proxy + registry against the real pod. A minimal fake
-    // SessionManager maps the conversation id -> its real sandbox ref.
+    // The production proxy and registry against the real pod, with a minimal fake SessionManager.
     const sessions = {
       get: (cid: string) => (cid === id ? { id, threadId: id, sandbox: ref } : undefined),
       getByShortId: async () => undefined,
@@ -134,16 +118,13 @@ maybe("web-service reverse proxy (real pod)", () => {
   });
 
   it("declared-but-not-started -> friendly 502", async () => {
-    // Unit exists (seeded) but not started -> registry.isRunning false.
     const { status, body } = await httpGet(proxyPort, `/c/${id}/demo/`);
     expect(status).toBe(502);
     expect(body.toLowerCase()).toContain("start");
   });
 
   it("starts the service, then proxies HTTP into the pod under its base path", async () => {
-    // Start via the registry (systemctl start webservice-demo) — the same call the
-    // UI Start button makes through the agent-host.
-    // (Give it a moment to bind the port after start.)
+    // Start it as the UI Start button does, then wait for it to bind the port.
     await cluster.exec(SELECTOR(id), ["systemctl", "start", "webservice-demo"], NS);
     await waitFor(async () => {
       const { exitCode } = await cluster.exec(SELECTOR(id), ["sh", "-c", `curl -fsS localhost:${DEMO_PORT}/c/${id}/demo/ >/dev/null`], NS);
@@ -154,13 +135,13 @@ maybe("web-service reverse proxy (real pod)", () => {
     expect(status).toBe(200);
     expect(body).toContain("demo-ok");
 
-    // Outside the base path -> the in-pod service 404s (sub-path serving).
+    // Outside the base path the in-pod service 404s.
     const outside = await httpGet(proxyPort, `/c/${id}/demo/../nope`);
     expect([200]).not.toContain(outside.status);
   });
 
   it("proxies a WebSocket upgrade into the pod", async () => {
-    // The demo server echoes on upgrade — prove the raw splice works end-to-end.
+    // The demo server echoes on upgrade.
     const { statusLine, echoed } = await wsEcho(proxyPort, `/c/${id}/demo/ws`, "ping-42");
     expect(statusLine).toContain("101");
     expect(echoed).toContain("ping-42");

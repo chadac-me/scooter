@@ -1,20 +1,7 @@
 /**
- * Tier 1 contract — hydrate() driven by the Conversation CR (the SOURCE OF TRUTH).
- *
- * THE BUG THIS REPLACES. hydrate() looped over the LOCAL store's metas and used the cluster only
- * as a lookup keyed by a local record (`live.get(name)`). LOCAL_STATE_PATH is an emptyDir, so a
- * restarted pod has no metas, the loop body never runs, and `entries` stays empty — which makes
- * sweepIdle() and resumeInterrupted() (both `for (const entry of entries.values())`) no-ops
- * forever. Measured on odin: 21 running Sandboxes, 48 Conversation CRs, 59 conversations in the
- * durable store, and GET /conversations returning 0. 42 requested cores on a 24-core node, every
- * rollout deadlocked. See docs/CONVERSATION_STATE_MODEL.md.
- *
- * WHY THE EXISTING TEST DIDN'T CATCH IT. session.spec.ts:480 encodes exactly this invariant
- * ("hydrate reconciles a still-running Sandbox as running so the idle sweep reclaims it") and
- * PASSES — because it hands the SAME file-store root to both simulated processes. It models a
- * restart with durable state; production restarts with WIPED state. The property was right; the
- * fixture was more durable than the deployment. Every test here therefore states its durability
- * assumption explicitly: the second manager always gets an EMPTY local store.
+ * Contract tests for hydrate() driven by the Conversation CR, the source of truth.
+ * LOCAL_STATE_PATH is an emptyDir that a restart wipes, so every test here gives the
+ * second manager an empty local store and expects the CR list to populate it.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -44,9 +31,7 @@ const fakeProvisioner = (): SandboxProvisioner => {
   };
 };
 
-/** In-memory store WITH meta persistence, so "the local cache survived" is expressible.
- *  (The plain fixture in session.spec.ts omits listConversations, which would make every
- *  local-path assertion here vacuously pass.) */
+/** In-memory store with meta persistence, so "the local cache survived" is expressible. */
 const inMemoryStore = (): ConversationStore => {
   const logs = new Map<SessionId, AguiEvent[]>();
   const metas = new Map<string, Record<string, unknown>>();
@@ -94,12 +79,12 @@ const provisionerWithLive = (names: string[]) => {
 
 describe("hydrate() adopts from the Conversation CR", () => {
   it("THE REGRESSION: an EMPTY local store still adopts a CR whose Sandbox is running", async () => {
-    // The exact production shape: pod restarts (local wiped), the CR and the Sandbox both survive.
+    // The pod restarts with local state wiped while the CR and the Sandbox both survive.
     const prov = provisionerWithLive(["conv-gamma"]);
     const registry = registryWith([cr("gamma")]);
     const sessions = createSessionManager({
       provisioner: prov,
-      store: inMemoryStore(), // EMPTY — this is the emptyDir
+      store: inMemoryStore(),
       conversationRegistry: registry as never,
       selfPod: SELF,
     } as never);
@@ -109,7 +94,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
     expect(sessions.list(), "the CR is the source of truth; local was empty").toHaveLength(1);
     expect(sessions.get("gamma")?.status).toBe("running");
 
-    // ...and therefore the sweep can finally reclaim it (I2).
+    // The sweep can therefore reclaim it.
     const swept = await sessions.sweepIdle(0);
     expect(swept).toContain("gamma");
     expect(prov.suspend).toHaveBeenCalledOnce();
@@ -125,14 +110,13 @@ describe("hydrate() adopts from the Conversation CR", () => {
 
     await sessions.hydrate();
     expect(sessions.list()).toHaveLength(0);
-    // and it must not be swept out from under its real owner
+    // It must not be swept out from under its real owner.
     expect(await sessions.sweepIdle(0)).toEqual([]);
     expect(prov.suspend).not.toHaveBeenCalled();
   });
 
   it("does NOT adopt an UNASSIGNED CR — the controller is the single assigner (decision Q1)", async () => {
-    // hostPod unset = the controller has not placed it yet. Self-assigning would race its load
-    // accounting, so we wait rather than claim.
+    // hostPod unset means the controller has not placed it yet, and self-assigning would race its load accounting.
     const prov = provisionerWithLive(["conv-pending"]);
     const registry = registryWith([cr("pending", { hostPod: undefined, phase: undefined })]);
     const sessions = createSessionManager({
@@ -145,8 +129,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
   });
 
   it("adopts a CR with NO local meta and NO history — enough to SUSPEND it (I5)", async () => {
-    // suspend() throws for anything not in `entries`, so a leaked sandbox was previously
-    // unreachable through the normal API. A synthesized entry closes that.
+    // suspend() throws for anything not in `entries`, so the adopted CR needs a synthesized entry.
     const prov = provisionerWithLive(["conv-bare"]);
     const registry = registryWith([cr("bare")]);
     const sessions = createSessionManager({
@@ -160,7 +143,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
   });
 
   it("a CR whose Sandbox is NOT running hydrates as suspended (not a phantom live pod)", async () => {
-    const prov = provisionerWithLive([]); // nothing running in the cluster
+    const prov = provisionerWithLive([]);
     const registry = registryWith([cr("sleepy", { phase: "Suspended" })]);
     const sessions = createSessionManager({
       provisioner: prov, store: inMemoryStore(),
@@ -169,7 +152,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
 
     await sessions.hydrate();
     expect(sessions.get("sleepy")?.status).toBe("suspended");
-    // sweepIdle only suspends RUNNING conversations — nothing to reclaim, no spurious call.
+    // sweepIdle only suspends running conversations.
     expect(await sessions.sweepIdle(0)).toEqual([]);
     expect(prov.suspend).not.toHaveBeenCalled();
   });
@@ -189,8 +172,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
   });
 
   it("a LOCAL meta with no CR still hydrates (self-heal, never lose a conversation)", async () => {
-    // The cache is not the authority, but it is not garbage either: a conversation created while
-    // the CR write failed must keep working and get re-registered.
+    // A conversation created while the CR write failed must keep working and get re-registered.
     const root = inMemoryStore();
     const prov1 = fakeProvisioner();
     const reg1 = registryWith([]);
@@ -199,7 +181,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
     } as never);
     await m1.start("orphan-local");
 
-    // Same store (so the meta persists), still no CR for it.
+    // Same store, still no CR for it.
     const reg2 = registryWith([]);
     const m2 = createSessionManager({
       provisioner: provisionerWithLive([]), store: root,
@@ -211,8 +193,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
   });
 
   it("PROPAGATES a CR list failure — a pod that cannot read the truth must not serve (Q4)", async () => {
-    // Returning [] here would mean "this pod owns nothing", indistinguishable from the truth, and
-    // the pod would serve blind. Boot retries, then fails readiness.
+    // Returning [] would be indistinguishable from owning nothing, so the pod would serve blind.
     const registry = registryWith([], { listError: new Error("apiserver unavailable") });
     const sessions = createSessionManager({
       provisioner: provisionerWithLive([]), store: inMemoryStore(),
@@ -223,7 +204,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
   });
 
   it("single-replica (noop registry, no selfPod) still hydrates from the local store", async () => {
-    // No CRs exist at all in single-replica; the local store must remain the path there.
+    // No CRs exist in single-replica, so the local store must remain the path there.
     const root = inMemoryStore();
     const m1 = createSessionManager({ provisioner: fakeProvisioner(), store: root });
     await m1.start("solo");

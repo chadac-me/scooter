@@ -1,9 +1,7 @@
 /**
- * Local token-entry server on 127.0.0.1:34579. We do NOT run Claude's OAuth (the authorize step is
- * gated by a browser-minted hCaptcha attestation — see claudeCreds.ts). Instead the page instructs
- * the user to run `claude setup-token` on their OWN machine and paste the resulting `sk-ant-oat01-…`
- * token; we persist it to the volume. The SDK then consumes it as CLAUDE_CODE_OAUTH_TOKEN. The token
- * stays on the user's machine — it never reaches scooter. See todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §H.
+ * Local token-entry server on port 34579. The page instructs the user to run `claude
+ * setup-token` on their own machine and paste the resulting token, which is persisted to
+ * the volume (see claudeCreds.ts).
  */
 
 import { createServer, type Server } from "node:http";
@@ -33,13 +31,13 @@ const loginPage = (): string =>
   );
 
 export interface LoginServer {
-  /** Resolves once the user submits a valid token (persisted). */
+  /** Resolves once the user submits a valid token. */
   done: Promise<void>;
   url: string;
   close(): void;
 }
 
-/** Start the token-entry server; resolves `done` when the user pastes a valid setup token. */
+/** Start the token-entry server; `done` resolves when the user pastes a valid setup token. */
 export function startLoginServer(log: (m: string) => void = console.log): LoginServer {
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));

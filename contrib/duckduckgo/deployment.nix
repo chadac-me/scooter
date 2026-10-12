@@ -1,4 +1,4 @@
-# duckduckgo's DEPLOYMENT half. Gated on contribs.duckduckgo.enable; why: #599, #711.
+# duckduckgo's deployment half, gated on contribs.duckduckgo.enable.
 { config, lib, ... }:
 
 let

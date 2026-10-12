@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# atlas-dev.sh — run an Atlas command against an EPHEMERAL, per-invocation local
-# Postgres, then tear it down. Atlas needs a throwaway "dev" database to normalize
-# each schema.sql and compute diffs; this spins one on a private socket in a temp
-# dir so nothing is shared and concurrent runs (e.g. parallel CI PRs) cannot
-# interfere.
-#
-# Self-contained: if `initdb`/`atlas` aren't already on PATH (i.e. you're not in the
-# dev shell), it re-execs itself inside `nix shell nixpkgs#postgresql_16
-# nixpkgs#atlas`, so it works standalone from a bare checkout.
+# atlas-dev.sh — run an Atlas command against an ephemeral, per-invocation local
+# Postgres (Atlas's "dev" database for normalising schema.sql and computing
+# diffs) on a private socket in a temp dir, so concurrent runs cannot interfere.
+# If `initdb`/`atlas` are not on PATH it re-execs itself inside
+# `nix shell nixpkgs#postgresql_16 nixpkgs#atlas`.
 #
 # Usage: scripts/atlas-dev.sh <atlas args...>
 #   scripts/atlas-dev.sh migrate diff my_change --env webhooks
@@ -15,8 +11,7 @@
 # ATLAS_DEV_URL is exported into the atlas invocation; atlas.hcl reads it as `dev`.
 set -euo pipefail
 
-# Pull Postgres (+ Atlas) from nixpkgs on demand rather than requiring them in the
-# ambient shell. The guard var stops an infinite re-exec.
+# The guard var stops an infinite re-exec.
 if [ -z "${ATLAS_DEV_NIX:-}" ] && { ! command -v initdb >/dev/null 2>&1 || ! command -v atlas >/dev/null 2>&1; }; then
   export ATLAS_DEV_NIX=1
   exec nix shell nixpkgs#postgresql_16 nixpkgs#atlas -c "$0" "$@"

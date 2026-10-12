@@ -1,11 +1,8 @@
-"""Brave's AGENT TOOL — `brave_web_search`.
+"""Brave's agent tool, `brave_web_search`.
 
-THE KEY IS A HEADER, NEVER A QUERY PARAM: a key in a URL is copied into every access log
-and proxy trace it passes. Declared as the credential's kind in `broker_provider.py`, so
-this file never holds it and cannot put it anywhere.
-
-Named for its provider so sibling search contribs (kagi, duckduckgo) can be enabled at
-the same time. Why: issue #700, PR #707.
+The key is a header injected by the broker, never a query param that would land in
+access logs; the tool is named for its provider so sibling search contribs can be
+enabled at the same time.
 """
 
 from __future__ import annotations
@@ -19,9 +16,7 @@ mcp = FastMCP(name="brave")
 
 PROVIDER = "brave"
 UPSTREAM = "https://api.search.brave.com"
-# /res/v1/web/search is the plain results endpoint. The same-priced
-# /res/v1/llm/context returns richer, pre-chunked snippets and is worth revisiting;
-# this ports what #698 shipped rather than changing the response shape in the move.
+# The plain results endpoint.
 SEARCH_PATH = "res/v1/web/search"
 
 
@@ -38,9 +33,7 @@ async def brave_web_search(query: str, ctx: ToolContext = ToolContextDep) -> Too
     verbatim — a 401 or 429 means this deployment's search key is bad or out of quota,
     so report it rather than retrying the query.
     """
-    # NOT attachment-gated, unlike a provider's reply tools: there is no resource to be
-    # attached to. The gate for search is `enabled` — no key ⇒ no provider ⇒ the agent
-    # is never shown this tool. See broker_provider.py.
+    # Not attachment-gated; the gate is the provider's `enabled` in broker_provider.py.
     text = query.strip()
     if not text:
         return ToolResult.error("`query` is required — pass the text to search for.")

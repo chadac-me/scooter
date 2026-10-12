@@ -1,16 +1,8 @@
 /**
- * The agent-host's INBOUND tunnel connection — holds `GET /byoc/:id/tunnel` open and serves
- * the container-initiated MCP streams that arrive on it.
- *
- * WHY THIS EXISTS. The agent-host reaches the BYOC controller over HTTP/SSE PER PROMPT, so it
- * has no channel for a stream the CONTAINER opens. Exec frames only work because they arrive
- * during a prompt; tunnel frames are deliberately kept OUT of run streams (a run's stream is
- * the conversation's transcript, and a tunnel close there would look like run output). Found
- * live: the container proxied scooter-env correctly, the agent SAW the server, and every tool
- * list came back empty because nothing on the cloud side was listening.
- *
- * Replies go back via `POST /byoc/:id/tunnel/:streamId` — the same asymmetric shape the exec
- * and permission paths already use.
+ * The agent-host's inbound tunnel connection: holds `GET /byoc/:id/tunnel` open and
+ * serves the container-initiated MCP streams that arrive on it, since the per-prompt
+ * HTTP/SSE transport has no channel for a stream the container opens. Replies go back
+ * via `POST /byoc/:id/tunnel/:streamId`.
  */
 
 import { formatError, logger } from "../log.js";
@@ -24,8 +16,7 @@ export interface TunnelClientDeps extends Omit<TunnelServiceDeps, "send"> {
   baseUrl: string;
   /** The container session whose inbound stream this follows. */
   sessionId: string;
-  /** The conversation this session serves — the SERVER-SIDE scope for every target it
-   *  resolves. Never read from a container frame. */
+  /** The conversation this session serves, the server-side scope for every target it resolves. */
   conversationId: string;
   fetchImpl?: typeof fetch;
 }
@@ -35,11 +26,7 @@ export interface TunnelClient {
   close(): void;
 }
 
-/**
- * Follow a session's inbound tunnel stream, serving each frame. Reconnects on drop: a broken
- * stream would silently strip a BYO agent of its MCP tools — a capability regression the user
- * would experience as "the tool disappeared", with nothing in the log.
- */
+/** Follow a session's inbound tunnel stream, serving each frame and reconnecting on drop. */
 export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
   const doFetch = deps.fetchImpl ?? fetch;
   const base = `${deps.baseUrl.replace(/\/$/, "")}/byoc/${encodeURIComponent(deps.sessionId)}`;
@@ -48,7 +35,7 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
 
   const service = createTunnelService({
     ...deps,
-    // Responses ride the REPLY route, not the stream (which is inbound-only).
+    // Responses ride the reply route, since the stream is inbound-only.
     send: (frame: WireFrame) => {
       if (!frame.id) return;
       void doFetch(`${base}/tunnel/${encodeURIComponent(frame.id)}`, {
@@ -57,8 +44,7 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
         body: JSON.stringify(frame),
       })
         .then((res) => {
-          // A non-OK reply is a DROPPED response the container is still waiting on — surface it
-          // rather than letting the tool call hang until the SDK gives up.
+          // A non-OK reply is a dropped response the container is still waiting on.
           if (!res.ok) {
             log.warn("reply rejected", {
               conversation_id: deps.conversationId,
@@ -90,8 +76,7 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
           signal: controller.signal,
         });
         if (!res.ok || !res.body) {
-          // 404 = the session is gone (the container re-attached elsewhere); stop rather than
-          // spin against a stream that will never exist.
+          // A 404 means the session is gone, so stop rather than spin.
           if (res.status === 404) return;
           throw new Error(`tunnel stream ${res.status}`);
         }
@@ -112,7 +97,7 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
                 const frame = JSON.parse(line.slice(5).trim()) as WireFrame;
                 void service.onFrame(deps.conversationId, frame);
               } catch {
-                // one malformed frame must not kill the stream
+                // One malformed frame must not kill the stream.
               }
             }
           }
@@ -131,8 +116,7 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
     }
   };
 
-  // Say so, once, per session. A silent tunnel client is indistinguishable from one that never
-  // started — which is exactly what made the first live failure hard to place.
+  // Log once per session, since a silent tunnel client looks like one that never started.
   log.info("following inbound stream", {
     conversation_id: deps.conversationId,
     session_id: deps.sessionId,

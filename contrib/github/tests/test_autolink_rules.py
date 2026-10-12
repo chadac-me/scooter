@@ -1,9 +1,4 @@
-"""GitHub's auto-link rules: which proxied calls produce a conversation link.
-
-Moved out of the broker's test_autolink with the provider (PR #591). The rules are
-github's knowledge of its own API; the matching MECHANISM stays covered in the
-broker's suite.
-"""
+"""GitHub's auto-link rules: which proxied calls produce a conversation link."""
 
 from __future__ import annotations
 
@@ -30,6 +25,5 @@ def test_github_issue_rule():
 
 
 def test_github_rules_do_not_match_reads_or_comments():
-    # A GET, and a POST to a NON-create path (issue comments) must not link.
     assert _match(_GITHUB_LINK_RULES, "GET", "repos/acme/app/pulls") is None
     assert _match(_GITHUB_LINK_RULES, "POST", "repos/acme/app/issues/3/comments") is None

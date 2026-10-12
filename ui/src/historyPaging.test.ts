@@ -1,10 +1,8 @@
 /**
  * Scroll-back paging of older history.
  *
- * The initial MESSAGES_SNAPSHOT paints only the trailing window (mounting a whole
- * long thread is one ~900ms synchronous commit that blocks the composer). It
- * carries `fromSeq` — where that window starts — and the agent pages older
- * messages in from there, prepending them.
+ * The initial MESSAGES_SNAPSHOT paints only the trailing window and carries `fromSeq`,
+ * where that window starts; the agent pages older messages in from there, prepending them.
  */
 import { describe, it, expect, vi } from "vitest";
 
@@ -30,10 +28,7 @@ function pagingFetch(pages: Page[]) {
   return { impl, calls };
 }
 
-/** Apply a MESSAGES_SNAPSHOT the way the stream loop does: seed the visible
- *  messages, then let the cursor tracker read `fromSeq`. run() alone does not
- *  fold messages — the base applier needs the full runtime pipeline, which is why
- *  the sibling integrityAgent tests assert on EMITTED events instead. */
+/** Apply a MESSAGES_SNAPSHOT the way the stream loop does: seed the visible messages, then let the cursor tracker read `fromSeq`. */
 function applySnapshot(
   agent: ReturnType<typeof createIntegrityAgent>,
   messages: unknown[],
@@ -111,8 +106,7 @@ describe("older-history paging", () => {
   });
 
   it("collapses concurrent loads onto one request", async () => {
-    // A scroll handler fires continuously; without this each event would stack a
-    // duplicate fetch and prepend the same page more than once.
+    // A scroll handler fires continuously, so each event must not stack a duplicate fetch.
     const { agent, calls } = makeAgent([{ messages: [msg("old1")], fromSeq: 300, done: false }]);
     applySnapshot(agent, [msg("new1")], 500);
     const [a, b, c] = await Promise.all([

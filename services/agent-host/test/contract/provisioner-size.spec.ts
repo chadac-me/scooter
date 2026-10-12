@@ -1,23 +1,8 @@
 /**
- * Tier 1 contract — the Sandbox CR is the SOURCE OF TRUTH for a conversation's size.
- *
- * There is no size table. The size lives in the CR's container `resources` block, which
- * outlives the pod (suspend keeps the CR) and is what a (re)start comes up with.
- *
- * Three things this pins:
- *
- *  1. RENDER/UN-RENDER ROUND-TRIP. A GPU is stored under its extended-resource name
- *     (`nvidia.com/gpu: "1"`, a STRING) because k8s demands it. The UI derives the
- *     selected preset by comparing cpu/memory/gpu against the catalog, so a gpu read
- *     back as the rendered string matches no preset and the picker silently shows
- *     "Custom" for a size that IS a preset. getSize must invert the render.
- *
- *  2. COLD-CREATE. Sizing a conversation whose Sandbox does not exist yet (a size
- *     picked before the first turn) must create the CR Suspended so the size has
- *     somewhere durable to live — not silently do nothing.
- *
- *  3. A READ FAILURE IS NOT "NO SIZE". A 403/500 on the CR read must propagate, never
- *     be mistaken for an unsized conversation and quietly reset the pod to the default.
+ * The Sandbox CR's container `resources` block is the source of truth for a
+ * conversation's size. getSize inverts the k8s rendering (a GPU is stored as the string
+ * `nvidia.com/gpu: "1"`) so the UI can match presets, sizing a conversation with no
+ * Sandbox yet cold-creates it Suspended, and a non-404 read failure propagates.
  */
 
 import { describe, it, expect } from "vitest";
@@ -26,7 +11,7 @@ import { createK8sProvisioner } from "../../src/session/k8sProvisioner.js";
 
 type Obj = Record<string, any>;
 
-/** A fake k8s API: one CR in "the cluster" (or none), recording creates + patches. */
+/** A fake k8s API holding one CR or none, recording creates and patches. */
 function fakeKc(opts: { cr?: Obj | null; getRejectCode?: number } = {}) {
   const patches: Obj[] = [];
   const creates: Obj[] = [];
@@ -91,7 +76,7 @@ describe("k8sProvisioner size — the CR is the store", () => {
     const size = await provisioner(kc).getSize("abc");
     expect(size?.limits?.gpu).toBe(1);
     expect(size?.requests?.gpu).toBe(1);
-    // The extended-resource key must NOT leak into the friendly shape.
+    // The extended-resource key must not leak into the friendly shape.
     expect(JSON.stringify(size)).not.toContain("nvidia.com/gpu");
   });
 
@@ -111,7 +96,7 @@ describe("k8sProvisioner size — the CR is the store", () => {
     expect(patches).toHaveLength(1);
     const c = patches[0].body.spec.podTemplate.spec.containers[0];
     expect(c.resources).toEqual({ requests: { cpu: "1", memory: "2Gi" }, limits: { cpu: "1", memory: "2Gi" } });
-    // The rest of the container is preserved — a patch must not drop the image.
+    // The patch must not drop the rest of the container.
     expect(c.image).toBe("img");
   });
 
@@ -131,7 +116,7 @@ describe("k8sProvisioner size — the CR is the store", () => {
   it("rejects a malformed raw quantity at the boundary", async () => {
     const { kc, patches } = fakeKc({ cr: withResources({}) });
     await expect(provisioner(kc).setSize("abc", { limits: { memory: "8 gigabytes" } })).rejects.toThrow();
-    expect(patches).toHaveLength(0); // nothing reached the CR
+    expect(patches).toHaveLength(0);
   });
 
   it("COLD-CREATES a Suspended Sandbox when sizing a conversation that has none", async () => {
@@ -140,18 +125,18 @@ describe("k8sProvisioner size — the CR is the store", () => {
     expect(patches).toHaveLength(0);
     const sandbox = creates.find((c) => c.plural === "sandboxes");
     expect(sandbox).toBeTruthy();
-    // Suspended: the CR + PVCs exist, no pod runs until the conversation starts.
+    // Suspended: the CR and PVCs exist, and no pod runs until the conversation starts.
     expect(sandbox!.body.spec.operatingMode).toBe("Suspended");
     expect(sandbox!.body.spec.podTemplate.spec.containers[0].resources).toEqual({
       requests: { cpu: "1", memory: "2Gi" },
       limits: { cpu: "1", memory: "2Gi" },
     });
-    // The FULL thread id builds CONVERSATION_URL, not the short CR name.
+    // The full thread id builds CONVERSATION_URL, not the short CR name.
     const env = Object.fromEntries(
       sandbox!.body.spec.podTemplate.spec.containers[0].env.map((e: Obj) => [e.name, e.value]),
     );
     expect(env.CONVERSATION_ID).toBe("thread-abc");
-    // …and its ServiceAccount comes with it, else the pod can't get a broker token.
+    // Its ServiceAccount comes with it, or the pod cannot get a broker token.
     expect(creates.some((c) => c.body?.metadata?.name === "sandbox-abc")).toBe(true);
   });
 

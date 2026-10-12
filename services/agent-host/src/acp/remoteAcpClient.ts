@@ -1,11 +1,9 @@
 /**
- * RemoteAcpClient — the CLOUD side of bring-your-own-Claude. An AcpClient (the same interface the
- * bridge drives for goose/sdk) whose brain runs in the USER'S container, reached over a WS
- * transport. ACP requests (initialize/newSession/prompt/cancel) go DOWN the wire and await the
- * correlated `ack`; the agent's notifications (session_update/terminal_created/permission_request)
- * come UP and dispatch to the bridge's callbacks. The agent's TOOL calls (Channel B) are served
- * HERE against the CLOUD ExecBackend — so tools run in the cloud sandbox while the model runs on
- * the laptop. See remoteProtocol.ts + todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+ * RemoteAcpClient: the cloud side of bring-your-own-Claude, an AcpClient whose brain
+ * runs in the user's container. ACP requests go down the wire and await the
+ * correlated `ack`, the agent's notifications come up and dispatch to the bridge's
+ * callbacks, and the agent's tool calls (channel B) are served here against the
+ * cloud ExecBackend, so tools run in the cloud sandbox while the model runs on the laptop.
  */
 
 import { randomUUID } from "node:crypto";
@@ -25,10 +23,9 @@ import {
 } from "./remoteProtocol.js";
 
 export interface RemoteAcpClientDeps {
-  /** The duplex frame transport to the container (a WS in prod, a fake pair in tests). */
+  /** The duplex frame transport to the container. */
   transport: RemoteTransport;
-  /** The CLOUD sandbox ExecBackend — services the agent's tool calls tunneled over Channel B, so
-   *  tools exec in the cloud sandbox (the body stays cloud-side). */
+  /** The cloud sandbox ExecBackend that services the agent's tunneled tool calls. */
   exec: ExecBackend;
 }
 
@@ -49,12 +46,11 @@ export function createRemoteAcpClient(deps: RemoteAcpClientDeps): AcpClient {
 
   transport.onClose(() => {
     closed = true;
-    // A dropped connection must not leave a run hanging — reject in-flight requests so the bridge
-    // surfaces a RUN_ERROR ("your Claude agent is offline"), never a silent stall.
+    // Reject in-flight requests so the bridge surfaces a RUN_ERROR rather than a silent stall.
     failAllPending("remote agent disconnected");
   });
 
-  // Send an ACP request DOWN the wire and await its ack (`result` or throw on `error`).
+  // Send an ACP request down the wire and await its ack.
   const request = <R = unknown>(type: string, payload: unknown): Promise<R> =>
     new Promise<R>((resolve, reject) => {
       if (closed || !transport.isOpen()) {
@@ -96,8 +92,7 @@ export function createRemoteAcpClient(deps: RemoteAcpClientDeps): AcpClient {
         case "permission_request": {
           const { request: req } = frame.payload as AcpPermissionRequestPayload;
           const id = frame.id;
-          // No handler wired (or none set yet) → cancel (safe default). Otherwise ask the UI and
-          // reply with the answer over the same id.
+          // With no handler wired, cancel; otherwise ask the UI and reply over the same id.
           void (permissionHandler ? permissionHandler(req) : Promise.resolve<PermissionAnswer>({ cancelled: true }))
             .then((ans) => {
               if (id) reply2(id, ans);
@@ -110,18 +105,16 @@ export function createRemoteAcpClient(deps: RemoteAcpClientDeps): AcpClient {
       }
       return;
     }
-    // Channel B: the agent's tool calls, served on the CLOUD ExecBackend.
+    // Channel B: the agent's tool calls, served on the cloud ExecBackend.
     if (frame.ch === "exec" && frame.id) void serveExec(frame);
-    // TUNNEL frames never arrive here: this transport is HTTP/SSE PER PROMPT, and a stream the
-    // container opens has no prompt to ride. They come in on the controller's dedicated
-    // inbound stream instead (tunnelClient.ts) — the gap the live test found.
+    // Tunnel frames arrive on the controller's dedicated inbound stream (tunnelClient.ts), never here.
   });
 
-  // Permission answers go back on the ACP channel (they answer a permission_request `id`).
+  // Permission answers go back on the ACP channel against the permission_request `id`.
   const reply2 = (id: string, ans: PermissionAnswer) =>
     transport.send({ ch: "acp", type: "ack", id, payload: { result: ans } });
 
-  // Run one Channel-B exec/fs request against the cloud ExecBackend + reply.
+  // Run one channel-B exec/fs request against the cloud ExecBackend and reply.
   const serveExec = async (frame: WireFrame) => {
     const id = frame.id!;
     try {
@@ -148,8 +141,7 @@ export function createRemoteAcpClient(deps: RemoteAcpClientDeps): AcpClient {
           reply(id, "exec_result", { result: {} });
           return;
         }
-        // exec_spawn (streaming terminal) — a later increment; the non-streaming exec_run covers
-        // the shell-tool path for the PoC. Reply with an error so the agent falls back.
+        // exec_spawn (a streaming terminal) is unsupported; reply with an error so the agent falls back.
         default:
           reply(id, "exec_result", { error: `unsupported exec request: ${frame.type}` });
       }
@@ -174,7 +166,7 @@ export function createRemoteAcpClient(deps: RemoteAcpClientDeps): AcpClient {
       await request("cancel", { sessionId });
     },
     async killActiveTerminals(_graceForPendingSpawn = false) {
-      // Best-effort — a disconnected agent has no terminals to kill.
+      // A disconnected agent has no terminals to kill.
       if (closed || !transport.isOpen()) return;
       await request("kill_terminals", {}).catch(() => {});
     },

@@ -1,9 +1,8 @@
 name: Docs (GitHub Pages)
 
-# Build the mkdocs site with the GENERATED kubenix option reference and publish to Pages.
-# The reference (`nix build .#options-doc`) is rendered from the module system on every build,
-# so the published options can never drift from the code. One-time repo setup: Settings →
-# Pages → Source = "GitHub Actions".
+# Build the mkdocs site with the generated kubenix option reference
+# (`nix build .#options-doc`) and publish it to Pages; one-time repo setup is
+# Settings → Pages → Source = "GitHub Actions".
 on:
   push:
     branches: [main]

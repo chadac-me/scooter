@@ -1,16 +1,14 @@
 /**
- * Tier 1 contract — /agui honors the conversation OWNER only for the TRUSTED
- * webhooks caller (verified by its SA token via TokenReview — useOwnerVerifier).
- * A browser / any other caller can't claim a conversation. See todo/IDENTITY_MAPPING.md.
+ * /agui honors a body `owner` only for the trusted webhooks caller (verified via
+ * useOwnerVerifier); any other caller's conversation is owned by its resolved ingress
+ * identity, and an anonymous caller gets no owner.
  */
 
 import { describe, it, expect } from "vitest";
 
 import { createAguiServer, type RunAgentInput } from "../../src/agui/server.js";
 
-/** Stand up the server (optional owner-verifier + identity resolver), capture the
- *  onPrompt input (whose `owner` is the RESOLVED owner the handler computed), POST
- *  once. `identity` = the ingress user the resolver returns for the caller. */
+/** POST once to a server with an optional owner verifier and identity resolver, returning the onPrompt input. */
 async function postAgui(
   body: Record<string, unknown>,
   trusted: boolean | undefined,
@@ -64,9 +62,7 @@ describe("/agui owner (trusted-caller gated)", () => {
   });
 });
 
-// The bug: a browser doesn't send `owner`; the server must resolve the caller's
-// INGRESS IDENTITY and own the conversation to them (like /whoami). Without this a
-// UI-created conversation had no owner and never showed under the Mine filter.
+// A browser sends no `owner`, so the server resolves the caller's ingress identity and owns the conversation to them.
 describe("/agui owner (resolved from ingress identity — the UI path)", () => {
   const UI_MSG = { threadId: "t1", messages: [{ role: "user", content: "hi" }] };
 
@@ -81,8 +77,7 @@ describe("/agui owner (resolved from ingress identity — the UI path)", () => {
   });
 
   it("the PRIVILEGED webhooks owner wins over the resolved identity", async () => {
-    // A trusted webhooks call with an explicit owner claims for THAT user, even
-    // though the caller's own ingress identity resolves to someone else.
+    // A trusted webhooks call with an explicit owner claims for that user, whatever its own ingress identity.
     const input = await postAgui(
       { ...UI_MSG, owner: "user-claimed" },
       /* trusted */ true,
@@ -97,6 +92,6 @@ describe("/agui owner (resolved from ingress identity — the UI path)", () => {
       /* trusted */ false,
       { id: "user-real", anonymous: false },
     );
-    expect(input?.owner).toBe("user-real"); // the spoofed body owner is ignored
+    expect(input?.owner).toBe("user-real");
   });
 });

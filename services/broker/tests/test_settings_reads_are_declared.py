@@ -1,21 +1,9 @@
-"""Every `settings.<name>` in the broker must name a declared field.
+"""Every `settings.<name>` in the broker must name a declared field, since a pydantic
+model raises AttributeError at runtime for an undeclared one.
 
-A pydantic model raises AttributeError for a field it doesn't declare, so a read
-of a DELETED setting is not a stale-but-harmless line — it throws, at runtime,
-on whatever path reaches it. #584 deleted `sandbox_control_service_accounts`
-from BrokerSettings and left the read in core/auth.py, which put an
-AttributeError on the authentication path every caller takes.
-
-A unit test of the affected function is the better test and exists
-(test_auth_identity.py). This is the cheap net UNDER it: coverage of a given
-line is a thing a refactor can quietly remove, and the reads that matter most
-live in the few functions tests tend to stub out rather than run.
-
-The allowed names come from the MODEL (model_fields + attributes), not from
-parsing config.py — inherited fields and properties are then included by
-construction, and the check can't pass vacuously because a scrape silently
-matched nothing. Limitation: it matches the NAME `settings`, so a module binding
-that name to something other than BrokerSettings would be a false positive.
+The allowed names come from the model (model_fields plus attributes), so inherited
+fields and properties are included by construction; a module binding the name
+`settings` to something else would be a false positive.
 """
 
 from __future__ import annotations

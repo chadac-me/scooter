@@ -1,7 +1,4 @@
-"""Slack image download (multimodal, stage 5): the `files` array on a Slack message
-is downloaded via the bot token, size-capped + MIME-filtered, and returned base64
-for the /agui multimodal content parts. Best-effort: a bad/oversize/non-image file
-is skipped, never raised."""
+"""Slack attachment download: the `files` array is fetched via the bot token, size-capped, and split into images, inlined text and binary parts."""
 
 import base64
 
@@ -42,7 +39,6 @@ async def test_downloads_an_image_as_base64(monkeypatch):
     _patch(monkeypatch, handler)
     out = await sf.download_images([_img_file()])
     assert out == [{"data": base64.b64encode(b"\x89PNGdata").decode(), "mimeType": "image/png"}]
-    # The private URL is fetched with the bot token.
     assert captured["auth"] == "Bearer xoxb-123"
 
 
@@ -58,14 +54,14 @@ async def test_skips_oversize_by_declared_size(monkeypatch):
     monkeypatch.setattr(settings, "image_max_bytes", 100, raising=False)
     _patch(monkeypatch, lambda req: httpx.Response(200, content=b"x"))
     out = await sf.download_images([_img_file(size=101)])
-    assert out == []  # skipped early, never downloaded
+    assert out == []
 
 
 async def test_skips_oversize_by_downloaded_bytes(monkeypatch):
     monkeypatch.setattr(settings, "slack_bot_token", "xoxb-123", raising=False)
     monkeypatch.setattr(settings, "image_max_bytes", 4, raising=False)
     _patch(monkeypatch, lambda req: httpx.Response(200, content=b"toolong"))
-    out = await sf.download_images([_img_file()])  # no declared size -> caught after download
+    out = await sf.download_images([_img_file()])
     assert out == []
 
 
@@ -104,8 +100,6 @@ async def test_text_file_is_inlined_with_fence_and_filename(monkeypatch):
     out = await sf.download_files([_file("foo.py", mimetype="text/x-python")])
     assert out.images == []
     assert out.file_parts == []
-    # The inlined block carries the filename header, a python language hint, and the
-    # file contents inside a fenced block.
     assert "[Attached file: foo.py]" in out.inline_text
     assert "```python" in out.inline_text
     assert "print('hi')" in out.inline_text
@@ -148,7 +142,7 @@ async def test_oversize_file_is_skipped_by_declared_size(monkeypatch):
     monkeypatch.setattr(settings, "file_max_bytes", 100, raising=False)
     _patch(monkeypatch, lambda req: httpx.Response(200, content=b"x"))
     out = await sf.download_files([_file("big.pdf", mimetype="application/pdf", size=101)])
-    assert out.file_parts == []  # skipped early, never downloaded
+    assert out.file_parts == []
 
 
 async def test_failed_download_is_skipped_without_raising(monkeypatch):
@@ -172,7 +166,6 @@ async def test_mixed_attachments_split_three_ways(monkeypatch):
     monkeypatch.setattr(settings, "slack_bot_token", "xoxb-123", raising=False)
 
     def handler(req):
-        # Differentiate by the requested URL so each file gets its own body.
         url = str(req.url)
         if url.endswith("img"):
             return httpx.Response(200, content=b"\x89PNG")

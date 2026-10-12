@@ -1,9 +1,4 @@
-"""GitHub provider module.
-
-Declares: GitHub App (or PAT fallback) credential source + two transports —
-http-proxy to api.github.com AND a git-credential helper for github.com. Both
-routes (/github/{path} and /github/git-credentials) fall out automatically.
-"""
+"""GitHub provider: a GitHub App (or PAT fallback) credential source, an http-proxy to api.github.com, a git-credential helper for github.com, and the agent tool."""
 
 from __future__ import annotations
 
@@ -20,9 +15,7 @@ from .github_app import GitHubAppSource
 from .mcp_tools import github_mcp_server
 
 
-# Auto-link the PRs / issues an agent creates via the proxy. GitHub's create
-# responses carry `html_url` (the human link) + `title`. The /issues create
-# endpoint only makes issues (a PR is created via /pulls), so the two are distinct.
+# Auto-link the PRs and issues an agent creates via the proxy; the create responses carry `html_url` and `title`.
 _GITHUB_LINK_RULES = [
     rule(
         "POST", r"^repos/[^/]+/[^/]+/pulls/?$",
@@ -40,7 +33,7 @@ UPSTREAM = "https://api.github.com"
 
 @register_provider
 def github() -> Provider:
-    # Read at BUILD time, like every provider factory (#573).
+    # Read at build time, like every provider factory.
     settings = GitHubSettings()
     if settings.github_app_id and settings.github_app_private_key:
         credential = GitHubAppSource(
@@ -54,15 +47,12 @@ def github() -> Provider:
         enabled = True
     else:
         credential = StaticTokenSource(token="")
-        enabled = False  # no GitHub config -> off
+        enabled = False
 
     return Provider(
         name="github",
         credential=credential,
-        # ORDER MATTERS: specific routes (git-credentials) MUST be registered
-        # before the HttpProxy's `/{path:path}` catch-all, otherwise the proxy
-        # shadows /github/git-credentials and forwards it to api.github.com
-        # (404). FastAPI matches routes in registration order.
+        # FastAPI matches routes in registration order, so git-credentials must precede the HttpProxy catch-all.
         transports=[
             GitCredential(host="github.com", username="x-access-token"),
             HttpProxy(
@@ -70,10 +60,7 @@ def github() -> Provider:
                 link_rules=_GITHUB_LINK_RULES,
                 agent_host_url=settings.agent_host_url,
             ),
-            # The agent tool (github_comment), moved out of the agent-host by #700 so
-            # it ships with this contrib and is ABSENT when it is not enabled. Same
-            # upstream as the proxy, from one variable — the tool and the raw route
-            # must not drift in what they call or how they authenticate.
+            # The agent tool shares the proxy's upstream so the two cannot drift.
             McpTools(server=github_mcp_server(), upstream=UPSTREAM),
         ],
         enabled=enabled,

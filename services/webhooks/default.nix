@@ -1,14 +1,9 @@
 { lib, python3Packages, scooterSchema, scooterLib, scooterWebhooksLib, contribs ? [ ], ... }:
 
-# Webhooks service (Python/FastAPI). Spawns agent conversations from
-# GitHub/GitLab/Jira/Slack threads via the agent-host /agui endpoint.
-# See docs/WEBHOOKS.md.
-#
-# `contribs`: out-of-tree handler packages injected into the image. Each is a
-# normal Python dependency, so its dist-info lands on the app's path and the
-# handler registry discovers it via the `scooter_webhooks.handlers` entry point
-# at startup (see scooter_webhooks_lib/registry.py). Defaults to none — the flake passes the
-# webhooks-targeted subset from ./contrib.
+# Webhooks service (Python/FastAPI): spawns agent conversations from provider
+# threads via the agent-host /agui endpoint. `contribs` are handler packages
+# injected as ordinary dependencies, which the handler registry discovers via the
+# `scooter_webhooks.handlers` entry point at startup.
 
 python3Packages.buildPythonApplication {
   pname = "agent-webhooks";
@@ -21,16 +16,16 @@ python3Packages.buildPythonApplication {
   dependencies = with python3Packages; [
     fastapi
     uvicorn
-    websockets  # WS server (FastAPI) + client (the claude-bridge proxy to the agent-host)
+    websockets  # WS server and client (the proxy to the agent-host)
     httpx
     pydantic
     pydantic-settings
     sqlalchemy
     aiosqlite
     asyncpg
-    scooterSchema  # generated SQLAlchemy models for the webhooks DB (lib/py/scooter-schema)
-    scooterLib     # shared structured-logging convention (lib/py/scooter-lib)
-    scooterWebhooksLib # the extension surface a handler composes (lib/py/scooter-webhooks-lib)
+    scooterSchema  # generated SQLAlchemy models for the webhooks DB
+    scooterLib     # shared structured-logging convention
+    scooterWebhooksLib # the extension surface a handler composes
   ] ++ contribs;
 
   nativeCheckInputs = with python3Packages; [

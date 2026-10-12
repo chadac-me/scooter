@@ -1,9 +1,8 @@
-"""DuckDuckGo broker provider — agent tools, no proxy route, and NO CREDENTIAL at all.
+"""DuckDuckGo broker provider: agent tools, no proxy route, and no credential.
 
-`enabled` gates on an explicit flag (`DUCKDUCKGO_ENABLED`) rather than on a key being
-present like every other provider, because there is no key: nothing's absence could
-mean "off", and the default must be off so that building this contrib does not make a
-deployment start scraping DuckDuckGo. Why: PR #707.
+`enabled` gates on the explicit `DUCKDUCKGO_ENABLED` flag, since there is no key
+whose absence could mean off, and it defaults off so building this contrib does not
+make a deployment start scraping DuckDuckGo.
 """
 
 from __future__ import annotations
@@ -20,16 +19,11 @@ PROVIDER_NAME = "duckduckgo"
 
 @register_provider
 def duckduckgo() -> Provider:
-    # Read at BUILD time, like every provider factory — the broker calls this once per
-    # create_app(), after refreshing the environment.
+    # Read at build time, like every provider factory.
     settings = DuckduckgoSettings()
     return Provider(
         name=PROVIDER_NAME,
-        # credential=None by omission: `_Upstream` injects nothing without a credential
-        # source, so the request goes out as written.
+        # No credential, so the request goes out as written; no raw proxy, which would bypass the parsing that tells a bot-check page from an empty web.
         transports=[McpTools(server=duckduckgo_mcp_server(), upstream=UPSTREAM)],
-        # No raw /duckduckgo/* proxy: a second way to reach the page with none of the
-        # parsing, which is the only thing that keeps a bot-check page from reading as
-        # an empty web.
         enabled=settings.duckduckgo_enabled,
     )

@@ -1,9 +1,7 @@
 /**
- * Tier 1 contract — the advisory fit check between a web service's declared
- * requirement and the sandbox's actual limits. The point of the feature is turning
- * a silent OOM kill into a sentence, so the tests pin BOTH directions: a real gap
- * is reported, and anything we can't judge stays quiet (a false warning is worse
- * than none — it trains the reader to ignore the true one).
+ * The advisory fit check between a web service's declared requirement and the
+ * sandbox's limits: a real gap is reported, and anything that cannot be judged stays
+ * quiet.
  */
 
 import { describe, it, expect } from "vitest";
@@ -86,8 +84,7 @@ describe("fitAdvice", () => {
     expect(msg).toContain("marimo");
     expect(msg).toContain("8Gi");
     expect(msg).toContain("4Gi");
-    // Advisory, never a block — the wording has to say so or the agent will treat
-    // it as a refusal and give up instead of proceeding.
+    // The wording must say the service still starts, or the agent treats the advice as a refusal.
     expect(msg).toContain("still start");
   });
 

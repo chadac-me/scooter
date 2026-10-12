@@ -1,7 +1,6 @@
 /**
- * Tier 1 — the transcript recorder. OFF by default (no-op, zero overhead); when a
- * dir is set, writes one NDJSON file per run with correlated, sequenced entries.
- * See todo/docs/AGENT_TRANSCRIPT_HARNESS.md.
+ * The transcript recorder: a no-op by default, and with a dir set it writes one NDJSON
+ * file per run with sequenced entries.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -19,9 +18,8 @@ describe("transcript recorder", () => {
   it("is a NO-OP when no dir is given (recording OFF by default)", () => {
     const rec = createRecorder(undefined);
     expect(rec.enabled).toBe(false);
-    // Must not throw / must not write anything.
     rec.record({ layer: "agui-out", provider: "claude", conversationId: "c1", runId: "r1", data: { type: "X" } });
-    expect(readdirSync(dir)).toEqual([]); // nothing written
+    expect(readdirSync(dir)).toEqual([]);
   });
 
   it("writes one NDJSON file per run, named <conversationId>-<runId>.ndjson", () => {
@@ -46,9 +44,9 @@ describe("transcript recorder", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0].seq).toBe(0);
     expect(lines[1].seq).toBe(1);
-    expect(lines[0].t).toBe(5);  // 1005 - 1000 (start)
-    expect(lines[1].t).toBe(12); // 1012 - 1000
-    // The RAW shape is preserved exactly — this is the ground truth for the fakes.
+    expect(lines[0].t).toBe(5);
+    expect(lines[1].t).toBe(12);
+    // The raw shape is preserved exactly.
     expect((lines[0].data as { message: { content: unknown[] } }).message.content).toEqual([{ type: "tool_use", id: "t1", name: "check_subagent" }]);
     expect(lines[0].layer).toBe("sdk-in");
     expect(lines[1].layer).toBe("agui-out");

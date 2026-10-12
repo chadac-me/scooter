@@ -1,19 +1,8 @@
 /**
- * Tier 1 contract — the conversation event log on Postgres.
- *
- * These encode the invariants the file store proved over many incidents, so a
- * store that passes them is a safe replacement for it.
- *
- * Each test names the failure it prevents. The four that matter most:
- *   - ORDER under fire-and-forget appends (a scrambled log breaks replay AND
- *     the integrity chain, and the chain makes that detectable but not fixable)
- *   - the chain CONTINUING across a restart (a new pod must not reseed from
- *     scratch and fork every client's verification)
- *   - the TAIL windowing by TIME, not append order, across a restart seam
- *   - flush() closing the subagent-completion race
- *
- * Runs against a REAL drizzle client over an in-memory Postgres double, so the
- * store's generated-model queries are exercised rather than a hand-rolled shim.
+ * Contract test for the conversation event log on Postgres: emission order under
+ * fire-and-forget appends, the integrity chain continuing across a restart, the
+ * tail windowing and flush(). Runs against a real drizzle client over an
+ * in-memory Postgres double so the store's generated-model queries are exercised.
  */
 
 import { describe, it, expect } from "vitest";
@@ -36,10 +25,7 @@ const run = (n: number, ts?: number): AguiEvent[] =>
     { type: "TEXT_MESSAGE_END", messageId: `m${n}`, ...(ts ? { ts: ts + 3 } : {}) },
   ] as AguiEvent[];
 
-/**
- * An in-memory Postgres under a real drizzle client. Rows live in an array so a
- * test can inspect physical order, which is the thing most of these assert.
- */
+/** An in-memory Postgres under a real drizzle client, with rows in an array so tests can inspect physical order. */
 function fakeDb(): {
   db: NodePgDatabase;
   rows: Array<Record<string, unknown>>;
@@ -47,7 +33,7 @@ function fakeDb(): {
   assign: (conv: string, a: { hostPod: string | null; hostGeneration?: number }) => void;
 } {
   const rows: Array<Record<string, unknown>> = [];
-  // The conversations row the fence reads; absent now means DELETED.
+  // The conversations row the fence reads, where an absent row means deleted.
   const assigned = new Map<string, { hostPod: string | null; hostGeneration?: number }>();
   let fail: Error | undefined;
   const client = {
@@ -64,13 +50,11 @@ function fakeDb(): {
         const [conversation_id, seq, event, checksum, prev_checksum] = values as [
           string, number, unknown, string, string,
         ];
-        // drizzle SERIALIZES jsonb to a string before binding; Postgres returns
-        // it parsed. Model that, or every event->>'type' filter sees a string.
+        // drizzle serializes jsonb to a string before binding and Postgres returns it parsed.
         const parsed = typeof event === "string" ? JSON.parse(event) : event;
         // The fence rides this statement, evaluated before the PK.
         if (/WHERE EXISTS/i.test(text)) {
-          // The subquery correlates on the conversation id, which is therefore bound a
-          // SECOND time ahead of the claim: [...5 row values, id, pod, gen?].
+          // The subquery correlates on the conversation id, which is therefore bound a second time ahead of the claim: [...5 row values, id, pod, gen?].
           const [, pod, gen] = values.slice(5) as [string, string, number | undefined];
           const a = assigned.get(conversation_id);
           const allowed =
@@ -79,10 +63,7 @@ function fakeDb(): {
               (a.hostPod === pod && (gen === undefined || Number(a.hostGeneration ?? 0) === Number(gen))));
           if (!allowed) return { rows: [], rowCount: 0 };
         }
-        // The PK is a CORRECTNESS backstop, not just an index: a second writer
-        // must collide loudly rather than interleave silently. Honour ON
-        // CONFLICT the way Postgres does, so a store that adds
-        // onConflictDoNothing is CAUGHT rather than silently passing.
+        // Honour ON CONFLICT the way Postgres does, so a store that adds onConflictDoNothing is caught.
         if (rows.some((r) => r.conversation_id === conversation_id && r.seq === seq)) {
           if (/ON CONFLICT/i.test(text)) return { rows: [], rowCount: 0 }; // silently skipped
           throw Object.assign(new Error(`duplicate key value violates unique constraint`), { code: "23505" });
@@ -102,30 +83,27 @@ function fakeDb(): {
         return a ? { rows: [[a.hostPod, a.hostGeneration ?? 0]], rowCount: 1 } : { rows: [], rowCount: 0 };
       }
       if (head.startsWith("SELECT")) {
-        // drizzle asks for rowMode:"array": positional values in SELECT order.
-        // The store issues four shapes; model each by what the SQL selects.
+        // drizzle asks for rowMode:"array", so each of the store's query shapes is modelled by what its SQL selects.
         const conversation_id = values[0] as string;
         let mine = rows
           .filter((r) => r.conversation_id === conversation_id)
           .sort((a, b) => (a.seq as number) - (b.seq as number));
 
-        // tail-by-count: newest N, selecting ONLY "event" (head() selects seq+checksum,
-        // so the projection is what tells these two DESC queries apart).
+        // tail-by-count selects only "event", which is what tells it apart from head().
         if (/ORDER BY .*"?SEQ"? DESC/i.test(text) && /^SELECT\s+"?EVENT"?\s+FROM/i.test(head)) {
-          // DESC, as Postgres returns it — the store reverses to chronological order.
+          // DESC as Postgres returns it; the store reverses to chronological order.
           const n = Number(values[1] ?? mine.length);
           const newest = mine.slice(-n).reverse();
           return { rows: newest.map((r) => [r.event]), rowCount: newest.length };
         }
-        // head(): newest row, seq + checksum only.
+        // head(): the newest row, seq and checksum only.
         if (/ORDER BY .*"?SEQ"? DESC/i.test(text) && !/RUN_STARTED/i.test(text)) {
           const last = mine[mine.length - 1];
           return { rows: last ? [[last.seq, last.checksum]] : [], rowCount: last ? 1 : 0 };
         }
         // tail step 1: the RUN_STARTED boundary, newest-first with an OFFSET.
         if (/RUN_STARTED/i.test(text)) {
-          // drizzle emits "... limit $2 offset $3", and OMITS the offset when it
-          // is 0 — so params are [conv, limit] or [conv, limit, offset].
+          // drizzle omits the offset when it is 0, so params are [conv, limit] or [conv, limit, offset].
           const starts = mine.filter((r) => (r.event as { type?: string }).type === "RUN_STARTED").reverse();
           const hit = starts[Number(values[2] ?? 0)];
           return { rows: hit ? [[hit.seq]] : [], rowCount: hit ? 1 : 0 };
@@ -161,9 +139,7 @@ const fencedStore = (db: NodePgDatabase, pod: string, gen?: number) =>
 
 describe("eventStore — ordering", () => {
   it("THE INVARIANT: a burst of fire-and-forget appends lands in EMISSION order", async () => {
-    // appendEvent is called as `void store.appendEvent(...)` for every streamed
-    // token, so concurrent awaits must not interleave. A scrambled log (END
-    // before START) breaks history replay on switch/revive.
+    // appendEvent is `void`-called for every streamed token, so concurrent awaits must not interleave.
     const { db, rows } = fakeDb();
     const s = store(db);
     const events = run(1);
@@ -187,13 +163,7 @@ describe("eventStore — ordering", () => {
   });
 
   it("a PK collision SURFACES — it must never be swallowed as ON CONFLICT DO NOTHING", async () => {
-    // One pod owns a conversation, but canWrite() fails OPEN on an unobserved
-    // one, so the invariant has a known hole. A second writer must be loud.
-    // Both stores seed their counter from the table, so a rival that starts
-    // LATER picks up the right seq — that is correct, not a collision. The real
-    // hazard is two writers holding STALE cached heads: a partitioned old owner
-    // keeps appending from the seq it remembers while the new owner advances.
-    // Model that by letting both cache the same head before either writes.
+    // Two writers holding stale cached heads is modelled by letting both cache the same head before either writes.
     const { db } = fakeDb();
     const a = store(db);
     const b = store(db);
@@ -211,16 +181,9 @@ describe("eventStore — ordering", () => {
   });
 });
 
-// --- THE APPEND FENCE ---------------------------------------------------------------------
+// --- the append fence ---------------------------------------------------------------------
 //
-// The test directly above is the hazard: two writers, stale cached heads, a PK collision
-// that is loud but has already lost a turn. These pin the fence that stops the second
-// writer from reaching the constraint at all — the row is consulted IN the insert, so a
-// superseded pod is refused by the write it was already making.
-//
-// What the fence is deliberately NOT: an existence check. A missing or unclaimed row must
-// still append, because a brand-new conversation streams its first turn before anything has
-// assigned it a host, and refusing there would drop the user's first prompt.
+// The fence consults the conversations row inside the insert so a superseded pod is refused by the write it was already making, while a missing or unclaimed row must still append because a new conversation streams its first turn before any host is assigned.
 
 describe("eventStore — the append fence", () => {
   it("THE FENCE: the row naming another host refuses the append, and nothing is written", async () => {
@@ -228,15 +191,14 @@ describe("eventStore — the append fence", () => {
     assign(CONV, { hostPod: "host-2", hostGeneration: 4 });
     const s = fencedStore(db, "host-1", 4);
 
-    // RESOLVES: losing the claim is an outcome, not a failure — every caller `void`s this.
+    // Losing the claim resolves rather than rejects, since every caller `void`s this.
     await expect(s.appendEvent(CONV, run(1)[0])).resolves.toBeUndefined();
 
     expect(rows).toEqual([]);
   });
 
   it("a refused append notifies NO listener and leaves no gap in seq", async () => {
-    // A phantom onAppend would hand the integrity SSE stream a checksum no reader can find
-    // in the table, which reads to a client as a corrupt chain rather than a reassignment.
+    // A phantom onAppend would hand the integrity SSE stream a checksum no reader can find in the table.
     const { db, rows, assign } = fakeDb();
     assign(CONV, { hostPod: "host-2", hostGeneration: 4 });
     const s = fencedStore(db, "host-1", 4);
@@ -249,8 +211,7 @@ describe("eventStore — the append fence", () => {
     expect(fired, "nothing committed, so nothing to announce").toEqual([]);
     expect(errors, "a fence refusal is not a persistence failure").toEqual([]);
 
-    // The claim comes back to this pod: seq must resume at 1 (the refused event consumed
-    // nothing) and the chain must still start from EMPTY.
+    // When the claim comes back, seq must resume at 1 and the chain must still start from EMPTY.
     assign(CONV, { hostPod: "host-1", hostGeneration: 4 });
     await s.appendEvent(CONV, run(2)[0]);
     expect(rows.map((r) => r.seq)).toEqual([1]);
@@ -258,10 +219,7 @@ describe("eventStore — the append fence", () => {
   });
 
   it("the EPOCH fences a pod the row still names as host", async () => {
-    // Reassigned away and back: host-1 holds a claim from generation 5, the row has since
-    // advanced to 7, and another pod wrote events in between. Pod IDENTITY cannot catch
-    // this — a StatefulSet pod reuses its name — and the cached canWrite() deliberately
-    // ALLOWS it (it absorbs a newer generation for the same pod). The row does not.
+    // A StatefulSet pod reuses its name, so only the generation can catch a pod reassigned away and back.
     const { db, rows, assign } = fakeDb();
     assign(CONV, { hostPod: "host-1", hostGeneration: 7 });
 
@@ -293,9 +251,7 @@ describe("eventStore — the append fence", () => {
   });
 
   it("no observed generation narrows the fence to pod identity — it does not widen it", async () => {
-    // Between boot and the first watch event this pod knows it is the host but not at which
-    // epoch. Presenting an epoch nobody assigned would refuse EVERY append (a silently
-    // logless pod); presenting none keeps the identity half of the fence working.
+    // Between boot and the first watch event the pod knows it is the host but not at which epoch, so it presents none.
     const { db, rows, assign } = fakeDb();
     assign(CONV, { hostPod: "host-1", hostGeneration: 9 });
     await fencedStore(db, "host-1").appendEvent(CONV, run(1)[0]);
@@ -307,8 +263,7 @@ describe("eventStore — the append fence", () => {
   });
 
   it("an UNFENCED store appends unconditionally — single-replica is untouched", async () => {
-    // No POD_NAME means no second writer to fence against and nothing assigning a host, so
-    // the fence would refuse nothing and cost a subquery per streamed token.
+    // Without POD_NAME there is no second writer to fence against.
     const { db, rows, assign } = fakeDb();
     assign(CONV, { hostPod: "someone-else", hostGeneration: 12 });
 
@@ -349,8 +304,7 @@ describe("eventStore — the integrity chain", () => {
   });
 
   it("THE RESTART: a fresh store over the same table CONTINUES the chain", async () => {
-    // A new pod must not reseed from EMPTY — that forks every client's
-    // verification and makes the whole history look tampered with.
+    // A new pod must not reseed from EMPTY, which would fork every client's verification.
     const { db } = fakeDb();
     const first = store(db);
     for (const e of run(1)) await first.appendEvent(CONV, e);
@@ -366,8 +320,7 @@ describe("eventStore — the integrity chain", () => {
   });
 
   it("checksums are READ from the row, never recomputed from the jsonb column", async () => {
-    // jsonb reorders keys at every level, so a chain re-derived from `event`
-    // could never match the writer's. The stored columns are the only copy.
+    // jsonb reorders keys, so a chain re-derived from `event` could never match the writer's.
     const { db, rows } = fakeDb();
     const s = store(db);
     await s.appendEvent(CONV, run(1)[0]);
@@ -391,11 +344,7 @@ describe("eventStore — the tail", () => {
   });
 
   it("orders by SEQ, not ts — seq IS the chronology in this store", async () => {
-    // The file store sorted by `ts` first because a log concatenated runs from
-    // separate processes across a restart, so append order could disagree with
-    // time. A monotonic per-conversation counter has no such seam: seq is
-    // assigned in emission order by the single owning pod. Here the ts values
-    // are deliberately out of order to prove seq wins.
+    // The ts values are deliberately out of order to prove seq wins.
     const { db } = fakeDb();
     const s = store(db);
     const misleading = [...run(1, 300), ...run(2, 100)]; // appended 1 then 2, but ts says otherwise
@@ -406,8 +355,7 @@ describe("eventStore — the tail", () => {
   });
 
   it("windows on RUN boundaries, never mid-run", async () => {
-    // A raw "last N events" could cut a TEXT_MESSAGE_START from its END and
-    // render a half-message. The tail must fold identically to a full replay.
+    // The tail must fold identically to a full replay, never cutting a message in half.
     const { db } = fakeDb();
     const s = store(db);
     for (const e of [...run(1), ...run(2)]) await s.appendEvent(CONV, e);
@@ -436,9 +384,7 @@ describe("eventStore — the tail", () => {
 
 describe("eventStore — durability contracts", () => {
   it("THE SUBAGENT RACE: flush() awaits appends enqueued so far", async () => {
-    // A subagent's RUN_FINISHED fires onEvent (→ report completion → read)
-    // BEFORE the fire-and-forget insert lands, so lastRunCompleted() saw no
-    // finish and the notification was dropped. flush closes that window.
+    // A subagent's RUN_FINISHED fires onEvent before the fire-and-forget insert lands, and flush closes that window.
     const { db } = fakeDb();
     const s = store(db);
     run(1).forEach((e) => void s.appendEvent(CONV, e));
@@ -450,9 +396,7 @@ describe("eventStore — durability contracts", () => {
   });
 
   it("an append FAILURE is surfaced, not swallowed", async () => {
-    // appendEvent is `void`-called, so a failed write to the conversation's ONLY
-    // persistence would otherwise vanish. With no file fallback this is a lost
-    // turn and must be loud.
+    // appendEvent is `void`-called, so a failed write would otherwise vanish.
     const { db, failNext } = fakeDb();
     const s = store(db);
     const errors: unknown[] = [];
@@ -491,8 +435,7 @@ describe("backfillConversation — the one-shot migration", () => {
   const lines = run(1).map((e) => JSON.stringify(e));
 
   it("reproduces the chain the file store would have computed", async () => {
-    // The .jsonl files store only raw events; the chain is recomputed on read.
-    // If the backfill's chain differs, every client verifying history breaks.
+    // The .jsonl files store only raw events, so the backfill must compute the same chain the file store did on read.
     const { db } = fakeDb();
     const res = await backfillConversation(db, CONV, lines);
 
@@ -509,7 +452,7 @@ describe("backfillConversation — the one-shot migration", () => {
   });
 
   it("is idempotent — a re-run does not double-load", async () => {
-    // The Job is re-runnable by design; the PK is what makes that safe.
+    // The PK is what makes the re-runnable Job safe.
     const { db, rows } = fakeDb();
     await backfillConversation(db, CONV, lines);
     await backfillConversation(db, CONV, lines).catch(() => {});
@@ -517,7 +460,7 @@ describe("backfillConversation — the one-shot migration", () => {
   });
 
   it("REPORTS what it wrote, so the Job can verify instead of assuming", async () => {
-    // A backfill that loads 127 of 128 conversations must not report success.
+    // A partial backfill must not report success.
     const { db } = fakeDb();
     const res = await backfillConversation(db, CONV, lines);
     expect(res).toMatchObject({ conversationId: CONV, rows: lines.length });
@@ -526,9 +469,7 @@ describe("backfillConversation — the one-shot migration", () => {
 });
 
 describe("eventStore — the tail bounded by EVENT COUNT", () => {
-  // `runs` is a poor proxy for size: a turn with 40 tool calls emits hundreds of
-  // events, so runs=8 returned 4787 events / 1.3 MB on a real conversation — 53% of
-  // its whole log — for what is meant to be a fast first paint.
+  // `runs` is a poor proxy for size, since one turn with many tool calls emits hundreds of events.
   it("returns at most `limit` events", async () => {
     const { db } = fakeDb();
     const s = store(db);
@@ -547,8 +488,7 @@ describe("eventStore — the tail bounded by EVENT COUNT", () => {
   });
 
   it("APPLIES the boundary trim — a raw cut mid-message is not returned", async () => {
-    // Direct trimToBoundary tests do not prove the STORE calls it; without this,
-    // deleting the call passes every test while the window folds to nothing.
+    // Direct trimToBoundary tests do not prove the store calls it.
     const { db } = fakeDb();
     const s = store(db);
     // A tool call, then a clean run: a 3-event window cuts inside the tool call.
@@ -580,9 +520,7 @@ describe("trimToBoundary", () => {
   const ev = (type: string) => ({ type }) as never;
 
   it("THE POINT: drops a leading fragment so the window can actually fold", async () => {
-    // A raw seq cut lands mid-item — measured on a real conversation, the first event
-    // of a 300-event window was a TOOL_CALL_RESULT whose START was outside it. The
-    // client's fold discards such a window, wasting the seed entirely.
+    // A raw seq cut lands mid-item, and the client's fold discards such a window entirely.
     const { trimToBoundary } = await import("../../src/session/eventStore.js");
     const out = trimToBoundary([ev("TOOL_CALL_RESULT"), ev("TOOL_CALL_END"), ev("RUN_STARTED"), ev("TEXT_MESSAGE_START")]);
     expect(out.map((e) => (e as { type: string }).type)).toEqual(["RUN_STARTED", "TEXT_MESSAGE_START"]);

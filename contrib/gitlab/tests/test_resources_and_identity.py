@@ -1,16 +1,11 @@
-"""GitLab's resource shapes and owner lookup — moved here with the provider.
-
-These cases were in the webhooks app's test_resource_shapes / test_identity_resolve
-until gitlab became a contrib (PR #580). The knowledge is gitlab's, so the tests
-are too.
-"""
+"""GitLab's resource shapes and owner lookup."""
 
 from __future__ import annotations
 
 import httpx
 import pytest
 
-import scooter_contrib_gitlab.resources  # noqa: F401  (registers the shapes)
+import scooter_contrib_gitlab.resources  # noqa: F401
 from scooter_contrib_gitlab import identity as gl_identity
 from scooter_contrib_gitlab.config import settings
 from scooter_webhooks_lib import identity as lib_identity
@@ -42,15 +37,14 @@ async def test_gitlab_url_offers_the_short_forms():
 
 
 async def test_a_short_id_stays_itself():
-    # The instance host is not in `acme/web!7`, so widening it would invent a
-    # gitlab.com URL that may name a different instance's MR.
+    # The instance host is not in `acme/web!7`, so widening it would invent a URL.
     assert resource_id_variants("gitlab", "mr", "acme/web!7") == ["acme/web!7"]
     assert canonical_link("gitlab", "mr", "acme/web!7") == ("merge_request", "acme/web!7")
 
 
 async def test_type_aliases_are_two_way():
     pairs = link_variants("gitlab", "mr", "acme/web!7")
-    assert pairs[0] == ("mr", "acme/web!7")  # the caller's own shape first
+    assert pairs[0] == ("mr", "acme/web!7")
     assert ("merge_request", "acme/web!7") in pairs
 
 
@@ -76,6 +70,5 @@ async def test_gitlab_email(monkeypatch):
 
 
 async def test_gitlab_no_token(monkeypatch):
-    # No token -> no lookup at all (the API would 401 and leak nothing useful).
     monkeypatch.setattr(settings, "gitlab_token", "", raising=False)
     assert await lib_identity.get_user_email("gitlab", "alice") is None

@@ -1,17 +1,11 @@
 /**
- * The "coming back up" screen shown in the conversation area WHILE an explicit
+ * The "coming back up" screen shown in the conversation area while an explicit
  * Sandbox-tab Start is in flight (state "starting"), so the click gives immediate
- * feedback instead of a frozen screen while the pod is ContainerCreating.
- *
- * NOTE: an asleep (suspended/ended) conversation no longer gets a full-screen
- * takeover. The thread + its history render straight off the persisted integrity
- * stream (no live pod needed), and sending a message resumes the pod automatically
- * (promptByThread revives before it runs). So the old DeadPodLanding takeover was
- * removed; only this brief starting spinner remains, for the explicit-Start case.
+ * feedback while the pod is ContainerCreating. An asleep conversation renders its
+ * thread off the persisted integrity stream and sending a message resumes the pod,
+ * so this brief spinner is the only takeover.
  */
 
-/** Shown while a resume kicked off from the Sandbox tab is in flight (state
- *  "starting"), so the Start click gives immediate feedback. */
 export function StartingPodLanding() {
   return (
     <div

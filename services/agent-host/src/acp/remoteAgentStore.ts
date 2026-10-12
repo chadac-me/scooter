@@ -1,13 +1,8 @@
 /**
- * Durable per-user remote-agent binding, on the shared Postgres. Persists that an owner has
- * connected a BYO Claude agent so the "Connected" badge is correct ACROSS replicas + survives an
- * agent-host restart (the in-memory registry lives on one replica only). Best-effort: a DB blip
- * degrades the badge to "offline", never breaks a connection or a request.
- *
- * Two-tier truth (see todo/docs/BYO_CLAUDE_REMOTE_AGENT.md):
- *   - DB status  → the BADGE (any replica can read it; survives restart).
- *   - live registry (in-memory, owning replica) → ROUTING (a prompt only goes to a genuinely-open
- *     WS; a stale DB "online" after a crash just falls to the cloud floor — RUN_ERROR-safe).
+ * Durable per-user remote-agent binding on the shared Postgres, so the "Connected"
+ * badge is correct across replicas and survives a restart. The DB status drives only
+ * the badge; routing uses the live registry, so a stale "online" after a crash just
+ * falls to the cloud floor. Best-effort: a DB blip degrades the badge to "offline".
  */
 
 import { eq, sql } from "drizzle-orm";
@@ -27,14 +22,13 @@ export interface RemoteAgentBinding {
   lastSeen?: string;
 }
 
-/** The persistence seam (Postgres impl below; tests inject a fake). */
+/** The persistence seam; Postgres below, a fake in tests. */
 export interface RemoteAgentStore {
-  /** Upsert the owner ONLINE (on WS connect). */
+  /** Upsert the owner online. */
   markOnline(owner: string): Promise<void>;
-  /** Mark the owner OFFLINE (on WS close) — but only if `transportStillCurrent` (a late close of a
-   *  superseded connection must not flip a freshly-reconnected owner offline). */
+  /** Mark the owner offline. */
   markOffline(owner: string): Promise<void>;
-  /** Is this owner's agent believed online (for the badge)? false on any error. */
+  /** Whether this owner's agent is believed online, false on any error. */
   isOnline(owner: string): Promise<boolean>;
   close(): Promise<void>;
 }
@@ -43,12 +37,7 @@ export interface PgRemoteAgentStoreConfig {
   dsn: string;
 }
 
-/** Postgres-backed store on the BYOC database via the generated @scooter/schema Drizzle
- *  client. `remote_agents` used to exist twice — a webhooks copy written here and a byoc
- *  copy written by byoc-controller, same entity, no synchronisation. There is now one
- *  table (lib/sql/byoc/schema.sql) with two writers: byoc-controller owns session_id, this
- *  store owns the status/last_seen badge. It never touches session_id, so the two writers
- *  cannot clobber each other. All errors swallowed (best-effort). PR #423. */
+/** Postgres-backed store on the BYOC `remote_agents` table (lib/sql/byoc/schema.sql), owning only status/last_seen while byoc-controller owns session_id; all errors are swallowed. */
 export function createPgRemoteAgentStore(config: PgRemoteAgentStoreConfig): RemoteAgentStore {
   const pool = createPgPool("remoteAgentStore", { connectionString: config.dsn, max: 2 });
   const db = drizzle(pool);

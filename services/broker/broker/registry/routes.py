@@ -1,17 +1,12 @@
-"""The module registry HTTP API — the broker-side catalog.
+"""The module registry HTTP API: the broker-side catalog.
 
-    GET  /modules.tar.gz?ids=a,b   download (UNAUTHENTICATED) — a gzipped tar of
-                                    <name>/<filename> for each requested module, which
-                                    registry-modules.nix fetchTarballs + imports.
-    GET  /modules[?q=]             list VISIBLE modules (authed): own private + all
-                                    public, searchable. Metadata only (no file blob).
-    GET  /modules/{name}           one module's metadata + files (authed; visibility-gated).
-    POST /modules                  publish/create (authed): owner = caller's conversation.
+    GET  /modules.tar.gz?ids=a,b   download (unauthenticated) a gzipped tar of
+                                    <name>/<filename> for each requested module
+    GET  /modules[?q=]             list visible modules (authed): own private plus all public
+    GET  /modules/{name}           one module's metadata and files (authed, visibility-gated)
+    POST /modules                  publish or create (authed), owned by the caller's conversation
 
-The module NAME is the id — globally unique (first publisher owns it). Download is
-open (Nix isn't a secret); the CATALOG (list + get-with-files) is visibility-gated.
-Owner = the publishing conversation's id (the broker has no email/user; #127 human-user
-resolution is a follow-up).
+The module name is the globally unique id, owned by its first publisher.
 """
 
 from __future__ import annotations
@@ -36,7 +31,7 @@ _VALID_VISIBILITY = {"private", "public"}
 
 
 def _build_tarball(entries: dict[str, str]) -> bytes:
-    """Gzipped tar of {path: content} at fixed mtime (deterministic fetchTarball hash)."""
+    """Gzipped tar of {path: content} at a fixed mtime, for a deterministic fetchTarball hash."""
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w") as tar:
         for path, content in entries.items():
@@ -66,8 +61,7 @@ def create_registry_router(store: ModuleRegistryStore, *, now: Callable[[], str]
             m = await store.get(ref)
             if m is None:
                 raise HTTPException(status_code=404, detail=f"module not found: {ref}")
-            # Tar under the NAME (the canonical ref registry-modules.nix imports as
-            # <name>/module.nix), regardless of whether the caller asked by id or name.
+            # Tarred under the name regardless of how the caller referenced the module.
             for fname, content in m.files.items():
                 if "/" in fname or fname in ("..", "."):
                     raise HTTPException(status_code=500, detail=f"bad filename in module {ref}")
@@ -83,10 +77,9 @@ def create_registry_router(store: ModuleRegistryStore, *, now: Callable[[], str]
 
     @router.get("/modules/{ref}")
     async def get_module(ref: str, identity: Identity = Depends(authenticate)):
-        # ref = a name OR a numeric id (both resolve).
         m = await store.get(ref)
         if m is None or not _visible_to(m, identity.conversation_id):
-            # A private module the caller can't see is indistinguishable from missing.
+            # A private module the caller cannot see is indistinguishable from missing.
             raise HTTPException(status_code=404, detail="module not found")
         return {**m.summary(), "files": m.files}
 
@@ -95,9 +88,6 @@ def create_registry_router(store: ModuleRegistryStore, *, now: Callable[[], str]
         owner = identity.conversation_id
         if not owner:
             raise HTTPException(status_code=403, detail="a conversation identity is required to publish")
-        # The NAME is the id (globally unique; first publisher owns it). The numeric id
-        # is minted by the store; a re-publish of the same name (by the owner) bumps the
-        # version. No `id` field in the request.
         name = (body.get("name") or "").strip()
         files = body.get("files")
         if not name:

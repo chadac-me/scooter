@@ -1,11 +1,4 @@
-"""Tier 1 — the imperative marker read (ControllerK8s.read_unmount_marker + _job_result),
-against a monkeypatched `_apis()`. These lock the producer-side half of the wedge fix:
-
-  - a TERMINATING claimed PVC spawns NO marker-check Job (that Job can never schedule — the
-    claim is being deleted — so it would time out and be misread as unclean → another delete);
-  - a read failure / timeout resolves to "unknown", NEVER "unclean" (a failure to READ is not
-    evidence the volume is dirty; the loop backs off instead of destroying a good volume).
-"""
+"""Tier 1: the imperative marker read (read_unmount_marker and _job_result) against a monkeypatched `_apis()`, where a terminating claim spawns no check Job and a read failure or timeout is "unknown", never "unclean"."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -37,7 +30,7 @@ def test_terminating_claim_spawns_no_marker_job(monkeypatch):
     core, batch = _fake_apis(monkeypatch, claimed_items=[_pvc("warm-store-x", terminating=True)])
     k = ControllerK8s(namespace="ns")
     assert k.read_unmount_marker("conv-a") == "unknown"
-    batch.create_namespaced_job.assert_not_called()  # the doomed Job is never created
+    batch.create_namespaced_job.assert_not_called()
 
 
 def test_missing_claim_is_unknown_no_job(monkeypatch):
@@ -52,12 +45,12 @@ def test_marker_read_api_error_is_unknown_not_unclean(monkeypatch):
     batch.create_namespaced_job.side_effect = client.ApiException(status=500, reason="boom")
     _fake_apis(monkeypatch, claimed_items=[_pvc("warm-store-x")], batch=batch)
     k = ControllerK8s(namespace="ns")
-    # A read that ERRORS must not be reported as unclean (which the loop maps to delete).
+    # A read that errors must not be reported as unclean.
     assert k.read_unmount_marker("conv-a") == "unknown"
 
 
 def test_healthy_claim_reads_the_marker_clean(monkeypatch):
-    # A non-terminating claim DOES spawn the check Job; a Completed Job → "clean".
+    # A non-terminating claim spawns the check Job, and a Completed Job is "clean".
     batch = MagicMock()
     created = SimpleNamespace(metadata=SimpleNamespace(name="warm-marker-check-abc"))
     batch.create_namespaced_job.return_value = created
@@ -71,7 +64,7 @@ def test_healthy_claim_reads_the_marker_clean(monkeypatch):
 
 
 def test_definitively_failed_check_is_unclean(monkeypatch):
-    # The Job ran and the marker file was absent (Failed) → unclean (a genuine dirty overlay).
+    # A Failed Job means the marker was definitively absent.
     batch = MagicMock()
     batch.create_namespaced_job.return_value = SimpleNamespace(
         metadata=SimpleNamespace(name="warm-marker-check-abc")
@@ -85,7 +78,7 @@ def test_definitively_failed_check_is_unclean(monkeypatch):
 
 
 class _Clock:
-    """A fake monotonic clock so the timeout path doesn't sleep in real time."""
+    """A fake monotonic clock so the timeout path does not sleep in real time."""
 
     def __init__(self):
         self._t = 0.0
@@ -98,11 +91,10 @@ class _Clock:
 
 
 def test_job_result_timeout_is_unknown_not_failed(monkeypatch):
-    # A check Job that never reaches a terminal state within the deadline is UNKNOWN, not
-    # "failed" — the caller maps failed→unclean→delete, so a timeout must not do that.
+    # A check Job that never reaches a terminal state within the deadline is unknown, not failed.
     batch = MagicMock()
     batch.read_namespaced_job_status.return_value = SimpleNamespace(
-        status=SimpleNamespace(succeeded=0, failed=0)  # never terminal
+        status=SimpleNamespace(succeeded=0, failed=0)
     )
     monkeypatch.setattr(k8smod, "_apis", lambda: (MagicMock(), MagicMock(), batch, MagicMock()))
     assert _job_result("warm-marker-check-abc", "ns", timeout_s=5.0, clock=_Clock()) == "unknown"

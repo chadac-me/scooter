@@ -1,20 +1,7 @@
 """The AWS approval notify: broker -> agent-host POST /conversations/{id}/approvals/aws.
 
-This is the call that makes the Approve window appear in the conversation. It had
-NO test coverage, and the original implementation was:
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(url, json=payload)
-
-— the response was discarded, so a 404 (unknown conversation) or a 503 (the host
-could not activate the conversation to raise the interrupt) disappeared with no log
-line anywhere. The approval simply never appeared and nothing said why. The outer
-`try/except` in PermissionService only catches EXCEPTIONS, and a non-2xx response
-isn't one.
-
-The request itself is never lost — it is stored PENDING before the notify runs, and
-the agent-host re-queries /aws/pending on revive. What a dropped notify costs is the
-IMMEDIATE approval window, so the transient cases are retried.
+The call that makes the Approve window appear; transient failures are retried,
+permanent ones are logged, and nothing raises.
 """
 
 from __future__ import annotations
@@ -30,8 +17,7 @@ from scooter_contrib_aws import broker_provider as aws_provider
 
 
 def _errors(caplog):
-    """The ERROR-level records, which under structured logging carry their values
-    as record ATTRIBUTES (set via `extra=`) rather than interpolated into msg."""
+    """The ERROR-level records, whose values ride as record attributes set via `extra=`."""
     return [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
@@ -45,14 +31,12 @@ class _Req:
     """The PermissionRequest fields notify_host actually reads."""
 
     request_id: str = "req-abc123"
-    # NOTE: the broker knows the conversation ONLY by the short id parsed from the
-    # sandbox SA name (core/auth.py _SA_PATTERN -> `sandbox-{shortId}`), never the
-    # full thread UUID. The agent-host resolves it via getByShortId.
+    # The broker knows the conversation only by the short id parsed from the sandbox SA name.
     conversation_id: str = "k3f9zq"
     target_account: str = "dev"
     justification: str = "read terraform state"
     policy_summary: str = "s3:GetObject on the state bucket"
-    risk_level: _Risk = None  # set in __post_init__
+    risk_level: _Risk = None
 
     def __post_init__(self):
         if self.risk_level is None:
@@ -61,16 +45,14 @@ class _Req:
 
 @pytest.fixture(autouse=True)
 def _fast_and_configured(monkeypatch):
-    """Point the notify at a host URL and remove the backoff sleep, so the retry
-    tests assert on ATTEMPT COUNT without spending real seconds."""
+    """Point the notify at a host URL and remove the backoff sleep."""
     monkeypatch.setattr(aws_provider.settings, "aws_agent_host_url", "http://agent-host:8080", raising=False)
     monkeypatch.setattr(aws_provider.settings, "aws_notify_attempts", 3, raising=False)
     monkeypatch.setattr(aws_provider.settings, "aws_notify_backoff", 0.0, raising=False)
 
 
 def _mock_httpx(monkeypatch, handler):
-    """Route every httpx.AsyncClient request in the module under test through
-    `handler` (a MockTransport callable), recording the requests it saw."""
+    """Route every httpx.AsyncClient request through `handler`, recording the requests it saw."""
     seen: list[httpx.Request] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -97,12 +79,10 @@ async def test_posts_the_broker_notify_shape_to_the_short_id_url(monkeypatch):
 
     assert len(seen) == 1
     req = seen[0]
-    # Addressed by the SHORT id — the only handle the broker has.
+    # Addressed by the short id, the only handle the broker has.
     assert req.url.path == "/conversations/k3f9zq/approvals/aws"
     body = json.loads(req.read().decode())
-    # The GENERIC payload: an id and prose THIS side rendered. The platform used to
-    # receive target_account/risk_level/policy_summary and compose the sentence
-    # itself, which is why it could not describe any other integration. Why: PR #651.
+    # The generic payload: an id and prose this side rendered.
     assert body == {
         "request_id": "req-abc123",
         "message": (
@@ -111,8 +91,7 @@ async def test_posts_the_broker_notify_shape_to_the_short_id_url(monkeypatch):
             "Reason: read terraform state"
         ),
     }
-    # The account/risk/policy facts must still REACH the human — they are just inside
-    # the rendered message now rather than separate fields the platform interprets.
+    # The account, risk and policy facts must still reach the human inside the rendered message.
     for fact in ("dev", "low", "s3:GetObject", "read terraform state"):
         assert fact in body["message"], f"{fact} missing from the approval prose"
 
@@ -136,9 +115,7 @@ async def test_no_host_url_configured_is_a_silent_noop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_503_is_retried_then_succeeds(monkeypatch):
-    """503 is exactly what the agent-host returns when it could not activate the
-    conversation to raise the interrupt — the suspended/revived case. Retrying is
-    what turns a lost approval window into a delivered one."""
+    """503 is what the agent-host returns when it could not activate the conversation to raise the interrupt."""
     seen = _mock_httpx(
         monkeypatch,
         lambda req, n: httpx.Response(202) if n >= 3 else httpx.Response(503, text="could not activate"),
@@ -154,7 +131,6 @@ async def test_5xx_exhausts_the_budget_and_logs_an_error(monkeypatch, caplog):
         await aws_provider.notify_host(_Req())
 
     assert len(seen) == 3, "a persistent 5xx must use the whole retry budget"
-    # The decisive part: it must be VISIBLE. The old code logged nothing at all.
     errors = _errors(caplog)
     assert errors
     assert any(getattr(r, "request_id", None) == "req-abc123" for r in errors)
@@ -173,30 +149,25 @@ async def test_connect_error_is_retried_then_logged(monkeypatch, caplog):
     errors = _errors(caplog)
     assert errors
     assert any(getattr(r, "request_id", None) == "req-abc123" for r in errors)
-    # str() on an httpx transport error can be empty; format_error must still say
-    # something useful about it (this is why the convention forbids bare str(e)).
+    # str() on an httpx transport error can be empty; format_error must still say something.
     assert all(getattr(r, "error", {}).get("message") for r in errors)
 
 
 @pytest.mark.asyncio
 async def test_a_notify_failure_never_raises(monkeypatch):
-    """The request is already stored PENDING; a notify failure must not propagate
-    (it would surface as a failed `scooter-aws request` for an approval that in fact
-    exists and is answerable)."""
+    """The request is already stored pending, so a notify failure must not propagate."""
     def _boom(request, n):
         raise httpx.ConnectError("down", request=request)
 
     _mock_httpx(monkeypatch, _boom)
-    await aws_provider.notify_host(_Req())  # must not raise
+    await aws_provider.notify_host(_Req())
 
 
-# --- permanent failures are NOT retried, but ARE surfaced --------------------
+# --- permanent failures are not retried, but are surfaced --------------------
 
 @pytest.mark.asyncio
 async def test_404_is_not_retried_and_is_logged_loudly(monkeypatch, caplog):
-    """A 404 means the host does not know this conversation — an addressing bug (the
-    id-space mismatch that caused the original 'approval window never appeared'). It
-    will fail identically forever, so retrying only hides it."""
+    """A 404 means the host does not know this conversation, which will fail identically forever."""
     seen = _mock_httpx(monkeypatch, lambda req, n: httpx.Response(404, text="unknown conversation"))
     with caplog.at_level(logging.ERROR):
         await aws_provider.notify_host(_Req())
@@ -210,10 +181,7 @@ async def test_404_is_not_retried_and_is_logged_loudly(monkeypatch, caplog):
 @pytest.mark.parametrize("status", [408, 429])
 @pytest.mark.asyncio
 async def test_429_and_408_are_treated_as_transient(monkeypatch, status):
-    """408/429 are the two 4xx that DO change on a retry, so they're transient.
-    (Parametrized rather than looped: _mock_httpx patches httpx.AsyncClient, so a
-    second patch inside one test wraps the first and the attempt counter carries
-    over — the loop version asserted against a stale count.)"""
+    """408/429 are the two 4xx that change on a retry; parametrized because a second _mock_httpx in one test would wrap the first."""
     seen = _mock_httpx(
         monkeypatch,
         lambda req, n: httpx.Response(202) if n >= 2 else httpx.Response(status),

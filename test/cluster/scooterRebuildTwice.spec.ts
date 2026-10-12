@@ -1,24 +1,13 @@
 /**
- * Tier-2 cluster — running `scooter-rebuild switch` TWICE in one pod.
+ * Tier-2 cluster: `scooter-rebuild switch` run repeatedly in one pod.
  *
- * An agent reported that a second switch aborted with a dbus "Subscribe" rejection
- * (cleared by `systemctl daemon-reexec`). The boot converge only ever runs ONE
- * switch, so nothing covered the second.
- *
- * Worth a test beyond the abort itself: scooter-apply-module deliberately IGNORES
- * switch-to-configuration's exit code and decides success from a failed-unit diff.
- * An abort BEFORE any unit changes leaves that diff empty — so the switch reports
- * success having done nothing. A silent no-op is worse than a loud failure, so
- * every assertion here is on the OBSERVED EFFECT (did the marker change?), never on
- * the exit code or a log string.
- *
- * SECURITY: this pod is NOT privileged. A systemd-PID-1 pod under `privileged`
- * inherits the HOST cgroup namespace and churns /kubepods.slice, which destabilizes
- * the node and kills the host's login session. It runs under a cgroup-delegating
- * runtime (crun) with CAP_SYS_ADMIN instead — the same shape k8sProvisioner.ts uses
- * in production. The first test asserts the isolation actually holds before any
- * switch runs, so a cluster without crun fails loudly here instead of taking the
- * developer's session down.
+ * scooter-apply-module decides success from a failed-unit diff rather than the switch's
+ * exit code, so a switch that aborts before touching any unit reports success having done
+ * nothing; every assertion here is therefore on the observed effect (the marker changed),
+ * never on the exit code or a log string. When SANDBOX_RUNTIME_CLASS names a
+ * cgroup-delegating runtime the pod runs unprivileged with CAP_SYS_ADMIN, the shape
+ * k8sProvisioner.ts uses, and the first test asserts the cgroup isolation holds before any
+ * switch runs.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -31,22 +20,12 @@ const IMAGE = process.env.OVERLAY_IMAGE ?? "agent-sandbox-os:latest";
 const POD = "rebuild-twice";
 const SELECTOR = "app=rebuild-twice";
 const UPPER = "/nix/.scooter-rw";
-/** Cgroup-delegating runtime for the pod. Defaults to unset (the cluster default)
- *  so CI, which has no crun RuntimeClass, still runs this — a throwaway CI node is
- *  the one place a host-cgroup pod is acceptable. Set SANDBOX_RUNTIME_CLASS=crun
- *  when running against a cluster you care about, e.g. a local k3d on a workstation:
- *  the cgroup-isolation test below then passes instead of failing loudly. */
+/** Cgroup-delegating runtime class for the pod; unset on CI, which has no crun RuntimeClass and a disposable node. */
 const RUNTIME_CLASS = process.env.SANDBOX_RUNTIME_CLASS;
-/** Whether to REQUIRE cgroup isolation. On by default when a runtime class is set. */
+/** Cgroup isolation is required whenever a runtime class is set. */
 const REQUIRE_ISOLATION = RUNTIME_CLASS !== undefined;
 
-/** A module adding a marker, so each switch has a real diff to apply.
- *
- *  A systemd unit, NOT environment.etc: kubernetes bind-mounts /etc/hostname and
- *  /etc/hosts read-only, so NixOS's setup-etc.pl cannot rewrite /etc and an
- *  environment.etc marker never lands (it logs "could not create symlink" and
- *  carries on). The unit's fragment path under /run/systemd is writable, and
- *  `systemctl cat` reads back what the switch actually installed. */
+/** A module adding a marker unit so each switch has a real diff to apply; a unit rather than environment.etc because kubernetes bind-mounts parts of /etc read-only. */
 const MARKER_UNIT = "scooter-switch-marker";
 const moduleFor = (marker: string) => `{ config, lib, pkgs, ... }:
 {
@@ -62,7 +41,7 @@ const moduleFor = (marker: string) => `{ config, lib, pkgs, ... }:
 maybe("scooter-rebuild, run twice", () => {
   let cluster: Cluster;
 
-  /** Write the marker module, switch, and report what actually landed. */
+  /** Write the marker module, switch, and report what landed. */
   async function switchTo(marker: string) {
     await cluster.exec(
       SELECTOR,
@@ -70,7 +49,7 @@ maybe("scooter-rebuild, run twice", () => {
       NS,
     );
     const r = await cluster.exec(SELECTOR, ["scooter-rebuild", "switch"], NS);
-    // Read back what the switch INSTALLED, from the unit systemd now has loaded.
+    // Read back what the switch installed from the unit systemd now has loaded.
     const got = await cluster.exec(
       SELECTOR,
       ["sh", "-c", `systemctl cat ${MARKER_UNIT}.service 2>/dev/null | sed -n 's/^Description=switch marker //p'`],
@@ -93,11 +72,7 @@ maybe("scooter-rebuild, run twice", () => {
             name: "sandbox",
             image: IMAGE,
             imagePullPolicy: "Never",
-            // NOT privileged when a cgroup-delegating runtime is available:
-            // CAP_SYS_ADMIN is all stage-2's specialfs mounts need, and under crun
-            // the cap does not re-introduce the host cgroup namespace. Without a
-            // runtime class (CI) fall back to privileged, which is how the sibling
-            // cluster specs run.
+            // CAP_SYS_ADMIN is all stage-2 needs under a cgroup-delegating runtime; without one, fall back to privileged.
             securityContext: RUNTIME_CLASS
               ? { capabilities: { add: ["SYS_ADMIN"] } }
               : { privileged: true },
@@ -125,11 +100,7 @@ maybe("scooter-rebuild, run twice", () => {
   });
 
   it("runs in its OWN cgroup namespace when a cgroup-delegating runtime is set", async () => {
-    // The guard rail for local runs. A pod in the HOST cgroup namespace reports a
-    // /kubepods/... path; its systemd then churns the host tree, which destabilizes
-    // the node and kills the developer's login session. With crun the path is the
-    // pod's own root. Skipped when no runtime class is configured (CI), where the
-    // node is disposable.
+    // A pod in the host cgroup namespace reports a /kubepods/... path and its systemd would churn the host tree.
     const r = await cluster.exec(SELECTOR, ["sh", "-c", "cat /proc/self/cgroup"], NS);
     if (!REQUIRE_ISOLATION) {
       expect(r.stdout.trim().length, "cgroup path should be readable").toBeGreaterThan(0);

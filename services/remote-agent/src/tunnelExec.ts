@@ -1,19 +1,14 @@
 /**
- * Tunnel ExecBackend — the container's ExecBackend impl that forwards the local Claude agent's tool
- * calls to the CLOUD over Channel B, so tools run in the cloud sandbox (not on the user's machine).
- * The SdkAcpClient (@scooter/claude-sdk-provider) calls this; each call sends an exec/fs frame and
- * awaits the cloud's exec_result. See protocol.ts + todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+ * The container's ExecBackend, which forwards the local Claude agent's tool calls to the
+ * cloud over Channel B so tools run in the cloud sandbox. Each call sends an exec/fs frame
+ * and awaits the cloud's exec_result (see protocol.ts).
  */
 
 import { randomUUID } from "node:crypto";
 
 import type { WireFrame } from "./protocol.js";
 
-// THE REAL CONTRACT, imported — not a local copy. This file used to keep its own structural
-// duplicate "to avoid a build dep" (a dep this package already has for createSdkAcpClient),
-// and the copy DRIFTED: the provider's TerminalHandle grew release(), the copy didn't, an
-// `as never` cast at the wiring site silenced the mismatch, and the first real BYOC tool call
-// died `handle.release is not a function`. A shared type makes that drift a compile error.
+// The provider's own contract types, so a drift is a compile error.
 import type {
   ExecBackend,
   ExecRequest,
@@ -59,8 +54,7 @@ export function createTunnelExecBackend(deps: TunnelExecDeps): ExecBackend {
         env: req.env,
       });
     },
-    // Streaming spawn isn't tunneled in the PoC — the SDK's shell tool uses run(); spawn is a
-    // fallback the cloud doesn't yet stream. Provide a minimal one-shot adapter over run().
+    // Streaming spawn is not tunnelled; this is a one-shot adapter over run().
     spawn(req) {
       const id = randomUUID();
       const outCbs = new Set<(c: string) => void>();
@@ -75,9 +69,7 @@ export function createTunnelExecBackend(deps: TunnelExecDeps): ExecBackend {
         },
         waitForExit: () => done,
         kill: async () => {},
-        // One-shot adapter: the remote run has no held resource; releasing just drops the
-        // output listeners. Required by the contract — the bash tool calls it after every
-        // command (spawn -> waitForExit -> release).
+        // The remote run holds no resource, so releasing just drops the output listeners.
         release: async () => {
           outCbs.clear();
         },

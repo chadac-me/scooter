@@ -1,19 +1,11 @@
 /**
- * UI unit test — the RUNTIME contrib manifest loader and the three places the app
- * merges it.
- *
- * What this guards: that a deployment's contrib rows reach the UI over the wire
- * (so changing the contrib set needs no UI recompile), that a missing/broken
- * manifest can never take the app down with it, and that no contrib row is
- * hardcoded in the app's own tables — a regression that re-hardcodes gitlab would
- * otherwise keep every other suite green while the loader quietly did nothing.
- *
- * The loader is driven through a stubbed `fetch`, i.e. the real code path,
- * because the failure modes worth testing (404, timeout, malformed body) only
- * exist there. Module state is per test FILE in vitest, and every test below
- * establishes its own by loading first.
- *
- * See contrib/ui-manifest.nix (what generates the document) and contrib/README.md.
+ * UI unit test for the runtime contrib manifest loader and the three places the app
+ * merges it. It guards that a deployment's contrib rows reach the UI over the wire,
+ * that a missing or broken manifest never takes the app down, and that no contrib row
+ * is hardcoded in the app's own tables. The loader is driven through a stubbed `fetch`
+ * because the failure modes worth testing (404, timeout, malformed body) only exist
+ * there; module state is per test file in vitest, so every test loads first.
+ * See contrib/ui-manifest.nix for what generates the document.
  */
 
 import { afterEach, describe, it, expect, vi } from "vitest";
@@ -100,8 +92,7 @@ describe("loading the manifest", () => {
         gitlab_comment: DOC.toolCards.gitlab_comment,
         broken: { provider: "gitlab", action: "did a thing" }, // no argKey
       },
-      // A chip for a source that failed validation is the dead chip this feature
-      // removes, so it must not survive its row.
+      // A chip for a source that failed validation must not survive its row.
       linkProviders: ["gitlab", "noIcon", 7],
     });
     await loadContribManifest();
@@ -212,7 +203,7 @@ describe("the app no longer hardcodes a contrib's row", () => {
   it("keeps contrib names OUT of the app's own tables", async () => {
     serve404();
     await loadContribManifest();
-    // With nothing served, what remains IS the app's own list.
+    // With nothing served, what remains is the app's own list.
     expect(linkProviders()).toEqual(["github", "slack"]);
     expect(matchToolCall("Comment on the GitLab MR", { body: "x" })).toBeNull();
   });
@@ -220,8 +211,7 @@ describe("the app no longer hardcodes a contrib's row", () => {
   it("drops a contrib's row entirely when the manifest does not carry it", async () => {
     serve404();
     await loadContribManifest();
-    // The fallback path an absent contrib takes: a neutral glyph, no <svg>, and
-    // the raw name as the label — NOT a dead branded chip.
+    // An absent contrib falls back to a neutral glyph with the raw name as its label.
     expect(render("gitlab")).not.toContain("<svg");
     expect(sourceLabel("gitlab")).toBe("gitlab");
   });

@@ -1,17 +1,10 @@
 /**
- * Tier 2 — the run_background detached-job mechanism works in a REAL pod.
+ * Tier 2: the run_background detached-job mechanism in a real pod.
  *
- * jobManager launches a command via `setsid … & ` so it survives the exec shell,
- * captures stdout+exit to files, and check() reads them back. The unit tier fakes
- * the exec; this proves the actual in-pod behavior the fake can't:
- *   - setsid detaches the job so the launcher exec returns IMMEDIATELY (the job
- *     keeps running after),
- *   - a still-running job has NO status file (check -> running),
- *   - once it finishes, the exit code lands in `status` and stdout in `log`,
- *   - a non-zero exit is captured.
- *
- * Drives the exact shell the jobManager emits, against the OS image (which now
- * ships util-linux for setsid). Gated: RUN_CLUSTER_TESTS=1.
+ * jobManager launches a command via `setsid … &` so it survives the exec shell and captures
+ * stdout and the exit code to files. This drives the exact shell jobManager emits against the
+ * OS image and asserts the launcher returns immediately, a running job has no status file,
+ * and the exit code and output land once it finishes. Gated on RUN_CLUSTER_TESTS=1.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -23,9 +16,9 @@ const NS = "agent-sandbox-bgjob-test";
 const IMAGE = process.env.SANDBOX_OS_IMAGE ?? "agent-sandbox-os:latest";
 const POD = "bgjob-boot";
 const SELECTOR = "app=bgjob-boot";
-const JOBS = "/tmp/scooter-jobs"; // writable in the bare pod (no workspace PVC here)
+const JOBS = "/tmp/scooter-jobs"; // writable in the bare pod, which has no workspace PVC
 
-/** The detached launcher jobManager.start() emits (JOBS_DIR/<jobId>). */
+/** The detached launcher jobManager.start() emits. */
 const launch = (jobId: string, command: string) => {
   const d = `${JOBS}/${jobId}`;
   return (
@@ -83,21 +76,20 @@ maybe("run_background detached-job mechanism works in a real pod", () => {
   });
 
   it("launches a job DETACHED (the exec returns while the job keeps running)", async () => {
-    // A 5s sleep: the launcher must return promptly, and the job must still be
-    // running right after (no status file yet).
+    // The launcher must return well before the 5s sleep ends.
     const t0 = Date.now();
     const r = await cluster.exec(SELECTOR, ["sh", "-c", launch("job-a", "sleep 5; echo done-a")], NS);
     expect(r.exitCode).toBe(0);
     expect(Date.now() - t0, "launcher returned without waiting the 5s sleep").toBeLessThan(4000);
 
-    // No status file yet -> still running.
+    // No status file means still running.
     const st = await cluster.exec(SELECTOR, ["sh", "-c", `[ -f ${JOBS}/job-a/status ] && echo EXITED || echo RUNNING`], NS);
     expect(st.stdout.trim()).toBe("RUNNING");
   });
 
   it("captures the exit code + stdout once the job finishes", async () => {
     await cluster.exec(SELECTOR, ["sh", "-c", launch("job-b", "echo hello-b; exit 0")], NS);
-    // Poll for the status file (it appears once the detached job exits).
+    // The status file appears once the detached job exits.
     let status = "";
     for (let i = 0; i < 30; i++) {
       const s = await cluster.exec(SELECTOR, ["sh", "-c", `cat ${JOBS}/job-b/status 2>/dev/null`], NS);
@@ -118,19 +110,18 @@ maybe("run_background detached-job mechanism works in a real pod", () => {
       await new Promise((r) => setTimeout(r, 500));
     }
     expect(status).toBe("7");
-    // stderr is captured too (2>&1 in the launcher's redirect).
+    // stderr is captured too.
     const log = await cluster.exec(SELECTOR, ["sh", "-c", `cat ${JOBS}/job-c/log`], NS);
     expect(log.stdout).toContain("boom-c");
   });
 
   it("kill -- -PGID reaps the whole process GROUP (the job AND its children)", async () => {
-    // A job that spawns a child (a background sleep) and writes both pids, so we can
-    // verify BOTH die when we signal the group — not just the leader.
+    // A job that spawns a child and writes both pids, so both can be checked after the group signal.
     const cmd =
       `sleep 300 & echo $! > ${JOBS}/job-k/child_pid; ` +
       `echo started; sleep 300`;
     await cluster.exec(SELECTOR, ["sh", "-c", launch("job-k", cmd)], NS);
-    // Wait until the child pid file exists (the job is up + spawned its child).
+    // Wait until the job has spawned its child.
     let childPid = "";
     for (let i = 0; i < 30; i++) {
       const c = await cluster.exec(SELECTOR, ["sh", "-c", `cat ${JOBS}/job-k/child_pid 2>/dev/null`], NS);
@@ -146,11 +137,11 @@ maybe("run_background detached-job mechanism works in a real pod", () => {
     expect(await alive(leaderPid)).toBe("yes");
     expect(await alive(childPid)).toBe("yes");
 
-    // Kill the process GROUP (the same command jobManager.kill emits).
+    // The same group kill jobManager.kill emits.
     await cluster.exec(SELECTOR, ["sh", "-c", `kill -TERM -- -${leaderPid} 2>/dev/null; sleep 2; kill -KILL -- -${leaderPid} 2>/dev/null; true`], NS);
     await new Promise((r) => setTimeout(r, 1000));
 
-    // BOTH the leader and its child are gone — the group reap worked.
+    // Both the leader and its child are gone.
     expect(await alive(leaderPid)).toBe("no");
     expect(await alive(childPid)).toBe("no");
   });

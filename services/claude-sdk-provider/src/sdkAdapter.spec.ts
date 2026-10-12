@@ -1,10 +1,7 @@
 /**
- * Tier 1 contract test — Claude Agent SDK message → bridge SessionUpdate mapping.
- *
- * The claude-code provider (SDK-backed) must produce the SAME normalized
- * SessionUpdates the goose ACP path does, so the bridge/AG-UI mapping is
- * unchanged. This mirrors bridge.spec.ts's ACP→AG-UI mapping — the highest-value
- * test for a new provider. Pure function, no SDK runtime.
+ * Tier 1 contract test for the Claude Agent SDK message to bridge SessionUpdate
+ * mapping: the claude-code provider must produce the same normalized SessionUpdates
+ * the goose ACP path does. Pure function, no SDK runtime.
  */
 
 import { describe, it, expect } from "vitest";
@@ -12,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { sdkMessageToUpdates, SANDBOX_MCP_PREFIX, type SdkMessage } from "./sdkAdapter.js";
 
 describe("sdkMessageToUpdates", () => {
-  // With partials OFF, the assistant message is the ONLY source of text/thinking.
+  // With partials off, the assistant message is the only source of text/thinking.
   it("maps an assistant text block to agent_message_chunk (partials off)", () => {
     const msg: SdkMessage = { type: "assistant", message: { content: [{ type: "text", text: "hello" }] } };
     expect(sdkMessageToUpdates(msg, false)).toEqual([
@@ -27,9 +24,7 @@ describe("sdkMessageToUpdates", () => {
     ]);
   });
 
-  // REGRESSION (double-send): with partials ON (our default), text + thinking arrive
-  // as stream_event deltas, so the final assistant message must NOT re-emit them —
-  // else every reply is sent twice. tool_use etc. are still emitted from it.
+  // With partials on, text and thinking arrive as stream_event deltas, so the final assistant message must not re-emit them.
   it("does NOT re-emit assistant text/thinking when partials are on (no double-send)", () => {
     const msg: SdkMessage = {
       type: "assistant",
@@ -50,7 +45,7 @@ describe("sdkMessageToUpdates", () => {
       type: "assistant",
       message: { content: [{ type: "text", text: "running" }, { type: "tool_use", id: "tu_x", name: `${SANDBOX_MCP_PREFIX}bash`, input: { command: "ls" } }] },
     };
-    // text skipped (deltas cover it), tool_use kept (not a delta).
+    // text is skipped (deltas cover it), tool_use is kept.
     expect(sdkMessageToUpdates(msg)).toEqual([
       { sessionUpdate: "tool_call", toolCallId: "tu_x", title: "bash", rawInput: { command: "ls" } },
     ]);
@@ -104,9 +99,9 @@ describe("sdkMessageToUpdates", () => {
         ],
       },
     };
-    // partials ON (default): text is skipped (deltas cover it), tool_call kept.
+    // partials on: text is skipped, tool_call is kept.
     expect(sdkMessageToUpdates(msg).map((u) => u.sessionUpdate)).toEqual(["tool_call"]);
-    // partials OFF: both, in order.
+    // partials off: both, in order.
     expect(sdkMessageToUpdates(msg, false).map((u) => u.sessionUpdate)).toEqual(["agent_message_chunk", "tool_call"]);
   });
 

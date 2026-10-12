@@ -1,9 +1,8 @@
 { lib, python3Packages, scooterLib, scooterSchema, ... }:
 
-# scooter_webhooks_lib — the webhooks extension surface (handler contract + the
-# generic spawn/identity/store building blocks). A webhooks handler — in-tree or a
-# contrib — build-depends on this instead of the webhooks app, breaking the
-# app<->contrib build cycle. Depends on scooter_lib + scooter_schema.
+# scooter_webhooks_lib: the webhooks extension surface (handler contract and the
+# spawn/identity/store building blocks) that a handler build-depends on instead of
+# the webhooks app. Depends on scooter_lib and scooter_schema.
 
 python3Packages.buildPythonPackage {
   pname = "scooter-webhooks-lib";

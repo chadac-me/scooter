@@ -1,26 +1,16 @@
 /**
- * FAKE BACKEND ORCHESTRATOR — boots the whole kube-less server stack the fast-e2e / dev harness
- * drives the UI against, as ONE Playwright webServer process:
+ * Fake backend orchestrator: boots the kube-less server stack the fast-e2e / dev harness
+ * drives the UI against, as one Playwright webServer process (ephemeral Postgres → atlas
+ * migrate → agent-host with the fake agent → conversation-router in ROUTER_DEV_MODE). The
+ * router owns the conversation list, its events stream and create, served from Postgres,
+ * and proxies everything else to the single agent-host; Playwright waits on the router's
+ * /healthz, so when this process reports ready the whole chain is up. Teardown stops the
+ * chain in reverse, including the detached Postgres that pg_ctl daemonized.
  *
- *   ephemeral Postgres  →  atlas migrate (agent_host schema)  →  agent-host (fake agent)  →  router
- *
- * Why the router is now in the stack: the conversation LIST (GET /conversations), its live events
- * stream (GET /conversations/events), and CREATE (POST /conversations) were moved OFF agent-host
- * onto the conversation-router, which serves the list/stream from Postgres (LISTEN/NOTIFY) and
- * creates conversations. So the UI can no longer talk to agent-host directly for those — it talks
- * to the router, which proxies everything else through to the single agent-host and answers the
- * list/create itself. The router runs in ROUTER_DEV_MODE (see services/conversation-router/
- * devmode.go): no CRD watch, existence = every metadata row, create = a direct row INSERT.
- *
- * Playwright waits on the router's /healthz (which proxies to agent-host), so when this process
- * reports ready the whole chain is up. On teardown it tears the chain down in reverse and, crucially,
- * stops the detached Postgres (pg_ctl daemonizes it — it is NOT a child, so a plain tree-kill would
- * orphan it).
- *
- * Plain .mjs (no TS toolchain) so it runs as a bare `node` webServer command. Requires on PATH
- * (the nix dev shell provides all): `conversation-router`, postgres tools (initdb/pg_ctl/createdb),
- * `atlas`, and node. Env (all optional, defaults match the old single-agent-host webServer):
- *   ROUTER_PORT (8080)  AGENT_HOST_PORT (8079)  PG_PORT (55432)
+ * Plain .mjs so it runs as a bare `node` webServer command. Requires on PATH:
+ * `conversation-router`, postgres tools (initdb/pg_ctl/createdb), `atlas`, and node. Env
+ * (all optional):
+ *   E2E_ROUTER_PORT (8080)  E2E_AGENT_HOST_PORT (8079)  E2E_PG_PORT (55432)
  *   ROUTER_BIN (else `conversation-router` on PATH)
  *   LOCAL_STATE_PATH, MIRROR_STATE_PATH, GOOSE_MODEL, AGENT_AVAILABLE_MODELS
  */
@@ -30,27 +20,22 @@ import { mkdtempSync, mkdirSync, rmSync, chownSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Postgres refuses to run as root (initdb/postgres hard-fail as uid 0). CI runners are non-root,
-// but a dev container (Scooter's own sandbox included) often runs as root — so when we ARE root,
-// run the PG processes as a non-root uid (default `nobody`, override via PGUID/PGGID) and chown the
-// datadir to it. Everything else (agent-host, router, the TCP clients) runs as-is. Empty object on
-// a non-root host → spawn uses the current user, exactly as CI does.
+// Postgres refuses to run as root, so when running as root the PG processes run as a
+// non-root uid (default `nobody`, override via PGUID/PGGID) and the datadir is chowned to it.
 const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
 const PG_AS = runningAsRoot
   ? { uid: Number(process.env.PGUID ?? 65534), gid: Number(process.env.PGGID ?? 65534) }
   : {};
 
-// E2E_-prefixed so they can't collide with k8s SERVICE env injection — a dev container running
-// inside k8s (Scooter's own sandbox) gets AGENT_HOST_PORT=tcp://<ip>:8080 auto-injected, which
-// would poison a bare `AGENT_HOST_PORT` read (→ PORT="tcp://…" → NaN).
+// E2E_-prefixed so they cannot collide with the k8s service env a dev container inside k8s
+// gets injected (AGENT_HOST_PORT=tcp://…).
 const ROUTER_PORT = process.env.E2E_ROUTER_PORT ?? "8080";
 const AGENT_HOST_PORT = process.env.E2E_AGENT_HOST_PORT ?? "8079";
 const PG_PORT = process.env.E2E_PG_PORT ?? "55432";
 const REPO_ROOT = new URL("../../..", import.meta.url).pathname;
 const DSN = `postgres://postgres@127.0.0.1:${PG_PORT}/agent_host?sslmode=disable`;
-// The webhooks DB owns the resource_links table. In production agent-host WRITES links here and
-// the router READS them to enrich the list; the sidebar's link-name search depends on it. Both
-// must point at the SAME DB or a linked conversation lists with no links (chat-search-filter).
+// The webhooks DB owns the resource_links table, which agent-host writes and the router
+// reads, so both must point at the same DB.
 const WEBHOOKS_DSN = `postgres://postgres@127.0.0.1:${PG_PORT}/webhooks?sslmode=disable`;
 
 const log = (msg) => console.log(`[fakeBackend] ${msg}`);
@@ -97,8 +82,7 @@ function cleanup() {
     }
   }
   if (pgStarted && tmp) {
-    // pg_ctl daemonizes postgres detached from this process — it must be stopped explicitly, or it
-    // leaks past teardown holding PG_PORT and the temp datadir.
+    // pg_ctl daemonizes postgres detached from this process, so it must be stopped explicitly.
     spawnSync("pg_ctl", ["-D", join(tmp, "data"), "-m", "immediate", "stop"], { stdio: "ignore", ...PG_AS });
     pgStarted = false;
   }
@@ -151,8 +135,8 @@ must("atlas", ["migrate", "apply", "--dir", "file://webhooks/migrations", "--url
   cwd: join(REPO_ROOT, "lib/sql"),
 });
 
-// Spawn a long-lived child; if it dies unexpectedly, tear the whole stack down (Playwright then
-// sees /healthz never come up, or drop, and fails the run fast rather than hanging).
+// Spawn a long-lived child and tear the whole stack down if it dies unexpectedly, so
+// Playwright fails fast rather than hanging.
 function spawnService(name, cmd, args, env) {
   log(`starting ${name}: ${cmd} ${args.join(" ")}`);
   const child = spawn(cmd, args, { env: { ...process.env, ...env }, stdio: "inherit" });
@@ -168,26 +152,20 @@ let shuttingDown = false;
 spawnService("agent-host", "node", [join(REPO_ROOT, "services/agent-host/dist/index.js")], {
   PORT: AGENT_HOST_PORT,
   GOOSE_BIN: "fake",
-  // Force the fake sandbox (noop provisioner, no k8s). agent-host otherwise infers it from
-  // GOOSE_BIN=fake AND not-in-cluster — but a dev container that happens to run inside k8s
-  // (KUBERNETES_SERVICE_HOST set, e.g. Scooter's own sandbox) would then pick the k8s provisioner
-  // and try to reconcile against the cluster. Explicit is deterministic on any host.
+  // Force the fake sandbox (noop provisioner, no k8s) rather than letting agent-host infer it
+  // from the environment.
   FAKE_SANDBOX: "1",
   LOCAL_STATE_PATH: process.env.LOCAL_STATE_PATH ?? "/tmp/agent-host-e2e",
-  // PRODUCTION's two-store topology (mirroredConversationStore only exists with MIRROR_STATE_PATH).
+  // Production's two-store topology (mirroredConversationStore only exists with MIRROR_STATE_PATH).
   MIRROR_STATE_PATH: process.env.MIRROR_STATE_PATH ?? "/tmp/agent-host-e2e-mirror",
   GOOSE_MODEL: process.env.GOOSE_MODEL ?? "model-default",
   AGENT_AVAILABLE_MODELS: process.env.AGENT_AVAILABLE_MODELS ?? "model-default,model-fast,model-smart",
-  // The env here is an explicit ALLOWLIST, not process.env passthrough — a var the
-  // playwright config sets but this omits never reaches agent-host. AGENT_MODELS_JSON
-  // carries the PROVIDER-TAGGED catalog, which is what makes the picker render its
-  // grouped (optgroup) branch; without it the stack falls back to the legacy
-  // untagged form and the grouped branch is structurally untestable.
+  // The env is an explicit allowlist, and AGENT_MODELS_JSON carries the provider-tagged catalog that makes the picker render its grouped branch.
   ...(process.env.AGENT_MODELS_JSON ? { AGENT_MODELS_JSON: process.env.AGENT_MODELS_JSON } : {}),
   // Durable conversation metadata + event log in the ephemeral PG — the row the router lists and
   // hydrates from, and the source of the conversations_changed NOTIFY the router pushes.
   AGENT_HOST_DB_DSN: DSN,
-  // REQUIRED with a DSN: nothing else writes the row.
+  // Required with a DSN, since nothing else writes the row.
   CONVERSATION_ROUTER_URL: `http://127.0.0.1:${ROUTER_PORT}`,
   // Switches agent-host's link store from files to the shared PG resource_links table, so a link
   // POSTed here is visible to the router's list enrichment (see WEBHOOKS_DSN).
@@ -204,8 +182,7 @@ spawnService("conversation-router", routerBin, [], {
   ROUTER_DEV_MODE: "1",
   AGENT_HOST_URL: `http://127.0.0.1:${AGENT_HOST_PORT}`,
   AGENT_HOST_DB_DSN: DSN,
-  // Read-only handle on the same resource_links table agent-host writes, so the list/events
-  // enrich each conversation with its links (the sidebar's link-name search).
+  // Read-only handle on the same resource_links table agent-host writes, for list enrichment.
   WEBHOOKS_DB_DSN: WEBHOOKS_DSN,
 });
 

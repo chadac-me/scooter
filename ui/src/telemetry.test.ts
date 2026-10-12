@@ -1,9 +1,8 @@
 /**
- * Telemetry must be INERT and SAFE when it is off, which is the default everywhere.
+ * Telemetry must be inert and safe when it is off, which is the default everywhere.
  *
- * The rule under test: no call in this module may throw into its caller, and none may do
- * anything observable before a collector is configured. Telemetry that can break the app
- * it observes is worse than no telemetry.
+ * No call in this module may throw into its caller, and none may do anything
+ * observable before a collector is configured.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -64,8 +63,7 @@ describe("initTelemetryFromServer", () => {
 
 describe("attribute names are stable", () => {
   it("keeps BOTH conversation identifiers", () => {
-    // A conversation has a local key before the server assigns its id, so the window where
-    // bugs live spans both. Dropping either breaks the trace exactly there.
+    // A conversation has a local key before the server assigns its id, so a trace needs both.
     expect(ATTR.conversationKey).toBe("scooter.conversation.key");
     expect(ATTR.conversationId).toBe("scooter.conversation.id");
   });

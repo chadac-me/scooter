@@ -37,16 +37,13 @@ func TestOwnerFromHonorsARenamedHeader(t *testing.T) {
 	if got := ownerFrom(reqWith(map[string]string{"x-forwarded-user": "alice"})); got != "alice" {
 		t.Fatalf("want alice from the configured header, got %q", got)
 	}
-	// The default name must NOT be read once the header is renamed — the ingress only
-	// strips the configured one, so honoring both would let a client spoof identity.
+	// The ingress only strips the configured header, so honoring the default too would let a client spoof identity.
 	if got := ownerFrom(reqWith(map[string]string{"x-auth-user": "attacker"})); got != "" {
 		t.Fatalf("the default header must be ignored when renamed, got %q", got)
 	}
 }
 
-// alb-oidc: the sub arrives in x-amzn-oidc-identity, NOT x-auth-user. Without this the
-// router saw every browser caller as anonymous and `visible()` returned true for
-// everything — all users seeing all conversations (issue #527).
+// In alb-oidc mode the sub arrives in x-amzn-oidc-identity, not x-auth-user.
 func TestOwnerFromSupportsAlbOidc(t *testing.T) {
 	t.Setenv("AUTH_MODE", "alb-oidc")
 	if got := ownerFrom(reqWith(map[string]string{"x-amzn-oidc-identity": "cognito-sub-abc"})); got != "cognito-sub-abc" {

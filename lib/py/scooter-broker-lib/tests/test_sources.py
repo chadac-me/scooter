@@ -1,10 +1,4 @@
-"""The GENERIC credential sources — the ones more than one provider composes.
-
-Provider-specific sources (GitHub App, Atlassian OAuth, Datadog keys) are tested
-with their providers in the broker app, since that is where they live: a source
-only its own integration can use is implementation, not shared surface.
-See PR #567.
-"""
+"""The generic credential sources; provider-specific ones are tested with their contribs."""
 
 from __future__ import annotations
 

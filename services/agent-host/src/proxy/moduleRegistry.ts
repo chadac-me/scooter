@@ -1,22 +1,15 @@
 /**
- * ModuleRegistry — the agent-host's view of a conversation's Nix MODULES (the
- * `/etc/scooter/modules` + attached registry modules the sandbox re-converges).
- * Backs the Sandbox tab's module search/install + the settings "available modules"
- * list. Like WebServiceRegistry it reaches the pod ONLY via the exec API + the
- * in-pod scooter-* CLIs — no in-pod HTTP server:
- *   - SEARCH the broker catalog:  exec `agent-broker "modules?q=<q>"` (returns JSON).
- *   - LIST attached modules:      read `/etc/scooter/registry-modules.json` (names).
- *   - INSTALL a module:           exec `scooter-rebuild module add <ref>` (attaches +
- *                                 re-converges; needs the pod running).
- *
- * Everything needs a RUNNING pod (the CLIs run in-pod). When the pod is asleep the
- * list is empty and install throws — the UI gates on the Sandbox status.
+ * ModuleRegistry: the agent-host's view of a conversation's attached registry
+ * modules, reached only via the exec API and the in-pod scooter-* CLIs. Search execs
+ * `agent-broker "modules?q=<q>"`, list reads `/etc/scooter/registry-modules.json`,
+ * and install execs `scooter-rebuild module add <ref>`. Everything needs a running
+ * pod: when it is asleep the list is empty and install throws.
  */
 
 import type { SandboxRef } from "../types.js";
 import type { ExecLike } from "./webServiceRegistry.js";
 
-/** The file scooter-rebuild keeps the attached registry-module NAMES in. */
+/** The file scooter-rebuild keeps the attached registry-module names in. */
 export const REGISTRY_IDS_PATH = "/etc/scooter/registry-modules.json";
 
 /** One module as the broker registry returns it (GET /modules). */
@@ -25,7 +18,7 @@ export interface RegistryModule {
   name: string;
   description: string;
   visibility: "public" | "private";
-  /** The publishing conversation id (may be omitted for the caller's own). */
+  /** The publishing conversation id, omitted for the caller's own. */
   owner?: string;
 }
 
@@ -35,12 +28,11 @@ export interface ModuleRegistryDeps {
 }
 
 export interface ModuleRegistry {
-  /** Search the broker catalog (caller's own + all public). Empty query = all. */
+  /** Search the broker catalog (caller's own plus all public); an empty query means all. */
   search(conversationId: string, query: string): Promise<RegistryModule[]>;
-  /** The registry modules currently ATTACHED to this conversation (their names). */
+  /** The names of the registry modules currently attached to this conversation. */
   attached(conversationId: string): Promise<string[]>;
-  /** Attach a registry module by name-or-id and re-converge. Throws on failure
-   *  (unknown module, pod asleep, switch error). Returns the CLI's message. */
+  /** Attach a registry module by name-or-id and re-converge, returning the CLI's message or throwing on failure. */
   install(conversationId: string, ref: string): Promise<string>;
 }
 
@@ -73,7 +65,7 @@ export function createModuleRegistry(deps: ModuleRegistryDeps): ModuleRegistry {
     try {
       return await deps.connect(ref);
     } catch {
-      return null; // pod asleep / unreachable
+      return null; // pod asleep or unreachable
     }
   };
 
@@ -82,8 +74,7 @@ export function createModuleRegistry(deps: ModuleRegistryDeps): ModuleRegistry {
       const exec = await connect(conversationId);
       if (!exec) return [];
       try {
-        // agent-broker is the authenticated broker curl wrapper baked into the pod;
-        // the query is a substring the broker matches against name/description.
+        // agent-broker is the authenticated broker wrapper baked into the pod.
         const r = await exec.execute({ command: "agent-broker", args: [`modules?q=${encodeURIComponent(query)}`] });
         if (r.exitCode !== 0) return [];
         return parseModuleList(r.stdout);
@@ -100,7 +91,7 @@ export function createModuleRegistry(deps: ModuleRegistryDeps): ModuleRegistry {
         const arr = JSON.parse(raw) as unknown;
         return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
       } catch {
-        return []; // no attached modules / pod asleep
+        return []; // no attached modules, or pod asleep
       }
     },
 

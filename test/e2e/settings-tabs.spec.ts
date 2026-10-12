@@ -1,26 +1,15 @@
 /**
- * Tier 3 E2E — the Settings page's tab layout + real URLs.
- *
- * Settings be one long scrolling page reachable only by a header toggle. It is
- * now a left tab rail where each tab is a real path (/settings/<tab>), so this asserts
- * the things that change for a user: the tabs exist, clicking one shows only that
- * section AND updates the URL, a pasted deep-link opens the right tab after a full
- * reload, and browser Back/Forward moves between tabs.
- *
- * Also asserts the whole-UI invariants at each step, so navigating settings cannot
- * leave the rest of the app in an inconsistent state.
+ * Tier 3 E2E for the Settings page's tab layout and real URLs: the tabs exist, clicking one
+ * shows only that section and updates the URL (/settings/<tab>), a pasted deep-link opens
+ * the right tab after a full reload, and browser Back/Forward moves between tabs. Also
+ * asserts the whole-UI invariants at each step.
  */
 
 import { type Page } from "@playwright/test";
 import { test, expect, snapshot, assertConsistent } from "./fixtures.js";
 
-// The tabs are an accordion (a trigger that expands the list) below the `desk`
-// (1200px) breakpoint, so each test opens it before the tab buttons can be
-// seen/clicked. At/above desk the trigger is hidden and the list is always shown, so
-// this is a no-op there (the Desktop Chrome viewport is 1280px, hence the isVisible
-// guard). Selecting a tab does NOT auto-close the menu, so one open per test suffices
-// — it stays open across client-side nav (tab clicks, Back/Forward) but resets on a
-// full page.goto().
+// Below the `desk` breakpoint the tabs are an accordion that must be opened before the
+// tab buttons can be clicked; at or above it the trigger is hidden, so this is a no-op.
 async function openTabs(page: Page) {
   const toggle = page.locator('[data-testid="settings-tabs-toggle"]');
   if ((await toggle.isVisible()) && (await toggle.getAttribute("aria-expanded")) !== "true") {
@@ -36,10 +25,7 @@ const TABS = [
 ];
 
 test.describe("settings page tabs", () => {
-  // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). Settings itself is pure UI, but
-  // the round-trip test opens with a completeTurn — on the full target that funds a
-  // sandbox boot (≤25s cold) + an exec'd turn (~10s) before the settings navigation
-  // even starts, leaving the 60s suite default no headroom. 120s with margin.
+  // The round-trip test opens with a completeTurn, which on the full target funds a sandbox boot.
   test.setTimeout(120_000);
 
   test("the header toggle opens /settings and shows every tab", async ({ chat, page }) => {
@@ -47,9 +33,8 @@ test.describe("settings page tabs", () => {
     await page.locator('[data-testid="settings-toggle"]').click();
     await expect(page.locator('[data-testid="settings-page"]')).toBeVisible({ timeout: 20_000 });
 
-    // A real URL, not a hidden view flag. Match on PATHNAME via a predicate: chat's ?thread=
-    // deep-link is preserved across the navigation, so a `**/settings/x` glob (which matches the
-    // whole URL including the query) would never match.
+    // A real URL, matched on pathname because the chat's ?thread= deep-link is preserved
+    // across the navigation.
     await page.waitForURL((u) => u.pathname.startsWith("/settings/"), { timeout: 20_000 });
     await openTabs(page);
     for (const t of TABS) {
@@ -77,8 +62,8 @@ test.describe("settings page tabs", () => {
   });
 
   test("a deep-link to a tab opens it directly after a full page load", async ({ page }) => {
-    // The nginx SPA fallback serves index.html for /settings/*; the app re-derives the
-    // tab from the path. This is the bookmark / shared-link case.
+    // The nginx SPA fallback serves index.html for /settings/* and the app re-derives the
+    // tab from the path.
     await page.goto("/settings/modules");
     await expect(page.locator('[data-testid="settings-page"]')).toBeVisible({ timeout: 20_000 });
     await openTabs(page);
@@ -116,15 +101,8 @@ test.describe("settings page tabs", () => {
   });
 
   test("the Bring Your Own Claude tab always renders something actionable", async ({ page }) => {
-    // The fast stack runs WITH BYO enabled, so the ENABLED path renders there; the full
-    // target's test platform leaves BYOC off, so the DISABLED panel (red box + kubenix
-    // sample) renders instead. Both branches emit [data-testid="claude-agent-section"]
-    // with real content, so every assertion below is deliberately branch-agnostic —
-    // asserting one specific branch would test a state the other deployment cannot
-    // produce (my first cut did exactly that and failed for the wrong reason).
-    //
-    // What matters at this level either way: the tab is NEVER BLANK. It `return null`
-    // when BYO was off, which reads as a broken page rather than "off by config".
+    // The fast stack runs with BYO enabled and the full target leaves it off, so the
+    // assertions are branch-agnostic: the tab must never render blank.
     await page.goto("/settings/claude");
     await expect(page.locator('[data-testid="settings-panel-claude"]')).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('[data-testid="claude-agent-section"]')).toBeVisible();
@@ -132,9 +110,8 @@ test.describe("settings page tabs", () => {
     const text = (await page.locator('[data-testid="settings-panel-claude"]').innerText()).trim();
     expect(text.length, "the claude tab must never render blank").toBeGreaterThan(40);
 
-    // And it must not leak a raw parser error where the device list goes — /byoc/* does not exist
-    // on this stack, so the SPA catch-all returns index.html and res.json() throw
-    // `Unexpected token '<', "<!doctype "...` straight into the UI.
+    // It must not leak a raw parser error where the device list goes (the SPA catch-all
+    // returns index.html for /byoc/*).
     expect(text, "a JSON parser error must never reach the user").not.toMatch(/Unexpected token|not valid JSON/i);
   });
 
@@ -145,9 +122,7 @@ test.describe("settings page tabs", () => {
   });
 
   test("leaving settings returns to chat with the app still consistent", async ({ chat, page }) => {
-    // The only test in this file that runs a TURN, so the only one that funds a sandbox
-    // boot. completeTurn's default is 120s on the full target, which the 60s suite ceiling
-    // cannot contain; every other test here is pure navigation and keeps the default.
+    // The only test in this file that runs a turn, so the only one that funds a sandbox boot.
     test.setTimeout(180_000);
     await chat.open();
     await chat.completeTurn("a turn before visiting settings");
@@ -160,7 +135,7 @@ test.describe("settings page tabs", () => {
     await expect(chat.input()).toBeVisible({ timeout: 20_000 });
     const after = await snapshot(page);
     assertConsistent(after, "back from settings");
-    // The conversation survived the round trip — settings must not disturb the thread.
+    // The conversation survived the round trip; settings must not disturb the thread.
     expect(after.userMessages, "transcript preserved across settings").toBe(before.userMessages);
   });
 });

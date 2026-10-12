@@ -7,24 +7,22 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi",
   "uvicorn",
-  "websockets",  # WS server (FastAPI) + client (claude-bridge proxy to the agent-host)
+  "websockets",  # WS server and client
   "httpx",
   "pydantic",
   "pydantic-settings",
   "sqlalchemy",
-  "aiosqlite",   # default dev store (SQLite)
-  "asyncpg",     # Postgres driver for the durable mapping store (prod)
-  "scooter-schema", # generated SQLAlchemy models for the webhooks database (single source of truth)
+  "aiosqlite",   # SQLite driver for local dev
+  "asyncpg",     # Postgres driver
+  "scooter-schema", # generated SQLAlchemy models for the webhooks database
   "scooter-lib",    # shared structured-logging convention (lib/py/scooter-lib)
-  "scooter-webhooks-lib", # the extension surface: handler registry + mapping store
+  "scooter-webhooks-lib", # the handler extension surface
 ]
 
 [project.scripts]
 agent-webhooks = "webhooks.app:main"
 
-# External packages can contribute handler modules via this entry-point group
-# (mirrors the broker's `agent_broker.providers`). scooter_webhooks_lib/registry.py
-# scans it at startup; adding a handler never edits the service.
+# External packages contribute handler modules via this entry-point group, scanned at startup.
 [project.entry-points."scooter_webhooks.handlers"]
 # example = "my_pkg.handlers:my_handler"
 

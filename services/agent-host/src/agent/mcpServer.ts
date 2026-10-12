@@ -1,11 +1,8 @@
 /**
- * The agent-facing MCP server — exposes the agent-host's in-process tools to goose
- * (background jobs, model self-selection, and the typed agent-tools).
- *
- * Transport: a stateless Streamable-HTTP MCP endpoint served in-process by the
- * agent-host. Each conversation's `newSession` is given an MCP server URL that
- * encodes its conversationId (?conv=<id>), so a tool call resolves to the right
- * sandbox.
+ * The agent-facing MCP server: exposes the agent-host's in-process tools to the agent
+ * (background jobs, subagents, model self-selection, sandbox sizing, scheduling,
+ * marimo) over a stateless Streamable-HTTP endpoint. The conversation a request acts
+ * for comes only from the signed conversation token in its Authorization header.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -40,14 +37,10 @@ import { logger } from "../log.js";
 
 const log = logger("mcp-endpoint");
 
-/** How buildServer gets a marimo client for a conversation: the agent-host resolves
- *  the conversation's pod IP fresh (it changes across suspend/resume) and returns a
- *  client targeting podIP:2718. Omitted when no real sandbox (fake/local). */
+/** How buildServer gets a marimo client targeting a conversation's pod, resolved fresh since the pod IP changes across suspend/resume. */
 export interface MarimoToolsWiring {
   clientFor(conversationId: string): MarimoClient | Promise<MarimoClient>;
-  /** The URL to tell the user to open to start a notebook session (a marimo session
-   *  only exists once a browser has the notebook open). Surfaced in the no-session
-   *  message. Undefined when the public URL isn't known. */
+  /** The URL the user must open to start a notebook session, or undefined when the public URL is unknown. */
   notebookUrlFor?(conversationId: string): string | undefined;
 }
 
@@ -57,8 +50,7 @@ export interface ToolResult {
   isError?: boolean;
 }
 
-/** Pure handlers for the background-job tools (run_background / check_background /
- *  list_background), testable without the MCP plumbing. */
+/** Pure handlers for the background-job tools, testable without the MCP plumbing. */
 export async function handleRunBackground(
   jobs: JobManager,
   conversationId: string,
@@ -127,21 +119,13 @@ export async function handleKillBackground(
   return { content: [{ type: "text", text }], isError: res.outcome === "unknown" };
 }
 
-/** What buildServer still needs from the agent-host for the web tools.
- *
- *  This used to carry the broker client, the conversation's links and the webhooks
- *  resource-map lookup, all for the provider reply tools. Those moved to the contribs
- *  in #700, and the broker resolves its own targets from the conversation's links —
- *  so what is left is an injectable fetch for tests. */
+/** What buildServer needs from the agent-host for the web tools. */
 export interface AgentToolsWiring {
   /** Injectable fetch for web_fetch (defaults to global fetch). */
   fetchImpl?: typeof fetch;
 }
 
-/** Build an McpServer instance bound to one conversation. Registers whichever
- *  capabilities are present: the background-job tools when `jobs` is given, the
- *  typed agent-tools when `agentTools` is given (broker wired), and the model
- *  self-selection tools when `models` offers more than one model. */
+/** Build an McpServer bound to one conversation, registering whichever capabilities are wired. */
 export async function buildServer(
   conversationId: string,
   agentTools?: AgentToolsWiring,
@@ -154,9 +138,7 @@ export async function buildServer(
 ): Promise<McpServer> {
   const server = new McpServer({ name: "scooter-env", version: "1.0.0" });
   if (marimo) {
-    // Notebook tools (marimo_execute / list / cell ops) — target THIS conversation's
-    // in-pod marimo. clientFor resolves the pod IP fresh each call; notebookUrlFor
-    // supplies the link the no-session message tells the user to open.
+    // Notebook tools targeting this conversation's in-pod marimo.
     registerMarimoTools(
       server,
       () => marimo.clientFor(conversationId),
@@ -309,16 +291,10 @@ export async function buildServer(
       async (args) => handleSearchSubagent(subagents, conversationId, args) as TR,
     );
   }
-  // web_fetch needs NO broker and NO credential — it hits a URL directly. Registered
-  // unconditionally so it doesn't depend on broker wiring. `web_search` is NOT here
-  // any more: it needs a search key (or, for duckduckgo, an explicit opt-in), which
-  // makes it a search contrib's
-  // tool, arriving over the broker's /mcp iff one of them is configured (#700).
+  // web_fetch needs no broker and no credential, so it is registered unconditionally.
   registerWebFetch(server, { fetchImpl: agentTools?.fetchImpl });
 
-  // Model self-selection: list the offered models (+ deployment hints) and switch
-  // this conversation's model mid-run. Registered only when more than one model is
-  // offered (a single-model deployment has nothing to switch to).
+  // Model self-selection is registered only when more than one model is offered.
   if (models && models.catalog.models.length > 1) {
     server.registerTool(
       "list_models",
@@ -345,9 +321,7 @@ export async function buildServer(
       async (args) => handleSwitchModel(models, conversationId, args) as Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
     );
   }
-  // Sandbox right-sizing: show the current cpu/memory/gpu and record a new size on
-  // the broker (applied on the NEXT sandbox restart — the broker owns sizing now).
-  // Registered only when the resources wiring is present (the broker path is usable).
+  // Sandbox right-sizing records a new size on the broker, applied on the next sandbox restart.
   if (resources) {
     server.registerTool(
       "show_sandbox_resources",
@@ -384,49 +358,22 @@ export async function buildServer(
     );
   }
   if (scheduler) {
-    // The agent manages its OWN scheduled tasks (scoped to this conversation's owner).
+    // The agent manages its own scheduled tasks, scoped to this conversation's owner.
     registerSchedulerTools(server, scheduler, conversationId);
   }
   return server;
 }
 
 export interface McpEndpoint {
-  /** Handle an HTTP request to the MCP endpoint. The conversation is taken from the
-   *  signed conversation token in `Authorization: Bearer …` — never from the URL. */
+  /** Handle an HTTP request to the MCP endpoint, taking the conversation from the signed token in `Authorization: Bearer …`, never from the URL. */
   handle(req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void>;
-  /** The MCP URL a conversation's newSession should advertise.
-   *
-   *  The SAME url for every conversation now: the scope travels in the credential, so
-   *  `?conv=` is gone. It used to be the only thing telling the endpoint which
-   *  conversation a caller wanted, on a route with no caller authentication — see
-   *  headersFor and issue #700. */
+  /** The MCP URL a conversation's newSession should advertise, the same for every conversation since the scope travels in the credential. */
   urlFor(conversationId: string): string;
-  /** The headers a client must send to reach THIS conversation's tools: a bearer
-   *  conversation token. Returns [] when no signing secret is configured, which
-   *  leaves the endpoint open exactly as it was before — see createMcpEndpoint. */
+  /** The bearer conversation-token header a client must send to reach this conversation's tools, or [] when no signing secret is configured. */
   headersFor(conversationId: string, owner?: string): Array<{ name: string; value: string }>;
 }
 
-/**
- * Create the in-process MCP endpoint. Stateless: a fresh McpServer +
- * StreamableHTTP transport per request (no session state to keep — the
- * conversationId comes from the URL), so it composes with the agent-host's
- * existing node:http server.
- */
-/**
- * The conversation this request may act for, or undefined.
- *
- * THE ONLY SOURCE IS THE SIGNED TOKEN. It used to be `?conv=`, which anything able to
- * reach this port could choose — and the BYOC tunnel went to real lengths to keep the
- * id server-side (`tunnelTargets.ts`) while the endpoint it protected had no opinion.
- *
- * `?conv=` IS DELETED, NOT DEPRECATED, and no fallback reads it. A conversation id that
- * can arrive in a query param will eventually be trusted by something; and an
- * unconfigured secret meaning "accept anything" would leave the agent-host failing OPEN
- * while the broker's verifier fails CLOSED, which is the inconsistency in the dangerous
- * direction. The kubenix module generates the Secret, so "no secret" is a
- * misconfiguration rather than a supported mode.
- */
+/** The conversation this request may act for, taken only from the signed bearer token, or undefined (an unconfigured secret fails closed). */
 export function resolveConversation(req: IncomingMessage, secret: string): string | undefined {
   if (!secret) return undefined;
   const token = bearerFrom(req.headers.authorization);
@@ -442,43 +389,30 @@ export function resolveConversation(req: IncomingMessage, secret: string): strin
 export function createMcpEndpoint(deps: {
   baseUrl: string;
   path?: string;
-  /** HS256 secret for minting + verifying conversation tokens. EMPTY = the endpoint
-   *  stays unauthenticated on the pre-#700 `?conv=` behaviour, with a startup warning. */
+  /** HS256 secret for minting and verifying conversation tokens; empty makes the endpoint reject every request. */
   convTokenSecret?: string;
-  /** Override the token lifetime. Defaults to DEFAULT_CONV_TOKEN_TTL_SECONDS. */
+  /** Override the token lifetime (default DEFAULT_CONV_TOKEN_TTL_SECONDS). */
   convTokenTtlSeconds?: number;
-  /** When provided, the per-conversation server exposes the five typed agent-tools
-   *  (slack/gitlab/github/web). Omit to leave them off (e.g. no broker configured). */
+  /** Wiring for the web tools. */
   agentTools?: AgentToolsWiring;
-  /** When provided, exposes the background-job tools (run_background /
-   *  check_background / list_background). Omit to leave them off. */
+  /** When provided, exposes the background-job tools. */
   jobs?: JobManager;
-  /** When provided (and >1 model is offered), exposes list_models / switch_model
-   *  so the agent can pick + switch its own model. */
+  /** When provided and more than one model is offered, exposes list_models / switch_model. */
   models?: ModelToolsWiring;
-  /** When provided, exposes show_sandbox_resources / set_sandbox_resources so the
-   *  agent can right-size its own sandbox (the broker owns + applies the size). Omit
-   *  to leave them off (e.g. a fake/local sandbox can't resize). */
+  /** When provided, exposes show_sandbox_resources / set_sandbox_resources. */
   resources?: SandboxResourceToolsWiring;
-  /** When provided, exposes the scheduled-task tools (list/search/view/create/edit/
-   *  delete) — the agent manages its OWN scheduled tasks via the scheduler service.
-   *  Omit to leave them off (e.g. no scheduler deployed). */
+  /** When provided, exposes the scheduled-task tools. */
   scheduler?: SchedulerToolsWiring;
-  /** When provided, exposes the subagent tools (spawn/list/check/cancel) — the
-   *  agent delegates work to child agents sharing this conversation's sandbox.
-   *  Omit to leave them off. */
+  /** When provided, exposes the subagent tools. */
   subagents?: SubagentManager;
-  /** When provided, exposes the marimo notebook tools (execute + cell ops), targeting
-   *  the conversation's in-pod marimo. Omit for a fake/local sandbox. */
+  /** When provided, exposes the marimo notebook tools. */
   marimo?: MarimoToolsWiring;
 }): McpEndpoint {
   const path = deps.path ?? "/mcp";
   const secret = deps.convTokenSecret ?? "";
   const ttlSeconds = deps.convTokenTtlSeconds;
   if (!secret) {
-    // Every request will 401 and the agent will have no platform tools at all. Said at
-    // ERROR once on the way up, naming the consequence and the fix, because the
-    // alternative symptom is an agent that silently cannot do anything.
+    // Every request will 401, so say so at ERROR once on the way up.
     log.error(
       "no CONV_TOKEN_SECRET: the MCP endpoint will reject EVERY request and the agent " +
         "will have no platform tools. The kubenix module provisions this secret; set it.",
@@ -500,13 +434,12 @@ export function createMcpEndpoint(deps: {
     async handle(req, res, body) {
       const conv = resolveConversation(req, secret);
       if (!conv) {
-        // 401, not 400: this is "I don't know who you are", and a 400 reads as a
-        // malformed request the client should reshape rather than authenticate.
+        // 401 because the caller is unidentified, not malformed.
         res.statusCode = 401;
         res.end("missing or invalid conversation token");
         return;
       }
-      // Stateless transport: no session id (sessionIdGenerator undefined).
+      // Stateless transport with no session id.
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       const server = await buildServer(conv, deps.agentTools, deps.jobs, deps.models, deps.resources, deps.scheduler, deps.subagents, deps.marimo);
       await server.connect(transport);

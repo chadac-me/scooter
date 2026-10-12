@@ -1,9 +1,4 @@
-"""Owner resolution for Slack: a user id -> the email Scooter matches on.
-
-Registered into `scooter_webhooks_lib.identity`, which owns the orchestration
-(#575). This is the provider-specific half that used to sit in the webhooks app's
-`identity_resolve` behind an `if provider == "slack"`. Why: PR #588.
-"""
+"""Owner resolution for Slack: a user id to the email Scooter matches on, registered into `scooter_webhooks_lib.identity`."""
 
 from __future__ import annotations
 
@@ -24,8 +19,7 @@ _SLACK_API = "https://slack.com/api"
 
 @register_email_resolver("slack")
 async def slack_email(user_id: str) -> str | None:
-    """The email for a Slack user id, via users.info (needs the users:read.email
-    scope on the bot token). None if unavailable."""
+    """The email for a Slack user id via users.info, which needs the users:read.email scope."""
     token = settings.slack_bot_token
     if not token or not user_id:
         return None

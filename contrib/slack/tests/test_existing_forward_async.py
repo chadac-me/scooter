@@ -1,14 +1,8 @@
-"""A follow-up to an EXISTING Slack conversation must forward OFF the request path.
+"""A follow-up to an existing Slack conversation forwards off the request path.
 
-send_message() blocks until the agent's whole turn finishes (the /agui SSE runs to
-RUN_FINISHED — minutes). If the Slack handler AWAITS it inline, the webhook can't
-200 within Slack's ~3s window, so Slack retries — and every retry is dropped as an
-already-handled duplicate. The channel looks dead ("everything classified as a
-duplicate on existing conversations"). So the handler must background the forward
-and return immediately; the reply still streams into the thread via slack_respond.
-
-These tests drive the real handler with a send_message that BLOCKS, and assert the
-handler returns BEFORE send_message completes (i.e. it was NOT awaited inline).
+send_message() blocks until the agent's whole turn finishes, and Slack retries a
+webhook that does not answer within ~3s, so the handler must return before the
+forward completes; these tests drive it with a send_message that blocks.
 """
 
 from __future__ import annotations
@@ -20,14 +14,13 @@ from scooter_contrib_slack import webhooks_handler as slack_h
 
 
 async def _assert_nonblocking(handler_coro):
-    """Run the handler with a send_message that blocks until released; assert the
-    handler returns promptly (didn't await the block) yet DID dispatch the forward."""
+    """Run the handler with a send_message that blocks until released, asserting it returns promptly yet dispatched the forward."""
     started = asyncio.Event()
     release = asyncio.Event()
 
     async def blocking_send(conv_id, msg, *, priority=False, images=None, files=None, source=None):
         started.set()
-        await release.wait()  # the whole-turn block
+        await release.wait()
         return True
 
     with (
@@ -39,17 +32,14 @@ async def _assert_nonblocking(handler_coro):
         db.lookup_conversation = AsyncMock(return_value="conv-existing")
         db.get_conversation_for_resource = AsyncMock(return_value="conv-existing")
 
-        # The handler must return promptly even though send_message blocks forever.
         await asyncio.wait_for(handler_coro, timeout=1.0)
 
-        # The forward WAS dispatched (a background task entered send_message)...
         await asyncio.wait_for(started.wait(), timeout=1.0)
-        # ...but the handler returned WITHOUT it completing (still blocked).
         assert not release.is_set()
         assert sm.call_args.args[0] == "conv-existing"
 
         release.set()
-        await asyncio.sleep(0)  # let the background task drain
+        await asyncio.sleep(0)
 
 
 async def test_mention_on_existing_conversation_forwards_in_background():

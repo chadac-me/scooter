@@ -1,12 +1,8 @@
-"""Agent-host client — spawn + drive agent conversations from webhooks.
+"""Agent-host client: spawn and drive agent conversations from webhooks.
 
-Replaces the OpenHands-coupled client. We spawn a conversation by POSTing the
-task to the agent-host's standard AG-UI endpoint (POST /agui) — the same path
-the UI uses — and read the SSE event stream to know when the run finishes and to
-collect the final assistant message.
-
-The conversation_id IS the threadId we generate, so it's known up front (the
-thread<->conversation mapping can be recorded immediately).
+A conversation is spawned by POSTing the task to the agent-host's AG-UI endpoint
+(POST /agui, the same path the UI uses) and reading the SSE stream until the run
+finishes. The conversation_id is the threadId, so it is known up front.
 """
 
 from __future__ import annotations
@@ -25,12 +21,7 @@ _C = {"component": "agent_host_client"}
 
 
 class AgentHostConfig(Protocol):
-    """What this client needs from whatever settings object the app hands it.
-
-    CONFIG STAYS IN THE APP, same as `store.DatabaseConfig`: a lib module is given
-    its configuration, it does not read the environment. A contrib is not the app
-    and does own its settings (PR #573) — the two rules don't overlap. Why: PR #575.
-    """
+    """What this client needs from the settings object the app hands it; a lib module never reads the environment itself."""
 
     agent_host_url: str
     agent_host_token_path: str
@@ -41,15 +32,12 @@ _config: AgentHostConfig | None = None
 
 
 def init(config: AgentHostConfig) -> None:
-    """Bind the agent-host settings. Called once at service startup, beside
-    `store.init_db`."""
+    """Bind the agent-host settings once at service startup."""
     global _config
     _config = config
 
 
 def _cfg() -> AgentHostConfig:
-    # Loud, not silent: an unconfigured client would otherwise POST to "/agui" and
-    # fail as a confusing connection error at the first webhook delivery.
     if _config is None:
         raise RuntimeError("scooter_webhooks_lib.agent_host_client.init(config) was never called")
     return _config
@@ -64,11 +52,7 @@ def _conversations_url() -> str:
 
 
 async def _create_conversation(owner: str | None) -> str | None:
-    """Ask the server for a conversation id (POST /conversations). None on failure.
-
-    `owner` rides the body, NOT an identity header — that header's name is
-    deployment-configurable, so a hard-coded one gets dropped. Why: PR #546.
-    """
+    """Ask the server for a conversation id (POST /conversations), or None on failure; `owner` rides the body because the identity header's name is deployment-configurable."""
     headers = {"content-type": "application/json"}
     token = _sa_token()
     if token:
@@ -97,12 +81,7 @@ async def _create_conversation(owner: str | None) -> str | None:
 def _content(
     text: str, images: list[dict] | None, files: list[dict] | None = None
 ) -> str | list[dict]:
-    """Build a message's `content`: a plain string (text-only, the common case) OR
-    a multimodal parts array (text + image + file parts) the agent-host /agui
-    normalizer splits. Each image is {data: base64, mimeType}; each file is
-    {name, data: base64, mimeType} (a binary attachment the agent-host writes into
-    the sandbox). The inlined-text block for text attachments is woven into `text`
-    by the CALLER, not here. Mirrors the UI's send shape."""
+    """Build a message's `content`: a plain string, or a multimodal parts array (text, image and file parts) in the UI's send shape."""
     if not images and not files:
         return text
     parts: list[dict] = []
@@ -128,24 +107,14 @@ async def create_conversation(
     files: list[dict] | None = None,
     source: str | None = None,
 ) -> dict | None:
-    """Spawn an agent conversation for `initial_message`.
+    """Spawn an agent conversation for `initial_message` and return {conversation_id, result}, or None on failure.
 
-    Generates a threadId, POSTs the task to the agent-host /agui endpoint, and
-    consumes the AG-UI SSE stream until RUN_FINISHED, accumulating the final
-    assistant message. Returns {conversation_id, result} or None on failure.
-
-    `repository` is woven into the task text (the agent works in its sandbox).
-
-    `on_created`, if given, is awaited with the conversation_id BEFORE the agent
-    run starts — the run blocks until RUN_FINISHED, and the agent may call a
-    response tool (e.g. slack_respond) on its very first turn, so the target
-    link/mapping MUST be registered up front or that first reply has nothing to
-    infer its thread from (the Slack "first message escapes the thread" bug). A
-    hook failure is logged, not fatal — the run proceeds.
+    `on_created` is awaited with the conversation_id before the run starts, so the
+    caller can register the target link before the agent's first reply tool call.
     """
     conversation_id = await _create_conversation(owner)
     if conversation_id is None:
-        return None  # nothing to prompt
+        return None
     task = initial_message
     if repository:
         task = f"Repository: {repository}\n\n{task}"
@@ -156,12 +125,10 @@ async def create_conversation(
         "messages": [{"role": "user", "content": _content(task, images, files)}],
     }
     if source:
-        # Mark this as a SYSTEM message (a webhook event, not a human turn) — the
-        # agent-host decorates the prompt + the UI hides it. e.g. "github", "slack".
+        # Marks a system message (a webhook event, not a human turn).
         payload["source"] = source
     if owner:
-        # The resolved Scooter owner rides the body; the agent-host honors it only for
-        # this TRUSTED caller (our SA token, verified via TokenReview — see _sa_token).
+        # The agent-host honors the owner only for a caller it verified via TokenReview.
         payload["owner"] = owner
 
     if on_created is not None:
@@ -176,28 +143,20 @@ async def create_conversation(
     try:
         result_text = await _run_and_collect(payload)
     except RunInterrupted:
-        # The run was interrupted (agent-host restart) — the conversation exists
-        # (created via on_created) and the agent-host resumes it on boot. Signal
-        # INTERRUPTED (not a failure) so the caller doesn't post "couldn't start".
+        # The conversation exists and the agent-host resumes it on boot, so this is not a failure.
         logger.warning(
             "run interrupted by restart, agent-host will resume",
             extra={**_C, "conversation_id": conversation_id},
         )
         return {"conversation_id": conversation_id, "result": "", "interrupted": True}
     except RunErrored as e:
-        # The agent CRASHED mid-run. The conversation EXISTS (on_created posted the
-        # link + anchor) and did work — so this is NOT "couldn't start". Signal
-        # ERRORED (with the message) so the caller posts a truthful "hit an error
-        # partway through" note, not a create-failed one.
+        # The conversation exists and did work, so the caller reports an error partway through rather than a failed start.
         logger.warning(
             "run errored mid-run",
             extra={**_C, "conversation_id": conversation_id, "error": format_error(e)},
         )
         return {"conversation_id": conversation_id, "result": "", "errored": True, "error": str(e)}
     except Exception:
-        # A GENUINE early failure BEFORE the run produced anything (rare — on_created
-        # already ran by here, so the conversation usually exists; this is the
-        # can't-actually-create case). Return None → the caller's "couldn't start".
         logger.exception(
             "create conversation failed",
             extra={**_C, "conversation_id": conversation_id},
@@ -216,23 +175,16 @@ async def send_message(
     files: list[dict] | None = None,
     source: str | None = None,
 ) -> bool:
-    """Send a follow-up message into an existing conversation (same thread).
-
-    `priority=True` (an @mention to an ACTIVE conversation) tags the forward so the
-    agent-host can force-interrupt a stuck turn after its priority timeout. The
-    agent-host owns the timer; webhooks only flags intent. PRIORITY_INTERRUPT=10
-    mirrors the agent-host's bridge constant. `images` (base64 + mime) attach as
-    multimodal content parts.
-    """
+    """Send a follow-up message into an existing conversation; `priority=True` lets the agent-host interrupt a stuck turn."""
     payload = {
         "threadId": conversation_id,
         "runId": str(uuid.uuid4()),
         "messages": [{"role": "user", "content": _content(message, images, files)}],
     }
     if source:
-        payload["source"] = source  # a system message (webhook follow-up), not a human turn
+        payload["source"] = source
     if priority:
-        payload["priority"] = 10  # PRIORITY_INTERRUPT (agent-host bridge.ts)
+        payload["priority"] = 10  # PRIORITY_INTERRUPT in the agent-host bridge
     try:
         await _run_and_collect(payload)
         return True
@@ -245,26 +197,15 @@ async def send_message(
 
 
 class RunInterrupted(Exception):
-    """The /agui SSE dropped before RUN_FINISHED — e.g. the agent-host pod
-    restarted mid-run. This is TRANSIENT: the agent-host resumes interrupted
-    conversations on boot, so the caller must NOT declare a hard failure (no
-    "couldn't start" post). Distinct from a RunErrored (the agent genuinely
-    failed)."""
+    """The /agui stream dropped before RUN_FINISHED; transient, since the agent-host resumes interrupted conversations on boot."""
 
 
 class RunErrored(Exception):
-    """A RUN_ERROR arrived on the /agui stream — the agent ran but CRASHED mid-task.
-    Crucially the conversation ALREADY EXISTS (on_created ran: the link/anchor were
-    posted) and the agent did real work; it just errored partway. So the caller must
-    NOT post "couldn't start" — the conversation is there. Carries the error message
-    for a truthful "hit an error partway through" note."""
+    """A RUN_ERROR arrived on the /agui stream; the conversation exists and did work before the agent crashed."""
 
 
 def _sa_token() -> str | None:
-    """Read the projected ServiceAccount token a TokenReview verifies, proving we're the
-    trusted webhooks caller: the conversation-router then honors the `owner` we send on
-    POST /conversations (and the agent-host `payload.owner` on /agui). None if not
-    mounted — the owner is ignored and the conversation is created unowned."""
+    """The projected ServiceAccount token that proves we are the trusted webhooks caller, or None if not mounted."""
     path = _cfg().agent_host_token_path
     try:
         with open(path, encoding="utf-8") as f:
@@ -274,16 +215,7 @@ def _sa_token() -> str | None:
 
 
 async def _run_and_collect(payload: dict) -> str:
-    """POST a RunAgentInput to /agui and accumulate the final assistant text from
-    the AG-UI SSE stream (TEXT_MESSAGE_CONTENT deltas), returning on RUN_FINISHED.
-
-    Sends our SA token as `Authorization: Bearer` so the agent-host can verify us as
-    the trusted webhooks caller (TokenReview) and honor `payload.owner`.
-
-    Raises RunInterrupted if the connection drops before RUN_FINISHED (a restart);
-    raises RunErrored on a RUN_ERROR (the agent crashed mid-run — the conversation
-    still exists).
-    """
+    """POST a RunAgentInput to /agui and return the final assistant text, raising RunInterrupted on a dropped stream and RunErrored on RUN_ERROR."""
     text_parts: list[str] = []
     saw_finished = False
     headers = {"Accept": "text/event-stream"}
@@ -310,16 +242,10 @@ async def _run_and_collect(payload: dict) -> str:
                         saw_finished = True
                         break
                     elif etype == "RUN_ERROR":
-                        # The agent CRASHED mid-run (not a transport drop). The
-                        # conversation already exists + did work — see RunErrored.
                         raise RunErrored(event.get("message", "agent run error"))
     except httpx.HTTPError as e:
-        # Transport-level drop (connection reset, agent-host restart, read timeout).
-        # The run may be resuming on the agent-host — treat as interrupted, not failed.
         raise RunInterrupted(str(e)) from e
     if not saw_finished:
-        # The stream ended cleanly but before RUN_FINISHED (server closed mid-run,
-        # e.g. a graceful restart) — also interrupted, not a completed run.
         raise RunInterrupted("stream ended before RUN_FINISHED")
     return "".join(text_parts).strip()
 
@@ -333,13 +259,7 @@ async def push_link(
     title: str | None = None,
     ref: dict | None = None,
 ) -> bool:
-    """Record an external resource link (the PR/issue/thread this conversation
-    came from) on the agent-host, so the UI's linked-resources panel can show it.
-
-    `ref` carries structured target identifiers (e.g. slack channel/threadTs,
-    github owner/repo/number) so the agent-host's response tools can infer where
-    to reply without the agent supplying them. Best-effort — a failure must not
-    break the webhook flow."""
+    """Record an external resource link on the agent-host, best-effort; `ref` carries the structured target the response tools reply to."""
     base = _cfg().agent_host_url.rstrip("/")
     body: dict = {"source": source, "resourceType": resource_type, "url": url, "title": title}
     if ref is not None:
@@ -366,15 +286,7 @@ async def push_link(
 
 
 async def get_conversation_status(conversation_id: str) -> str | None:
-    """Status of a conversation via the agent-host management API.
-
-    Returns the status string, or None when it can't be determined. Finding #17:
-    a 404 (conversation gone) and a transient failure (5xx / agent-host
-    unreachable) BOTH yield None, but they're very different — the former is
-    terminal, the latter means "try again". They're logged DISTINCTLY (404 at
-    debug, transient at warning) so a persistently-unreachable agent-host is
-    visible instead of silently looking like every conversation vanished.
-    """
+    """Status of a conversation via the agent-host management API, or None; a 404 and a transient failure are logged distinctly."""
     base = _cfg().agent_host_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -388,9 +300,6 @@ async def get_conversation_status(conversation_id: str) -> str | None:
             resp.raise_for_status()
             return resp.json().get("status")
     except httpx.HTTPError as e:
-        # Transient: the agent-host is unreachable or erroring. NOT the same as a
-        # 404 — surface it so a flapping/dead agent-host doesn't silently freeze
-        # all status comments.
         logger.warning(
             "status fetch failed, transient, will retry",
             extra={**_C, "conversation_id": conversation_id, "error": format_error(e)},
@@ -418,12 +327,7 @@ def conversation_url(conversation_id: str) -> str:
 
 
 async def user_id_for_email(email: str) -> str | None:
-    """Ask the agent-host which Scooter user has this email (user_identity). None if
-    no match / unreachable.
-
-    Lives with the other agent-host calls rather than in `identity`, so `identity`
-    needs no configuration of its own — it is pure orchestration over a registry.
-    """
+    """Ask the agent-host which Scooter user has this email, or None if no match or unreachable."""
     base = _cfg().agent_host_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -432,8 +336,7 @@ async def user_id_for_email(email: str) -> str | None:
                 return None
             return resp.json().get("id") or None
     except (httpx.HTTPError, ValueError) as e:
-        # Domain alongside the pseudonym: it separates a misconfigured tenant from a
-        # missing user, and names an organisation rather than a person.
+        # The domain separates a misconfigured tenant from a missing user without naming a person.
         logger.warning(
             "by-email lookup failed",
             extra={

@@ -1,9 +1,7 @@
 /**
- * File-backed ConversationStore — appends AG-UI events as JSONL on the
- * conversation-state PVC (mounted by the agent-host), one file per conversation.
- *
- * Revival replays the JSONL. Goose's own session state lives alongside under
- * gooseStatePath(id). A richer store (indexing, compaction) can come later.
+ * File-backed ConversationStore: appends AG-UI events as JSONL on the conversation-state
+ * PVC, one file per conversation, with meta/links/jobs as sibling JSON files and Goose's
+ * own session state under gooseStatePath(id).
  */
 
 import { appendFile, mkdir, readFile, writeFile, rename, readdir, rm } from "node:fs/promises";
@@ -20,13 +18,8 @@ import { tailByRuns } from "./eventWindow.js";
 
 const log = logger("fileStore");
 
-// Atomic whole-file write: write a temp sibling then rename over the target.
-// rename(2) is atomic on POSIX, so a concurrent reader (e.g. listConversations()
-// during a hydrate in another replica, or a fire-and-forget setTitle/activity
-// write) always sees either the complete old file or the complete new one —
-// never a truncated/partial one. writeFile alone truncates-then-writes, which a
-// concurrent read can catch mid-flight (-> a torn JSON.parse that drops the
-// record). A monotonic counter keeps temp names unique under concurrent writes.
+// Atomic whole-file write via a temp sibling and rename(2), so a concurrent reader sees either the
+// complete old file or the complete new one.
 let atomicSeq = 0;
 async function writeFileAtomic(path: string, data: string): Promise<void> {
   const tmp = `${path}.tmp-${process.pid}-${atomicSeq++}`;
@@ -34,11 +27,8 @@ async function writeFileAtomic(path: string, data: string): Promise<void> {
   await rename(tmp, path);
 }
 
-/** True for "file/dir does not exist" — the ONE benign read error (a genuinely
- *  new/empty conversation, or the state dir before first write). Findings #11/#12:
- *  every OTHER read error (EACCES/EIO/unmounted PVC) is a real failure that must
- *  NOT be silently flattened to empty — that replays a real conversation as blank
- *  history, or vanishes the entire conversation list after a restart. */
+/** True for "file/dir does not exist", the one benign read error; every other read error is a real
+ *  failure that must not be flattened to empty. */
 function isENOENT(e: unknown): boolean {
   return (e as { code?: string })?.code === "ENOENT";
 }
@@ -47,29 +37,20 @@ export function createFileConversationStore(root: string): ConversationStore {
   const logPath = (id: SessionId) => join(root, id, "events.jsonl");
   const metaPath = (id: SessionId) => join(root, id, "meta.json");
   const linksPath = (id: SessionId) => join(root, id, "links.json");
-  // The conversation's background-job registry (run_background) — small JSON index
-  // of {jobId, command, startedAt}. The job's OUTPUT lives in-pod on the workspace
-  // PVC; this is just the durable list so `list_background` survives a restart.
+  // The conversation's background-job registry, a small JSON index; the job's output lives in-pod.
   const jobsPath = (id: SessionId) => join(root, id, "jobs.json");
   const ensureDir = (id: SessionId) => mkdir(join(root, id), { recursive: true });
 
-  // Per-conversation write chain: appendEvent is fired-and-forgotten (void) for
-  // a burst of events (e.g. a user prompt's START/CONTENT/END), so concurrent
-  // awaits on appendFile would land in non-deterministic order and SCRAMBLE the
-  // log (END before START) — which breaks history replay on switch/revive.
-  // Serialize all appends per conversation so on-disk order == emission order.
+  // Per-conversation write chain, so on-disk order equals emission order despite void-called
+  // appends.
   const writeChains = new Map<SessionId, Promise<void>>();
 
-  // Per-conversation rolling integrity checksum, folded in the SAME write-chain
-  // order as the on-disk log (so live checksums match history). Seeded from disk
-  // on first touch after a restart. `onAppend` subscribers receive the
-  // checksummed event after it's durably written — this is the live stream the
-  // UI verifies against.
+  // Per-conversation rolling integrity checksum, folded in write-chain order and seeded from disk
+  // on first touch; onAppend subscribers receive each checksummed event once it is durably written.
   const checksums = new Map<SessionId, string>();
   const seeded = new Set<SessionId>();
   const appendListeners = new Set<(id: SessionId, c: ChecksummedEvent) => void>();
-  // Finding #4: observers notified when a durable append FAILS, so a lost turn
-  // leaves a trace (log + metric/health signal) instead of vanishing silently.
+  // Observers notified when a durable append fails, so a lost turn leaves a trace.
   const appendErrorListeners = new Set<(id: SessionId, error: unknown) => void>();
 
   const seedChecksum = async (id: SessionId): Promise<string> => {
@@ -81,11 +62,8 @@ export function createFileConversationStore(root: string): ConversationStore {
         if (line.trim()) acc = chainNext(acc, JSON.parse(line) as AguiEvent);
       }
     } catch (e) {
-      // Finding #20: ENOENT = no log yet (a new conversation) -> empty seed is
-      // correct and silent. But a PARSE or I/O error here mis-seeds the integrity
-      // checksum from a corrupt/unreadable log — and the integrity chain exists
-      // precisely to detect corruption, so swallowing it silently defeats it. Log
-      // loudly for anything other than not-found.
+      // ENOENT means no log yet; any parse or I/O error mis-seeds the integrity chain, so log it
+      // loudly.
       if (!isENOENT(e)) {
         log.errorWith("checksum seed failed to read/parse the log (integrity may be off)", e, {
           conversation_id: id,
@@ -103,13 +81,12 @@ export function createFileConversationStore(root: string): ConversationStore {
     appendEvent(id, event) {
       const prev = writeChains.get(id) ?? Promise.resolve();
       const next = prev
-        .catch(() => {}) // a prior failure must not break the CHAIN (ordering)
+        .catch(() => {}) // a prior failure must not break the chain (ordering)
         .then(async () => {
           try {
             await ensureDir(id);
-            // Seed the rolling checksum from the log as it exists BEFORE this
-            // append (lazy, once after a restart) — so prevChecksum is the chain
-            // through the prior events, not including the one we're about to write.
+            // prevChecksum is the chain through the prior events, seeded lazily once after a
+            // restart.
             const prevChecksum = await seedChecksum(id);
             await appendFile(logPath(id), JSON.stringify(event) + "\n", "utf8");
             // Fold this event in (write order) and notify live subscribers.
@@ -117,12 +94,7 @@ export function createFileConversationStore(root: string): ConversationStore {
             checksums.set(id, checksum);
             for (const cb of appendListeners) cb(id, { event, prevChecksum, checksum });
           } catch (error) {
-            // Finding #4: this append failed (ENOSPC/EACCES/unmounted PVC). The
-            // log+chain catch above keeps ORDERING but would otherwise swallow
-            // THIS failure — and the caller is `void store.appendEvent(...)`, so
-            // nobody sees the rejection. Surface it loudly + notify observers
-            // (the only persistence the conversation has just lost a turn), THEN
-            // rethrow so an awaiting caller (tests, sync writers) sees it too.
+            // Surface the lost turn and notify observers, then rethrow for an awaiting caller.
             log.errorWith("durable append FAILED (turn lost)", error, { conversation_id: id });
             for (const cb of appendErrorListeners) {
               try { cb(id, error); } catch { /* an observer must not break the store */ }
@@ -130,16 +102,14 @@ export function createFileConversationStore(root: string): ConversationStore {
             throw error;
           }
         });
-      // The chain advances on the SETTLED promise (so a failed write doesn't wedge
-      // the next append's ordering), but `next` itself preserves the rejection for
-      // the caller.
+      // The chain advances on the settled promise so a failed write cannot wedge ordering, while
+      // `next` preserves the rejection for the caller.
       writeChains.set(id, next.catch(() => {}));
       return next;
     },
 
-    // Await everything ENQUEUED so far for `id` to be durably written. The chain's
-    // tail is the settled promise of the last append, so awaiting it guarantees all
-    // prior fire-and-forget appends have flushed to disk before a subsequent read.
+    // Await everything enqueued so far for `id`; the chain's tail is the settled promise of the
+    // last append.
     async flush(id) {
       await (writeChains.get(id) ?? Promise.resolve());
     },
@@ -159,10 +129,8 @@ export function createFileConversationStore(root: string): ConversationStore {
       try {
         data = await readFile(logPath(id), "utf8");
       } catch (e) {
-        // Finding #11: ENOENT = no log yet (a new conversation) — yield nothing.
-        // Any OTHER error (EACCES/EIO/unmounted PVC) means a REAL conversation's
-        // log can't be read; returning empty would replay it as blank history and
-        // hide the failure. Propagate instead.
+        // ENOENT means no log yet; any other error would replay a real conversation as blank
+        // history, so propagate it.
         if (isENOENT(e)) return;
         throw e;
       }
@@ -188,8 +156,7 @@ export function createFileConversationStore(root: string): ConversationStore {
     },
 
     async readEventsBefore(id, beforeSeq, limit) {
-      // The file has no seq column: a line's 1-based position IS its seq, matching
-      // the Postgres store's per-conversation counter.
+      // The file has no seq column: a line's 1-based position is its seq.
       if (limit <= 0 || beforeSeq <= 1) return { events: [], firstSeq: beforeSeq, done: true };
       let data: string;
       try {
@@ -212,15 +179,8 @@ export function createFileConversationStore(root: string): ConversationStore {
     },
 
     async readEventsTail(id, runs) {
-      // The RECENT tail only: the events from the last `runs` runs, for a fast
-      // first paint on a LONG conversation. We read the file (one syscall), parse
-      // it, and window on RUN boundaries via tailByRuns — which FIRST orders by each
-      // event's `ts`. That time-ordering is load-bearing: a conversation that
-      // survived agent-host restarts has a log that concatenates runs from separate
-      // processes, so a naive scan-from-the-end for the last N RUN_STARTED (which
-      // assumed append order == time order) could window across a restart seam and
-      // fold a scrambled, half-rendered history. Parsing the whole log is the cost
-      // of that correctness; the window itself stays bounded to `runs`.
+      // Window on run boundaries via tailByRuns, which orders by `ts` first because a log that
+      // survived restarts concatenates runs from separate processes.
       let data: string;
       try {
         data = await readFile(logPath(id), "utf8");
@@ -242,9 +202,8 @@ export function createFileConversationStore(root: string): ConversationStore {
       }
     },
 
-    // Atomically REWRITE the whole event log (content-based mirror reconciliation only — see the
-    // interface). Runs ON the per-id write chain so it can't interleave with concurrent appends, and
-    // re-seeds the rolling checksum from the new contents so subsequent appends chain correctly.
+    // Atomically rewrite the whole event log on the per-id write chain and re-seed the rolling
+    // checksum from the new contents.
     async replaceEvents(id, events) {
       const prev = writeChains.get(id) ?? Promise.resolve();
       const next = prev
@@ -253,7 +212,7 @@ export function createFileConversationStore(root: string): ConversationStore {
           await ensureDir(id);
           const body = events.map((e) => JSON.stringify(e)).join("\n") + (events.length ? "\n" : "");
           await writeFileAtomic(logPath(id), body);
-          // Re-seed the rolling checksum from the rewritten log (mark seeded so seedChecksum trusts it).
+          // Mark seeded so seedChecksum trusts the re-seeded value.
           let acc = EMPTY_CHECKSUM;
           for (const e of events) acc = chainNext(acc, e);
           checksums.set(id, acc);
@@ -263,9 +222,7 @@ export function createFileConversationStore(root: string): ConversationStore {
       return next;
     },
 
-    /** Persist the conversation record. The SOLE home of lastActivityAt — touch()
-     *  routes through here, so activity is one field of one record, not a file of
-     *  its own that can disagree with this one. */
+    /** Persist the conversation record, the sole home of lastActivityAt. */
     async saveMeta(meta: ConversationMeta) {
       await ensureDir(meta.id);
       await writeFileAtomic(metaPath(meta.id), JSON.stringify(meta));
@@ -278,7 +235,7 @@ export function createFileConversationStore(root: string): ConversationStore {
       await writeFileAtomic(jobsPath(id), JSON.stringify([job, ...existing]));
     },
 
-    /** The conversation's background-job records (for list_background). [] if none. */
+    /** The conversation's background-job records, [] if none. */
     async listJobs(id: SessionId): Promise<JobRecord[]> {
       try {
         return JSON.parse(await readFile(jobsPath(id), "utf8")) as JobRecord[];
@@ -287,9 +244,7 @@ export function createFileConversationStore(root: string): ConversationStore {
       }
     },
 
-    /** Rewrite an existing job record IN PLACE (by jobId) — e.g. to mark
-     *  notifiedAt so the completion-watcher announces exactly once. No-op if the
-     *  job isn't found (or no registry yet). */
+    /** Rewrite an existing job record in place by jobId; a no-op if the job is not found. */
     async updateJob(id: SessionId, job: JobRecord) {
       const existing = await this.listJobs!(id);
       const i = existing.findIndex((j) => j.jobId === job.jobId);
@@ -314,27 +269,22 @@ export function createFileConversationStore(root: string): ConversationStore {
       }
     },
 
-    /** Permanently remove a conversation's persisted state (meta + event log +
-     *  activity + goose state) so an ended/deleted conversation does NOT come
-     *  back on the next hydrate(). */
+    /** Permanently remove a conversation's persisted state so it does not come back on the next
+     *  hydrate(). */
     async removeConversation(id: SessionId) {
       await rm(join(root, id), { recursive: true, force: true });
     },
 
-    /** Scan the state dir and rebuild conversation metadata so the list survives
-     *  a restart. Reads meta.json (the ONLY metadata file); a dir with an event log
-     *  but no meta still appears (best-effort defaults).
-     */
+    /** Scan the state dir and rebuild conversation metadata; a dir with an event log but no
+     *  meta.json still appears with defaults. */
     async listConversations(): Promise<ConversationMeta[]> {
       let ids: string[];
       try {
         const ents = await readdir(root, { withFileTypes: true });
         ids = ents.filter((e) => e.isDirectory()).map((e) => e.name);
       } catch (e) {
-        // Finding #12: ENOENT = the state dir doesn't exist yet (nothing persisted
-        // -> []). Any OTHER readdir error (EACCES/EIO/unmounted state PVC) must
-        // propagate — silently returning [] makes the ENTIRE conversation list
-        // vanish after a restart, indistinguishable from "no conversations".
+        // ENOENT means nothing persisted yet; any other readdir error would make the entire list
+        // vanish, so propagate it.
         if (isENOENT(e)) return [];
         throw e;
       }
@@ -344,8 +294,7 @@ export function createFileConversationStore(root: string): ConversationStore {
         try {
           meta = JSON.parse(await readFile(metaPath(id), "utf8")) as ConversationMeta;
         } catch {
-          // No meta.json — skip dirs that aren't real conversations (e.g. no
-          // event log either). Only surface ones that have a log.
+          // Without meta.json, only surface dirs that have an event log.
           try {
             await readFile(logPath(id), "utf8");
           } catch {
@@ -364,11 +313,8 @@ export function createFileConversationStore(root: string): ConversationStore {
           parentId: meta.parentId,
           userTitled: meta.userTitled,
           starred: meta.starred,
-          // Messages still queued when the conversation was suspended. Must be carried
-          // through: hydrate rebuilds the Entry from THIS object, so dropping it here
-          // loses the user's queued message across a restart / cross-replica hydrate —
-          // the rollout case suspend-preservation exists for (an in-process
-          // suspend→revive would still work, which is what makes the omission subtle).
+          // Carried through because hydrate rebuilds the Entry from this object, so dropping it
+          // would lose the queued message across a restart.
           pendingQueue: meta.pendingQueue,
         });
       }

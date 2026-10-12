@@ -1,4 +1,4 @@
-# slack's DEPLOYMENT half. Gated on contribs.slack.enable; why: #599, #711.
+# slack's deployment half, gated on contribs.slack.enable.
 { config, lib, ... }:
 
 let

@@ -15,7 +15,7 @@ func TestAguiThreadIDReadsBodyAndRestoresIt(t *testing.T) {
 	if id != "conv-xyz" {
 		t.Fatalf("threadId = %q, want conv-xyz", id)
 	}
-	// CRITICAL: the body must still be fully readable by the upstream proxy afterwards.
+	// The body must still be fully readable by the upstream proxy afterwards.
 	rest, _ := io.ReadAll(r.Body)
 	if string(rest) != body {
 		t.Errorf("body not restored: got %q, want %q", string(rest), body)
@@ -36,7 +36,7 @@ func TestResolveTarget(t *testing.T) {
 	cache := NewOwnershipCache()
 	cache.set("conv-assigned", "10.42.0.2") // owner pod IP
 
-	// non-scoped -> ClusterIP fallback (any ready pod)
+	// non-scoped -> ClusterIP fallback
 	if u := resolveTarget(cfg, cache, httptest.NewRequest("GET", "/healthz", nil), fallback); u.String() != fb {
 		t.Errorf("healthz -> %q, want fallback %q", u.String(), fb)
 	}
@@ -44,7 +44,7 @@ func TestResolveTarget(t *testing.T) {
 	if u := resolveTarget(cfg, cache, httptest.NewRequest("GET", "/conversations/conv-assigned/events.integrity", nil), fallback); u.String() != "http://10.42.0.2:8080" {
 		t.Errorf("assigned conv -> %q, want http://10.42.0.2:8080", u.String())
 	}
-	// path-scoped, UNassigned -> fallback (controller will assign shortly)
+	// path-scoped, unassigned -> fallback
 	if u := resolveTarget(cfg, cache, httptest.NewRequest("GET", "/conversations/conv-unknown/cancel", nil), fallback); u.String() != fb {
 		t.Errorf("unassigned conv -> %q, want fallback %q", u.String(), fb)
 	}
@@ -64,7 +64,7 @@ func TestOwnershipCache(t *testing.T) {
 	if ip, ok := c.HostIP("x"); !ok || ip != "10.42.0.1" {
 		t.Errorf("HostIP(x) = (%q,%v)", ip, ok)
 	}
-	c.set("x", "") // empty ip = unassigned -> removed
+	c.set("x", "") // an empty ip is unassigned
 	if _, ok := c.HostIP("x"); ok {
 		t.Error("empty ip should be treated as unassigned")
 	}

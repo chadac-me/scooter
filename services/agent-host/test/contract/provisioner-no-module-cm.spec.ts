@@ -1,18 +1,15 @@
 /**
- * Tier 1 contract — the deployment's own .scooter ConfigMap is the SINGLE converge
- * source at /etc/agent-sandbox/scooter, mounted directly.
- *
- * The provisioner creates no per-conversation module ConfigMap. Nothing may occupy that
- * mount path, because anything that does SHADOWS the deployment's tools: a second CM
- * there suppresses `scooter-tools` and the deployment's injected tools reach the pod
- * only if something copies them across.
+ * The deployment's own .scooter ConfigMap is the single converge source at
+ * /etc/agent-sandbox/scooter, mounted directly. The provisioner creates no
+ * per-conversation module ConfigMap, since anything else at that mount path would
+ * shadow the deployment's tools.
  */
 
 import { describe, it, expect } from "vitest";
 
 import { createK8sProvisioner, sandboxManifest } from "../../src/session/k8sProvisioner.js";
 
-/** A fake k8s API recording every ConfigMap create/read, stubbing the rest of create(). */
+/** A fake k8s API recording every ConfigMap create and read. */
 function fakeKc() {
   const createdConfigMaps: string[] = [];
   const reads: string[] = [];
@@ -27,8 +24,7 @@ function fakeKc() {
       reads.push(p.name ?? "");
       throw Object.assign(new Error("not found"), { code: 404 });
     },
-    // create() reads the CR first: a COLD Sandbox made by setSize carries the size,
-    // and it must not be overwritten with the deployment default. 404 = none yet.
+    // create() reads the CR first to keep a cold Sandbox's size; 404 means none yet.
     getNamespacedCustomObject: async () => {
       throw Object.assign(new Error("not found"), { code: 404 });
     },
@@ -57,8 +53,7 @@ describe("k8sProvisioner.create — no per-conversation module ConfigMap", () =>
   });
 
   it("does not read the deployment scooterConfigMap either", async () => {
-    // With the deployment CM mounted directly, the agent-host never needs its contents
-    // — the kubelet delivers every key.
+    // The kubelet delivers every key of the directly mounted CM.
     const { kc, reads } = fakeKc();
     await provisioner(kc, "deploy-scooter").create("conv1", "conv1");
     expect(reads).toEqual([]);
@@ -83,8 +78,7 @@ describe("sandboxManifest — the deployment .scooter mount", () => {
     };
 
   it("mounts the deployment scooterConfigMap at the converge path", () => {
-    // Unconditional: the deployment's injected tools reach the pod ONLY through this
-    // mount, so any condition on it is a silent tool-injection outage.
+    // The deployment's injected tools reach the pod only through this mount.
     const m = render({ scooterConfigMap: "deploy-scooter" });
     const spec = m.spec.podTemplate.spec;
     const mount = (spec.containers[0].volumeMounts ?? []).find((v) => v.name === "scooter-tools");

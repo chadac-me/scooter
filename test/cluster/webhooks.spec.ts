@@ -1,15 +1,10 @@
 /**
- * Tier 2 — webhooks spawn-from-event, end to end on the cluster.
+ * Tier 2: webhooks spawn-from-event end to end on the cluster.
  *
- * Proves the full loop: POST /webhooks/test -> webhooks spawns a conversation in
- * the agent-host via /agui -> the (dummy) agent runs in a real sandbox -> the
- * result flows back -> webhooks returns it. Also asserts the conversation shows
- * up in the agent-host management API.
- *
- * Requires the platform deployed with the webhooks test webhook + fakeAgent
- * agent-host (so spawns are deterministic, no model needed).
- *
- * Gated: RUN_CLUSTER_TESTS=1 RUN_WEBHOOKS_TESTS=1.
+ * POST /webhooks/test makes webhooks spawn a conversation in the agent-host, the fake agent
+ * runs in a real sandbox, and the result flows back; the conversation must also appear in
+ * the agent-host management API. Gated on RUN_CLUSTER_TESTS=1 and RUN_WEBHOOKS_TESTS=1, with
+ * the platform deployed with the test webhook and the fakeAgent agent-host.
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -41,10 +36,8 @@ maybe("webhooks spawn-from-event", () => {
 
     const resp = JSON.parse(body);
     expect(resp.conversation_id).toBeTruthy();
-    // The dummy agent ran `echo <marker>` in a real sandbox; result flows back.
     expect(resp.result).toContain(marker);
 
-    // The spawned conversation is visible in the agent-host management API.
     const listed = await cluster.curlJson(`${AGENT_HOST}/conversations`);
     const ids = (listed as Array<{ id: string }>).map((c) => c.id);
     expect(ids).toContain(resp.conversation_id);

@@ -1,11 +1,7 @@
 /**
- * Tier 1 contract — manager.switchModelNow (agent model-switch, stage 2).
- *
- * The immediate MID-TURN switch the switch_model MCP tool calls: cancel the live
- * run, rebuild goose with the new model, and re-nudge to continue. Pins the exact
- * sequence + the load-bearing regression guard: it must REBUILD (not just tear the
- * bridge down and strand the turn), and it must not race (the continue-nudge is
- * strictly after the rebuild). See docs/AGENT_MODEL_SWITCH.md.
+ * manager.switchModelNow, the immediate mid-turn switch the switch_model MCP tool
+ * calls: cancel the live run, rebuild the agent with the new model, and re-nudge it to
+ * continue, with the nudge strictly after the rebuild.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -38,9 +34,7 @@ const inMemoryStore = (): ConversationStore => {
   };
 };
 
-/** A bridgeFactory that records the model each built bridge got + a shared,
- *  ordered call log across all bridges (so we can assert cancel-then-continue
- *  spanned the OLD bridge (cancel) and a NEW one (prompt)). */
+/** A bridgeFactory recording each built bridge's model and an ordered call log across all bridges. */
 function trackingFactory() {
   const built: Array<{ model?: string }> = [];
   const log: string[] = [];
@@ -69,27 +63,24 @@ describe("switchModelNow (immediate mid-turn model switch)", () => {
   it("cancels the running turn, rebuilds goose with the NEW model, and re-nudges to continue", async () => {
     const { factory, built, log } = trackingFactory();
     const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore(), bridgeFactory: factory });
-    // Start on "opus" (the first prompt picks the model), then a normal prompt so a
-    // live bridge exists (goose "running").
+    // Start on "opus", then a normal prompt so a live bridge exists.
     const conv = await sessions.start("thread-1", "opus");
     await sessions.prompt(conv.id, "do the thing");
-    log.length = 0; // ignore the setup prompt
+    log.length = 0;
 
     const switched = await sessions.switchModelNow(conv.id, "sonnet");
     expect(switched).toBe(true);
 
-    // The OLD bridge (built with opus) was cancelled; a NEW bridge (built with
-    // sonnet) ran the continue-nudge. Cancel strictly before the continue.
+    // The old bridge was cancelled and a new one ran the continue-nudge, in that order.
     expect(built[0].model).toBe("opus");
     expect(built.at(-1)!.model).toBe("sonnet");
     expect(log[0]).toMatch(/^cancel#/);
     expect(log.at(-1)).toMatch(/^prompt#/);
-    // The continue prompt ran on a DIFFERENT (newer) bridge than the one cancelled.
+    // The continue prompt ran on a newer bridge than the one cancelled.
     const cancelIdx = Number(log[0].split("#")[1]);
     const promptIdx = Number(log.at(-1)!.split("#")[1]);
     expect(promptIdx).toBeGreaterThan(cancelIdx);
 
-    // The conversation's persisted model is now sonnet.
     expect(sessions.get(conv.id)?.model).toBe("sonnet");
   });
 
@@ -102,14 +93,12 @@ describe("switchModelNow (immediate mid-turn model switch)", () => {
 
     const switched = await sessions.switchModelNow(conv.id, "opus");
     expect(switched).toBe(false);
-    expect(log).toEqual([]); // nothing cancelled or re-prompted
+    expect(log).toEqual([]);
     expect(sessions.get(conv.id)?.model).toBe("opus");
   });
 
   it("ALWAYS leaves a live bridge on the new model (never tears down without rebuilding)", async () => {
-    // The mid-turn-kill regression: applyModelSwitch alone sets bridge=undefined and
-    // relies on the NEXT prompt to rebuild — if switchModelNow did that it would
-    // strand the turn that called it. Assert a live bridge on the new model remains.
+    // applyModelSwitch alone leaves no bridge until the next prompt, which would strand the turn that called it.
     const { factory, built } = trackingFactory();
     const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore(), bridgeFactory: factory });
     const conv = await sessions.start("thread-1", "opus");
@@ -117,12 +106,10 @@ describe("switchModelNow (immediate mid-turn model switch)", () => {
 
     await sessions.switchModelNow(conv.id, "sonnet");
 
-    // A subsequent normal prompt must NOT need to build yet another bridge (the
-    // switch already left one live) — i.e. the last built bridge is on sonnet and
-    // is the live one.
+    // A subsequent prompt must not need to build another bridge.
     const builtCount = built.length;
     await sessions.prompt(conv.id, "next");
-    expect(built.length).toBe(builtCount); // no extra rebuild -> bridge was live
+    expect(built.length).toBe(builtCount);
     expect(built.at(-1)!.model).toBe("sonnet");
   });
 

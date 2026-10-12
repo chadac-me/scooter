@@ -6,6 +6,5 @@ from scooter_lib.settings import ScooterBaseSettings
 
 
 class BraveSettings(ScooterBaseSettings):
-    # The subscription token from https://api-dashboard.search.brave.com. Empty ⇒ this
-    # provider is disabled, so `web_search` is not listed at all.
+    # The subscription token from https://api-dashboard.search.brave.com; empty disables the provider.
     brave_search_api_key: str = ""

@@ -1,8 +1,8 @@
-"""http-proxy transport — transparent reverse proxy with credential injection.
+"""http-proxy transport: a transparent reverse proxy with credential injection.
 
-Mounts `/{provider}/{path:path}` (all methods). Injects the provider's
-credential into the outbound request to `upstream`; forwards; returns the
-upstream response. The agent sees normal API responses and never the token.
+Mounts `/{provider}/{path:path}`, injects the provider's credential into the
+outbound request to `upstream` and returns the upstream response, so the agent
+sees normal API responses and never the token.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from scooter_lib.logging_config import format_error
 
 logger = logging.getLogger(__name__)
 
-# Headers we never forward upstream.
+# Headers never forwarded upstream.
 _HOP_BY_HOP = frozenset({
     "host", "connection", "keep-alive", "transfer-encoding", "te", "trailer",
     "upgrade", "proxy-authorization", "proxy-authenticate", "authorization",
@@ -32,11 +32,9 @@ class HttpProxy(Transport):
     upstream: str = ""                  # e.g. "https://api.github.com"
     name: str = "http-proxy"
     methods: tuple[str, ...] = ("GET", "POST", "PUT", "PATCH", "DELETE")
-    # Auto-link rules: when a proxied request matches one AND returns 2xx, the
-    # created resource (PR/MR/issue) is associated with the agent's conversation
-    # by POSTing to agent_host_url/conversations/{id}/links. Empty = no auto-link.
+    # A proxied request matching a rule and returning 2xx links the created resource to the conversation.
     link_rules: list[LinkRule] = field(default_factory=list)
-    # Where to POST the link. Set from settings (broker's agent-host URL).
+    # Where the link is POSTed.
     agent_host_url: str = ""
 
     def routes(self, provider: Provider, authed: AuthDependency) -> APIRouter:
@@ -54,10 +52,7 @@ class HttpProxy(Transport):
             }
             body = await request.body()
             async with httpx.AsyncClient(timeout=30) as client:
-                # Build the outbound request, then let the credential mutate it in
-                # place (headers, and in future params/body). Passing the whole
-                # request — not just a header dict — is what lets a provider like
-                # Datadog set MULTIPLE auth headers (DD-API-KEY + DD-APPLICATION-KEY).
+                # The credential mutates the built request in place, so a provider can set several auth headers.
                 outbound = client.build_request(
                     request.method,
                     f"{upstream}/{path}",
@@ -70,9 +65,7 @@ class HttpProxy(Transport):
                     cred.inject(outbound)
                 upstream_resp = await client.send(outbound)
 
-            # Auto-link: if this was a create-a-resource request that succeeded,
-            # associate the created PR/MR/issue with the caller's conversation.
-            # Best-effort — never let it affect the response the agent gets back.
+            # Best-effort auto-link that never affects the response the agent gets back.
             if self.link_rules and 200 <= upstream_resp.status_code < 300 and identity.conversation_id:
                 await self._maybe_autolink(request.method, path, upstream_resp, identity.conversation_id)
 
@@ -80,10 +73,7 @@ class HttpProxy(Transport):
                 k: v for k, v in upstream_resp.headers.items()
                 if k.lower() not in {"transfer-encoding", "content-encoding", "content-length"}
             }
-            # On a failure, surface the URL the proxy actually requested (path only,
-            # never the query — it may carry secrets) in a response header. A
-            # mis-prefixed path (e.g. the /api/v4 double-prefix footgun) then shows
-            # up directly instead of as an opaque upstream 404.
+            # On a failure, surface the URL the proxy requested (path only, since the query may carry secrets) so a mis-prefixed path is visible.
             if upstream_resp.status_code >= 400:
                 resp_headers["X-Broker-Upstream-Url"] = str(outbound.url.copy_with(query=None))
 
@@ -98,9 +88,7 @@ class HttpProxy(Transport):
     async def _maybe_autolink(
         self, method: str, path: str, resp: httpx.Response, conversation_id: str
     ) -> None:
-        """Try each link rule against a successful proxied request; on the first
-        match, extract the created resource and post it as a conversation link.
-        Fully best-effort: any parse/extract error is swallowed."""
+        """Post the created resource of the first matching link rule as a conversation link, swallowing any parse or extract error."""
         rule = next((r for r in self.link_rules if r.matches(method, path)), None)
         if rule is None:
             return
@@ -121,7 +109,7 @@ class HttpProxy(Transport):
             return
         try:
             link: Link | None = rule.extract(data)
-        except Exception as e:  # a bad response shape must not break the proxy
+        except Exception as e:
             logger.warning(
                 "auto-link extract failed",
                 extra={

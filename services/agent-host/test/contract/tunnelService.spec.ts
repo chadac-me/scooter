@@ -1,12 +1,8 @@
 /**
- * Tier 1 contract — the agent-host's tunnel service: resolve a target, call it, stream back.
- *
- * This is the cloud half of MCP-over-the-wire. The container opens a stream naming a target;
- * this resolves it (see tunnelTargets.ts — names only, conversation scoped server-side), makes
- * the real HTTP call, and streams the response back as tunnel frames.
- *
- * The behaviours pinned here are the ones whose absence produces a HANGING agent rather than a
- * failing one — the silent-degradation class this project keeps fixing.
+ * The agent-host's tunnel service, the cloud half of MCP-over-the-wire: the container
+ * opens a stream naming a target, the service resolves it (names only, conversation
+ * scoped server-side), makes the HTTP call, and streams the response back as frames.
+ * Every failure must reach the container as a close with a reason, never a silent stop.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -55,7 +51,6 @@ describe("agent-host tunnel service", () => {
   });
 
   it("REJECTS an unresolvable target with a close carrying the reason", async () => {
-    // The container must learn WHY — a silent drop becomes a hung tool call.
     const out = collector();
     const svc = createTunnelService({ send: out.send, ...deps(streamingFetch([])) });
     await svc.onFrame("conv-a", { ch: "tunnel", type: "open", id: "s1", payload: { target: "evil:9000", method: "GET", path: "/", headers: {} } });
@@ -64,7 +59,6 @@ describe("agent-host tunnel service", () => {
     const close = out.sent.find((f) => f.type === "close");
     expect(close).toBeTruthy();
     expect((close!.payload as { error?: string }).error).toMatch(/unknown target/i);
-    // and it never called out
     expect(out.sent.some((f) => f.type === "chunk")).toBe(false);
   });
 
@@ -76,7 +70,7 @@ describe("agent-host tunnel service", () => {
     }) as unknown as typeof fetch;
     const out = collector();
     const svc = createTunnelService({ send: out.send, ...deps(fetchImpl) });
-    // The payload even tries to name another conversation — it must be ignored.
+    // The payload names another conversation, which must be ignored.
     await svc.onFrame("conv-mine", {
       ch: "tunnel", type: "open", id: "s1",
       payload: { target: "scooter-env", method: "GET", path: "/mcp?conv=conv-theirs", headers: {} },
@@ -117,17 +111,11 @@ describe("agent-host tunnel service", () => {
   });
 });
 
-// --- error responses must reach the container INTACT ------------------------------------------
+// --- error responses reach the container intact -----------------------------------------------
 
 describe("4xx responses are relayed, not swallowed", () => {
   it("a 400 reaches the container WITH its body — the CLI needs it to fall back", async () => {
-    // THE LIVE FAILURE, and it was self-inflicted: the CLI probes optional methods
-    // (`server/discover`) and RELIES on the rejection so it can fall back to the standard
-    // `initialize` handshake. A diagnostic that did `res.clone().text()` to log the error
-    // consumed undici's shared stream, so the original yielded NOTHING and the container got an
-    // empty response. The CLI never fell back, ended up with no server, and the model told the
-    // user the tool does not exist. (The first "fix" — rewriting the client's negotiated
-    // protocol version — was treating that symptom, and lying to both ends to do it.)
+    // The CLI probes optional methods such as `server/discover` and relies on the rejection body to fall back to the standard `initialize` handshake.
     const out = collector();
     const errorBody = JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Unsupported protocol version" }, id: null });
     const fetchImpl = (async () => new Response(errorBody, { status: 400, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
@@ -142,14 +130,13 @@ describe("4xx responses are relayed, not swallowed", () => {
     expect(body, "the error body must survive the relay").toBe(errorBody);
     const first = chunks[0]?.payload as { status?: number };
     expect(first.status, "the status must be relayed too").toBe(400);
-    // A rejected request is a NORMAL protocol outcome, not a stream failure.
+    // A rejected request is a normal protocol outcome, not a stream failure.
     const close = out.sent.find((f) => f.type === "close");
     expect((close?.payload as { error?: string }).error).toBeUndefined();
   });
 
   it("relays the request BYTE FOR BYTE — the tunnel never rewrites protocol payloads", async () => {
-    // Rewriting a client's negotiated version behind its back makes each end believe it is
-    // speaking a protocol the other is not. The tunnel is a pipe.
+    // The tunnel is a pipe.
     const sent: string[] = [];
     const fetchImpl = (async (_u: string, init?: RequestInit) => {
       sent.push(String(init?.body ?? ""));
@@ -169,11 +156,10 @@ describe("4xx responses are relayed, not swallowed", () => {
   });
 });
 
-// --- the injected conversation token (issue #700) -----------------------------------
+// --- the injected conversation token ------------------------------------------------
 //
 // The container's own headers are forwarded, so the credential the agent-host injects
-// has to OVERWRITE rather than merge. A container that could set its own Authorization
-// would be choosing its own identity at an endpoint that now authenticates with one.
+// overwrites any Authorization the container sent rather than merging with it.
 describe("tunnel credential injection", () => {
   const capture = () => {
     const seen: Array<{ url: string; headers: Record<string, string> }> = [];
@@ -216,8 +202,7 @@ describe("tunnel credential injection", () => {
     expect(sent).toEqual([["Authorization", "Bearer real-conv-a"]]);
   });
 
-  // HTTP header names are case-insensitive and the container picks the spelling, so a
-  // case-sensitive delete would leave `authorization:` alongside our `Authorization:`.
+  // HTTP header names are case-insensitive and the container picks the spelling.
   it("strips a container header that differs only in CASE", async () => {
     const out = collector();
     const cap = capture();

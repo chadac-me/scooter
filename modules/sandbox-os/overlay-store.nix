@@ -1,34 +1,13 @@
-# Overlay Nix store: whatever /nix/store currently is becomes the READ-ONLY LOWER
-# of a local-overlay-store; a writable UPPER (a deployer-mounted volume) catches
-# everything built at runtime (lazy stubs, in-pod nix, runtime-converge). So the
-# base closure is immutable and runtime mutations are isolated + discardable.
+# Overlay Nix store: whatever /nix/store currently is becomes the read-only lower
+# of a local-overlay-store, and a deployer-mounted writable upper catches
+# everything built at runtime.
 #
-# Mechanism (https://nix.dev/manual/nix/2.22/store/types/experimental-local-overlay-store):
-#   - overlayfs mounts lowerdir=<current store> + upperdir=<volume> + workdir=<volume>
-#     OVER /nix/store, so /nix/store is the merged view (reads see the base
-#     closure, writes land in the upper);
-#   - nix is configured with a `local-overlay://` store so it records new paths in
-#     a separate state DB on the upper (the lower's read-only DB is the base).
-#
-# COMPOSE-ON-TOP, not assume-baked-dir. We bind-pin whatever /nix/store IS as our
-# lower, so this works identically for:
-#   - the baked OCI image store (the k8s/Docker prod path),
-#   - a bare /nix/store on an EC2/VM host (the non-container path — first-class:
-#     we may run this sandbox OS outside Docker),
-#   - the nixosTest framework's OWN /nix/store overlay (so the VM test can run).
-# In every case the current store becomes our read-only lower; writes go up.
-#
-# CONTAINER/VM BOOT ORDERING (the fiddly part): systemd PID 1 + the running system
-# exec FROM /nix/store, so we must NOT remount it out from under them. We overlay
-# /nix/store EARLY (ordered before local-fs.target + nix-daemon) with the current
-# store bind-pinned as the lower first — the lower still exposes every running
-# path, so PID 1 keeps working across the remount.
-#
-# The UPPER is deployer-configurable: mount an emptyDir (ephemeral, default), a
-# tmpfs, or a PVC (persist runtime builds across suspend/resume) at upperPath.
-# It MUST be disk-backed (emptyDir/PVC) in prod, NOT tmpfs — a RAM upper charges
-# every runtime-built closure (incl. the ~hundreds-of-MB module rebuild) to pod
-# memory.
+# An overlayfs is mounted over /nix/store early in boot (before local-fs.target
+# and nix-daemon) with the current store bind-pinned as its lower, so PID 1 and
+# the running system keep working across the remount; nix is pointed at a
+# `local-overlay://` store that records new paths in a state DB on the upper. The
+# upper should be disk-backed (emptyDir or PVC), since a tmpfs upper charges every
+# runtime build to pod memory.
 
 { config, lib, pkgs, ... }:
 
@@ -69,41 +48,23 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # The overlay-store boot sequence is one ordered oneshot:
-    #
-    #  1. bind /nix/store -> lowerPath        (a stable read-only lowerdir)
-    #  2. ensure upperPath/{upper,work,state} exist (on the mounted volume)
-    #  3. overlay-mount (lower+upper+work) OVER /nix/store
-    #
-    # Runs in early boot, before local-fs.target + nix-daemon, so subsequent execs
-    # + the agent's nix builds use the merged store with writes going to the upper.
+    # One early-boot oneshot: bind-pin the lower, create the upper dirs, mount the
+    # overlay over /nix/store.
     systemd.services.overlay-store-setup = {
       description = "Set up the read-only-lower + writable-upper Nix overlay store";
       wantedBy = [ "local-fs.target" ];
       before = [ "local-fs.target" "nix-daemon.service" "nix-daemon.socket" ];
       after = [ "-.mount" ];
-      # DO NOT use `RequiresMountsFor = [ cfg.upperPath ]` here. In a k8s pod the
-      # upper volume is a kubelet/CRI bind-mount established BEFORE this container's
-      # PID 1 starts — systemd inside the container does not reliably synthesize a
-      # `<upperPath>.mount` unit for it. `RequiresMountsFor` adds a hard
-      # `Requires=<that unit>`; when the unit never appears/activates (observed on
-      # EKS/containerd, though not k3d), this oneshot's start job BLOCKS, and because
-      # we're `before local-fs.target` with DefaultDependencies=false, the WHOLE BOOT
-      # FREEZES right after "starting systemd..." — never reaching local-fs/multi-user.
-      # The mount is already present when we run, so we don't need to wait on a unit:
-      # the script's own `[ -d "$upper_root" ]` check is the real guard (degrade if
-      # absent). A short TimeoutStartSec guarantees we can never wedge boot even if
-      # the overlay mount itself stalls.
+      # No RequiresMountsFor on the upper: the pod's volume is mounted before PID 1
+      # starts and systemd may never synthesize a unit for it, which would block
+      # the whole boot.
       unitConfig = {
         DefaultDependencies = false;
       };
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        # Fail-safe: never let overlay setup hang the boot. If it can't finish
-        # quickly, give up (store stays as the read-only baked lower — degrade,
-        # don't freeze). local-fs.target only `Wants` (not `Requires`) us, so a
-        # timeout/failure here does NOT block the target — boot proceeds.
+        # A timeout leaves the store as-is rather than hanging the boot.
         TimeoutStartSec = "30s";
       };
       path = [ pkgs.util-linux pkgs.coreutils pkgs.gnugrep ];
@@ -112,15 +73,13 @@ in
         lower=${lib.escapeShellArg cfg.lowerPath}
         upper_root=${lib.escapeShellArg cfg.upperPath}
 
-        # No writable volume mounted -> leave the store as-is. Degrade, don't break
-        # (the image still works; it just can't build new paths at runtime).
+        # No writable volume means the store stays as-is.
         if [ ! -d "$upper_root" ]; then
           echo "overlay-store: no upper volume at $upper_root; store unchanged"
           exit 0
         fi
 
-        # Idempotent: if /nix/store is already OUR overlay (upperdir under
-        # $upper_root), nothing to do.
+        # Nothing to do when /nix/store is already this overlay.
         if grep -qs "upperdir=$upper_root/upper" /proc/self/mountinfo; then
           echo "overlay-store: already mounted"
           exit 0
@@ -128,22 +87,15 @@ in
 
         mkdir -p "$lower" "$upper_root/upper" "$upper_root/work" "$upper_root/state"
 
-        # 1. Bind-pin the CURRENT /nix/store at $lower as a stable READ-ONLY
-        #    lowerdir. Composes on top of whatever /nix/store already is. The
-        #    two-step bind + remount-ro is the reliable way to get a read-only bind.
+        # Bind-pin the current /nix/store at $lower as a read-only lowerdir.
         if ! mountpoint -q "$lower"; then
           mount --bind /nix/store "$lower"
-          # Make the bind PRIVATE before remounting ro: if it stays in the source's
-          # shared peer group, mount propagation can route writes around our ro
-          # flag (observed when the current /nix/store is itself a writable overlay,
-          # e.g. the nixosTest framework's). Private + ro = a truly read-only lower.
+          # A shared peer group could propagate writes around the ro flag.
           mount --make-private "$lower"
           mount -o remount,bind,ro "$lower"
         fi
 
-        # 2. Overlay (ro lower + rw upper + work) OVER /nix/store. Reads fall
-        #    through to the lower (every running store path stays visible -> PID 1
-        #    keeps working); writes land in the upper.
+        # Mount the overlay over /nix/store; reads fall through to the lower.
         mount -t overlay scooter-store \
           -o "lowerdir=$lower,upperdir=$upper_root/upper,workdir=$upper_root/work" \
           /nix/store
@@ -152,29 +104,8 @@ in
     };
 
     nix.settings = {
-      # Tell Nix this is a local-overlay store so it records new paths against the
-      # upper's own state DB (the lower's read-only DB is the immutable base).
-      #   root        = merged store root (/, so the store dir is /nix/store)
-      #   lower-store = a NESTED store URI (URL-encoded) for the read-only lower:
-      #                 `local?root=/&real=<lowerPath>&read-only=true`.
-      #                 - root=/      -> the lower reads the EXISTING system state
-      #                                  (DB at /nix/var/nix/db, profiles, gcroots).
-      #                                  This is what avoids "database does not
-      #                                  exist" / "creating .links|profiles:
-      #                                  Read-only" — the real store already has a
-      #                                  complete state dir; we just don't write it.
-      #                 - real=<lower> -> the lower's actual store DIR is our frozen
-      #                                  read-only bind of /nix/store, NOT /nix/store
-      #                                  itself (which is now OUR overlay).
-      #                 - read-only=true -> never write the lower (required; #11840
-      #                                  means the flag alone is incomplete, hence
-      #                                  the root=/ existing-state trick above).
-      #                 The nested ?/& are percent-encoded so the outer URI keeps
-      #                 them attached to lower-store. (The flat `lower-store.real=`
-      #                 form is rejected as an unknown setting — it must be nested.)
-      #   upper-layer = the overlay upperdir (where new path *files* land)
-      #   state       = the upper's writable state dir (the new-paths DB)
-      #   check-mount = off; we manage the overlayfs mount in overlay-store-setup.
+      # The lower is a nested, percent-encoded store URI whose root=/ reads the
+      # existing system state DB and whose real= is the read-only bind.
       store =
         let
           lowerStore = "local?root=/&real=${cfg.lowerPath}&read-only=true";
@@ -188,15 +119,10 @@ in
 
       experimental-features = lib.mkAfter [ "local-overlay-store" "read-only-local-store" ];
 
-      # Single-user mode: skip the chown-to-build-user-group that fails with
-      # "changing ownership ...: Invalid argument" on the overlayfs store. (Proven
-      # necessary by docs/spikes/local-overlay-store-mwe.sh.)
+      # The chown to a build-user group fails on the overlayfs store.
       build-users-group = "";
 
-      # The store optimiser writes hardlinks under <lower>/.links — but the lower
-      # is read-only, so any optimise attempt fails with "creating directory
-      # /nix/.scooter-ro/.links: Read-only file system". Disable it; runtime store
-      # paths land un-deduplicated in the upper (fine — the upper is discardable).
+      # The optimiser writes hardlinks under the read-only lower's .links.
       auto-optimise-store = false;
     };
   };

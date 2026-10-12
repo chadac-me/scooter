@@ -1,4 +1,4 @@
-# github's DEPLOYMENT half. Gated on contribs.github.enable; why: #599, #711.
+# github's deployment half, gated on contribs.github.enable.
 { config, lib, ... }:
 
 let

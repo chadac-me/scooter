@@ -1,7 +1,7 @@
 /**
- * A thin HTTP client for one running `marimo edit --no-token` server. Talks the two
- * endpoints in types.ts over node:http (the same transport the web-service proxy
- * uses to reach a pod). All fragile marimo-protocol knowledge lives here + sse.ts.
+ * A thin HTTP client for one running `marimo edit --no-token` server, speaking the two
+ * endpoints in types.ts over node:http. All fragile marimo-protocol knowledge lives here
+ * and in sse.ts.
  */
 
 import { request as httpRequest } from "node:http";
@@ -15,9 +15,7 @@ interface RawResponse {
   body: string;
 }
 
-/** One POST/GET to the marimo server, buffering the full body. Rejects (kind
- *  "unreachable") on a socket error/timeout — the pod may be asleep or still coming
- *  up. Kept tiny + injectable-free; tests drive a real http.Server. */
+/** One POST/GET to the marimo server, buffering the full body and rejecting with kind "unreachable" on a socket error or timeout. */
 function httpCall(
   target: MarimoTarget,
   method: "GET" | "POST",
@@ -59,14 +57,11 @@ function httpCall(
 }
 
 export interface MarimoClient {
-  /** GET /api/sessions — the id→info map of open notebooks on this server. */
+  /** GET /api/sessions, the id-to-info map of open notebooks on this server. */
   listSessions(): Promise<Record<string, SessionInfo>>;
-  /** Resolve the session to target: an explicit id, else the one open session, else
-   *  match `file` against a session's path/filename. Throws (no-session /
-   *  multiple-sessions) when it can't pick exactly one. */
+  /** Resolve the session to target (an explicit id, else the one open session, else a `file` match), throwing when it cannot pick exactly one. */
   resolveSession(opts?: { sessionId?: string; file?: string }): Promise<string>;
-  /** POST /api/kernel/execute — run `code` in the resolved session's scratchpad and
-   *  fold the SSE stream into a result. Throws on non-200 / an incomplete stream. */
+  /** POST /api/kernel/execute, running `code` in the resolved session's scratchpad and folding the SSE stream into a result. */
   execute(code: string, opts?: { sessionId?: string; file?: string }): Promise<ExecuteResult>;
 }
 

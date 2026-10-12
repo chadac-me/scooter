@@ -1,5 +1,4 @@
-// Router-served star/title writes for an IDLE conversation (newRouter gates on no owner pod).
-// Why here, and why idle-only: PR #475.
+// Router-served star/title writes for an idle conversation (newRouter gates on no owner pod).
 package main
 
 import (
@@ -11,8 +10,7 @@ import (
 	"time"
 )
 
-// metaReader / metaWriter are the narrow store deps (satisfied by *Store / *WriteStore), so the
-// handler is testable with fakes.
+// metaReader and metaWriter are the narrow store deps, satisfied by *Store and *WriteStore.
 type metaReader interface {
 	ConversationByID(ctx context.Context, id string) (*ConversationRow, error)
 }
@@ -22,12 +20,12 @@ type metaWriter interface {
 	SetUserTitle(ctx context.Context, id, title string) (*ConversationRow, error)
 }
 
-// serveConversationMetadataPatch mirrors agent-host's mutableFor auth + view() response. Why: PR #475.
+// serveConversationMetadataPatch mirrors agent-host's mutableFor auth and view() response.
 func serveConversationMetadataPatch(w http.ResponseWriter, r *http.Request, field, id string, store metaReader, writeStore metaWriter) {
 	log := logger("metadata")
 	caller := ownerFrom(r)
 
-	// Existence + ownership before the write (mutableFor's rule; anonymous = single-user, may mutate any).
+	// Existence and ownership are checked before the write; an anonymous caller may mutate any.
 	row, err := store.ConversationByID(r.Context(), id)
 	if err != nil {
 		log.Error("metadata patch: existence read failed", convAttr(id), errAttr(err))
@@ -91,7 +89,7 @@ func serveConversationMetadataPatch(w http.ResponseWriter, r *http.Request, fiel
 		return
 	}
 
-	// Same wire row the list emits; a missing CR just yields the default status (UI ignores it here).
+	// The same wire row the list emits.
 	out := makeListRow(*updated, nil, time.Now().UnixMilli())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

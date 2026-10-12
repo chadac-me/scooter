@@ -1,22 +1,11 @@
-# Shared-database migration Job — applies the Atlas migrations under lib/sql to the
-# per-service databases on deploy.
+# Shared-database migration Job: applies the Atlas migrations under lib/sql to
+# the per-service databases on deploy.
 #
-# Tables are declared once in lib/sql/<db>/schema.sql and their migrations live in
-# lib/sql/<db>/migrations (Atlas-owned). This Job runs the agent-db-migrator image,
-# which does `atlas migrate apply --baseline <baseline>` against each database.
-# `--baseline` adopts the tables production already has (created by the services'
-# own inline DDL during the transition) on the first deploy without re-running the
-# baseline, then applies any later migrations — so the same Job is safe every deploy.
-#
-# It connects as each per-consumer role (agent-pg-<db>) to that role's database, so
-# it can only touch a database it owns. It runs alongside the services' own table
-# creation for now; the services stop self-creating tables in a later phase.
-#
-# A `wait-for-db` initContainer gates the Job on those databases/roles actually
-# existing — agent-postgres-init creates them and nothing sequences the two Jobs.
-#
-# The Job's NAME carries a hash of its spec, because a Job's pod template is
-# immutable — see `jobName` below.
+# The agent-db-migrator image runs `atlas migrate apply --baseline` against each
+# database, connecting as that database's own consumer role. A `wait-for-db`
+# initContainer gates it on agent-postgres-init having created those databases
+# and roles, and the Job's name hashes its spec because a pod template is
+# immutable.
 
 { config, lib, kubenix, ... }:
 
@@ -26,34 +15,19 @@ let
   pcfg = cfg.postgres;
   ns = cfg.namespace;
 
-  # The databases that have an Atlas schema here AND are provisioned in this deploy
-  # (postgres.nix only lists a consumer when its feature is enabled).
-  #
-  # The database set comes from `scooter.db` (#606) — it used to be a hardcoded
-  # literal here, a second list that had to be kept in step with lib/sql by hand.
-  #
-  # The Job iterates the CONSUMER KEY, which is not always the database name: agent-host
-  # registers `consumers.agent-host = { db = "agent_host"; … }`. The key names the
-  # per-consumer Secret (agent-pg-<key>); `c.db` names the database, the role, and the
-  # lib/sql directory. Keying on the db name instead silently drops agent-host, whose
-  # tables NOTHING then creates (its stores stopped self-creating in #425) — so the key
-  # is RESOLVED by matching `consumers.*.db` against the spec rather than written down,
-  # and that mismatch can no longer be introduced by editing one list and not the other.
+  # Consumer keys whose database has an Atlas schema; the key names the Secret
+  # while `c.db` names the database, role and lib/sql directory.
   enabledKeys = lib.attrNames
     (lib.filterAttrs (_k: c: builtins.elem c.db cfg.dbSpec.databases) pcfg.consumers);
   # key -> the database/role/sql-dir name.
   dbOf = k: pcfg.consumers.${k}.db;
-  # DB NAME -> the env var the migrator script looks up. Mirror the script's own
-  # `tr '[:lower:]-' '[:upper:]_'` so the two always agree; a bare lib.toUpper would
-  # emit AGENT-HOST_DB_PASSWORD for a hyphenated name, which is not a legal env name.
+  # The env var the migrator script looks up, mirroring its own
+  # `tr '[:lower:]-' '[:upper:]_'`.
   pwEnvOf = db: "${lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] db)}_DB_PASSWORD";
-  # A SHELL reference to that var ("$WEBHOOKS_DB_PASSWORD"), built in Nix so the
-  # generated script never needs `${!var}` indirection — the wait image's /bin/sh is
-  # BusyBox ash, which has no such expansion.
+  # A shell reference to that var, since BusyBox ash has no `${"$"}{!var}` indirection.
   pwRefOf = db: "$" + pwEnvOf db;
 
-  # The per-consumer password env, shared by the gate initContainer and the migrator:
-  # both connect as the same roles, so they must read the same Secrets.
+  # The password env shared by the gate initContainer and the migrator.
   pwEnv = map
     (k: {
       name = pwEnvOf (dbOf k);
@@ -61,21 +35,8 @@ let
     })
     enabledKeys;
 
-  # ORDERING GATE. agent-postgres-init creates each per-consumer database + role; this
-  # Job connects AS those roles. Nothing sequences the two Jobs, so the migrator used to
-  # discover the gap by failing: ~30 internal retries per database, times the Job's own
-  # backoff, each printing the connection error — the bulk of a deploy's error-level log
-  # volume, and pure noise since the only cure was waiting.
-  #
-  # So wait HERE instead, in an initContainer, where a not-yet-provisioned database is a
-  # quiet expected state rather than an error. The probe is a real connect as the
-  # consumer role to its own database — NOT pg_isready, which reports the SERVER as
-  # accepting connections while the role and database still do not exist, i.e. it goes
-  # green exactly when the gate must still be closed.
-  #
-  # Identity note: the probe uses the DATABASE name as the role name because the migrator
-  # does (`postgres://$env:$pw@…/$env`). Resolving `.user` here instead could let the gate
-  # pass with a role the migrator never uses.
+  # Waits for each database and role to exist with a real connect as the role the
+  # migrator itself uses.
   waitScript = ''
     set -eu
   '' + lib.optionalString (pcfg.sslmode != null) ''
@@ -100,30 +61,22 @@ let
     echo "all target databases reachable"
   '';
 
-  # Stable identity for humans and selectors, independent of the hashed name below:
-  # `kubectl -n … logs -l app.kubernetes.io/name=agent-db-migrate` finds this deploy's
-  # migrator without anyone having to look up the current hash.
+  # Stable identity for selectors and logs, independent of the hashed name.
   jobLabels = {
     "app.kubernetes.io/name" = "agent-db-migrate";
     "app.kubernetes.io/component" = "migration";
   };
 
   jobSpec = {
-    # Ordering is the `wait-for-db` initContainer's job now, not the backoff's, so
-    # these retries only cover a genuinely failing migration — where 10 attempts
-    # just reprint the same error 10 times. Why: PR #533.
+    # Retries only cover a genuinely failing migration.
     backoffLimit = 3;
-    # Each spec change leaves the PREVIOUS hash-named Job behind under a deploy that
-    # does not prune (kubectl apply); this reaps it a day later, which is long enough
-    # to read the pod logs after a bad deploy.
+    # Reap a superseded Job after a day, leaving time to read its logs.
     ttlSecondsAfterFinished = 86400;
     template = {
       metadata.labels = jobLabels;
       spec = {
         restartPolicy = "OnFailure";
-        # Block until every target database + role exists (see waitScript). Needs a
-        # psql client, which the migrator image does not carry — the postgres image
-        # does, and is already pulled on every node running the shared server.
+        # The postgres image carries the psql client the gate needs.
         initContainers = [{
           name = "wait-for-db";
           image = pcfg.image;
@@ -140,20 +93,15 @@ let
             { name = "DB_ENVS"; value = lib.concatStringsSep " " (map dbOf enabledKeys); }
           ]
           ++ lib.optional (pcfg.sslmode != null) { name = "DB_SSLMODE"; value = pcfg.sslmode; }
-          # The script derives its var name from the DB name in DB_ENVS, while the
-          # Secret is named for the consumer KEY — so resolve each side separately
-          # rather than assuming they are the same string.
+          # The var name derives from the db name and the Secret from the consumer key.
           ++ pwEnv;
         };
       };
     };
   };
 
-  # The spec IS the Job's identity, because a Job's spec.template is IMMUTABLE: a
-  # CHANGED Job re-applied under a FIXED name is rejected apiserver-side, which fails
-  # the whole deploy (helm: UPGRADE FAILED mid-roll) and never runs the migration.
-  # Hashing makes a spec change a CREATE; an unchanged spec keeps its name, so a no-op
-  # deploy does not re-run. Why: PR #542.
+  # A Job's spec.template is immutable, so hashing makes a spec change a create
+  # while an unchanged spec keeps its name.
   jobName = kubenix.lib.k8s.mkNameHash { name = "agent-db-migrate"; data = jobSpec; };
 in
 {

@@ -1,9 +1,8 @@
 /**
- * Tier 1 — skill delivery to a BYO container.
- *
- * The container cannot read the agent-host pod's filesystem, so skills arrive as
- * DATA on new_session and are written locally. Names become PATH SEGMENTS and
- * come off a wire, so the escape guard is part of the contract.
+ * Tier 1 test for skill delivery to a BYO container. The container cannot read the
+ * agent-host pod's filesystem, so skills arrive as data on new_session and are written
+ * locally; names become path segments and come off a wire, so the escape guard is part
+ * of the contract.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -45,7 +44,7 @@ describe("writeSkillPayloads", () => {
   });
 
   it("REFUSES a name that would escape the skills directory", () => {
-    // These arrive over a wire. A traversal name must not write outside cwd.
+    // These arrive over a wire, so a traversal name must not write outside cwd.
     const n = writeSkillPayloads(cwd, [
       { name: "../../../etc/evil", content: "x" },
       { name: "..", content: "x" },
@@ -66,12 +65,7 @@ describe("writeSkillPayloads", () => {
 });
 describe("failure is survivable", () => {
   it("an unwritable parent THROWS, so the caller must catch", () => {
-    // The caller wraps this in try/catch: skills are an enhancement, and the first
-    // version let ENOENT propagate so every BYOC run died with
-    // "no such file or directory, mkdtemp '/tmp/scooter-skills-XXXXXX'".
-    //
-    // Targets a path under the test's own tmpdir, NOT /proc: writing into /proc is
-    // not a normal filesystem failure and risks blocking rather than failing fast.
+    // The target is under the test's own tmpdir rather than /proc, so the failure is a normal filesystem error that fails fast.
     const notADir = join(cwd, "a-file-not-a-dir");
     writeFileSync(notADir, "x", "utf8");
     expect(() => writeSkillPayloads(notADir, [{ name: "a", content: "A" }])).toThrow();

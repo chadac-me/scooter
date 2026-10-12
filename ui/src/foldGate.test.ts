@@ -1,12 +1,9 @@
 /**
  * The fold gate decides whether a folded message list is painted.
  *
- * The regression it exists for: the transcript stops updating mid-conversation and only
- * a page refresh brings it back. Cause was a high-water mark on message COUNT that was
- * never reset, compared against a list that legitimately shrinks on every reconnect (the
- * server paints only the trailing window, so paged-in older history is gone and
- * opened-but-empty messages the live fold kept are dropped). Once the mark exceeded the
- * window, every later push was suppressed for the life of the mount.
+ * It suppresses a list that shrinks within one fold, but a reconnect re-folds from
+ * empty over the trailing window, so the high-water mark must reset per fold
+ * generation or the transcript freezes.
  */
 
 import { describe, it, expect } from "vitest";
@@ -37,7 +34,7 @@ describe("createFoldGate", () => {
 
     // Reconnect: a new fold, re-folded from empty over the window alone.
     expect(gate.accept(2, 200)).toBe(true);
-    // …and it keeps painting as live messages arrive, instead of freezing at 350.
+    // It keeps painting as live messages arrive.
     expect(gate.accept(2, 201)).toBe(true);
   });
 
@@ -45,7 +42,7 @@ describe("createFoldGate", () => {
     const gate = createFoldGate();
     gate.accept(1, 40);
     expect(gate.accept(2, 200)).toBe(true);
-    // Within the NEW fold, a shrink is still suppressed.
+    // Within the new fold, a shrink is still suppressed.
     expect(gate.accept(2, 7)).toBe(false);
   });
 

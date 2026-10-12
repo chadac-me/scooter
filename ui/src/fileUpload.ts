@@ -1,10 +1,10 @@
 /**
- * Client-side helpers for the composer's FILE upload path — the non-image sibling of
- * imageUpload.ts. Images ride as vision content blocks (SimpleImageAttachmentAdapter);
- * arbitrary files instead get MATERIALIZED into the sandbox at /workspace/uploads/<name>
- * by the agent-host. This module (1) turns an attached File into a `{type:"file"}` content
- * part carrying base64 bytes, and (2) pulls those parts back out of a composer message so
- * RuntimeProvider can forward them to `agent.send(..., { files })`.
+ * Client-side helpers for the composer's file upload path, the non-image sibling of
+ * imageUpload.ts. Images ride as vision content blocks; arbitrary files are
+ * materialized into the sandbox at /workspace/uploads/<name> by the agent-host. This
+ * module turns an attached File into a `{type:"file"}` content part carrying base64
+ * bytes, and pulls those parts back out of a composer message so RuntimeProvider can
+ * forward them to `agent.send(..., { files })`.
  */
 
 import type {
@@ -20,8 +20,8 @@ export interface OutboundFile {
   mimeType: string;
 }
 
-/** Default client cap (~25MB) — tracks the agent-host FILE_MAX_BYTES. A file over this
- *  is rejected at add() time with a clear message instead of being sent and dropped. */
+/** Default client cap (~25MB), tracking the agent-host FILE_MAX_BYTES; a larger file
+ *  is rejected at add() time. */
 export const CLIENT_FILE_MAX_BYTES = 25 * 1024 * 1024;
 
 /** base64 length -> byte size (0.75 ratio, minus '=' padding). */
@@ -31,19 +31,15 @@ export function base64Bytes(b64: string): number {
   return Math.floor((b64.length * 3) / 4) - pad;
 }
 
-/** Strip a `data:<mime>;base64,` prefix if present; otherwise return the string as-is
- *  (we store bare base64 in the file part, but tolerate a data URL defensively). */
+/** Strip a `data:<mime>;base64,` prefix if present, since a file part holds bare
+ *  base64 but a data URL is tolerated. */
 function stripDataUrl(s: string): string {
   const m = /^data:[^;,]*;base64,(.+)$/s.exec(s);
   return m ? m[1] : s;
 }
 
-/**
- * Pull the FILE parts out of an assistant-ui message content array. Our file adapter
- * stores a part as { type:"file", filename, data:<base64>, mimeType }. A part missing
- * data/mimeType is skipped. Non-file parts (text, image) are ignored — images are
- * handled separately by imagesFromMessage.
- */
+/** Pull the `{ type:"file", filename, data, mimeType }` parts out of an assistant-ui
+ *  message content array, skipping parts without data and ignoring non-file parts. */
 export function filesFromContent(content: unknown): OutboundFile[] {
   if (!Array.isArray(content)) return [];
   const out: OutboundFile[] = [];
@@ -67,13 +63,9 @@ export function filesFromContent(content: unknown): OutboundFile[] {
   return out;
 }
 
-/**
- * Pull file parts out of a WHOLE appended composer message — reading BOTH
- * `message.content` AND `message.attachments[].content`. Same reason as
- * imagesFromMessage: @assistant-ui's composer keeps completed attachment content in a
- * SEPARATE `message.attachments[]` array, not merged into `message.content`, so reading
- * `content` alone finds nothing and every upload is silently dropped.
- */
+/** Pull file parts out of a whole appended composer message, reading both
+ *  `message.content` and `message.attachments[].content` because the composer keeps
+ *  completed attachment content in the latter. */
 export function filesFromMessage(message: unknown): OutboundFile[] {
   const m = message as { content?: unknown; attachments?: unknown };
   const out: OutboundFile[] = [...filesFromContent(m?.content)];
@@ -106,16 +98,14 @@ export function fileToBase64(file: File): Promise<string> {
 let attachmentSeq = 0;
 
 /**
- * Attachment adapter for ARBITRARY files (accept "*", so it's the wildcard fallback in a
- * CompositeAttachmentAdapter placed AFTER the image adapter — images match "image/*"
- * first and keep riding as vision blocks; everything else lands here). On send() it reads
- * the File into a `{type:"file"}` content part; RuntimeProvider extracts those with
- * filesFromMessage and forwards them, and the agent-host materializes each into the
- * sandbox. Rejects at add() time when the file exceeds the client cap.
+ * Attachment adapter for arbitrary files. It accepts "*", so in a
+ * CompositeAttachmentAdapter placed after the image adapter it is the wildcard
+ * fallback; send() reads the File into a `{type:"file"}` content part, which
+ * RuntimeProvider forwards and the agent-host materializes into the sandbox. A file
+ * over the client cap is rejected at add() time.
  */
 export class SandboxFileAttachmentAdapter implements AttachmentAdapter {
-  // "*" is the composite's wildcard sentinel (fileMatchesAccept treats it as match-all).
-  // NOT "*/*", which the accept parser does NOT match.
+  // "*" is the composite's match-all sentinel ("*/*" is not).
   accept = "*";
 
   constructor(private readonly maxBytes: number = CLIENT_FILE_MAX_BYTES) {}

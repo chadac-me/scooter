@@ -1,22 +1,10 @@
 /**
- * RightPanel — the single right-side panel that hosts the Approvals and Queue tabs.
- *
- * WHY: approvals were already a right-side slider; the queue was an INLINE strip in
- * the main column that stacked every queued message's full text and ate the screen on
- * a backlog. This unifies both into ONE right panel with two tabs, so neither steals
- * vertical space from the conversation. The panel collapses entirely (renders null)
- * when both are empty — idle conversations stay clean, matching the old behavior.
- *
- * Tab behavior:
- *   • Approvals is a GATE the user can't miss — when a new interrupt arrives we
- *     auto-focus that tab. The queue never steals focus.
- *   • Each tab carries a count badge. A tab with an empty backing list is still
- *     selectable (so the user can see "0"), but the panel as a whole hides when BOTH
- *     are empty.
- *
- * The two tabs' bodies are the existing components: InterruptList (data-testid
- * `interrupt-panel`, so the e2e specs still find it) and QueuedMessages
- * (data-testid `queued-messages`).
+ * RightPanel: the single right-side panel hosting the Sandbox, Approvals, Queue,
+ * Subagents and Shares tabs. Approvals is a gate the user cannot miss, so a new
+ * interrupt auto-focuses that tab; the queue never steals focus. Each tab carries a
+ * count badge, and a tab with an empty backing list is still selectable. The tab
+ * bodies are the existing components InterruptList (data-testid `interrupt-panel`)
+ * and QueuedMessages (data-testid `queued-messages`), so the e2e specs still find them.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -45,8 +33,7 @@ function TabButton({
   onClick: () => void;
   label: string;
   count: number;
-  /** Render the count badge as a RED alert (an approval is a gate the user must act
-   *  on). Otherwise it's a neutral grey count. */
+  /** Render the count badge as a red alert rather than a neutral grey count. */
   alert?: boolean;
 }) {
   return (
@@ -91,31 +78,25 @@ export function RightPanel() {
   const nQueued = queuedMessages.length;
   const subagents = subagentsOf(sessions, currentId);
   const nSubagents = subagents.length;
-  // Published static shares for this conversation. `configured` is false when the
-  // broker path isn't wired (local/fake) — hide the tab entirely then, rather than
-  // show a permanently-empty one.
+  // `configured` is false when the broker path is not wired, which hides the Shares tab.
   const { shares: publishedShares, configured: sharesConfigured } = useShares();
 
-  // Sandbox is the leftmost, ALWAYS-present tab — so it's the default. It now hosts
-  // BOTH the pod status AND the web services (start/stop), so there's no separate
-  // Services tab or bottom panel.
+  // Sandbox is the leftmost, always-present tab, so it is the default.
   const [active, setActive] = useState<Tab>("sandbox");
 
-  // On mobile the panel is an overlay right-drawer toggled from the header; drawer
-  // state drives its slide-in. Desktop (desk+ (≥1200px)) pins it in-flow regardless.
+  // On mobile the panel is an overlay right-drawer toggled from the header; desktop
+  // (≥1200px) pins it in-flow regardless.
   const drawer = useDrawer();
 
-  // Auto-focus Approvals whenever the pending-interrupt count RISES (a new gate the
-  // user must answer). Tracked by count so re-renders that don't change it don't
-  // re-steal focus, and the queue never triggers it.
+  // Auto-focus Approvals whenever the pending-interrupt count rises; tracking the count
+  // keeps re-renders from re-stealing focus.
   const prevInterrupts = useRef(nInterrupts);
   useEffect(() => {
     if (nInterrupts > prevInterrupts.current) setActive("approvals");
     prevInterrupts.current = nInterrupts;
   }, [nInterrupts]);
 
-  // The panel is ALWAYS shown now (the Sandbox status tab is persistent) — as long as
-  // there IS a conversation. Only a truly empty app (no conversation) hides it.
+  // Only an app with no conversation hides the panel.
   if (!sandbox.hasConversation) return null;
 
   return (
@@ -124,7 +105,7 @@ export function RightPanel() {
         "flex flex-col border-l bg-background",
         // Mobile: off-canvas right drawer over the thread, below the h-11 header.
         "fixed bottom-0 right-0 top-11 z-40 w-[86vw] max-w-80 translate-x-full shadow-xl transition-transform duration-200 ease-out",
-        // Desktop (desk+ (≥1200px)): the original static, in-flow column — unchanged.
+        // Desktop (≥1200px): a static, in-flow column.
         "desk:static desk:h-full desk:w-80 desk:max-w-none desk:translate-x-0 desk:shadow-lg desk:transition-none",
         drawer === "panel" && "translate-x-0",
       )}
@@ -153,7 +134,7 @@ export function RightPanel() {
           onClick={() => setActive("approvals")}
           label="Approvals"
           count={nInterrupts}
-          alert // a pending approval is a gate — red badge so the user knows to click here
+          alert // a pending approval is a gate, so its badge is red
         />
         <TabButton
           active={active === "queue"}

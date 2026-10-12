@@ -1,16 +1,11 @@
-/**
- * Tier 1 contract — the BYO "Connect your Claude agent" one-liner builder. Locks the wss URL
- * derivation + the docker one-liner shape (token + url baked in). See remoteAgentOneliner.ts.
- */
+/** The BYO docker one-liner builder, with the token and url baked in. */
 
 import { describe, it, expect } from "vitest";
 
 import { connectWsUrl, dockerCommand, createRemoteAgentUi } from "../../src/acp/remoteAgentOneliner.js";
 import { verifyJoinToken } from "../../src/auth/remoteAgentToken.js";
 
-// connectWsUrl + createRemoteAgentUi now target the BYOC CONTROLLER (per-owner
-// /byoc/ws/<session-id>), not the retired webhooks bridge — see remoteAgentOnelinerByoc.spec.ts.
-// Only dockerCommand is transport-agnostic, so it stays here.
+// connectWsUrl and createRemoteAgentUi are covered in remoteAgentOnelinerByoc.spec.ts.
 
 describe("dockerCommand", () => {
   it("bakes the url + token + the restart-always + volume + 1717 publish", () => {

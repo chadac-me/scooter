@@ -1,14 +1,7 @@
-# In-pod Nix configuration for the dev environment.
-#
-# The agent builds/installs tools on demand, so nix must Just Work in-pod:
-#   - flakes + the new CLI enabled;
-#   - a writable per-user profile on PATH (so `nix profile install` lands on PATH);
-#   - the `nixpkgs` flake registry PINNED to a fixed nixpkgs, so the documented
-#     `nix profile install nixpkgs#<pkg>` (and the agent's ad-hoc `nix run
-#     nixpkgs#<pkg>`) resolve deterministically — no mutable channel surprise.
-#
-# This is the foundation the nix-dev-env SKILL teaches against; the
-# dev-env-nix-build-skill nixosTest runs the skill's documented commands.
+# In-pod Nix configuration for the dev environment: flakes enabled, the per-user
+# profile on PATH, and the `nixpkgs` flake registry pinned to a fixed nixpkgs so
+# `nixpkgs#<pkg>` resolves deterministically. The dev-env-nix-build-skill nixosTest
+# runs the nix-dev-env skill's documented commands against it.
 
 { config, lib, pkgs, ... }:
 
@@ -31,32 +24,22 @@ in
   config = lib.mkIf cfg.enable {
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-    # Off: these pods lack the kernel user-namespaces Nix's build sandbox needs,
-    # so any derivation build (e.g. `nix develop`) fails hard. Why: PR #445.
+    # Off, because these pods lack the user namespaces Nix's build sandbox needs.
     nix.settings.sandbox = false;
 
-    # Don't fetch the GLOBAL flake registry (channels.nixos.org) — the local
-    # pinned `nixpkgs` entry below is the single source of truth, and fetching the
-    # global one needs network + makes `nixpkgs#x` non-deterministic. "" disables it.
+    # "" disables the global flake registry, so the pinned `nixpkgs` entry below is
+    # the only source.
     nix.settings.flake-registry = "";
 
-    # Pin `nixpkgs#…` to a fixed nixpkgs so the skill's documented install and the
-    # agent's ad-hoc `nix run nixpkgs#…` resolve the same, deterministic tree.
-    # When the ref is a path-flake (tests / local) pin to that store path;
-    # otherwise treat it as a github: flake ref.
+    # A path-flake ref (tests) pins to that store path; anything else is treated as
+    # a github: ref.
     nix.registry.nixpkgs.to =
       if lib.hasPrefix "path:" cfg.nixpkgs
       then { type = "path"; path = lib.removePrefix "path:" cfg.nixpkgs; }
       else { type = "github"; owner = "NixOS"; repo = "nixpkgs"; };
 
-    # Ensure the per-user nix profile (where `nix profile install` puts things) is
-    # on PATH so an installed tool is immediately runnable. `sessionVariables` (below)
-    # only reaches LOGIN/interactive shells; the agent-host execs NON-LOGIN `bash -c`
-    # (k8s exec API), which inherits systemd PID 1's environment — the minimal
-    # container-image PATH — so it did NOT fix "install succeeds but tool not found".
-    # The container-image Env.PATH (pkgs/sandbox-os) is the real source the exec
-    # inherits; it prepends the profile bin. HOME is pinned to /workspace
-    # (carry-over.nix), so the profile path is literal here.
+    # Only reaches login shells; the non-login exec path inherits the container
+    # image's Env.PATH (pkgs/sandbox-os), which prepends the profile bin itself.
     environment.sessionVariables.PATH = lib.mkAfter [ "$HOME/.nix-profile/bin" ];
   };
 }

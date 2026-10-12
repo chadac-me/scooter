@@ -1,31 +1,20 @@
 /**
- * Rolling integrity checksum for a conversation's AG-UI event log.
- *
- * A Merkle-style chain: checksum_n = sha256(checksum_{n-1} || canonical(event_n)),
- * starting from a fixed seed. Each persisted/broadcast event carries the checksum
- * of the log *through and including* that event, plus the previous checksum.
- *
- * Why: a UI streaming a conversation can only trust it has the complete, in-order
- * log if every event's `prevChecksum` matches the checksum it last held. A
- * mismatch means a gap (dropped SSE frame, reconnect, out-of-order, or a run it
- * never saw) — the client re-fetches history until the checksums agree. The
- * checksum is cheap for the server to maintain (one hash per appended event) and
- * for the client to verify (the same hash as events arrive).
- *
- * The hash input is the event's canonical JSON (stable key order) so the server
- * and client compute identical values from the same logical event.
+ * Rolling integrity checksum for a conversation's AG-UI event log: a hash chain
+ * checksum_n = sha256(checksum_{n-1} || canonical(event_n)) from a fixed seed, where
+ * each event carries the checksum through itself plus the previous one. A client
+ * whose held checksum does not match an event's `prevChecksum` has a gap and
+ * re-fetches history. The hash input is canonical JSON (stable key order) so server
+ * and client compute identical values.
  */
 
 import { createHash } from "node:crypto";
 
 import type { AguiEvent } from "../bridge.js";
 
-/** Seed checksum for an empty log (checksum_0). Distinct, fixed, documented. */
+/** Seed checksum for an empty log. */
 export const EMPTY_CHECKSUM = "0".repeat(64);
 
-/** Canonical JSON for hashing: keys sorted so {a,b} and {b,a} hash identically.
- *  AG-UI events are flat string/number/boolean records, so a shallow sort is
- *  sufficient and deterministic across server (persist) and client (verify). */
+/** Canonical JSON for hashing, with keys sorted; AG-UI events are flat records, so a shallow sort suffices. */
 export function canonicalize(event: AguiEvent): string {
   const obj = event as unknown as Record<string, unknown>;
   const keys = Object.keys(obj).sort();
@@ -46,14 +35,13 @@ export function chainAll(events: Iterable<AguiEvent>, seed = EMPTY_CHECKSUM): st
   return acc;
 }
 
-/** A stateful folder — tracks the running checksum as events are appended.
- *  The server keeps one per conversation; the client keeps one per open thread. */
+/** A stateful folder tracking the running checksum as events are appended. */
 export interface ChecksumChain {
   /** Checksum through the last folded event (EMPTY_CHECKSUM if none). */
   readonly current: string;
-  /** Fold `event`, returning { prev, next } — the checksum before and after. */
+  /** Fold `event`, returning the checksum before and after. */
   push(event: AguiEvent): { prev: string; next: string };
-  /** Reset to a known checksum (e.g. after a resync). */
+  /** Reset to a known checksum, e.g. after a resync. */
   reset(to: string): void;
 }
 

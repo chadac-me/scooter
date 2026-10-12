@@ -1,21 +1,13 @@
 /**
- * Fold an event log into AG-UI `Message`s for a MESSAGES_SNAPSHOT.
- *
- * Replaying history as individual events makes the client's applier rebuild the
- * message list token by token, deep-cloning the whole array on every emit — O(n²)
- * on a long conversation. A snapshot applies the same history in ONE pass.
+ * Fold an event log into AG-UI `Message`s for a MESSAGES_SNAPSHOT, which applies
+ * history in one pass where replaying individual events makes the client's applier
+ * rebuild and clone the message list on every emit.
  */
 
 import { EventType } from "@ag-ui/core";
 import type { AguiEvent } from "../bridge.js";
 
-/** Event types the client's applier routes through its message-mutation path: it
- *  deep-clones the whole message array to emit each one. A replay must skip them,
- *  or the client rebuilds — token by token — the list the snapshot just delivered.
- *
- *  Derived from the library's own enum so a new upstream event type cannot
- *  silently reintroduce the O(n^2) replay. `MESSAGES_SNAPSHOT` is excluded: it is
- *  what we send, not something we skip. */
+/** Event types the client's applier routes through its message-mutation path, which a replay must skip; derived from the library's enum so a new upstream type cannot slip past. */
 export const MESSAGE_EVENTS: ReadonlySet<string> = new Set(
   Object.values(EventType).filter(
     (t) => t !== EventType.MESSAGES_SNAPSHOT && /MESSAGE|REASONING|TOOL_CALL|TEXT|THINKING/.test(t),
@@ -38,8 +30,7 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
   const toolToAssistant = new Map<string, SnapshotMessage>();
   const toolName = new Map<string, string>();
   const toolArgs = new Map<string, string>();
-  // tool_call_id -> the emitted call object, so args that arrive after it was
-  // built (the shell shape) can still be written into it. Why: PR #644.
+  // tool_call_id -> the emitted call object, so args arriving after it was built can still be written into it.
   const emittedCalls = new Map<string, { function: { arguments: string } }>();
   let openAssistant: SnapshotMessage | undefined;
 
@@ -63,17 +54,12 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
         open(e.messageId, "reasoning");
         break;
       case "TEXT_MESSAGE_END":
-        // Close the assistant turn: a tool call that starts AFTER it belongs to the
-        // next turn, not this one. Without this every tool call in the conversation
-        // attaches to the last-opened assistant message (89 on one message in a real
-        // log), and a windowed fold of the same log disagrees with the whole-log fold.
+        // Close the assistant turn, so a tool call that starts after it belongs to the next turn.
         if (openAssistant?.id === e.messageId) openAssistant = undefined;
         break;
       case "TEXT_MESSAGE_CONTENT":
       case "REASONING_MESSAGE_CONTENT": {
-        // CONTENT with no preceding START: a log can begin mid-message (a truncated
-        // run, or a window that starts inside one). Open the message rather than drop
-        // the text — losing a user's turn is the worse failure.
+        // A log can begin mid-message, so open the message rather than drop the text.
         const m =
           byId.get(e.messageId) ??
           open(e.messageId, e.type === "REASONING_MESSAGE_CONTENT" ? "reasoning" : "assistant");
@@ -88,10 +74,8 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
       case "TOOL_CALL_ARGS": {
         const acc = (toolArgs.get(e.toolCallId) ?? "") + (e.delta ?? "");
         toolArgs.set(e.toolCallId, acc);
-        // The args can arrive AFTER the call was emitted at TOOL_CALL_END — for a
-        // shell tool that is the normal order, because the command is only known
-        // once terminal/create delivers it. Patch the already-emitted call, or a
-        // rehydrated conversation renders the card with no command. Why: PR #644.
+        // Args can arrive after the call was emitted at TOOL_CALL_END (the shell tool's
+        // normal order), so patch the already-emitted call.
         const already = emittedCalls.get(e.toolCallId);
         if (already) already.function.arguments = acc;
         break;
@@ -105,8 +89,7 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
         };
         if (host) (host.toolCalls ??= []).push(call);
         else {
-          // A tool call with no open assistant message still needs a carrier, or its
-          // result below would reference a toolCallId the client never saw.
+          // A tool call with no open assistant message still needs a carrier.
           const m = open(`asst-${e.toolCallId}`, "assistant");
           m.toolCalls = [call];
         }
@@ -115,9 +98,7 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
         break;
       }
       case "TOOL_CALL_RESULT": {
-        // A result whose START/END never made it into the log (an interrupted run
-        // truncates mid-call) would reference a toolCallId no message declares — the
-        // client renders that as a dangling card. Synthesize the carrier.
+        // A result whose START/END never made it into the log needs a synthesized carrier.
         if (!toolName.has(e.toolCallId)) {
           const host = openAssistant ?? open(`asst-${e.toolCallId}`, "assistant");
           (host.toolCalls ??= []).push({
@@ -140,19 +121,10 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
   return out.filter((m) => m.content !== "" || (m.toolCalls?.length ?? 0) > 0 || m.role === "tool");
 }
 
-/** How many trailing messages the initial snapshot paints. The rest of the
- *  history pages in on scroll. Each rendered message costs ~34 React fibers, so a
- *  full 1,555-message thread mounts ~53,000 of them in one synchronous,
- *  non-interruptible commit and the composer stays unclickable while it runs. */
+/** How many trailing messages the initial snapshot paints; the rest pages in on scroll. */
 export const INITIAL_SNAPSHOT_MESSAGES = 200;
 
-/** Split `events` at the point where the last `messages` messages begin.
- *
- *  Returns the trailing slice to fold into the initial snapshot plus the 1-based
- *  seq of its first event, which the client passes back to page older history in.
- *
- *  The cut lands on a run boundary so the folded window cannot open a message
- *  mid-stream: a slice starting inside a tool call renders a dangling card. */
+/** Split `events` on the run boundary before the last `messages` messages, returning the trailing slice plus the 1-based seq of its first event for paging older history. */
 export function splitForInitialSnapshot(
   events: AguiEvent[],
   messages = INITIAL_SNAPSHOT_MESSAGES,
@@ -185,11 +157,7 @@ export function splitForInitialSnapshot(
   return { tail: events.slice(boundary), fromSeq: boundary + 1, hasOlder: true };
 }
 
-/** The offset of the first RUN_STARTED in a backward page, so the page begins at a
- *  whole run. The caller drops that many events and advances its cursor by the
- *  same amount, keeping coverage complete. 0 when the window holds no
- *  RUN_STARTED — it is mid-run either way, and dropping it all would lose
- *  history. */
+/** The offset of the first RUN_STARTED in a backward page, so the page begins at a whole run, or 0 when the window holds none. */
 export function alignPageToRun(events: AguiEvent[]): number {
   const i = events.findIndex((e) => e.type === "RUN_STARTED");
   return i > 0 ? i : 0;

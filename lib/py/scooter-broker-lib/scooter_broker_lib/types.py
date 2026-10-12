@@ -1,15 +1,9 @@
-"""Core broker types — the contract provider modules, credential sources, and
-transports implement.
+"""Core broker types: the contract provider modules, credential sources and transports implement.
 
-Design stage: interfaces / shapes only. No implementation.
-
-Layering:
-  Provider  = a credential SOURCE + the TRANSPORTS it offers (one integration)
-  Transport = a delivery mechanism (http-proxy, git-credential, token-vend, ...)
-  Source    = how the secret is obtained (GitHub App, static PAT, OAuth, ...)
-
-The core auto-discovers registered providers and, for each, mounts every
-transport's routes. Adding an integration never edits the core.
+A Provider is one integration, a credential Source (how the secret is obtained)
+plus the Transports it offers (how it is delivered). The core discovers registered
+providers and mounts every transport's routes, so adding an integration never
+edits the core.
 """
 
 from __future__ import annotations
@@ -28,23 +22,14 @@ from fastapi import APIRouter
 
 @dataclass(frozen=True)
 class Identity:
-    """The validated caller identity, extracted from the pod's SA token.
+    """The caller identity the core extracted from a projected ServiceAccount token it validated via TokenReview."""
 
-    The pod presents a projected ServiceAccount token (audience agent-broker);
-    the core validates it via K8s TokenReview and extracts this.
-    """
-
-    conversation_id: str          # from SA name sandbox-{conversation_id}
+    conversation_id: str          # from the SA name sandbox-{conversation_id}
     namespace: str
-    service_account: str          # full system:serviceaccount:{ns}:sandbox-{id}
-    # True if this caller is a configured APPROVER (e.g. the agent-host relaying a
-    # user's approve/deny), not a sandbox. Approvers have no conversation_id.
+    service_account: str          # system:serviceaccount:{ns}:sandbox-{id}
+    # True for a configured approver (which has no conversation_id), not a sandbox.
     is_approver: bool = False
-    # The Scooter user who owns the conversation, when the caller's credential says
-    # so. Only the MCP two-token path populates it (from the conversation token's
-    # `owner` claim) — a sandbox SA name carries no owner, so this stays None there
-    # rather than being guessed. A tool that must scope by owner reads this instead
-    # of asking the agent-host. See issue #700.
+    # The conversation's owner from the conversation token's `owner` claim; a sandbox SA carries none, so it stays None there.
     owner: str | None = None
 
 
@@ -57,24 +42,13 @@ class Credential:
     """A resolved credential, ready for a transport to deliver."""
 
     kind: str                     # "bearer" | "basic" | "header" | "multi-header" | ...
-    value: str                    # the token / secret ("multi-header": a JSON {name: value} map)
+    value: str                    # the secret, or for "multi-header" a JSON {name: value} map
     expires_at: float | None = None
-    # Extra fields a transport may need (e.g. git username).
+    # Extra fields a transport may need, such as a git username.
     meta: dict[str, str] = field(default_factory=dict)
 
     def inject(self, req: httpx.Request) -> None:
-        """Apply this credential to an OUTBOUND httpx request, in place.
-
-        Takes the built request (not just a header dict) so a credential can
-        mutate whatever it needs — headers, and in future query params / body /
-        URL. A provider whose auth doesn't fit the shipped kinds subclasses
-        Credential and overrides this. The shipped kinds mutate headers only:
-          bearer        -> Authorization: Bearer <value>
-          header        -> <meta.header_name>: <value>        (e.g. PRIVATE-TOKEN)
-          basic         -> Authorization: Basic <value>
-          multi-header  -> each {name: value} in the JSON `value` map (e.g. the
-                           two Datadog keys DD-API-KEY / DD-APPLICATION-KEY)
-        """
+        """Apply this credential to an outbound httpx request in place; a provider whose auth fits none of the shipped kinds overrides this."""
         if self.kind == "bearer":
             req.headers["Authorization"] = f"Bearer {self.value}"
         elif self.kind == "header":
@@ -89,10 +63,10 @@ class Credential:
 
 @runtime_checkable
 class CredentialSource(Protocol):
-    """How a provider obtains its secret. Pluggable per provider."""
+    """How a provider obtains its secret."""
 
     async def get(self, identity: Identity) -> Credential:
-        """Resolve a credential for this caller (may mint/refresh/cache)."""
+        """Resolve a credential for this caller."""
         ...
 
 
@@ -100,37 +74,21 @@ class CredentialSource(Protocol):
 # Transport (the injection method)
 # ---------------------------------------------------------------------------
 
-# A core-provided dependency that authenticates the request and returns Identity.
+# A core-provided dependency that authenticates the request and returns the Identity.
 AuthDependency = Callable[..., Awaitable[Identity]]
 
 
 @runtime_checkable
 class Transport(Protocol):
-    """A delivery mechanism for a credential. Shipped: http-proxy,
-    git-credential, token-vend, mcp-tools. A transport may mount MULTIPLE routes.
-    """
+    """A delivery mechanism for a credential, which may mount several routes."""
 
     name: str
 
     def routes(self, provider: "Provider", authed: AuthDependency) -> APIRouter:
-        """Return an APIRouter with this transport's route(s) for `provider`,
-        mounted under the provider's prefix by the core. Handlers use `authed`
-        to get the Identity, then provider.credential.get(identity), then
-        deliver per this transport's mechanism.
-        """
+        """An APIRouter with this transport's routes for `provider`, which the core mounts under the provider's prefix."""
         ...
 
-    # OPTIONAL second half: `mcp_server`, a `FastMCP` carrying the agent tools this
-    # transport contributes. Served by the broker's single /mcp endpoint rather than
-    # mounted under the provider's prefix, and mounted NAMESPACE-LESS so tool names
-    # stay flat.
-    #
-    # Discovered by `hasattr` rather than declared in the Protocol's required surface:
-    # adding it there would make every existing transport fail isinstance(), which is
-    # why the four shipped transports that have no tools needed no change. The same
-    # arity-not-a-flag reasoning as `registry.wants_context`.
-    #
-    # See scooter_broker_lib/mcp.py and transports/mcp_tools.py. Why: issue #700.
+    # An optional `mcp_server` attribute (a `FastMCP`), discovered by `hasattr` so transports without tools still satisfy the Protocol, carries the agent tools served at the broker's /mcp endpoint.
 
 
 # ---------------------------------------------------------------------------
@@ -139,17 +97,13 @@ class Transport(Protocol):
 
 @dataclass
 class Provider:
-    """One integration. Owns its credential source and the transports it
-    offers (each declaring its own config, e.g. upstream URL / git host).
-    """
+    """One integration: its credential source and the transports it offers."""
 
-    name: str                          # registry key + route prefix
+    name: str                          # registry key and route prefix
     transports: list[Transport]
-    # The credential source. Optional: diagnostic transports (whoami) deliver no
-    # secret. Transports that need one assert it at mount time.
+    # Optional because a diagnostic transport delivers no secret; transports that need one assert it at mount time.
     credential: CredentialSource | None = None
     enabled: bool = True
-    # Optional async startup/shutdown hooks (e.g. open a DB, start a sweep task).
-    # Run by the app's lifespan. Default: no-ops.
+    # Optional hooks run by the app's lifespan.
     on_startup: Callable[[], Awaitable[None]] | None = None
     on_shutdown: Callable[[], Awaitable[None]] | None = None

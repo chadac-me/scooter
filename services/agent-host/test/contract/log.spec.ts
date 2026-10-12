@@ -1,13 +1,6 @@
 /**
- * Tier 1 — structured logging.
- *
- * Two things carry the weight here and both have burned us:
- *
- *   1. The conversation id must ride EVERY line inside a scope, including across awaits.
- *      An id that survives the first tick and then vanishes is worse than none, because
- *      the trace looks complete while missing the interesting half.
- *   2. formatError must never produce `{}`. Two production failures were unattributable
- *      for exactly that reason ("[k8sExec] exec() rejected {}").
+ * Structured logging: the conversation id rides every line inside a scope, including
+ * across awaits, and formatError never produces `{}`.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -70,14 +63,12 @@ describe("structured logging", () => {
 
     expect(lines[0].conversation_id).toBe("conv-1");
     expect(lines[1].conversation_id).toBe("conv-1");
-    // ...and does NOT leak past the scope.
+    // The id does not leak past the scope.
     expect(lines[2].conversation_id).toBeUndefined();
   });
 
   it("SURVIVES awaits — the case that makes ambient context worth having", async () => {
-    // A log site five frames deep, after an await, is exactly where the id used to be
-    // unavailable. If AsyncLocalStorage did not carry across the await this whole design
-    // would be pointless, so pin it.
+    // AsyncLocalStorage must carry the id across the await.
     const lines = captureJson();
     await withConversation("conv-async", async () => {
       logger("a").info("before await");
@@ -123,7 +114,7 @@ describe("structured logging", () => {
         logger("x").info("B finished");
       }),
     ]);
-    // B logs first (shorter sleep); each must carry its OWN id, not the other's.
+    // B logs first (shorter sleep); each must carry its own id.
     expect(lines.map((l) => [l.msg, l.conversation_id])).toEqual([
       ["B finished", "conv-B"],
       ["A finished", "conv-A"],
@@ -165,17 +156,15 @@ describe("formatError — never `{}`", () => {
   });
 
   it("captures NON-ENUMERABLE fields, which JSON.stringify silently drops", () => {
-    // This is the actual production bug: a WebSocket/k8s client error stringifies to `{}`
-    // because its useful fields are non-enumerable.
+    // A WebSocket/k8s client error stringifies to `{}` because its useful fields are non-enumerable.
     const err = {};
     Object.defineProperty(err, "message", { value: "hidden", enumerable: false });
-    expect(JSON.stringify(err)).toBe("{}"); // the old behavior
-    expect(formatError(err).message).toBe("hidden"); // the new one
+    expect(JSON.stringify(err)).toBe("{}");
+    expect(formatError(err).message).toBe("hidden");
   });
 
   it("says so explicitly when a thrown value really has no properties", () => {
-    // k8sExec.ts already used getOwnPropertyNames and STILL logged `{}` — meaning the
-    // value genuinely had nothing. Emitting a note beats emitting an empty object.
+    // A note beats an empty object.
     const out = formatError({});
     expect(out.note).toMatch(/no own properties/);
   });
@@ -214,8 +203,7 @@ describe("the production failures this replaces", () => {
   });
 
   it("an exec failure is diagnosable instead of `{}`", () => {
-    // "[k8sExec] exec() rejected {}" — the reported bug. A WebSocket error carries its
-    // detail non-enumerably, so the old console.error rendered nothing usable.
+    // A WebSocket error carries its detail non-enumerably.
     const wsErr = {};
     Object.defineProperty(wsErr, "message", { value: "socket hang up", enumerable: false });
     Object.defineProperty(wsErr, "code", { value: "ECONNRESET", enumerable: false });
@@ -226,15 +214,14 @@ describe("the production failures this replaces", () => {
     });
 
     const line = lines[0];
-    expect(line.conversation_id).toBe("conv-1"); // WHICH conversation — previously absent
+    expect(line.conversation_id).toBe("conv-1");
     expect((line.error as Record<string, unknown>).message).toBe("socket hang up");
     expect((line.error as Record<string, unknown>).code).toBe("ECONNRESET");
     expect(line.ws_close).toEqual({ code: 1006, reason: "" });
   });
 
   it("a failed prompt names its conversation", () => {
-    // "[agui] prompt failed for <id>" had the id interpolated into prose — greppable by
-    // eye, not queryable. It is a field now.
+    // The id is a field, not interpolated into prose.
     const lines = captureJson();
     withConversation("42bb375c", () => {
       logger("agui").errorWith("prompt failed; surfacing RUN_ERROR to the client", new Error("nope"), {

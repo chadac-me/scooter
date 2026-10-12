@@ -1,17 +1,9 @@
 /**
- * Theme (light / dark / system) — a tiny useSyncExternalStore store, same pattern
- * as view.ts / sessions.ts (the app deliberately has no router/state library).
- *
- * Three modes:
- *   "light" | "dark"  — an explicit choice, persisted to localStorage.
- *   "system"          — follow the OS/browser (prefers-color-scheme), live: an OS
- *                       switch flips the app with no reload. This is the DEFAULT
- *                       when nothing is stored.
- *
- * The `dark` class on <html> is the single switch every token reads (globals.css
- * `.dark` block). This module is the ONLY runtime writer of that class; a tiny
- * inline script in index.html applies the same resolution BEFORE first paint so
- * there is no light->dark flash on load (keep the two in sync). PR #465.
+ * Theme (light / dark / system): a small useSyncExternalStore store. "light" and "dark"
+ * are explicit choices persisted to localStorage; "system" (the default) follows
+ * prefers-color-scheme live. The `dark` class on <html> is the single switch every
+ * token reads; this module is its only runtime writer, and an inline script in
+ * index.html applies the same resolution before first paint, so keep the two in sync.
  */
 import { useSyncExternalStore } from "react";
 
@@ -26,7 +18,7 @@ function readStored(): ThemeMode {
     const v = globalThis.localStorage?.getItem(STORAGE_KEY);
     if (v === "light" || v === "dark" || v === "system") return v;
   } catch {
-    // localStorage can throw (private mode / disabled) — fall back to system.
+    // localStorage can throw (private mode / disabled); fall back to system.
   }
   return "system";
 }
@@ -42,7 +34,7 @@ function resolvesDark(m: ThemeMode = mode): boolean {
   return media?.matches ?? false;
 }
 
-/** Converge <html>.dark to the resolved appearance. Idempotent. */
+/** Converge <html>.dark to the resolved appearance; idempotent. */
 function apply() {
   globalThis.document?.documentElement.classList.toggle("dark", resolvesDark());
 }
@@ -52,14 +44,12 @@ function emit() {
   for (const cb of listeners) cb();
 }
 
-// "system" mode must react LIVE to an OS appearance change (no reload). The listener
-// only repaints while we're actually in system mode.
+// In system mode an OS appearance change repaints live.
 media?.addEventListener?.("change", () => {
   if (mode === "system") emit();
 });
 
-// Converge once at import — the inline <head> script already set the class pre-paint,
-// this keeps the store's view of the world authoritative for later toggles.
+// Converge once at import so the store's view is authoritative for later toggles.
 apply();
 
 export const themeStore = {

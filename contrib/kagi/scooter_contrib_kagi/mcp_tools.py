@@ -1,8 +1,4 @@
-"""Kagi's AGENT TOOL — `kagi_web_search`.
-
-Named for its provider so brave and duckduckgo can be enabled alongside it; the row
-filter below is the part that is easy to get wrong. Why: PR #698, PR #707.
-"""
+"""Kagi's agent tool, `kagi_web_search`, named for its provider so sibling search contribs can be enabled alongside it."""
 
 from __future__ import annotations
 
@@ -17,9 +13,7 @@ PROVIDER = "kagi"
 UPSTREAM = "https://kagi.com"
 SEARCH_PATH = "api/v1/search"
 
-# Kagi's rows are TYPED, and this filter is load-bearing: `t: 0` is a search result,
-# while `t: 1` is a related-searches row carrying a `list` and no url. Without the
-# filter that row renders as a bogus hit the agent cannot follow. Why: PR #698.
+# Kagi's rows are typed: `t: 0` is a search result, `t: 1` a related-searches row with no url.
 RESULT_ROW = 0
 
 
@@ -36,8 +30,7 @@ async def kagi_web_search(query: str, ctx: ToolContext = ToolContextDep) -> Tool
     verbatim — a 401 or a quota error means this deployment's search key is bad or
     exhausted, so report it rather than retrying the query.
     """
-    # NOT attachment-gated: there is no resource to be attached to. Search's gate is
-    # `enabled` — no key ⇒ no provider ⇒ the agent never sees this tool.
+    # Not attachment-gated; the gate is the provider's `enabled`.
     text = query.strip()
     if not text:
         return ToolResult.error("`query` is required — pass the text to search for.")

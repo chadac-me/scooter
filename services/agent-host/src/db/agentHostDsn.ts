@@ -1,16 +1,9 @@
 /**
- * The agent_host database DSN, assembled from the environment the platform wires.
- *
- * The agent-host Deployment and the one-shot event-backfill Job both connect to the SAME
- * database with the SAME credentials, so the DSN they use must be assembled identically — a
- * backfill that wrote to a different database/user than the live service reads from would
- * "succeed" while loading nothing anyone can see. Keeping this in one place is what makes the
- * two agree: index.ts (the service) and scripts/runEventBackfill.ts (the Job) both call it.
- *
- * Precedence matches the rest of agent-host: an explicit AGENT_HOST_DB_DSN wins; otherwise the
- * DSN is built from the discrete AGENT_HOST_DB_* vars the platform sets (host/port/name/user +
- * the password from the agent-pg-agent-host Secret). Returns "" when no password is present, so
- * a caller can distinguish "Postgres not configured" from a real connection failure.
+ * The agent_host database DSN assembled from the environment, shared by the service
+ * (index.ts) and the event-backfill Job so both connect to the same database with the
+ * same credentials. An explicit AGENT_HOST_DB_DSN wins; otherwise the DSN is built from
+ * the AGENT_HOST_DB_* vars, and "" is returned when no password is present so a caller
+ * can tell "not configured" from a connection failure.
  */
 
 export function agentHostDsnFromEnv(env: NodeJS.ProcessEnv = process.env): string {

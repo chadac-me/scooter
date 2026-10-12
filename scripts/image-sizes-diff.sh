@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
 # image-sizes-diff.sh — render a markdown table comparing PR image sizes against a
-# baseline (origin/main), for the CI sticky PR comment. Report-only: it FLAGS growth
-# with an emoji but never exits non-zero (v1 is a signal, not a merge gate).
+# baseline (origin/main) for the CI comment; report-only, it flags growth with an
+# emoji but never exits non-zero.
 #
 # Usage:
 #   scripts/image-sizes-diff.sh <baseline.json> <pr.json> [growth_pct_flag]
 #     baseline.json / pr.json : the [{name,bytes,kind}] arrays from image-sizes.sh
 #     growth_pct_flag         : % growth that earns a ⚠️ (default 5)
 #
-# Output (stdout): the markdown BODY of the image-size section (scripts/ci-report.mjs
-# to hand to `gh pr comment`. An image present in one side but not the other renders
-# with "—" on the missing side (added/removed image).
+# Output (stdout): the markdown body of the image-size section; an image present
+# on one side only renders "—" on the missing side.
 set -euo pipefail
 
 BASELINE="${1:?usage: image-sizes-diff.sh <baseline.json> <pr.json> [growth_pct]}"
 PR="${2:?usage: image-sizes-diff.sh <baseline.json> <pr.json> [growth_pct]}"
 FLAG_PCT="${3:-5}"
 
-# No marker and no heading of its own: this is one SECTION of the shared CI comment
-# now, and ci-report.mjs owns the <details> + summary line around it. A leftover
-# marker here would be a second, dead identity for the same content.
+# No marker and no heading of its own: this is one section of the shared CI
+# comment, and ci-report.mjs owns the <details> around it.
 MARKER=""
 
-# Join baseline & PR by name; compute delta + pct; render one table row each. All
-# arithmetic + human-size formatting is done in jq so there are no bash float woes.
+# Join baseline and PR by name and render one row each; all arithmetic and
+# formatting is done in jq.
 jq -rn \
   --slurpfile base "$BASELINE" \
   --slurpfile pr "$PR" \

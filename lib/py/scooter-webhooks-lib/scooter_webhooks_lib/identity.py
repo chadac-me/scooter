@@ -1,17 +1,8 @@
-"""Resolve an invoking external user to their internal Scooter user, by EMAIL, so a
-webhook-spawned conversation gets a real owner.
+"""Resolve an invoking external user to their Scooter user by email, so a webhook-spawned conversation gets a real owner.
 
-Flow (best-effort, non-blocking): the invoking external user id (from the webhook)
--> their EMAIL via the provider API -> the agent-host `/users/by-email` reverse
-lookup over user_identity -> the Scooter user id. Any step failing to resolve (no
-token, no email on the account, no matching Scooter user) yields None and the
-conversation stays unowned. See todo/IDENTITY_MAPPING.md.
-
-The per-provider email lookup is REGISTERED, not dispatched: this module used to
-hold `if provider == "slack" / "github" / "gitlab"` chains plus three provider API
-clients, which is the same shape the provider registries replaced. Each lookup now
-travels with its provider's contrib, and a provider Scooter doesn't ship simply has
-no resolver. Why: PR #575.
+The external user id becomes an email via the provider's registered resolver, then a
+Scooter user id via the agent-host's `/users/by-email` lookup; any miss yields None
+and the conversation stays unowned.
 """
 
 from __future__ import annotations
@@ -32,12 +23,7 @@ _resolvers: dict[str, EmailResolver] = {}
 
 
 def register_email_resolver(provider: str) -> Callable[[EmailResolver], EmailResolver]:
-    """Register how to get an email for one provider's external user id.
-
-    ``@register_email_resolver("github")`` on an ``async def (external_id) -> str |
-    None``. Re-registering the same provider REPLACES it, so a contrib can override
-    the in-tree lookup without the app knowing.
-    """
+    """Register an ``async def (external_id) -> str | None`` email lookup for one provider, replacing any earlier one."""
 
     def decorate(fn: EmailResolver) -> EmailResolver:
         _resolvers[provider] = fn
@@ -52,16 +38,14 @@ def registered_providers() -> list[str]:
 
 
 async def get_user_email(provider: str, external_id: str) -> str | None:
-    """The email for an invoking external user. None if the provider has no
-    registered resolver, or the lookup can't answer."""
+    """The email for an invoking external user, or None if no resolver is registered or it cannot answer."""
     resolver = _resolvers.get(provider)
     if resolver is None or not external_id:
         return None
     try:
         return await resolver(external_id)
     except Exception as e:
-        # A resolver is third-party code in a contrib; a raise here would take down a
-        # webhook delivery over a best-effort ownership lookup.
+        # A raise here would take down a webhook delivery over a best-effort lookup.
         logger.warning(
             "email resolver failed",
             extra={**_C, "provider": provider, "external_user": pseudonym(external_id), "error": format_error(e)},
@@ -70,9 +54,7 @@ async def get_user_email(provider: str, external_id: str) -> str | None:
 
 
 async def resolve_owner(provider: str, external_id: str) -> str | None:
-    """Map an invoking external user -> their Scooter user id (the conversation
-    owner), by email. Best-effort: any miss -> None (the conversation stays
-    unowned). Never raises into the webhook path."""
+    """Map an invoking external user to their Scooter user id by email, or None on any miss."""
     if not external_id:
         return None
     email = await get_user_email(provider, external_id)

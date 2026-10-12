@@ -1,18 +1,14 @@
 /**
- * Tier 3 E2E — CONCURRENCY: two viewers of the SAME conversation.
- *
- * Every prior spec drives ONE page. That structurally cannot reach the class of bug where two
- * clients of the same conversation diverge — which is what a user actually hits with a second tab
- * open, or a webhook/Slack driving the same thread while they watch it. The integrity stream is
- * supposed to make every viewer converge on the same log; this spec asserts that.
- *
- * Both pages are snapshotted and cross-compared, so a divergence names which surface disagreed.
+ * Tier 3 E2E for concurrency: two viewers of the same conversation. The integrity stream is
+ * supposed to make every viewer converge on the same log, which a single-page spec cannot
+ * reach; both pages are snapshotted and cross-compared so a divergence names which surface
+ * disagreed.
  */
 
 import { test, expect, Chat, snapshot, assertConsistent, type UiSnapshot } from "./fixtures.js";
 import type { Page } from "@playwright/test";
 
-/** Fields BOTH viewers of the same conversation must agree on once things settle. */
+/** Fields both viewers of the same conversation must agree on once things settle. */
 function sharedView(s: UiSnapshot) {
   return {
     userMessages: s.userMessages,
@@ -23,17 +19,8 @@ function sharedView(s: UiSnapshot) {
 }
 
 async function bothSettled(a: Page, b: Page, when: string): Promise<[UiSnapshot, UiSnapshot]> {
-  // ACTUALLY settle before snapshotting. This helper was named "settled" but only snapshotted,
-  // which is what fails CI on `SIMULTANEOUS sends from both tabs`: the test's earlier polls wait
-  // only for the USER messages to land in both tabs, so the assistant replies may still be
-  // streaming. Tab A then reads one reply behind tab B (assistantMessages 2 vs 3, toolCards 2 vs 3)
-  // and the "both tabs agree" comparison fails on a difference that resolves a moment later.
-  //
-  // Two conditions, in this order:
-  //   1. neither tab has a run in flight — the run-status bar is gone on BOTH;
-  //   2. the compared counts have STOPPED CHANGING and match.
-  // (1) alone is not enough: a tab can be idle because its stream has not delivered the last reply
-  // yet, not because there is nothing left to deliver.
+  // Settle before snapshotting: no run in flight on either tab, then the compared counts
+  // have stopped changing and match.
   for (const p of [a, b]) {
     await expect(p.locator('[data-testid="run-status-bar"]'), `${when}: a run is still in flight`)
       .toHaveCount(0, { timeout: 45_000 });
@@ -52,17 +39,8 @@ async function bothSettled(a: Page, b: Page, when: string): Promise<[UiSnapshot,
 }
 
 test.describe("two tabs on the same conversation", () => {
-  // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). Every test here opens with a
-  // completeTurn baseline — on the full target that funds a sandbox boot (5-25s cold,
-  // and every fake-agent turn execs in the sandbox) — then runs 1-2 MORE turns plus a
-  // convergence settle (up to 2×45s of polling that normally resolves in seconds).
-  // Arithmetic for the alternating test: open ~5s + boot ≤25s + 3 turns ×~10s + two
-  // cross-tab polls + settle ≈ 90s of expected work; the 60s suite default fails on
-  // timing alone.
-  //
-  // 300s, not 240: completeTurn's own default is now 120s on the full target (it waits
-  // for a ready pod BEFORE the exec, then for the run to END), and these tests chain
-  // several of them across two tabs — 240s no longer clears the worst case.
+  // Every test here chains several completeTurns across two tabs, each of which can wait
+  // for a ready pod on the full target.
   test.setTimeout(300_000);
 
   test("a turn sent in tab A appears in tab B without any refresh", async ({ chat, page, context, baseURL }) => {
@@ -70,7 +48,7 @@ test.describe("two tabs on the same conversation", () => {
     await chat.completeTurn("first turn from tab A");
     const url = page.url();
 
-    // Tab B opens the SAME conversation.
+    // Tab B opens the same conversation.
     const pageB = await context.newPage();
     await pageB.goto(url);
     const chatB = new Chat(pageB);
@@ -79,7 +57,7 @@ test.describe("two tabs on the same conversation", () => {
       .poll(async () => (await snapshot(pageB)).userMessages, { timeout: 30_000 })
       .toBe(1);
 
-    // A new turn in A must reach B live — no reload in B.
+    // A new turn in A must reach B live, with no reload in B.
     await chat.completeTurn("second turn from tab A");
     await expect
       .poll(async () => (await snapshot(pageB)).userMessages, { timeout: 45_000 })
@@ -99,7 +77,7 @@ test.describe("two tabs on the same conversation", () => {
     await expect(chatB.input()).toBeVisible({ timeout: 20_000 });
     await expect.poll(async () => (await snapshot(pageB)).userMessages, { timeout: 30_000 }).toBe(1);
 
-    // Alternate senders — each tab must see BOTH its own and the other's turns.
+    // Alternate senders; each tab must see both its own and the other's turns.
     await chat.completeTurn("turn from A");
     await expect.poll(async () => (await snapshot(pageB)).userMessages, { timeout: 45_000 }).toBe(2);
     await chatB.completeTurn("turn from B");
@@ -119,7 +97,7 @@ test.describe("two tabs on the same conversation", () => {
     const chatB = new Chat(pageB);
     await expect(chatB.input()).toBeVisible({ timeout: 20_000 });
 
-    // A queues a message behind a long run; B must see it in ITS queue tab.
+    // A queues a message behind a long run; B must see it in its queue tab.
     await chat.send("!sleep 6");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     await chat.sendWhileRunning("queued in A, visible in B");
@@ -142,7 +120,7 @@ test.describe("two tabs on the same conversation", () => {
     await expect(chatB.input()).toBeVisible({ timeout: 20_000 });
 
     await chat.send("?pick a color");
-    // BOTH tabs must show the pending approval — it's conversation state, not tab state.
+    // Both tabs must show the pending approval, since it is conversation state.
     await expect(page.locator('[data-testid="interrupt-panel"]')).toBeVisible({ timeout: 30_000 });
     await expect(pageB.locator('[data-testid="interrupt-panel"]')).toBeVisible({ timeout: 45_000 });
 
@@ -160,12 +138,7 @@ test.describe("two tabs on the same conversation", () => {
   });
 
   test("SIMULTANEOUS sends from both tabs lose neither message", async ({ chat, page, context }) => {
-    // Real end-to-end work (a run draining behind a queued turn) needs more than the 60s suite
-    // default — the 90s polls below were otherwise silently capped by the TEST budget, so a slower
-    // CI runner failed the test while the poll still had time left on paper. 300s (not the
-    // original 180s): on the full target the baseline turn also funds a sandbox boot (≤25s)
-    // before the four 90s worst-case polls even start, and completeTurn's own default is
-    // 120s there — at 180s this line would LOWER the budget below what it needs.
+    // The baseline turn funds a sandbox boot on the full target before the four 90s polls start.
     test.setTimeout(300_000);
     await chat.open();
     await chat.completeTurn("baseline before simultaneous sends");
@@ -176,13 +149,13 @@ test.describe("two tabs on the same conversation", () => {
     await expect(chatB.input()).toBeVisible({ timeout: 20_000 });
     await expect.poll(async () => (await snapshot(pageB)).userMessages, { timeout: 30_000 }).toBe(1);
 
-    // Fire both at once — one runs, the other must QUEUE, and neither may vanish.
+    // Fire both at once: one runs, the other must queue, and neither may vanish.
     await Promise.all([
       chat.sendWhileRunning("simultaneous from A"),
       chatB.sendWhileRunning("simultaneous from B"),
     ]);
 
-    // Both messages must eventually appear as real turns in BOTH tabs.
+    // Both messages must eventually appear as real turns in both tabs.
     for (const p of [page, pageB]) {
       await expect
         .poll(async () => p.locator(".aui-user-message-content").filter({ hasText: "simultaneous from A" }).count(), { timeout: 90_000 })

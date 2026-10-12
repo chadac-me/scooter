@@ -1,9 +1,4 @@
-/**
- * Tier 1 contract test — cost derivation (token usage × price table).
- *
- * Pure functions, fully deterministic. RED against the NOT_IMPLEMENTED design
- * stubs in metrics/pricing.ts.
- */
+/** Cost derivation from token usage and a price table. */
 
 import { describe, it, expect } from "vitest";
 
@@ -36,7 +31,7 @@ describe("pricing — parsePriceTable", () => {
 
 describe("pricing — computeCost", () => {
   it("prices fresh input + output by the per-million rate", () => {
-    // 1M input @ $15 + 0.5M output @ $75 = 15 + 37.5 = 52.5
+    // 1M input at $15 plus 0.5M output at $75 is $52.5.
     const c = computeCost(
       "claude-opus",
       { inputTokens: 1_000_000, outputTokens: 500_000 },
@@ -49,7 +44,7 @@ describe("pricing — computeCost", () => {
   });
 
   it("prices cached reads/writes at their own rates", () => {
-    // 2M cached-read @ $1.5 = 3 ; 100k cached-write @ $18.75 = 1.875
+    // 2M cached-read at $1.5 is $3 and 100k cached-write at $18.75 is $1.875.
     const c = computeCost(
       "claude-opus",
       { cachedReadTokens: 2_000_000, cachedWriteTokens: 100_000 },
@@ -61,7 +56,7 @@ describe("pricing — computeCost", () => {
   });
 
   it("missing cached rates default to 0 (not NaN)", () => {
-    // haiku has no cached rates; cached tokens cost nothing, no NaN.
+    // haiku has no cached rates, so cached tokens cost nothing.
     const c = computeCost("claude-haiku", { inputTokens: 1_000_000, cachedReadTokens: 500_000 }, TABLE);
     expect(c.cachedReadCost).toBe(0);
     expect(c.totalCost).toBeCloseTo(1, 6);

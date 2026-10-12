@@ -7,13 +7,9 @@ import time
 import uuid
 import websockets
 
-# Act as a BYOC container doing MCP FOR REAL: attach, take the offer, then open a
-# tunnel stream per MCP request and read the response back.
-#
-# This is the part an `offer` assertion does NOT cover. Being offered
-# `tunnel://scooter-broker` is a config string; using it means opening the stream,
-# sending a JSON-RPC body, and reading chunk frames until close -- the path where a
-# 30s CONNECT_TIMEOUT or a refused target actually shows up.
+# Act as a BYOC container doing MCP for real: attach, take the offer, then open a
+# tunnel stream per MCP request and read chunk frames back until close, the path
+# where a CONNECT_TIMEOUT or a refused target shows up.
 
 CONCURRENCY = int(os.environ.get("FAKE_CONCURRENCY", "1"))
 SESSION_N = 0
@@ -45,12 +41,10 @@ def decode_chunk(payload):
 
 
 async def mcp_call(ws, target, method, streams, timeout):
-    """One MCP request over its own tunnel stream. Returns the parsed JSON-RPC
-    reply, or a dict describing how it failed -- never raises on timeout, because
-    a HANG is the finding, not an error."""
+    """One MCP request over its own tunnel stream, returning the parsed JSON-RPC reply or a dict describing the failure (a timeout is a finding, so it never raises)."""
     sid = f"mcp-{uuid.uuid4()}"
-    # initialize REQUIRES a real params object; empty params gets -32603 from the
-    # scooter-env endpoint (the broker's fake is laxer, which hid it).
+    # initialize requires a real params object; empty params gets -32603 from the
+    # scooter-env endpoint.
     params = {}
     if method == "initialize":
         params = {"protocolVersion": "2024-11-05",
@@ -79,10 +73,8 @@ async def mcp_call(ws, target, method, streams, timeout):
     out = {"method": method, "elapsed": round(time.monotonic() - started, 2),
            "closed": st["closed"]}
     try:
-        # Two wire formats: scooter-broker answers plain JSON, scooter-env answers
-        # SSE ("event: message\ndata: {...}") because it is the StreamableHTTP
-        # transport. A real MCP client reads both; parsing only JSON made a working
-        # endpoint look broken.
+        # scooter-broker answers plain JSON while scooter-env answers SSE as the
+        # StreamableHTTP transport, and a real MCP client reads both.
         text = st["buf"].decode() or "{}"
         if text.lstrip().startswith(("event:", "data:")):
             payloads = [ln[5:].strip() for ln in text.splitlines()
@@ -119,7 +111,7 @@ async def main():
                 f = json.loads(await ws.recv())
                 ch, ftype, fid = f.get("ch"), f.get("type"), f.get("id")
 
-                # Tunnel REPLIES to streams we opened.
+                # Tunnel replies to streams we opened.
                 if ch == "tunnel" and fid in streams:
                     st = streams[fid]
                     if ftype == "chunk":
@@ -162,17 +154,15 @@ async def main():
                                               "payload": {"result": result}}))
                     flush()
 
-                    # Signal the DRIVER task; never call MCP from inside this
-                    # loop. mcp_call awaits a future that only this loop can
-                    # resolve, so awaiting it here parks the reader and every
-                    # call "times out" while the cloud has already replied.
+                    # Signal the driver task rather than calling MCP here, since
+                    # mcp_call awaits a future only this loop can resolve.
                     if out["mcp_offer"] and not offered.done():
                         offered.set_result(True)
 
         offered = asyncio.get_event_loop().create_future()
 
         async def driver():
-            """Run the MCP calls once an offer arrives, OUTSIDE the reader loop."""
+            """Run the MCP calls once an offer arrives, outside the reader loop."""
             await offered
             for target in out["mcp_offer"] or []:
                 for method in ("initialize", "tools/list"):

@@ -297,6 +297,10 @@ min total. Add it when the flake needs contention to fire, not by default.
 - **Suspend, don't delete.** The `Sandbox` object is the durable conversation
   handle.
 - Keep tests **red-first**: add/adjust the failing test before implementing.
+- **Comments are short and present-tense.** One sentence per comment; delete a
+  comment that restates the code. No history (what the code used to do, why another
+  approach was rejected, PR numbers, measurements): that goes in the PR body. A
+  file or class header may run to a short paragraph when the invariant needs it.
 
 ## Layout
 

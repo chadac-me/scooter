@@ -1,13 +1,7 @@
 /**
- * Tier 1 contract — store.flush() closes the fire-and-forget append→read race.
- *
- * appendEvent is fired-and-forget (`void store.appendEvent(...)`) so a burst of
- * events doesn't block emission. A reader that runs right after an event is EMITTED
- * (e.g. the subagent-completion watcher, which fires from the bridge's RUN_FINISHED
- * onEvent) can therefore read a log that doesn't yet include that event — and
- * lastRunCompleted() then sees no finish and DROPS the completion (the goose
- * subagent "finished but no result" bug). flush(id) awaits the enqueued appends so
- * a subsequent read is guaranteed to see them.
+ * store.flush() closes the fire-and-forget append/read race: appendEvent is not
+ * awaited, so a reader that runs right after an event is emitted can miss it, and
+ * flush(id) awaits the enqueued appends so a subsequent read sees them.
  */
 
 import { describe, it, expect } from "vitest";
@@ -32,11 +26,10 @@ describe("store.flush() — fire-and-forget append/read race", () => {
     const root = mkdtempSync(join(tmpdir(), "flush-"));
     try {
       const store = createFileConversationStore(root);
-      // Fire-and-forget the RUN_STARTED then RUN_FINISHED (as wireEventLog does).
+      // Fire-and-forget, as wireEventLog does.
       void store.appendEvent("sub-1" as SessionId, { type: "RUN_STARTED", threadId: "t", runId: "r" });
       void store.appendEvent("sub-1" as SessionId, runFinished);
-      // Read WITHOUT flushing — the async file writes haven't landed yet, so the
-      // log is empty/partial. (This is exactly what reportCompletion used to do.)
+      // Read without flushing, before the async file writes have landed.
       const eager = await collect(store.readEvents("sub-1" as SessionId));
       expect(eager.some((e) => e.type === "RUN_FINISHED")).toBe(false);
     } finally {

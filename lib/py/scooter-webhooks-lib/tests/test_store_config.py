@@ -1,10 +1,4 @@
-"""`init_db` takes its database config as an ARGUMENT, not from the app.
-
-The store used to import the webhooks app's `config.DatabaseSettings` — the one
-import standing between this module and the lib. It now accepts anything
-satisfying the `DatabaseConfig` protocol, which is what keeps config.py in the
-app (the arrangement agreed on PR #567).
-"""
+"""`init_db` takes anything satisfying the `DatabaseConfig` protocol as an argument, not the app's config."""
 
 from __future__ import annotations
 
@@ -29,8 +23,7 @@ async def _dispose():
 
 
 def test_the_apps_settings_shape_satisfies_the_protocol():
-    # runtime_checkable, so this is the actual structural check the app's
-    # DatabaseSettings has to keep passing — not a comment asserting it does.
+    # runtime_checkable, so this is the structural check the app's DatabaseSettings has to keep passing.
     assert isinstance(_Config(), DatabaseConfig)
 
 
@@ -41,9 +34,6 @@ async def test_init_db_uses_the_dsn_it_is_given():
 
 
 async def test_init_db_requires_a_config():
-    # It used to default to constructing the app's DatabaseSettings, so a caller
-    # who forgot silently got a second, independently env-read config — and on a
-    # misread env, a SQLite file in /tmp instead of the durable Postgres store.
     with pytest.raises(TypeError):
         await store.init_db()
 

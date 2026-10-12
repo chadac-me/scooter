@@ -1,21 +1,7 @@
 /**
- * Tier 1 contract — the container's ACK HANDLING, pinned against what the BYOC controller actually
- * sends (increment 5 of todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §M).
- *
- * WHY THIS FILE EXISTS. The controller's own tests (increment 3) drive a FAKE container, and the
- * container's behaviour was never asserted against a real controller frame. That let a wire
- * mismatch sit undetected on BOTH sides at once:
- *
- *   controller sends  {ch:"acp", type:"ack", id, payload:{optionId:"allow"}}      <- flat
- *   container  reads  payload.result.optionId                                     <- nested
- *
- * Both suites passed. In production every permission would resolve to `{}` — the agent unblocks
- * with an EMPTY answer instead of the user's decision, so a denied tool call would proceed as if
- * approved (or an approved one stall). This is exactly the "two components agreeing with their own
- * fakes" failure the e2e work kept surfacing, one layer down.
- *
- * These tests use the REAL frame the controller emits (see byoc-controller runRelay.answerPermission)
- * rather than a hand-written one, so the two ends cannot drift apart again silently.
+ * Tier 1 contract for the container's ack handling, pinned against the frame the BYOC
+ * controller actually emits (see byoc-controller runRelay.answerPermission) so the two
+ * ends cannot drift apart silently.
  */
 
 import { describe, it, expect } from "vitest";
@@ -34,17 +20,13 @@ describe("container: parsing a permission answer from the controller", () => {
   });
 
   it("still accepts the LEGACY nested shape (a container may outlive a controller rollout)", () => {
-    // The container is a long-lived process on the user's machine with `--restart always`; it will
-    // not be redeployed in lockstep with the cloud. Accepting both shapes means a rollout in either
-    // order cannot break approvals for someone running last week's image.
+    // The container is not redeployed in lockstep with the cloud, so a rollout in either order must not break approvals.
     expect(parsePermissionAnswer({ result: { optionId: "allow" } })).toEqual({ optionId: "allow" });
     expect(parsePermissionAnswer({ result: { cancelled: true } })).toEqual({ cancelled: true });
   });
 
   it("an EMPTY payload is a cancellation, never a silent approval", () => {
-    // The dangerous default. If a malformed/unknown answer fell through as {optionId: ""}, the SDK
-    // would treat it as a selection and the tool call could run WITHOUT the user having approved
-    // it. Fail closed.
+    // A malformed answer that fell through as a selection would let the tool call run without approval.
     expect(parsePermissionAnswer({})).toEqual({ cancelled: true });
     expect(parsePermissionAnswer(undefined)).toEqual({ cancelled: true });
     expect(parsePermissionAnswer(null)).toEqual({ cancelled: true });
@@ -55,8 +37,7 @@ describe("container: parsing a permission answer from the controller", () => {
   });
 
   it("an explicitly EMPTY optionId is a cancellation, not an approval", () => {
-    // `{optionId: ""}` is what the old code produced from a missing answer (`?? ""`). An empty
-    // option id selects nothing; treating it as an approval is the same fail-open bug.
+    // An empty option id selects nothing.
     expect(parsePermissionAnswer({ optionId: "" })).toEqual({ cancelled: true });
   });
 

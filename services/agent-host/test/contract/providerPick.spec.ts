@@ -27,7 +27,7 @@ describe("pickAcpProvider: an explicit pick outranks priority", () => {
   });
 
   it("REGRESSION: picking the LOWER-priority provider moves the run", async () => {
-    // This is @chadac's swap. Before the fix it returned remote-personalized.
+    // An explicit sdk-claude pick wins over the higher-priority BYOC provider.
     const p = await pickAcpProvider([CLOUD(), BYOC()], ctx({ provider: "sdk-claude" }));
     expect(p?.id).toBe("sdk-claude");
   });
@@ -38,7 +38,7 @@ describe("pickAcpProvider: an explicit pick outranks priority", () => {
   });
 
   it("an INELIGIBLE pick falls back to priority rather than failing the run", async () => {
-    // A chosen provider that cannot serve this run (no container, model not
+    // A chosen provider that cannot serve this run falls back to priority order.
     const p = await pickAcpProvider(
       [CLOUD(), stub("remote-personalized", 10, false)],
       ctx({ provider: "remote-personalized" }),

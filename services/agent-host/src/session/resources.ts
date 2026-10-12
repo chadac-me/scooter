@@ -1,27 +1,20 @@
 /**
- * Sandbox resources — the friendly cpu/memory/gpu shape the agent + user speak,
- * and the validator that guards the tool/API boundary.
- *
- * The agent-host owns sizing end to end: it validates tool input, renders the friendly
- * shape into a k8s `resources` block, and un-renders what it reads back off the Sandbox
- * CR — which is the SOURCE OF TRUTH for a conversation's size (there is no size table).
- *
- * Render and un-render MUST round-trip. The UI derives the selected preset by comparing
- * cpu/memory/gpu against the catalog, so a `gpu` that comes back as the rendered
- * `nvidia.com/gpu: "1"` instead of `gpu: 1` matches no preset and the picker silently
- * shows "Custom" for a size that is in fact a preset.
+ * Sandbox resources: the friendly cpu/memory/gpu shape the agent and user speak, and the
+ * validator that guards the tool/API boundary. The agent-host validates tool input,
+ * renders the friendly shape into a k8s `resources` block, and un-renders what it reads
+ * back off the Sandbox CR, which is the source of truth for a conversation's size.
+ * Render and un-render must round-trip, because the UI derives the selected preset by
+ * comparing cpu/memory/gpu against the catalog.
  */
 
-/** The friendly, user/agent-facing resource shape. cpu + memory are k8s quantity
- *  strings ("500m", "2", "1Gi"); gpu is a whole-device count. All optional — an
- *  omitted dimension is simply not set (keeps the current/default for it). */
+/** The friendly resource shape: cpu and memory are k8s quantity strings, gpu is a whole-device
+ *  count, and an omitted dimension is simply not set. */
 export interface SandboxResources {
   requests?: { cpu?: string; memory?: string; gpu?: number };
   limits?: { cpu?: string; memory?: string; gpu?: number };
 }
 
-/** Thrown by validateResources on a malformed quantity/count. Carries which
- *  field failed so the tool/API can tell the agent exactly what to fix. */
+/** Thrown by validateResources on a malformed quantity/count, carrying which field failed. */
 export class InvalidResourceError extends Error {
   constructor(
     public readonly field: string,
@@ -33,17 +26,12 @@ export class InvalidResourceError extends Error {
   }
 }
 
-/**
- * Validate a friendly resources value at the tool/API boundary — a bad quantity
- * must NEVER reach the broker/CR (fail-safe: reject, don't silently drop to default).
- *   cpu:    ^\d+m?$                     ("500m", "2")
- *   memory: ^\d+(Ki|Mi|Gi|Ti|K|M|G|T)?$ ("1Gi", "512Mi", "2G")
- *   gpu:    non-negative integer
- * Returns the (unchanged) value on success; throws InvalidResourceError otherwise.
- */
 const CPU_RE = /^\d+m?$/; // "500m", "2" — integer millicpu or whole cores
 const MEMORY_RE = /^\d+(Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E)?$/; // "1Gi", "512Mi", "2G", "1024"
 
+/** Validate a friendly resources value at the tool/API boundary (cpu `^\d+m?$`, memory
+ *  `^\d+(Ki|Mi|Gi|Ti|K|M|G|T)?$`, gpu a non-negative integer), returning it unchanged or throwing
+ *  InvalidResourceError. */
 export function validateResources(r: SandboxResources): SandboxResources {
   for (const side of ["requests", "limits"] as const) {
     const q = r[side];
@@ -61,12 +49,12 @@ export function validateResources(r: SandboxResources): SandboxResources {
   return r;
 }
 
-/** k8s extended-resource name for a whole GPU. A GPU request MUST equal its limit, so
- *  one friendly `gpu` count renders on BOTH sides. */
+/** k8s extended-resource name for a whole GPU; a GPU request must equal its limit, so one friendly
+ *  `gpu` count renders on both sides. */
 export const GPU_RESOURCE = "nvidia.com/gpu";
 
-/** A k8s container `resources` block: arbitrary quantity strings per side (cpu, memory,
- *  and extended resources like nvidia.com/gpu). */
+/** A k8s container `resources` block: arbitrary quantity strings per side, including extended
+ *  resources like nvidia.com/gpu. */
 export interface RenderedResources {
   requests?: Record<string, string>;
   limits?: Record<string, string>;
@@ -74,18 +62,16 @@ export interface RenderedResources {
 
 /**
  * Platform fallback when a conversation has no size and the deployment configures no
- * presets. Requests == limits (cpu AND memory) => Guaranteed QoS: the scheduler reserves
- * the full amount per pod and the pod is HARD-capped there, so one runaway sandbox can't
- * burst into its neighbours and starve them.
+ * presets; requests == limits gives Guaranteed QoS, so one runaway sandbox cannot starve
+ * its neighbours.
  */
 export const PLATFORM_DEFAULT: SandboxResources = {
   requests: { cpu: "2", memory: "4Gi" },
   limits: { cpu: "2", memory: "4Gi" },
 };
 
-/** Friendly -> the k8s container `resources` block. cpu/memory pass through; gpu
- *  renders as nvidia.com/gpu on BOTH sides (set on either side sets both). Empty sides
- *  are omitted, so a partial size never reserves nothing/everything by accident. */
+/** Friendly -> the k8s container `resources` block: cpu/memory pass through, gpu renders as
+ *  nvidia.com/gpu on both sides, and empty sides are omitted. */
 export function renderResources(r: SandboxResources): RenderedResources {
   const gpu = r.requests?.gpu ?? r.limits?.gpu;
   const side = (q: SandboxResources["requests"]): Record<string, string> => {
@@ -103,10 +89,8 @@ export function renderResources(r: SandboxResources): RenderedResources {
   return block;
 }
 
-/** The inverse of renderResources: the k8s block read back off the Sandbox CR -> the
- *  friendly shape. nvidia.com/gpu becomes a NUMBER again (see the module header: the
- *  UI's preset matching compares on it). An unparseable gpu count is dropped rather
- *  than surfaced as NaN. */
+/** The inverse of renderResources, turning nvidia.com/gpu back into a number; an unparseable gpu
+ *  count is dropped rather than surfaced as NaN. */
 export function unrenderResources(block: RenderedResources | undefined): SandboxResources {
   const side = (q: Record<string, string> | undefined): SandboxResources["requests"] | undefined => {
     if (!q) return undefined;
@@ -133,14 +117,12 @@ export interface SandboxSizePreset {
   cpu: string;
   memory: string;
   gpu?: number;
-  /** Deployment guidance for when to pick this size, shown to the agent and under the
-   *  UI dropdown. Absent when the deployment set none. */
+  /** Deployment guidance for when to pick this size, shown to the agent and under the UI dropdown. */
   hint?: string;
 }
 
-/** Parse the deployment's preset catalog. Empty/malformed -> {} (no presets: the agent
- *  and UI fall back to setting raw resources), because a bad catalog must not stop a
- *  conversation from starting. */
+/** Parse the deployment's preset catalog; empty or malformed yields {} so a bad catalog cannot stop
+ *  a conversation from starting. */
 export function parsePresets(raw: string | undefined): Record<string, SandboxSizePreset> {
   if (!raw || !raw.trim()) return {};
   try {
@@ -153,8 +135,8 @@ export function parsePresets(raw: string | undefined): Record<string, SandboxSiz
   }
 }
 
-/** A preset -> the friendly shape, requests == limits (Guaranteed QoS). Validates, so a
- *  malformed preset fails where it can be reported rather than at the CR. */
+/** A preset -> the friendly shape with requests == limits, validated so a malformed preset fails
+ *  where it can be reported. */
 export function presetToResources(p: SandboxSizePreset): SandboxResources {
   const side = { cpu: p.cpu, memory: p.memory, ...(p.gpu !== undefined && p.gpu !== null ? { gpu: p.gpu } : {}) };
   return validateResources({ requests: { ...side }, limits: { ...side } });

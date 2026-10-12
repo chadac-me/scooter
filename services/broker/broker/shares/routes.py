@@ -1,24 +1,19 @@
-"""The static-shares HTTP API — publish a bundle, serve it at /s/<uuid>/.
+"""The static-shares HTTP API: publish a bundle, serve it at /s/<uuid>/.
 
-    POST   /shares            publish a NEW share (authed) -> mints a UUID + url
-    PUT    /shares/{uuid}     update an existing share (authed, owner-only) -> new version
+    POST   /shares            publish a new share (authed), minting a UUID and url
+    PUT    /shares/{uuid}     update an existing share (authed, owner-only) with a new version
     GET    /shares            list the caller's own shares (authed)
-    GET    /shares/{uuid}     one share's metadata + latest manifest (authed, owner-only)
-    DELETE /shares/{uuid}     delete a share + all versions (authed, owner-only)
+    GET    /shares/{uuid}     one share's metadata and latest manifest (authed, owner-only)
+    DELETE /shares/{uuid}     delete a share and all versions (authed, owner-only)
 
-    GET    /s/{uuid}/                serve the latest bundle's entry point (UNAUTHENTICATED)
+    GET    /s/{uuid}/                serve the latest bundle's entry point (unauthenticated)
     GET    /s/{uuid}/{path}          serve any file from the latest bundle
     GET    /s/{uuid}/v/{n}/          serve version n's entry point
     GET    /s/{uuid}/v/{n}/{path}    serve a file from version n
 
-Serving under /s/ is UNAUTHENTICATED by design: the UUID is an unguessable
-capability (a v4 UUID ~= a bearer token), so "anyone with the link can view"
-falls out for free. `visibility` is carried for a future authenticated-only mode
-but is not yet enforced on the serve path. The management API under /shares IS
-authed and owner-scoped (owner = the caller's conversation id).
-
-Publish payload is JSON (no multipart dep, mirroring /modules). Supply EITHER an
-inline file map OR a base64 zip the broker unpacks:
+Serving under /s/ is unauthenticated because the UUID is an unguessable capability;
+`visibility` is carried but not yet enforced on the serve path. The publish payload is
+JSON with either an inline file map or a base64 zip the broker unpacks:
 
     {"description": "...", "visibility": "public", "entry_point": "index.html",
      "files": {"index.html": {"content_type": "text/html", "b64": "..."},
@@ -47,7 +42,7 @@ from scooter_broker_lib.types import Identity
 
 logger = logging.getLogger(__name__)
 
-# --- limits + whitelist (placeholder policy; tune before enabling in prod) -----
+# --- limits and whitelist ---------------------------------------------------
 _MAX_FILE_BYTES = 10 * 1024 * 1024          # 10 MB per file
 _MAX_TOTAL_BYTES = 100 * 1024 * 1024        # 100 MB per bundle
 _MAX_FILE_COUNT = 200
@@ -67,10 +62,7 @@ def _guess_content_type(path: str, given: str | None = None) -> str:
 
 
 def _safe_rel_path(name: str) -> str:
-    """Normalize a bundle path and reject traversal / absolute paths.
-
-    Guards the zip-slip class of bug: a zip entry like `../../etc/x` or `/etc/x`
-    must never escape the bundle namespace."""
+    """Normalize a bundle path and reject traversal or absolute paths, so a zip entry cannot escape the bundle namespace."""
     n = name.replace("\\", "/").lstrip("/")
     norm = posixpath.normpath(n)
     if norm.startswith("../") or norm == ".." or norm.startswith("/") or norm == ".":
@@ -118,7 +110,7 @@ def _files_from_inline(raw: dict) -> dict[str, ShareFile]:
 
 
 def _files_from_zip(zip_b64: str) -> dict[str, ShareFile]:
-    """Unpack a base64 zip into a bundle, guarding path traversal + size."""
+    """Unpack a base64 zip into a bundle, guarding path traversal and size."""
     try:
         raw = base64.b64decode(zip_b64, validate=True)
     except (binascii.Error, ValueError) as e:
@@ -149,8 +141,7 @@ def _bundle_from_body(body: dict) -> dict[str, ShareFile]:
 
 
 def _resolve_entry_point(files: dict[str, ShareFile], requested: str | None) -> str:
-    """Pick the bundle's entry point: an explicit one (must exist), else index.html,
-    else the sole file if there's exactly one."""
+    """Pick the bundle's entry point: an explicit one, else index.html, else the sole file."""
     if requested:
         rel = _safe_rel_path(requested)
         if rel not in files:
@@ -180,10 +171,8 @@ def create_shares_router(
         base = public_base_url.rstrip("/")
         return f"{base}/s/{uuid}/" if base else f"/s/{uuid}/"
 
-    # Headers on every SERVED file. `frame-ancestors` restricts who may embed a
-    # share in an <iframe> — shares are meant to render only inside the Scooter UI,
-    # never arbitrary external sites. `X-Content-Type-Options: nosniff` stops the
-    # browser from re-interpreting a served asset as a different (executable) type.
+    # Headers on every served file: frame-ancestors restricts embedding to the Scooter UI,
+    # and nosniff stops the browser re-interpreting an asset as an executable type.
     def _serve_headers() -> dict[str, str]:
         return {
             "Content-Security-Policy": f"frame-ancestors {frame_ancestors}",
@@ -231,12 +220,7 @@ def create_shares_router(
     async def list_shares(
         identity: Identity = Depends(authenticate), conversation_id: str = "",
     ):
-        # By default a caller sees only its OWN conversation's shares. A control/
-        # approver caller (the agent-host relaying a UI request on the user's behalf)
-        # may pass an EXPLICIT conversation_id to list a named conversation's shares —
-        # the browser has no sandbox SA token, so the agent-host is the only path to a
-        # per-conversation view. A non-admin asking for anyone else's is 403 (never a
-        # cross-conversation read); asking for its own explicitly is allowed.
+        # Only an admin caller (the agent-host relaying a UI request) may list another conversation's shares.
         if conversation_id and conversation_id != identity.conversation_id and not is_admin(identity):
             raise HTTPException(status_code=403, detail="not permitted to list another conversation's shares")
         owner = conversation_id or identity.conversation_id
@@ -247,7 +231,7 @@ def create_shares_router(
     async def get_share(uuid: str, identity: Identity = Depends(authenticate)):
         share = await store.get(uuid)
         if share is None or share.owner != identity.conversation_id:
-            # A share the caller doesn't own is indistinguishable from missing here.
+            # A share the caller does not own is indistinguishable from missing.
             raise HTTPException(status_code=404, detail="share not found")
         version = await store.get_version(uuid)
         return {
@@ -267,7 +251,7 @@ def create_shares_router(
             raise HTTPException(status_code=404, detail="share not found")
         return Response(status_code=204)
 
-    # --- serving (UNAUTHENTICATED capability URL) ---------------------------
+    # --- serving (unauthenticated capability URL) ---------------------------
     async def _serve(uuid: str, version: int | None, path: str) -> Response:
         ver = await store.get_version(uuid, version)
         if ver is None:

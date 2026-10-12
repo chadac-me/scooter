@@ -1,10 +1,4 @@
-"""GitHub's resource shapes: which ids and type spellings name the same PR/issue.
-
-Registered into `scooter_webhooks_lib.resources` (#576). `conversation_map` holds
-("pull_request", "o/r#7") while `resource_links` holds ("pr", the html_url) — the
-same PR — so an exact-match lookup in either shape found nothing written in the
-other and forwards were dropped (issue #563). Why: PR #591.
-"""
+"""GitHub's resource shapes: which ids and type spellings name the same PR or issue, registered into `scooter_webhooks_lib.resources`."""
 
 from __future__ import annotations
 

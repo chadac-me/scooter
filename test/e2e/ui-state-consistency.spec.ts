@@ -1,15 +1,9 @@
 /**
- * Tier 3 E2E — WHOLE-UI STATE CONSISTENCY.
- *
- * The lesson from the first coverage pass: 28 tests asserting ONE fact each surfaced only ONE bug.
- * Real UI unreliability is CROSS-COMPONENT DIVERGENCE — the thread, the queue, the run-status bar,
- * the badges, the right panel and the sidebar disagreeing about the same instant. A single-fact test
- * walks straight past that.
- *
- * So every test here snapshots EVERY surface after EVERY step (`snapshot`) and asserts the
- * invariants that must hold BETWEEN components (`assertConsistent`) — plus, where it matters, that
- * the DOM still agrees with the SERVER (`assertMatchesServer`). A failure names the exact moment and
- * the exact pair of components that diverged.
+ * Tier 3 E2E for whole-UI state consistency. Real UI unreliability is cross-component
+ * divergence (the thread, the queue, the run-status bar, the badges, the right panel and the
+ * sidebar disagreeing about the same instant), so every test here snapshots every surface
+ * after every step and asserts the invariants that must hold between components, plus,
+ * where it matters, that the DOM still agrees with the server.
  */
 
 import { test, expect, snapshot, assertConsistent, assertMatchesServer, checkpoint, type UiSnapshot } from "./fixtures.js";
@@ -17,16 +11,12 @@ import type { Page } from "@playwright/test";
 
 /** Snapshot + assert every invariant, and hand back the snapshot for step-specific assertions. */
 async function step(page: Page, when: string): Promise<UiSnapshot> {
-  // checkpoint = snapshot + screenshot (when UI_SHOTS=1) + the cross-component invariants.
   return checkpoint(page, when);
 }
 
 test.describe("whole-UI consistency through a normal turn", () => {
   test("every surface stays mutually consistent across idle → running → replied", async ({ chat, page, request, baseURL }) => {
-    // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). On the full target the exec waits
-    // for a ready sandbox pod first (5-25s measured), so the run lasts up to ~30s; add
-    // open + the multi-surface snapshots and the worst case brushes the 60s default on
-    // arithmetic alone.
+    // On the full target the exec waits for a ready sandbox pod first, so the run alone can take ~30s.
     test.setTimeout(120_000);
     await chat.open();
     const idle = await step(page, "after open");
@@ -35,19 +25,13 @@ test.describe("whole-UI consistency through a normal turn", () => {
     expect(idle.interruptOpen, "a fresh conversation must have no interrupt").toBe(false);
     expect(idle.runError, "a fresh conversation must have no error").toBeNull();
 
-    // RUNNING: the run bar is up, the composer offers Stop (not Send), nothing else changed state.
-    // 20s, not 3: this asserts the run bar is VISIBLE, so the run must still be in flight when
-    // the assertion polls. On the full target the exec waits for a ready sandbox pod BEFORE the
-    // sleep starts, so a 3s sleep can begin and END inside that wait — the bar never renders and
-    // the test fails with everything behaving correctly (observed: "element(s) not found" after
-    // the full 30s). The same arithmetic is why stop-run.spec.ts:75 uses a 20s sleep. Nothing
-    // waits for this sleep to finish — the poll below ends the test as soon as the run does.
+    // Running: the run bar is up, the composer offers Stop, nothing else changed state.
+    // A 20s sleep keeps the run in flight across the full target's ready-pod wait, so the
+    // run bar is actually visible when the assertion polls.
     await chat.send("!sleep 20");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
-    // Wait for the user message to be fully rendered before snapshotting. The run-status-bar
-    // becoming visible doesn't guarantee the user message has been counted yet — observed in
-    // nightly run 34018090436 where the snapshot showed 0 user messages while the message was
-    // visible in the DOM. Poll until the message text is present to avoid racing the render.
+    // The run bar becoming visible does not guarantee the user message has rendered yet, so
+    // poll for its text before snapshotting.
     await expect
       .poll(
         async () => {
@@ -64,10 +48,9 @@ test.describe("whole-UI consistency through a normal turn", () => {
     expect(running.runError, "a healthy run must not show an error").toBeNull();
     expect(running.userMessages, "the user's message renders immediately").toBeGreaterThan(idle.userMessages);
 
-    // REPLIED: back to a fully idle, consistent state — no residue anywhere.
-    // 60s, not 45: the poll starts once the bar is visible, but the 20s sleep above may only
-    // just have begun (the ready-pod wait precedes it), so the run can still owe ~20s of sleep
-    // plus the reply round-trip. 60s keeps a real margin inside the 120s test budget.
+    // Replied: back to a fully idle, consistent state with no residue anywhere.
+    // The 20s sleep may only just have begun when the bar appears, so the run can still owe
+    // ~20s plus the reply.
     await expect.poll(async () => (await snapshot(page)).running, { timeout: 60_000 }).toBe(false);
     const done = await step(page, "after the reply");
     expect(done.composerSendable, "the composer must return to Send when idle").toBe(true);
@@ -78,22 +61,17 @@ test.describe("whole-UI consistency through a normal turn", () => {
   });
 
   test("consistency holds at EVERY step of an 8-turn conversation (not just at the end)", async ({ chat, page, request, baseURL }) => {
-    // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). EVERY fake-agent turn runs a real
-    // exec (a plain message becomes `echo <text>`), so on the full target the first turn
-    // waits for the sandbox (~30s worst) and each warm turn still costs ~5-10s of exec +
-    // streaming + the per-step snapshot: 30 + 7 × 10 ≈ 100s of legitimate work against a
-    // 60s default.
+    // Every fake-agent turn runs a real exec, so on the full target eight turns cost well
+    // over the 60s default.
     test.setTimeout(240_000);
     await chat.open();
     for (let i = 1; i <= 8; i++) {
       await chat.sendTurn(`consistency turn ${i}`);
-      // sendTurn returns when the reply TEXT lands; the run's terminal event trails it. Wait for the
-      // run to actually end before asserting the between-turns idle state (otherwise we race it).
+      // sendTurn returns when the reply text lands; wait for the run to actually end before
+      // asserting the idle state.
       await chat.waitForIdle();
-      // Wait for the last user message's text to be fully rendered before snapshotting.
-      // The nightly run 33846941314 caught a race at turn 6 where the message element existed
-      // but innerText was empty — the DOM update hadn't completed yet. Poll until the expected
-      // text is present to avoid racing the render.
+      // Poll for the last user message's text before snapshotting, since the element can
+      // exist with an empty innerText mid-render.
       await expect
         .poll(
           async () => {
@@ -107,10 +85,10 @@ test.describe("whole-UI consistency through a normal turn", () => {
         )
         .toBe(true);
       const s = await step(page, `after turn ${i}`);
-      // Counts advance in lockstep — a divergence here is a dropped or duplicated message.
+      // Counts advance in lockstep; a divergence here is a dropped or duplicated message.
       expect(s.userMessages, `turn ${i}: user message count`).toBe(i);
       expect(s.assistantMessages, `turn ${i}: assistant message count`).toBe(i);
-      // Between turns the app is fully idle with no residue on ANY surface.
+      // Between turns the app is fully idle with no residue on any surface.
       expect(s.running, `turn ${i}: still running between turns`).toBe(false);
       expect(s.composerSendable, `turn ${i}: composer not sendable between turns`).toBe(true);
       expect(s.queued, `turn ${i}: stale queue rows between turns`).toEqual([]);
@@ -124,10 +102,8 @@ test.describe("whole-UI consistency through a normal turn", () => {
 
 test.describe("whole-UI consistency around the QUEUE", () => {
   test("queueing keeps thread, queue, badge, run-state and composer mutually consistent", async ({ chat, page }) => {
-    // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). startLongRun's 30s run-bar budget
-    // plus two sendWhileRunning retry loops (up to 10s each) plus three whole-UI
-    // snapshots leave no headroom inside the 60s default once the sandbox wait
-    // (5-25s) stretches the timeline.
+    // startLongRun's run-bar budget plus two sendWhileRunning retry loops plus three
+    // snapshots exceed the 60s default once the sandbox wait stretches the timeline.
     test.setTimeout(120_000);
     await chat.open();
     await chat.startLongRun(20);
@@ -137,8 +113,7 @@ test.describe("whole-UI consistency around the QUEUE", () => {
     await chat.sendWhileRunning("alpha");
     await chat.openQueueTab();
     const one = await step(page, "one message queued");
-    // The row's innerText includes the "PRIORITY" pill, so assert the message text is CONTAINED
-    // in the row rather than equal to it.
+    // The row's innerText includes the "PRIORITY" pill, so assert containment rather than equality.
     expect(one.queued.join("|"), "the queued text must render in the queue").toContain("alpha");
     expect(one.running, "queueing must not end the in-flight run").toBe(true);
     expect(one.userMessages, "a QUEUED message must not yet appear as a thread turn").toBe(before.userMessages);
@@ -146,44 +121,30 @@ test.describe("whole-UI consistency around the QUEUE", () => {
     await chat.sendWhileRunning("beta");
     const two = await step(page, "two messages queued");
     expect(two.queued.length, "both queued rows render").toBe(2);
-    // Both messages are queued — that is the invariant. Their relative ORDER is not one this
-    // test can assert, for the reason queue-durability.spec.ts documents at length: rows
-    // render by (priority DESC, arrival ASC), and a send's priority is
-    // `runIsActive() ? 10 : undefined` derived from the REPLAYED integrity log. On the
-    // cluster that derivation round-trips the router, so if the run's state lands late
-    // between these two rapid sends, beta is ranked differently from alpha and the sort
-    // legitimately floats it. Observed on CI: this exact assertion failed as "FIFO order"
-    // while both rows were present and correct.
-    //
-    // queue-durability.spec.ts owns the FIFO property and asserts it the honest way (within
-    // a priority group). Here the point is cross-surface consistency, so assert presence.
+    // Both messages queued is the invariant; their relative order depends on a priority
+    // derived from the replayed log, and queue-durability.spec.ts owns the FIFO property.
     expect(two.queued.join("|"), "alpha is still queued").toContain("alpha");
     expect(two.queued.join("|"), "beta is queued").toContain("beta");
     expect(two.running, "still running with two queued").toBe(true);
   });
 
   test("the queue DRAINS into the thread with counts conserved (nothing lost, nothing duplicated)", async ({ chat, page, request, baseURL }) => {
-    // A 60s wait inside the 60s suite default leaves ZERO headroom — the test dies at the same
-    // moment its own poll would have. Give this one a budget larger than the work it waits on.
+    // A 60s wait inside the 60s suite default leaves no headroom.
     test.setTimeout(180_000);
     await chat.open();
-    // 20s, not 3: the whole point is that the second message QUEUES behind an in-flight run.
-    // On the full target the exec waits for a ready sandbox pod before the sleep starts, so a
-    // 3s sleep can be over by the time sendWhileRunning fires — the message then lands on an
-    // IDLE conversation as an ordinary turn, the queue never holds it, and the conservation
-    // count comes up one short (observed: expected 2, received 1) while nothing is actually
-    // lost. A 20s sleep keeps the run in flight across the queueing window.
+    // A 20s sleep keeps the run in flight across the queueing window on the full target,
+    // where the exec first waits for a ready pod.
     await chat.send("!sleep 20");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     const start = await step(page, "run started");
     await chat.sendWhileRunning("drains into the thread");
-    // The queued ROWS only mount while the Queue tab is selected — open it before reading them.
+    // The queued rows only mount while the Queue tab is selected.
     await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 20_000 });
     const queued = await step(page, "queued");
     expect(queued.queued.join("|")).toContain("drains into the thread");
 
-    // Conservation: the queued message must LEAVE the queue and ARRIVE in the thread — exactly once.
+    // Conservation: the queued message must leave the queue and arrive in the thread exactly once.
     await expect.poll(async () => (await snapshot(page)).queued.length, { timeout: 60_000 }).toBe(0);
     await expect.poll(async () => (await snapshot(page)).running, { timeout: 60_000 }).toBe(false);
     const end = await step(page, "after the drain");
@@ -197,18 +158,12 @@ test.describe("whole-UI consistency around the QUEUE", () => {
   });
 
   test("a reload mid-queue preserves EVERY surface, not just the queue rows", async ({ chat, page, request, baseURL }) => {
-    // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75): reload + the 30s re-derive poll on
-    // top of a run whose exec first waits for the sandbox (5-25s) exceeds the 60s default.
+    // Reload plus the re-derive poll on top of a run whose exec first waits for the sandbox
+    // exceeds the 60s default.
     test.setTimeout(120_000);
     await chat.open();
-    // 60s, not 20: the test asserts the queue still holds a row and `running === true` AFTER
-    // the reload, so the run must outlive open→send→queue→snapshot→reload→re-derive. On the
-    // full target that window is far wider than it looks — a 20s sleep was still being drained
-    // before the post-reload poll could observe it (observed: queued.length stuck at 0 through
-    // the whole 30s budget, expected 1, with the queue demonstrably working). The sandbox wait
-    // precedes the sleep, so the sleep's own 20s is not the margin it appears to be. Nothing
-    // waits for this sleep to finish (the test ends mid-run; cleanState cancels it), so the
-    // longer sleep costs no wall-clock time.
+    // The run must outlive open→send→queue→snapshot→reload→re-derive, and nothing waits for
+    // the sleep to finish.
     await chat.send("!sleep 60");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     await chat.sendWhileRunning("survives with full state");
@@ -217,33 +172,16 @@ test.describe("whole-UI consistency around the QUEUE", () => {
 
     await page.reload();
     await chat.openQueueTab();
-    // 60s, not 30: the reload re-derives the whole conversation from the integrity log,
-    // and on a cluster that round-trips the router to the owning pod. The queue row can
-    // take longer to reappear than the fast stack's near-instant re-render.
-    //
-    // A pod RESTART during this window ends the test's premise rather than breaking the UI.
-    // This test needs the `!sleep 60` run to still be in flight after the reload, so that a
-    // queued row and `running === true` are there to observe. If the platform restarts the
-    // conversation's pod, that run is killed, the platform's own resume/restart messages run
-    // in its place, and the queue legitimately DRAINS — there is then no queued row and no
-    // in-flight run, and every assertion below would report platform recovery as lost UI
-    // state. Observed on CI: the post-reload page showed "No queued messages" with the
-    // thread holding the platform's restart prose as a completed turn.
-    //
-    // Detect that specific situation and skip, rather than asserting through it. The skip is
-    // narrow — it needs the restart marker actually present in the thread — so a genuine
-    // "the queue vanished on reload" regression, which has no such marker, still fails below.
-    // The marker can land ANYWHERE the restart's recovery message is rendered — the thread,
-    // or the QUEUE itself. CI showed the second case: the queue held exactly one row and it
-    // was the platform's restart prose, with the user's message gone. Checking only the
-    // thread meant the loop below "saw a row", proceeded, and reported the platform's
-    // recovery text as the user's lost message.
+    // The reload re-derives the conversation from the integrity log, which on a cluster
+    // round-trips the router to the owning pod.
+    // A pod restart mid-test kills the run this asserts on, and its recovery prose can land
+    // in the thread or in the queue itself, so skip only on that marker.
     const RESTART = /this conversation was interrupted by a restart/i;
     const restarted = async () => {
       if ((await page.getByText(RESTART).count()) > 0) return true;
       return (await snapshot(page)).queued.some((q) => RESTART.test(q));
     };
-    // A row that is OURS — not the platform's recovery message wearing a queue row's clothes.
+    // A row that is ours, not the platform's recovery message.
     const sawOurRow = async () =>
       (await snapshot(page)).queued.some((q) => q.includes("survives with full state"));
 
@@ -258,22 +196,9 @@ test.describe("whole-UI consistency around the QUEUE", () => {
     }
     expect(sawRow, "the queued row must be re-derived from the log after a reload").toBe(true);
     const post = await step(page, "after reload");
-    // The WHOLE state re-derived, not just the row: thread counts, queue contents, run state.
-    //
-    // Assert THIS TEST'S message survived, rather than that the queue is byte-identical. On
-    // the full target the platform legitimately enqueues its own recovery prose when a pod
-    // restarts mid-run —, where the post-reload queue held
-    //   "[System: this conversation was interrupted by a restart while you were working...]"
-    // and an exact toEqual reported that platform behaviour as lost user state. What this
-    // test is for is that the user's queued row survives a reload, and that is asserted
-    // exactly as strictly as before; a dropped or corrupted row still fails.
-    //
-    // Compare on the MESSAGE TEXT this test sent, not on the whole row string. A row's
-    // innerText is decorated with the "Priority" pill, and the pill is driven by the
-    // priority the row is re-derived with — which a reload can legitimately change (it comes
-    // from `runIsActive()` over the replayed log). Comparing decorated strings made this
-    // fail as `queued text survived: Prioritysurvives with full state` when the message
-    // itself was present and intact; the pill had simply gone.
+    // Assert that this test's message text survived rather than that the queue is
+    // byte-identical: the platform may enqueue its own recovery prose, and the "Priority"
+    // pill can legitimately change across a reload.
     expect(post.queued.join("|"), "the queued message survived the reload").toContain(
       "survives with full state",
     );
@@ -300,11 +225,8 @@ test.describe("whole-UI consistency around INTERRUPTS", () => {
     await chat.open();
     await chat.send("?pick a color");
     await expect(page.locator('[data-testid="interrupt-panel"]')).toBeVisible({ timeout: 30_000 });
-    // RETRY the answer while the panel is still up. The panel becomes visible as soon as the
-    // interrupt renders, but a click made before it is wired resolves to the element and
-    // never reaches the agent — CI failed here with "you picked: green" absent for the full
-    // 30s. Same fix, same reason, as interrupt.spec.ts's Dismiss. If answering is genuinely
-    // broken the panel never clears and this still fails.
+    // Retry the answer while the panel is still up, since a click made before the panel is
+    // wired never reaches the agent.
     const green = page.locator('[data-testid="interrupt-option"]').filter({ hasText: /green/i });
     await expect(green).toBeEnabled({ timeout: 30_000 });
     await expect(async () => {

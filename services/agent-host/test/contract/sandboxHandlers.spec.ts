@@ -1,12 +1,8 @@
 /**
- * Tier 1 contract test — the ACP sandbox client handlers under CONCURRENCY.
- *
- * This is the regression guard for the parallel-tool-call hang: goose firing
- * several bash tool calls at once. Each call is a createTerminal -> terminalOutput
- * -> waitForTerminalExit -> releaseTerminal sequence over the SAME handler set,
- * keyed by terminal id. If two concurrent terminals ever shared an id (the old
- * hash(command+args) bug), they'd clobber each other's handle/buffer and an
- * orphaned waitForTerminalExit would never resolve -> hang.
+ * Contract tests for the ACP sandbox client handlers under concurrency. Goose can
+ * fire several bash tool calls at once, each a createTerminal -> terminalOutput ->
+ * waitForTerminalExit -> releaseTerminal sequence over the same handler set keyed
+ * by terminal id, so concurrent terminals must never share an id or a buffer.
  */
 
 import { describe, it, expect } from "vitest";
@@ -14,9 +10,7 @@ import { describe, it, expect } from "vitest";
 import { createSandboxClientHandlers } from "../../src/acp/sandboxHandlers.js";
 import type { ExecBackend, ExecRequest, TerminalHandle } from "../../src/types.js";
 
-/** A fake ExecBackend whose spawned terminals are resolved MANUALLY, so a test
- *  can hold several execs open at once (true concurrency) and finish them in any
- *  order. Each spawn gets a unique id (like the real backend). */
+/** A fake ExecBackend whose spawned terminals are finished manually, in any order. */
 function createControllableExec() {
   let seq = 0;
   const live = new Map<string, { resolve: (out: string, code: number) => void; output: string }>();
@@ -59,7 +53,7 @@ function createControllableExec() {
     async writeBinaryFile() {},
   };
 
-  // Finish a specific spawned terminal (by 1-based spawn order) with output+code.
+  // Finish a spawned terminal by 1-based spawn order.
   const finish = (n: number, out: string, code: number) => {
     const entry = live.get(`term-${n}`);
     if (!entry) throw new Error(`no live terminal term-${n}`);
@@ -79,27 +73,25 @@ describe("ACP sandbox handlers — concurrent terminals", () => {
     );
     const ids = reqs.map((r) => r.terminalId);
 
-    expect(new Set(ids).size).toBe(3); // no collision
+    expect(new Set(ids).size).toBe(3);
   });
 
   it("each concurrent terminal keeps its OWN output + exit (no clobber, no hang)", async () => {
     const { exec, finish } = createControllableExec();
     const h = createSandboxClientHandlers(exec);
 
-    // Open three identical terminals concurrently — none finished yet.
     const t1 = (await h.createTerminal({ command: "bash", args: ["-c", "x"] } as any)).terminalId;
     const t2 = (await h.createTerminal({ command: "bash", args: ["-c", "x"] } as any)).terminalId;
     const t3 = (await h.createTerminal({ command: "bash", args: ["-c", "x"] } as any)).terminalId;
 
-    // Each waitForTerminalExit must resolve with ITS OWN exit code — a hang here
-    // (an orphaned/overwritten handle) would time the test out.
+    // An orphaned or overwritten handle would hang here.
     const exits = Promise.all([
       h.waitForTerminalExit({ terminalId: t1 } as any),
       h.waitForTerminalExit({ terminalId: t2 } as any),
       h.waitForTerminalExit({ terminalId: t3 } as any),
     ]);
 
-    // Finish out of order, with distinct output + codes.
+    // Finish out of order.
     finish(2, "two", 2);
     finish(1, "one", 1);
     finish(3, "three", 3);
@@ -107,7 +99,6 @@ describe("ACP sandbox handlers — concurrent terminals", () => {
     const [e1, e2, e3] = await exits;
     expect([e1.exitCode, e2.exitCode, e3.exitCode]).toEqual([1, 2, 3]);
 
-    // Output buffers stayed isolated per terminal.
     expect((await h.terminalOutput({ terminalId: t1 } as any)).output).toBe("one");
     expect((await h.terminalOutput({ terminalId: t2 } as any)).output).toBe("two");
     expect((await h.terminalOutput({ terminalId: t3 } as any)).output).toBe("three");
@@ -126,15 +117,12 @@ describe("ACP sandbox handlers — concurrent terminals", () => {
 
     await h.releaseTerminal({ terminalId: t1 } as any);
 
-    // t1 is gone; t2's output must survive.
     expect((await h.terminalOutput({ terminalId: t1 } as any)).output).toBe("");
     expect((await h.terminalOutput({ terminalId: t2 } as any)).output).toBe("second");
   });
 
   it("waitForTerminalExit on an unknown terminal THROWS (host bug, not a command failure)", async () => {
-    // Finding #14: an unknown id must NOT be reported as exitCode:1 (which looks
-    // like the agent's command failed) — it's a host/protocol bug. Throw instead
-    // (still non-hanging: it rejects rather than waits forever).
+    // An unknown id reported as exitCode:1 would look like the agent's command failed.
     const { exec } = createControllableExec();
     const h = createSandboxClientHandlers(exec);
     await expect(h.waitForTerminalExit({ terminalId: "term-nope" } as any)).rejects.toThrow(
@@ -144,17 +132,10 @@ describe("ACP sandbox handlers — concurrent terminals", () => {
 });
 
 /**
- * Tier 1 contract test — a cancel that arrives BEFORE the terminal it means to kill.
- *
- * The Stop button is live at RUN_STARTED, but the agent's terminal only registers once
- * the tool call spawns its shell. A cancel in that window killed an EMPTY map, which
- * succeeds silently: the shell ran to completion, the ACP prompt never resolved, and the
- * button looked dead. So killAllTerminals holds a kill for the next terminal instead.
- *
- * Both halves are pinned here because both regressed in review:
- *   - the hold must be CONSUMED (a sticky one killed the following run's terminal), and
- *   - it must be armed ONLY for a user stop (internal preemption also cancels with no
- *     terminal live, and there the replacement shell has to keep running).
+ * A cancel that arrives before the terminal it means to kill. The Stop button is
+ * live at RUN_STARTED but the terminal only registers once the tool call spawns
+ * its shell, so killAllTerminals holds a kill for the next terminal; the hold is
+ * consumed by one terminal and armed only for a user stop.
  */
 function createKillTrackingExec() {
   const spawned: Array<{ id: string; killed: boolean }> = [];
@@ -169,7 +150,7 @@ function createKillTrackingExec() {
       return {
         id: rec.id,
         onOutput() {},
-        waitForExit: () => new Promise<{ exitCode: number }>(() => {}), // never exits on its own
+        waitForExit: () => new Promise<{ exitCode: number }>(() => {}),
         async kill() {
           rec.killed = true;
         },
@@ -189,7 +170,7 @@ describe("ACP sandbox handlers — a cancel that beats its terminal", () => {
   const spawnTerminal = (h: ReturnType<typeof createSandboxClientHandlers>) =>
     h.createTerminal({ command: "sleep", args: ["20"] } as never);
 
-  /** kill() is fired without await inside createTerminal; let the microtask land. */
+  /** kill() is fired without await inside createTerminal, so let it land. */
   const settle = () => new Promise((r) => setTimeout(r, 20));
 
   it("a USER stop kills the terminal that registers just after it", async () => {
@@ -212,7 +193,7 @@ describe("ACP sandbox handlers — a cancel that beats its terminal", () => {
     await settle();
     expect(spawned[0]!.killed).toBe(true);
 
-    // The NEXT run's terminal belongs to a run nobody cancelled.
+    // The next run's terminal belongs to a run nobody cancelled.
     await spawnTerminal(handlers);
     await settle();
     expect(spawned[1]!.killed, "a later run's terminal must survive").toBe(false);
@@ -222,8 +203,7 @@ describe("ACP sandbox handlers — a cancel that beats its terminal", () => {
     const { exec, spawned } = createKillTrackingExec();
     const handlers = createSandboxClientHandlers(exec);
 
-    // applyPreemption cancels with nothing spawned yet. Killing the replacement shell
-    // here ends the preempting run too, leaving nothing in flight to queue behind.
+    // applyPreemption cancels with nothing spawned yet, and the replacement shell must keep running.
     await handlers.killAllTerminals();
     await spawnTerminal(handlers);
     await settle();

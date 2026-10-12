@@ -1,5 +1,4 @@
-/** Debug logger gated by DEBUG/AGENT_HOST_DEBUG (mirrors agent-host/src/debug.ts
- *  so this isolated package doesn't import from agent-host). */
+/** Debug logger gated by DEBUG/AGENT_HOST_DEBUG, mirroring agent-host/src/debug.ts. */
 const ON = process.env.DEBUG === "1" || process.env.AGENT_HOST_DEBUG === "1";
 export const debug = (...args: unknown[]): void => {
   // eslint-disable-next-line no-console

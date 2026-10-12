@@ -1,24 +1,11 @@
 /**
- * Durable external-resource LINKS on the shared Postgres — the GitHub PR / GitLab MR /
- * Slack thread / Jira ticket a conversation is working on, shown in the UI's linked-
- * resources panel and used by the response tools to infer where to reply.
- *
- * This must not be a file: `listLinks` read LOCAL_STATE_PATH, an emptyDir wiped on every
- * rollout, so a conversation's PR links became permanently invisible while the durable
- * mirror still held them.
- *
- * Shares the `resource_links` table webhooks OWNS, so one link is one row and the
- * reverse lookup ("which conversation owns this PR?") has a single answer. url/title/ref
- * are declared in lib/sql/webhooks/schema.sql and nullable, so a webhooks-written row
- * stays valid; this store never issues DDL.
- *
- * `resource_id` is the stable identity a link is deduped on. The webhooks service sets
- * it explicitly; a link arriving from the agent-host API carries a url/title instead, so
- * we derive it the same way the file store's dedupe key did (url, else title) — two
- * writes describing the same resource must not produce two rows.
- *
- * Best-effort on errors: a DB failure logs and degrades to an empty panel, never throws
- * into a request. An empty panel during an outage beats one that is permanently wrong.
+ * Durable external-resource links on the shared Postgres: the GitHub PR / GitLab MR /
+ * Slack thread / Jira ticket a conversation is working on, shown in the UI's
+ * linked-resources panel and used by the response tools to infer where to reply. Shares
+ * the `resource_links` table webhooks owns, so one link is one row and the reverse lookup
+ * has a single answer; this store never issues DDL. `resource_id` (url, else title) is the
+ * identity a link is deduped on. A DB failure logs and degrades to an empty panel, never
+ * throwing into a request.
  */
 
 import { and, asc, desc, eq, sql } from "drizzle-orm";
@@ -40,18 +27,14 @@ const { resourceLinks } = webhooks;
 export interface LinkStore {
   addLink(id: SessionId, link: ConversationLink): Promise<void>;
   listLinks(id: SessionId): Promise<ConversationLink[]>;
-  /** Which conversation owns this resource, or undefined. The reverse lookup a file
-   *  store could never answer without scanning every conversation directory. */
+  /** Which conversation owns this resource, or undefined. */
   conversationForResource(
     source: string,
     resourceType: string,
     resourceId: string,
   ): Promise<string | undefined>;
-  /** Drop every link of a conversation — called when the conversation itself is deleted, so
-   *  its rows in the shared resource_links table don't outlive it. The file store dropped links
-   *  implicitly with the conversation's directory; the durable table needs an explicit delete
-   *  (else a later conversation that links the SAME resource collides with the orphan on the
-   *  global (source, resource_type, resource_id) unique and never gets its own row). */
+  /** Drop every link of a deleted conversation, so an orphan row cannot block a later conversation
+   *  from linking the same resource on the global unique. */
   deleteByConversation(id: SessionId): Promise<void>;
   close(): Promise<void>;
 }
@@ -62,17 +45,14 @@ export interface PgLinkStoreConfig {
   /** Override the database handle (tests). Defaults to a hardened pool over `dsn`. */
   db?: NodePgDatabase;
   /**
-   * File-backed links to read through to on a Postgres miss. Rows found there are
-   * backfilled and served, so a conversation whose links are still only on disk keeps
-   * showing them. Omit once no deployment has file links left.
+   * File-backed links to read through to on a Postgres miss, backfilled and served.
    */
   legacy?: Pick<LinkStore, "listLinks">;
 }
 
 /**
- * The identity a link is deduped on. Mirrors the file store's key so a link written
- * before and after this store resolve to the same row: prefer the url, else the title.
- * Empty when a link carries neither, in which case source+type alone identify it.
+ * The identity a link is deduped on: the url, else the title, else empty (source+type alone
+ * identify it).
  */
 export function resourceIdOf(link: ConversationLink): string {
   return link.url ?? link.title ?? "";
@@ -91,8 +71,8 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
     ref: ConversationLink["ref"] | string | null;
   };
 
-  // withDerivedRef on READ as well as write: rows already stored ref-less must resolve
-  // without a data migration, and GET /links must show the ref the UI/tools expect.
+  // withDerivedRef on read as well as write, so rows stored ref-less resolve without a data
+  // migration.
   const rowToLink = (row: LinkRow): ConversationLink =>
     withDerivedRef({
       source: row.source,
@@ -107,26 +87,20 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
     });
 
   const insert = async (id: string, rawLink: ConversationLink, overwrite: boolean): Promise<number> => {
-    // Derive the structured `ref` from the URL when the writer supplied none. The
-    // broker's auto-link injector posts url+title only, so rows written that way had
-    // no ref at all — and ref is the documented contract the reply tools read first.
-    // Why: issue #563.
+    // Derive the structured `ref` from the URL when the writer supplied none.
     const link = withDerivedRef(rawLink);
     const values = {
       conversationId: id,
       source: link.source,
-      // Canonical spelling, because it is part of the unique key this upsert conflicts
-      // on: a "pr" write would miss the "pull_request" row for the SAME pull request
-      // and insert a duplicate. Both writers of this table agree on the long form.
+      // Canonical spelling, because it is part of the unique key this upsert conflicts on.
       resourceType: canonicalResourceType(link.source, link.resourceType),
       resourceId: resourceIdOf(link),
       url: link.url ?? null,
       title: link.title ?? null,
       ref: link.ref ?? null,
     };
-    // The conflict target is the GLOBAL unique webhooks declares — (source,
-    // resource_type, resource_id), NOT the conversation. One resource is one row, which
-    // is what keeps webhooks' reverse lookup single-valued.
+    // The conflict target is the global unique webhooks declares, not the conversation, so one
+    // resource is one row.
     const target = [resourceLinks.source, resourceLinks.resourceType, resourceLinks.resourceId];
     const q = db.insert(resourceLinks).values(values);
     const res = overwrite
@@ -143,8 +117,8 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
     return res.rowCount ?? 0;
   };
 
-  /** Copy file-backed links into Postgres once. DO NOTHING so a row already present
-   *  always wins — a backfill must never overwrite a fresher title/ref. */
+  /** Copy file-backed links into Postgres once, with DO NOTHING so a row already present always
+   *  wins. */
   const backfill = async (id: string, links: ConversationLink[]): Promise<void> => {
     for (const link of links) await insert(id, link, false);
     log.info("backfilled file links into postgres", { conversation_id: id, links: links.length });
@@ -153,10 +127,8 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
   return {
     async addLink(id, link) {
       try {
-        // Upsert: re-posting a link with a newly-known title or ref must ENRICH the row
-        // (the webhooks service posts a bare link first, then fills in structured
-        // targets), while COALESCE keeps what we already have if the new write is
-        // sparser. A second identical post is a no-op, which is the dedupe.
+        // Upsert so a re-post with a newly-known title or ref enriches the row, while coalesce
+        // keeps what is already there if the new write is sparser.
         await insert(id, link, true);
       } catch (e) {
         log.error("addLink failed (link not persisted)", {
@@ -187,8 +159,8 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
       }
       if (rows.length > 0 || !config.legacy) return rows;
 
-      // Nothing in Postgres: either this conversation has no links, or they are still
-      // only on disk. Read through and backfill so the next read is served from here.
+      // Nothing in Postgres: read through to the file links and backfill so the next read is served
+      // from here.
       let legacy: ConversationLink[] = [];
       try {
         legacy = await config.legacy.listLinks(id);
@@ -208,8 +180,7 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
 
     async conversationForResource(source, resourceType, resourceId) {
       try {
-        // LIMIT 1 with a DESC order is belt-and-braces: the global unique means there is
-        // at most one row, so this cannot silently pick between rivals.
+        // LIMIT 1 with DESC order is belt-and-braces: the global unique means at most one row.
         const res = await db
           .select({ conversationId: resourceLinks.conversationId })
           .from(resourceLinks)

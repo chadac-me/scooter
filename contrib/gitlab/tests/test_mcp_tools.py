@@ -1,9 +1,4 @@
-"""GitLab's agent tool (issue #700).
-
-Ported from services/agent-host/test/contract/agentTools.spec.ts with the code. A
-handler is a plain async function over a ToolContext, so these need no broker, no HTTP
-and no Kubernetes — fakes for `upstream` and `links` are enough.
-"""
+"""GitLab's agent tool, tested as a plain async function over a ToolContext with fakes for `upstream` and `links`."""
 
 from __future__ import annotations
 
@@ -77,8 +72,7 @@ async def test_an_ISSUE_link_posts_to_the_ISSUES_endpoint():
 
 
 async def test_resourceType_WINS_over_the_ref_field_the_iid_landed_in():
-    """THE #563 bug: webhooks wrote an issue's iid into `mrIid`. A reader trusting the
-    field would comment on the MERGE REQUEST of that number — a different object."""
+    """An issue's iid in `mrIid` must still comment on the issue, not the merge request of that number."""
     ctx = _ctx(links=[_link(ref={"projectId": "g/p", "mrIid": "3"}, rtype="issue")])
     await tools.gitlab_comment(body="hi", ctx=ctx)
     assert "/issues/3/" in ctx.upstream.calls[0]["path"]
@@ -114,7 +108,7 @@ async def test_comment_surfaces_a_failure_VERBATIM():
     assert res.is_error is True and "forbidden" in res.text
 
 
-# --- the conversation_map fallback (issue #700) ------------------------------------
+# --- the conversation_map fallback ------------------------------------
 
 async def test_a_SHORT_FORM_mr_mapping_row_resolves():
     ctx = _ctx(links=[_link(url="g/p!3")])
@@ -123,6 +117,6 @@ async def test_a_SHORT_FORM_mr_mapping_row_resolves():
 
 
 async def test_a_SHORT_FORM_issue_mapping_row_resolves_as_an_ISSUE():
-    """`g/p#3` is an issue. Resolving it as an MR would comment on a different object."""
+    """`g/p#3` is an issue, not an MR."""
     ctx = _ctx(links=[_link(url="g/p#3")])
     assert (await tools.gitlab_target(ctx)).is_mr is False

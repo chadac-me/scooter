@@ -1,5 +1,4 @@
-"""Entrypoint — the elect → reconcile loop. Only reconciles while holding the leader Lease;
-otherwise idles (a standby replica). Signal-drains cleanly. Mirrors conversation-controller."""
+"""Entrypoint: the elect-then-reconcile loop, which only reconciles while holding the leader Lease."""
 
 from __future__ import annotations
 
@@ -28,9 +27,9 @@ def run(cfg: Config, stop: threading.Event) -> None:
         runtime_class=cfg.runtime_class,
         pool_storage_class=cfg.pool_storage_class,
     )
-    # In-flight PV holds. TTL >> a reconcile interval, so a binding has time to appear.
+    # The hold TTL spans several reconcile intervals so a binding has time to appear.
     reservations = Reservations(ttl_seconds=max(120.0, cfg.reconcile_interval * 6))
-    # sandbox -> the PV it last used, for preferential placement. PR #403.
+    # sandbox -> the PV it last used, for preferential placement.
     affinity: dict[str, str] = {}
     elector = LeaderElector(cfg.namespace, cfg.lease_name, cfg.identity, cfg.lease_seconds)
     pool_cfg = PoolConfig(
@@ -50,7 +49,7 @@ def run(cfg: Config, stop: threading.Event) -> None:
                 logger.info("lost leadership, standing by", extra={"identity": cfg.identity})
             was_leader = leader
         except Exception:  # a transient k8s error must not kill the loop
-            logger.exception("reconcile tick failed")  # formatter attaches structured error
+            logger.exception("reconcile tick failed")
         stop.wait(cfg.reconcile_interval)
 
 

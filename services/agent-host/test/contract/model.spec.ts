@@ -1,9 +1,7 @@
 /**
- * Tier 1 contract test — per-conversation model resolution.
- *
- * resolveModel picks the conversation's model: an explicit request iff it's an
- * offered model (or the default), else the host default. Guards against
- * arbitrary model strings reaching the agent launch env.
+ * Per-conversation model resolution: resolveModel honours an explicit request only
+ * when it is an offered model or the default, and otherwise falls back to the host
+ * default.
  */
 
 import { describe, it, expect } from "vitest";

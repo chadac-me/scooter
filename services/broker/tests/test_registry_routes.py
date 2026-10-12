@@ -1,6 +1,4 @@
-"""Unit tests for the module registry HTTP API — download (unauth, by name OR id),
-the visibility-gated catalog, and publish (name = the unique id; owner = caller's
-conversation)."""
+"""The module registry HTTP API: download, the visibility-gated catalog, and publish."""
 
 from __future__ import annotations
 
@@ -56,7 +54,7 @@ async def test_download_unauth_by_name_and_tars_by_name(store):
     await _pub(store, "a", "conv-x", files={"module.nix": "AAA", "flake.nix": "{}"})
     await _pub(store, "b", "conv-y", files={"module.nix": "BBB"})
     app = FastAPI()
-    app.include_router(create_registry_router(store))  # no auth override — download is open
+    app.include_router(create_registry_router(store))  # no auth override, since download is open
     resp = TestClient(app).get("/modules.tar.gz?ids=a,b")
     assert resp.status_code == 200
     assert _tar_names(resp.content) == {"a/module.nix", "a/flake.nix", "b/module.nix"}
@@ -67,7 +65,6 @@ async def test_download_by_numeric_id_tars_under_name(store):
     m = await _pub(store, "marimo", "conv-x", files={"module.nix": "X"})
     app = FastAPI()
     app.include_router(create_registry_router(store))
-    # ask by numeric id -> served, tar path is the NAME (canonical).
     resp = TestClient(app).get(f"/modules.tar.gz?ids={m.id}")
     assert _tar_names(resp.content) == {"marimo/module.nix"}
 
@@ -93,10 +90,8 @@ async def test_list_is_visibility_gated(store):
 @pytest.mark.asyncio
 async def test_get_by_name_or_id_private_gated(store):
     m = await _pub(store, "b-priv", "conv-bob", vis="private")
-    # alice can't see bob's private -> 404 (by name AND by id)
     assert _client(store, "conv-alice").get("/modules/b-priv").status_code == 404
     assert _client(store, "conv-alice").get(f"/modules/{m.id}").status_code == 404
-    # bob can, by either ref
     assert _client(store, "conv-bob").get("/modules/b-priv").status_code == 200
     assert _client(store, "conv-bob").get(f"/modules/{m.id}").status_code == 200
 
@@ -107,8 +102,7 @@ async def test_publish_stamps_owner_and_name_is_unique(store):
     resp = c.post("/modules", json={"name": "mymod", "files": {"module.nix": "{...}: {}"}})
     assert resp.status_code == 201
     assert resp.json()["owner"] == "conv-alice"  # from the token, not the body
-    assert isinstance(resp.json()["id"], int)     # minted numeric id
-    # another conversation can't take the name -> 403
+    assert isinstance(resp.json()["id"], int)
     other = _client(store, "conv-bob")
     assert other.post("/modules", json={"name": "mymod", "files": {"module.nix": "y"}}).status_code == 403
 

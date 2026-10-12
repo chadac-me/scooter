@@ -1,9 +1,4 @@
-"""Shared test fixtures.
-
-SQLite has no migrations, so the test suite builds its schema from the ORM models.
-On Postgres the Atlas migrations under lib/sql own the schema and the service issues
-no DDL at all — which is why this lives here and not in the Store.
-"""
+"""Shared test fixtures, which build the SQLite schema from the ORM models since the service issues no DDL."""
 
 from scheduler.models import Base
 from scheduler.store import Store

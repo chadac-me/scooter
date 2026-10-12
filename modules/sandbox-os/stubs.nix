@@ -1,18 +1,14 @@
-# Tools the sandbox ships as nix-stubs SHIMS: the image carries the build recipe,
-# the tool itself arrives on first use. `nix run .#stubs-gen` regenerates
-# stubs.lock; the overlay in flake.nix turns these into `pkgs.<attr>`.
-#
-# Lives under modules/sandbox-os/ so the in-pod re-converge (which vendors this
-# tree) evaluates the same declarations instead of rebuilding the tools at full
-# size. See PR #502.
+# Tools the sandbox ships as nix-stubs shims: the image carries the build recipe
+# and the tool arrives on first use. Lives under modules/sandbox-os/ so the in-pod
+# re-converge evaluates the same declarations.
 
 { pkgs }:
 
 {
   uv = { package = pkgs.uv; bins = [ "uv" ]; };
 
-  # goose's built-in `tree` reads the agent-host's filesystem, not the sandbox's,
-  # so the skills steer the agent to `shell` + `tree`.
+  # The skills steer the agent to `shell` + `tree`, since goose's built-in reads
+  # the agent-host's filesystem.
   tree = pkgs.tree;
 
   marimo = pkgs.marimo;

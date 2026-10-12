@@ -1,16 +1,13 @@
 /**
- * Interrupt panel — renders the agent's pending option/permission requests as
- * inline buttons and resumes the run with the user's pick.
+ * Interrupt panel: renders the agent's pending option/permission requests as inline
+ * buttons and resumes the run with the user's pick.
  *
  * The agent-host pauses a run with an AG-UI interrupt (RUN_FINISHED outcome
- * "interrupt"), which rides the per-conversation integrity log. In the
- * single-source render model the log — not the react-ag-ui runtime's per-run
- * aggregator — is the source of truth, so we read the pending interrupts and
- * answer them through the IntegrityAgent via context (useConversationInterrupts),
- * NOT the runtime's unstable interrupt API. The answer is a POST /agui with
- * resume[], and the continuation streams back through the same integrity log.
- *
- * Each interrupt's metadata.options carries { optionId, name, kind } choices.
+ * "interrupt") that rides the per-conversation integrity log, so pending interrupts
+ * are read and answered through the IntegrityAgent (useConversationInterrupts), not
+ * the runtime's interrupt API. The answer is a POST /agui with resume[], and the
+ * continuation streams back through the same log. Each interrupt's metadata.options
+ * carries { optionId, name, kind } choices.
  */
 
 import { useEffect, useState } from "react";
@@ -33,15 +30,8 @@ function optionsOf(intr: PendingInterrupt): Option[] {
   return Array.isArray(raw) ? (raw as Option[]) : [];
 }
 
-/** An approval interrupt carries the CONTRIB NAME that raised it (`metadata.contrib`,
- *  set by the host in management.ts) plus its `requestId` (== the interrupt id, but
- *  carried explicitly so we needn't assume). A name rather than the old `aws: true`
- *  boolean: the gating copy is looked up per contrib in the manifest, so an
- *  integration added later needs no change here. Why: PR #651.
- *
- *  Returns undefined for a non-approval interrupt (a tool permission, etc.) → no
- *  can-approve check and nothing greyed. Exported for unit testing this
- *  classification. */
+/** The contrib name and requestId an approval interrupt carries in its metadata, or
+ *  undefined for a non-approval interrupt (exported for unit testing). */
 export function approvalOf(intr: PendingInterrupt): { contrib: string; requestId: string } | undefined {
   const m = intr.metadata;
   if (!m || typeof m.contrib !== "string" || !m.contrib) return undefined;
@@ -52,12 +42,9 @@ export function approvalOf(intr: PendingInterrupt): { contrib: string; requestId
 }
 
 /**
- * Per-VIEWER can-approve check for an APPROVAL interrupt. The interrupt is raised once
- * server-side but seen by many users, so whether *this* viewer may approve is
- * asked live from the host (which forwards the viewer's identity to the broker's
- * authorization check). Undefined while loading / for non-approval interrupts → treated as
- * "allowed" (don't grey a button we can't yet judge). Fails toward greying only on
- * an explicit `false`.
+ * Whether this viewer may approve an approval interrupt, asked live from the host;
+ * undefined while loading or for a non-approval interrupt, which the caller treats
+ * as allowed.
  */
 function useCanApprove(
   approval: { contrib: string; requestId: string } | undefined,
@@ -65,8 +52,7 @@ function useCanApprove(
   baseUrl: string,
 ): boolean | undefined {
   const [can, setCan] = useState<boolean | undefined>(undefined);
-  // Depend on the FIELDS, not the object: `approvalOf` builds a fresh object each
-  // render, so an object dependency would refetch on every render of a pending card.
+  // Depend on the fields, not the object, which `approvalOf` rebuilds every render.
   const contrib = approval?.contrib;
   const requestId = approval?.requestId;
   useEffect(() => {
@@ -90,8 +76,8 @@ function useCanApprove(
   return can;
 }
 
-/** One pending interrupt: its message + option buttons. For an approval interrupt, the
- *  gated option is greyed (with a tooltip) when this viewer may not use it. */
+/** One pending interrupt: its message plus option buttons, with the gated option
+ *  greyed when this viewer may not use it. */
 function InterruptCard({
   intr,
   busy,
@@ -102,21 +88,17 @@ function InterruptCard({
   intr: PendingInterrupt;
   busy: boolean;
   answer: (intr: PendingInterrupt, status: "resolved" | "cancelled", optionId?: string) => void;
-  /** undefined before the server creates the conversation; an interrupt implies it
-
-   *  exists, but the type does not assume it. */
+  /** Undefined before the server creates the conversation. */
   conversationId: MaybeConversationId;
   baseUrl: string;
 }) {
   const options = optionsOf(intr);
   const approval = approvalOf(intr);
   const canApprove = useCanApprove(approval, conversationId, baseUrl);
-  // How THIS contrib's approval is gated. Absent row (a contrib the manifest doesn't
-  // describe, or a manifest that failed to load) = no gating: the option stays live
-  // and the broker remains the enforcement point. Greying is a courtesy that saves a
-  // user a doomed click; it is not the security boundary.
+  // A contrib absent from the manifest has no gating; greying is a courtesy, and the
+  // broker remains the enforcement point.
   const gating = approval ? contribApprovals()[approval.contrib] : undefined;
-  // Gate only on an explicit no. Loading/unknown leaves it enabled (optimistic).
+  // Gate only on an explicit no; loading/unknown leaves it enabled.
   const approveBlocked = approval !== undefined && gating !== undefined && canApprove === false;
 
   return (
@@ -154,8 +136,7 @@ function InterruptCard({
             {gating?.blockedHint}
           </p>
         )}
-        {/* Always offer an explicit dismiss when there are no options or
-            the user wants to decline. */}
+        {/* An explicit dismiss is always offered. */}
         <Button
           variant="ghost"
           size="sm"
@@ -172,11 +153,9 @@ function InterruptCard({
 }
 
 /**
- * The list of pending interrupt cards + the resume wiring — the CONTENT of the
- * Approvals tab (the surrounding panel chrome lives in RightPanel). Kept as its own
- * component (and testid `interrupt-panel`) so the e2e specs still find the approvals
- * region by that selector, and so RightPanel can host it beside the queue in a tab.
- * Renders nothing when no interrupt is pending.
+ * The pending interrupt cards plus the resume wiring, the content of the Approvals
+ * tab (RightPanel owns the chrome). Keeps the `interrupt-panel` testid the e2e specs
+ * select by, and renders nothing when no interrupt is pending.
  */
 export function InterruptList() {
   const { interrupts: pending, submitResume, conversationId, baseUrl } = useConversationInterrupts();

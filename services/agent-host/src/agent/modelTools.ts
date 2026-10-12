@@ -1,13 +1,8 @@
 /**
- * The list_models / switch_model MCP tools — let the agent see the offered models
- * (with deployment hints) and switch its OWN model mid-conversation. Customers ship
- * an intro skill telling the agent to opportunistically pick the fast/cheap model
- * for simple work and escalate to the powerful one for complex planning/debugging.
- *
- * Pure handlers (no MCP/HTTP plumbing) for unit testing; mcpServer.ts registers
- * them. Validation lives HERE (switch_model rejects an unoffered model + returns
- * the valid list); the manager's switchModelNow does the mechanism (cancel the
- * running turn -> rebuild goose with the new model -> continue).
+ * The list_models / switch_model MCP tools, which let the agent see the offered
+ * models with their deployment hints and switch its own model mid-conversation.
+ * These are pure handlers registered by mcpServer.ts; validation lives here and the
+ * manager's switchModelNow does the mechanism.
  */
 
 import type { ModelCatalog } from "./models.js";
@@ -16,12 +11,11 @@ import type { ToolResult } from "./mcpServer.js";
 
 /** What the model tools need from the agent-host. */
 export interface ModelToolsWiring {
-  /** The offered models (ids + hints + default). */
+  /** The offered models. */
   catalog: ModelCatalog;
-  /** This conversation's current model (undefined = the default). */
+  /** This conversation's current model; undefined means the default. */
   currentModel(conversationId: string): string | undefined;
-  /** Switch this conversation's model NOW and continue on it (manager.switchModelNow).
-   *  Resolves to whether a switch happened (false = already on that model). */
+  /** Switch this conversation's model now and continue on it, resolving to false when already on that model. */
   switchModel(conversationId: string, model: string): Promise<boolean>;
 }
 
@@ -55,7 +49,7 @@ export function handleListModels(deps: ModelToolsWiring, conversationId: string)
   };
 }
 
-/** switch_model: validate + switch this conversation's model immediately. */
+/** switch_model: validate and switch this conversation's model immediately. */
 export async function handleSwitchModel(
   deps: ModelToolsWiring,
   conversationId: string,

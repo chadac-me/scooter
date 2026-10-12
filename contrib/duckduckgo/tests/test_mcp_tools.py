@@ -1,11 +1,4 @@
-"""DuckDuckGo's `duckduckgo_web_search` tool (asked for in review of PR #707).
-
-The provider with no key, and therefore the one a deployment can always have. The
-assertions that matter are the three outcomes of a 200: results, DDG's own "no results",
-and a page this scraper cannot read — which must be a FAILURE. PR #698 removed a
-DuckDuckGo-backed tool precisely because it reported a non-answer as an empty web, and
-re-adding DuckDuckGo would be worth nothing if it re-added that.
-"""
+"""DuckDuckGo's `duckduckgo_web_search` tool: the three outcomes of a 200 are results, DDG's own "no results", and an unreadable page, which must be a failure."""
 
 from __future__ import annotations
 
@@ -84,17 +77,13 @@ async def test_renders_each_hit_with_its_snippet():
 
 
 async def test_it_asks_for_the_html_page_with_a_browser_user_agent_and_no_region():
-    """The no-JS page refuses a programmatic user agent, so the UA is load-bearing
-    rather than cosmetic — and `kl=wt-wt` keeps results from being localized by whatever
-    egress IP the cluster happens to have."""
+    """The no-JS page refuses a programmatic user agent, and `kl=wt-wt` stops localization by egress IP."""
     ctx = _ctx(_page())
     await _fn("duckduckgo_web_search")(query="some query", ctx=ctx)
     call = ctx.upstream.calls[0]
     assert call["method"] == "GET" and call["path"] == "html/"
     assert call["params"] == {"q": "some query", "kl": "wt-wt"}
     assert "Mozilla/5.0" in call["headers"]["User-Agent"]
-    # No credential of its own: there is nothing to inject, and the tool must not invent
-    # an auth header that would make this look like an authenticated API.
     assert "Authorization" not in call["headers"]
 
 
@@ -107,9 +96,7 @@ async def test_an_upstream_failure_is_reported_VERBATIM():
 
 
 async def test_the_BOT_CHECK_page_is_a_failure_not_an_empty_web():
-    """A 200 carrying DDG's anomaly page is the exact shape of the #698 bug. The agent
-    has to hear "rate-limited", because an agent told "no results" retries the query and
-    then reports that the web has nothing."""
+    """An agent told "no results" retries the query, so a bot-check page must read as rate-limited."""
     out = await _fn("duckduckgo_web_search")(
         query="q", ctx=_ctx(httpx.Response(200, text="<script src='/dist/anomaly.js'>"))
     )
@@ -127,8 +114,7 @@ async def test_ddgs_own_no_results_notice_IS_a_successful_empty_search():
 
 
 async def test_an_UNREADABLE_page_is_a_failure_that_says_the_scraper_broke():
-    """DDG owes this provider no stability, so the page changing shape is a question of
-    when. It must read as "this tool is broken", not as "the web is empty"."""
+    """A restyled page must read as "this tool is broken", not as "the web is empty"."""
     out = await _fn("duckduckgo_web_search")(
         query="q", ctx=_ctx(httpx.Response(200, text="<html><body><h1>Hotel WiFi</h1></body></html>"))
     )
@@ -145,9 +131,7 @@ async def test_a_blank_query_fails_without_calling_upstream():
 # --- the provider wiring ----------------------------------------------------------
 
 def test_the_gate_is_an_explicit_FLAG_because_there_is_no_key(monkeypatch):
-    """Every other search provider gates on its key being present. This one has no key,
-    so nothing's absence could mean "off" — and defaulting it on would have each
-    deployment that merely BUILDS this contrib start scraping DuckDuckGo."""
+    """With no key to gate on, an explicit flag keeps a deployment that merely builds this contrib from scraping DuckDuckGo."""
     monkeypatch.delenv("DUCKDUCKGO_ENABLED", raising=False)
     assert duckduckgo().enabled is False
     monkeypatch.setenv("DUCKDUCKGO_ENABLED", "true")
@@ -155,16 +139,13 @@ def test_the_gate_is_an_explicit_FLAG_because_there_is_no_key(monkeypatch):
 
 
 def test_it_carries_NO_credential(monkeypatch):
-    """The broker is not only a secret vault: this provider is here for the tool surface
-    and the egress path, with nothing to inject."""
+    """This provider is here for the tool surface and the egress path, with nothing to inject."""
     monkeypatch.setenv("DUCKDUCKGO_ENABLED", "true")
     assert duckduckgo().credential is None
 
 
 def test_it_ships_tools_and_NO_raw_proxy_route(monkeypatch):
-    """A /duckduckgo/* passthrough would be a second way to reach the same page with
-    none of the parsing — and the parsing is the only thing standing between the agent
-    and a bot-check page that looks like an empty web."""
+    """A /duckduckgo/* passthrough would reach the same page with none of the parsing that tells a bot-check page from an empty web."""
     monkeypatch.setenv("DUCKDUCKGO_ENABLED", "true")
     transports = duckduckgo().transports
     assert [t.name for t in transports] == ["mcp-tools"]
@@ -176,7 +157,6 @@ def test_duckduckgo_web_search_is_not_attachment_gated():
 
 
 async def test_the_tool_is_named_for_its_provider_so_a_sibling_can_coexist():
-    """Three search providers, three tools: the name is what makes that possible
-    (broker/mcp/routes.py refuses to start on a duplicate)."""
+    """Tool names are flat and global, so the name is what lets the search providers coexist."""
     names = {t.name for t in await ddg_tools.mcp.list_tools(run_middleware=False)}
     assert names == {"duckduckgo_web_search"}

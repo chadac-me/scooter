@@ -1,23 +1,16 @@
-# The option preset every contrib gets. Why: PR #585.
-#
-# `lib`-only: the schema is read by three evals and only one of them has a `pkgs`
-# (see contrib/spec.nix). What a contrib BUILDS TO is therefore not an option here —
-# contrib/build.nix derives it from this spec, which is also what lets the kubenix
-# eval import a contrib without resolving a single derivation. Why: #711.
+# The option preset every contrib gets. Lib-only, since only one of the three
+# evals reading the schema has a `pkgs`; what a contrib builds to is derived from
+# this spec by contrib/build.nix.
 { name, lib, ... }:
 
 let
   inherit (lib) mkOption mkEnableOption types literalExpression;
 
-  # The services a contrib can plug into. NAMES only — the surface package and
-  # entry-point module each one builds against live in contrib/build.nix, because
-  # they are packages and this file may not force one.
+  # The services a contrib can plug into, as names only; the packages live in
+  # contrib/build.nix.
   serviceNames = [ "broker" "webhooks" ];
 
-  # Tier 1 of the UI surface: METADATA only -- a brand row and tool-card entries
-  # the app already keys off a hardcoded name. A contrib shipping React
-  # components (a RightPanel tab) is tier 2 and lands with the first feature
-  # that needs one. Why: PR #601.
+  # The UI surface is metadata only: a brand row and tool-card entries.
   sourceModule = {
     options = {
       label = mkOption {

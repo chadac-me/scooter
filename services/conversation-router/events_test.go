@@ -5,13 +5,7 @@ import (
 	"testing"
 )
 
-// notifyDecision is the pure gate on the LISTEN loop: from a NOTIFY payload alone it decides whether
-// to read and push a row. A wrong rule either pushes a removal the snapshot omits, or silently
-// swallows a real change.
-//
-// The "id with no observed CR" rule is GONE with the CR: the row is existence, and an id whose row
-// has since been deleted is dropped downstream by handleNotification, where ConversationByID
-// returns nil. One store, so there is nothing left to disagree with.
+// notifyDecision is the pure gate on the LISTEN loop, deciding from a NOTIFY payload alone whether to read and push a row.
 func TestNotifyDecision(t *testing.T) {
 	t.Run("a valid upsert proceeds", func(t *testing.T) {
 		id, ok := notifyDecision(`{"id":"uuid-live","op":"upsert"}`)
@@ -35,16 +29,14 @@ func TestNotifyDecision(t *testing.T) {
 	})
 }
 
-// The hub is the fan-out: broadcast must reach exactly the subscribers a row is VISIBLE to (the
-// same boundary the poll enforces — the stream must not leak what the list would hide), and must
-// never block on a slow subscriber (a full buffer drops, the poll reconciles).
+// broadcast must reach exactly the subscribers a row is visible to.
 func TestSSEHubBroadcastVisibility(t *testing.T) {
 	hub := newSSEHub()
 	alice := hub.subscribe("alice", "mine")
 	bob := hub.subscribe("bob", "mine")
 	all := hub.subscribe("carol", "all")
 
-	// A row owned by alice: alice sees it, bob (mine) does not, the all-scope sub does.
+	// A row owned by alice: alice sees it, bob (mine) does not, the all-scope subscriber does.
 	hub.broadcast(listRow{ID: "x", Owner: sp("alice")})
 
 	if !received(alice) {
@@ -68,12 +60,11 @@ func TestSSEHubUnsubscribeStopsDelivery(t *testing.T) {
 	}
 }
 
-// A subscriber whose buffer is full must not block the fan-out (one stuck client can't freeze live
-// updates for everyone else). broadcast returns; the excess frame is simply dropped.
+// A subscriber whose buffer is full must not block the fan-out; the excess frame is dropped.
 func TestSSEHubDropsWhenBufferFull(t *testing.T) {
 	hub := newSSEHub()
 	s := hub.subscribe("", "all")
-	// Fill the buffer past capacity — broadcast must never block.
+	// Fill the buffer past capacity.
 	for i := 0; i < subBuffer+5; i++ {
 		hub.broadcast(listRow{ID: "x", Owner: sp("alice")})
 	}
@@ -82,9 +73,7 @@ func TestSSEHubDropsWhenBufferFull(t *testing.T) {
 	}
 }
 
-// The upsert frame the hub puts on the wire must match the UI contract (conversationStream.ts):
-// a `data: {kind:"upsert", conversation:{…}}` line, with the conversation carrying the list-row
-// fields verbatim.
+// The upsert frame must match the UI contract: a `data: {kind:"upsert", conversation:{…}}` line carrying the list-row fields verbatim.
 func TestSSEHubUpsertFrameShape(t *testing.T) {
 	hub := newSSEHub()
 	s := hub.subscribe("", "all")

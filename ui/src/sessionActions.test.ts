@@ -1,12 +1,9 @@
 /**
- * UI unit test — the sidebar's row actions address the SERVER by the server's id.
+ * The sidebar's row actions address the server by the server's id.
  *
- * The regression: a conversation started in this browser keeps its LOCAL key as
- * `Session.id` for life (adoptServerId records the server id alongside it and never
- * rewrites the key). Star / rename / delete passed that key to the API, so every one
- * of them 404'd — 34 of 48 star writes in a week of production logs. The star lit up
- * optimistically and the next merge poll dropped it, which read as "favoriting doesn't
- * work"; delete leaked the sandbox. Why: PR #501.
+ * A conversation started in this browser keeps its local key as `Session.id` for
+ * life (adoptServerId records the server id alongside it), so star, rename and
+ * delete must send the server id to the API while the store stays keyed locally.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -39,8 +36,7 @@ const stubFetch = (status = 200) => {
 const current = (key: string): Session =>
   sessionStore.get().sessions.find((x) => x.id === key)!;
 
-/** A conversation as it exists after being started HERE: a local key, plus the server
- *  id adopted on first send. This is the shape the bug lived in. */
+/** A conversation as it exists after being started here: a local key plus the server id adopted on first send. */
 const startedInThisBrowser = async (serverId: string): Promise<Session> => {
   setConversationMinter(async () => serverId);
   const key = sessionStore.newSession();
@@ -58,7 +54,7 @@ describe("sidebar actions address the server by serverId, not the local key", ()
   it("a conversation started here has a local key that is NOT its server id", async () => {
     const s = await startedInThisBrowser("conv-A");
     expect(s.serverId).toBe("conv-A");
-    expect(s.id).not.toBe(s.serverId); // the premise of the whole bug
+    expect(s.id).not.toBe(s.serverId);
     expect(isServerBacked(s)).toBe(true);
   });
 
@@ -73,7 +69,7 @@ describe("sidebar actions address the server by serverId, not the local key", ()
     expect(calls[0].url).toContain("/conversations/conv-B/starred");
     expect(calls[0].url, "the local key must never reach the server").not.toContain(s.id);
     expect(calls[0].body).toBe(JSON.stringify({ starred: true }));
-    // …and the STORE is still keyed by the local key.
+    // The store is still keyed by the local key.
     expect(current(s.id).starred).toBe(true);
   });
 
@@ -112,7 +108,7 @@ describe("a failed star write is rolled back", () => {
 
     await toggleStar(s);
 
-    // Not left lit for the 10s until the merge poll silently drops it.
+    // Not left lit until the merge poll drops it.
     expect(current(s.id).starred).toBe(false);
   });
 
@@ -133,8 +129,7 @@ describe("a failed star write is rolled back", () => {
     release();
     await inFlight;
 
-    // The rollback fires only while the row still holds the value WE set. Here the
-    // user has moved on, so their choice stands rather than being flipped back.
+    // The rollback fires only while the row still holds the value we set, so the user's later choice stands.
     expect(current(s.id).starred).toBe(false);
   });
 });

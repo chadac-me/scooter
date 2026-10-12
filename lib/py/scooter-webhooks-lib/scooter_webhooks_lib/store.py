@@ -1,14 +1,8 @@
-"""The conversation-mapping store — async engine, session, and query helpers.
+"""The conversation-mapping store: async engine, session, and query helpers.
 
 Maps an external thread (a Slack thread, a GitHub PR, a Jira issue) to the
-conversation it spawned, which is the state every handler needs and none of them
-should reimplement. ``init_db()`` is called once at service startup.
-
-CONFIG STAYS IN THE APP. This module takes its database settings as an ARGUMENT
-typed by the `DatabaseConfig` protocol below, rather than importing the webhooks
-app's `config.DatabaseSettings`. That import is the only thing that stood between
-this module and the lib, and a protocol removes it without dragging a settings
-file across the boundary — the arrangement agreed on PR #567.
+conversation it spawned. ``init_db()`` is called once at service startup with the
+app's database settings, typed by the `DatabaseConfig` protocol.
 """
 
 from __future__ import annotations
@@ -23,10 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from . import resources
 
-# Models are the generated, single-source-of-truth ORM classes for the webhooks
-# database (lib/sql/webhooks/schema.sql -> scooter_schema). The generator pluralizes
-# class names; alias to this store's long-standing singular names so the query
-# helpers below are unchanged. Why: PR #412.
+# The ORM classes are generated from lib/sql/webhooks/schema.sql; the generator pluralizes names, aliased back to singular here.
 from scooter_schema.webhooks import (
     ConversationMap,
     PendingMessages as PendingMessage,
@@ -39,13 +30,7 @@ _C = {"component": "store"}
 
 @runtime_checkable
 class DatabaseConfig(Protocol):
-    """What this store needs from whatever settings object the app hands it.
-
-    Two fields, both already on the app's `DatabaseSettings`: the DSN to connect
-    with, and a host label that is informational (it only ever reaches a log
-    field). Assembling the DSN — from components, from a secretKeyRef password —
-    stays the app's business.
-    """
+    """What this store needs from the app's settings object: the DSN and an informational host label."""
 
     dsn: str
     db_host: str
@@ -58,29 +43,14 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 async def init_db(settings: DatabaseConfig) -> None:
-    """Initialize the async engine.
-
-    Tables are NOT created here: they are provisioned by the declarative schema +
-    Atlas migrate job (lib/sql/webhooks/schema.sql). See PR #412.
-
-    `settings` is REQUIRED. It used to default to constructing the app's
-    DatabaseSettings, which meant a caller who forgot to pass one silently got a
-    second, independently env-read config — and on a misread env, a SQLite file
-    in /tmp instead of the durable Postgres store, with no error anywhere.
-    """
+    """Initialize the async engine; tables are provisioned by the Atlas migrate job from lib/sql/webhooks/schema.sql, not here."""
     global _engine, _session_factory
-    # pool_pre_ping: emit a lightweight liveness check when a connection is checked
-    # out of the pool and RECYCLE it if the server (or an idle-timeout / proxy /
-    # failover) has closed it underneath us — instead of handing out a dead
-    # connection and 500ing the request with asyncpg "connection is closed" on the
-    # next transaction start (observed on POST /webhooks/slack). pool_recycle caps a
-    # connection's lifetime below common idle-timeout windows so stale ones are
-    # retired proactively, not just reactively.
+    # pool_pre_ping recycles a connection the server closed underneath us, and pool_recycle retires one before common idle timeouts.
     _engine = create_async_engine(
         settings.dsn,
         echo=False,
         pool_pre_ping=True,
-        pool_recycle=1800,  # recycle connections older than 30 min
+        pool_recycle=1800,
     )
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     logger.info("database initialized", extra={**_C, "db_host": settings.db_host})
@@ -110,11 +80,7 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def lookup_conversation(source: str, resource_type: str, resource_id: str) -> str | None:
-    """Look up an existing conversation for the given resource.
-
-    Auto-clears stuck pending entries older than _PENDING_TIMEOUT_SECONDS.
-    Returns conversation_id or None.
-    """
+    """The conversation for a resource, or None, clearing a pending entry older than _PENDING_TIMEOUT_SECONDS."""
     async with get_session() as session:
         row = (
             await session.execute(
@@ -168,9 +134,8 @@ async def lookup_conversation(source: str, resource_type: str, resource_id: str)
 async def store_conversation(
     source: str, resource_type: str, resource_id: str, conversation_id: str
 ) -> None:
-    """Store (upsert) a mapping from an external resource to an OpenHands conversation."""
+    """Upsert the mapping from an external resource to a conversation."""
     async with get_session() as session:
-        # Try to find existing
         existing = (
             await session.execute(
                 select(ConversationMap).where(
@@ -262,13 +227,7 @@ async def get_active_conversations() -> list[dict]:
 async def link_resource(
     conversation_id: str, source: str, resource_type: str, resource_id: str
 ) -> bool:
-    """Link a resource to a conversation. Returns True if newly inserted.
-
-    Normalises rather than trusting the caller: the row is stored in the canonical
-    shape, and an existing row in ANY known shape counts as already-linked. Without
-    this, the same PR arriving as ("pull_request", "o/r#7") and ("pr", "<html_url>")
-    produced two rows the other writer could never find. Why: issue #563.
-    """
+    """Link a resource to a conversation, storing the canonical shape and treating an existing row in any known shape as already linked; True if newly inserted."""
     rtype, rid = resources.canonical_link(source, resource_type, resource_id)
     async with get_session() as session:
         for vtype, vid in resources.link_variants(source, resource_type, resource_id):
@@ -289,8 +248,7 @@ async def link_resource(
             source=source,
             resource_type=rtype,
             resource_id=rid,
-            # When the canonical id IS the resource's URL, store it in the url column
-            # too: that is the column the UI links and agent-host derives a ref from.
+            # A URL-shaped canonical id also fills the column the UI links and the agent-host derives a ref from.
             url=rid if rid.startswith(("http://", "https://")) else None,
         ))
         return True
@@ -299,8 +257,7 @@ async def link_resource(
 async def get_conversation_for_resource(
     source: str, resource_type: str, resource_id: str
 ) -> str | None:
-    """Look up the conversation linked to a resource, in any shape it may be stored
-    in (see resources.link_variants) — the caller's own shape is tried first."""
+    """The conversation linked to a resource in any of its stored shapes (see resources.link_variants)."""
     async with get_session() as session:
         for vtype, vid in resources.link_variants(source, resource_type, resource_id):
             row = (
@@ -319,17 +276,7 @@ async def get_conversation_for_resource(
 async def resources_for_conversation(
     conversation_id: str, source: str | None = None, resource_type: str | None = None
 ) -> list[tuple[str, str, str]]:
-    """Every resource linked to a conversation, oldest FIRST.
-
-    The reverse of `get_conversation_for_resource`, and the generic form of the
-    per-provider "which tickets does this conversation have" helpers. Returns
-    (source, resource_type, resource_id) in insertion order, so the caller's
-    "primary" resource is simply the first one.
-
-    `resource_type` is matched against the CANONICAL spelling, because that is what
-    link_resource stores -- asking for "ticket" finds rows written as "issue".
-    Why: PR #581.
-    """
+    """Every (source, resource_type, resource_id) linked to a conversation, oldest first, with `resource_type` matched in its canonical spelling."""
     wanted_type = (
         resources.canonical_resource_type(source, resource_type)
         if source and resource_type
@@ -351,7 +298,7 @@ async def resources_for_conversation(
 
 
 def is_pending(conversation_id: str | None) -> bool:
-    """Check if a conversation_id is a pending placeholder."""
+    """True if the conversation_id is the pending placeholder."""
     return conversation_id == PENDING_CONVERSATION_ID
 
 
@@ -411,7 +358,7 @@ async def get_and_clear_pending_messages(
 async def clear_conversation(
     source: str, resource_type: str, resource_id: str
 ) -> None:
-    """Remove a conversation mapping (e.g. to clear a pending marker on failure)."""
+    """Remove a conversation mapping."""
     async with get_session() as session:
         await session.execute(
             delete(ConversationMap).where(

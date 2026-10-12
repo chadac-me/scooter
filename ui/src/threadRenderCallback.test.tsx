@@ -1,9 +1,8 @@
 /**
  * ThreadPrimitive.Messages memoizes its rendered message array on
- * [messagesLength, children]. A `children` prop whose identity changes each
- * render busts that memo, so every commit rebuilds one element per message —
- * 372ms per commit at 1,555 messages, measured, with only 4 fibers re-rendering.
- * The callback must therefore be a stable reference, not an inline arrow.
+ * [messagesLength, children], so a `children` prop whose identity changes each
+ * render rebuilds one element per message on every commit. The callback must
+ * therefore be a stable reference, not an inline arrow.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";

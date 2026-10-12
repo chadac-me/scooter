@@ -1,18 +1,10 @@
-"""IAM provisioning — cross-account dynamic roles + chained STS credentials.
+"""IAM provisioning: cross-account dynamic roles and chained STS credentials.
 
-Mechanics (ported from the OpenHands agent-token-broker):
-
-  broker IRSA --assume--> {account}/agent-token-broker-base (ExternalId)
-              --create--> dynamic policy + role (trust=broker IRSA, +boundary)
-              --assume(chained)--> dynamic role --> ephemeral STS creds
-
-All target-account operations go through the base role; the broker's own pod
-credentials (IRSA) can ONLY assume `agent-token-broker-base` roles (enforced by
-the broker IRSA policy). The dynamic role carries a permission BOUNDARY — the AWS
-hard ceiling on any vended credential.
-
-A class (vs. the reference's module functions) so the boto3 clients + config
-inject cleanly and a fake/moto can be substituted in tests.
+The broker IRSA assumes each account's `agent-token-broker-base` role (ExternalId),
+creates the dynamic policy and role (trusting the broker IRSA, with the permission
+boundary that is the AWS-enforced ceiling), and assumes the dynamic role from those
+credentials for ephemeral STS creds. A class so the boto3 clients inject cleanly
+and a fake can be substituted in tests.
 """
 
 from __future__ import annotations
@@ -26,7 +18,7 @@ from scooter_lib.logging_config import format_error
 
 logger = logging.getLogger(__name__)
 
-_CHAINED_MAX = 3600  # role-chaining caps the session at 1h
+_CHAINED_MAX = 3600  # role chaining caps the session at 1h
 
 
 class IamProvisioner:
@@ -36,9 +28,9 @@ class IamProvisioner:
         region: str,
         external_id: str,
         account_registry: dict[str, dict],
-        sts_client_factory=None,   # injectable; () -> boto3 sts client
-        iam_client_factory=None,   # injectable; (creds) -> boto3 iam client
-        propagation_delay: float = 10.0,  # 0 in tests (no real IAM eventual consistency)
+        sts_client_factory=None,   # () -> boto3 sts client
+        iam_client_factory=None,   # (creds) -> boto3 iam client
+        propagation_delay: float = 10.0,  # 0 in tests
     ) -> None:
         self._region = region
         self._external_id = external_id
@@ -59,7 +51,7 @@ class IamProvisioner:
         return acct
 
     def _assume_base(self, alias: str, *, session: str, duration: int = 900):
-        """Assume the account's base role; returns its STS credentials dict."""
+        """Assume the account's base role and return its STS credentials dict."""
         acct = self._account(alias)
         sts = self._sts_factory()
         assumed = sts.assume_role(
@@ -71,7 +63,7 @@ class IamProvisioner:
         return assumed["Credentials"]
 
     def _iam_for(self, alias: str):
-        """An IAM client scoped to the target account (via the base role)."""
+        """An IAM client scoped to the target account via the base role."""
         creds = self._assume_base(alias, session="agent-broker-mgmt")
         if self._iam_factory is not None:
             return self._iam_factory(creds)
@@ -133,7 +125,7 @@ class IamProvisioner:
             MaxSessionDuration=43200,
             PermissionsBoundary=boundary_arn,
         )
-        # Tag separately — iam:TagRole doesn't support the boundary condition key.
+        # Tagged separately because iam:TagRole does not support the boundary condition key.
         try:
             iam.tag_role(
                 RoleName=role_name,
@@ -155,7 +147,7 @@ class IamProvisioner:
         for arn in managed_policy_arns or []:
             iam.attach_role_policy(RoleName=role_name, PolicyArn=arn)
 
-        # IAM is eventually consistent — let the role + trust propagate.
+        # IAM is eventually consistent.
         if self._propagation_delay:
             time.sleep(self._propagation_delay)
         creds = self._chained_assume(
@@ -171,8 +163,7 @@ class IamProvisioner:
         )
 
     def _chained_assume(self, alias: str, role_arn: str, *, session: str, duration: int, retry: bool) -> StsCredentials:
-        """base-assume the account, then assume the dynamic role FROM those creds
-        (role chaining → capped at 1h). Retries AccessDenied for trust propagation."""
+        """Assume the base role, then the dynamic role from those creds (chained, so capped at 1h), retrying AccessDenied for trust propagation."""
         import boto3
         from botocore.exceptions import ClientError
 
@@ -246,7 +237,6 @@ class IamProvisioner:
 
         try:
             iam = self._iam_for(target_account)
-            # Detach all attached managed policies (covers inline + managed ARNs).
             try:
                 attached = iam.list_attached_role_policies(RoleName=role_name).get("AttachedPolicies", [])
             except ClientError as e:
@@ -274,8 +264,7 @@ class IamProvisioner:
 
 
 def trust_policy_for(broker_principal_arn: str) -> dict:
-    """The dynamic role's trust policy — only the broker IRSA principal may
-    sts:AssumeRole it."""
+    """The dynamic role's trust policy, which only the broker IRSA principal may assume."""
     return {
         "Version": "2012-10-17",
         "Statement": [

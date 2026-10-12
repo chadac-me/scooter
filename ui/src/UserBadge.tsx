@@ -1,8 +1,7 @@
 /**
- * The signed-in user, shown top-right in the header. Sourced from /whoami (the
- * trusted ingress identity) via the session store. Renders NOTHING when the
- * caller is anonymous — i.e. auth is off / no identity header (dev) — so the
- * badge only appears when there's a real identity to show.
+ * The signed-in user, shown top-right in the header, sourced from /whoami via the
+ * session store. Renders nothing when the caller is anonymous, so the badge only
+ * appears when there is a real identity to show.
  */
 
 import { FiUser } from "react-icons/fi";
@@ -15,8 +14,7 @@ export interface UserIdentity {
   anonymous: boolean;
 }
 
-/** Pure presentational badge — takes the identity as props (testable without the
- *  store). Returns null when anonymous / not-yet-loaded. */
+/** Pure presentational badge; returns null when anonymous or not yet loaded. */
 export function UserBadgeView({ user }: Readonly<{ user: UserIdentity }>) {
   if (user.anonymous || (!user.email && !user.id)) return null;
   const label = user.email || user.id;

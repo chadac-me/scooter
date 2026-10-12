@@ -1,25 +1,7 @@
 /**
- * TIER-1 REPRODUCTION of the cluster's truncated-run log.
- *
- * Observed on k3d (Tier-2 browser tests): a conversation's durable log ends mid-run —
- *
- *   RUN_STARTED, TEXT_MESSAGE_*, REASONING_START, REASONING_MESSAGE_CONTENT   <- stops
- *
- * no TOOL_CALL_*, no RUN_FINISHED — while `acp prompt: returned` logged SUCCESS for the
- * same run. Zero "durable append FAILED" lines. And TWO pods had resolved providers for
- * that conversation at the same second: the controller (re)assigned the CR while the run
- * was in flight.
- *
- * The mechanism: wireEventLog's ownership fence —
- *
- *   if (!ownershipGuard.canWrite(e.id)) return;     // manager.ts — SILENT
- *
- * The fence is correct to stop a stale pod from corrupting the log. But it is a silent
- * drop: when ownership moves MID-RUN, every remaining event of the in-flight run —
- * including its terminal — vanishes without one log line. The grep for "fencing
- * refusals" during the investigation found zero BECAUSE the fence never logs, which is
- * how this survived. The UI then reads a log with no terminal event and shows
- * "Working…" forever. Same silent-success family as #347/#350/#353.
+ * Ownership moving away mid-run: the event-log fence drops the rest of the in-flight run,
+ * including its terminal event. The drop must be logged, and the truncated log must read
+ * as dangling to the new owner so resume can recover it.
  */
 import { describe, it, expect, vi } from "vitest";
 
@@ -60,8 +42,7 @@ const inMemoryStore = (): ConversationStore & { dump(id: SessionId): AguiEvent[]
   } as never;
 };
 
-/** The run the cluster produced, replayed through the persist channel. `flipAt` is the
- *  index after which ownership moves away — where the CR reassignment landed. */
+/** A run replayed through the persist channel; `flipAt` is the index at which ownership moves away. */
 const RUN: AguiEvent[] = [
   { type: "RUN_STARTED", threadId: "t1", runId: "r1", host: "pod-A" },
   { type: "TEXT_MESSAGE_START", messageId: "m1", role: "user" },
@@ -70,7 +51,6 @@ const RUN: AguiEvent[] = [
   { type: "REASONING_START", messageId: "re1" },
   { type: "REASONING_MESSAGE_START", messageId: "re1" },
   { type: "REASONING_MESSAGE_CONTENT", messageId: "re1", delta: "Planning…" },
-  // ---- the cluster log ends HERE ----
   { type: "REASONING_MESSAGE_END", messageId: "re1" },
   { type: "TOOL_CALL_START", toolCallId: "c1", toolCallName: "run: echo" },
   { type: "TOOL_CALL_END", toolCallId: "c1" },
@@ -92,7 +72,7 @@ function harness(flipAt: number) {
       },
       prompt: vi.fn(async () => {
         RUN.forEach((e, i) => {
-          if (i === flipAt) owned = false; // the CR reassignment lands mid-run
+          if (i === flipAt) owned = false;
           persist?.(e);
         });
         return "r1";
@@ -112,10 +92,7 @@ const TERMINALS = ["RUN_FINISHED", "RUN_ERROR"];
 
 describe("ownership moving MID-RUN", () => {
   it("the fence drop is LOUD — a truncated run must leave a trace", async () => {
-    // THE ACTUAL DEFECT. The drop itself is by design (a stale pod must not corrupt the
-    // log the new owner drives) — but it was silent, so the investigation's grep for
-    // fencing refusals found zero and concluded the fence never fired. It had, every
-    // time. warn() routes to console.error (log.ts:159).
+    // warn() routes to console.error.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const { sessions } = harness(7);
@@ -132,10 +109,7 @@ describe("ownership moving MID-RUN", () => {
   });
 
   it("the truncated log reads as DANGLING to the new owner, so resume can fire", async () => {
-    // The designed recovery: the new owner sees a RUN_STARTED stamped with the OLD host,
-    // treats the run as stranded (#350), and resumes it. If the truncated log ever stops
-    // reading as dangling, the mid-run reassignment becomes an unrecoverable "Working…
-    // forever" — which is what the cluster showed when recovery failed to fire.
+    // The new owner sees a RUN_STARTED stamped with the old host and treats the run as stranded.
     const { sessions, store } = harness(7);
     const conv = await sessions.start("t1" as never);
     await sessions.prompt(conv.id as SessionId, "!echo first-marker");
@@ -149,7 +123,7 @@ describe("ownership moving MID-RUN", () => {
   });
 
   it("control: with stable ownership the same run persists completely", async () => {
-    const { sessions, store } = harness(RUN.length + 1); // never flips
+    const { sessions, store } = harness(RUN.length + 1);
     const conv = await sessions.start("t1" as never);
     await sessions.prompt(conv.id as SessionId, "!echo first-marker");
     const types = store.dump(conv.id as SessionId).map((e) => e.type);
@@ -159,8 +133,6 @@ describe("ownership moving MID-RUN", () => {
 
 describe("reviveFromMirror give-ups are LOUD", () => {
   it("warns when assigned a conversation it cannot reconstruct", async () => {
-    // THE OTHER HALF of the "Working… forever" bug: the newly assigned pod gave up
-    // SILENTLY, so its total quiet read as "the revive push never arrived". It had.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const store = inMemoryStore();

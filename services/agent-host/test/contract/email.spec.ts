@@ -1,4 +1,4 @@
-/** Tier 1 — email normalization for identity matching (case + trim + +tag, no dots). */
+/** Email normalization for identity matching: case, trim and +tag, but not dots. */
 
 import { describe, it, expect } from "vitest";
 
@@ -44,7 +44,7 @@ describe("normalizeEmail", () => {
   });
 
   it("keeps the original local part when the local is ONLY a tag (+tag@x)", () => {
-    // No base local — don't collapse to "@domain" (would collide across addresses).
+    // With no base local part, collapsing to "@domain" would collide across addresses.
     expect(normalizeEmail("+tag@example.com")).toBe("+tag@example.com");
   });
 

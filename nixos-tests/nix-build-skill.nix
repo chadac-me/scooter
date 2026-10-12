@@ -1,14 +1,6 @@
-# nixosTest: the nix-dev-env skill's documented workflow actually works.
-#
-# The skill tells the agent how to build/install a tool with nix in the sandbox.
-# This runs the documented commands and asserts the tool ends up runnable — so
-# the skill can't silently drift from reality.
-#
-# Hermetic: pre-seed the package in the store so `nix profile install` / the
-# documented build resolves offline.
-#
-# RED until Stage 5 (the skill exists + nix profile install works in-image with
-# the writable store).
+# nixosTest: the nix-dev-env skill's documented "install a tool with nix"
+# workflow works, so the skill cannot drift from reality. The package is
+# pre-seeded in the store so the install resolves offline.
 
 { pkgs, lib, sandboxModule }:
 
@@ -18,11 +10,7 @@ pkgs.testers.runNixOSTest {
   nodes.machine = { config, pkgs, lib, ... }: {
     imports = [ sandboxModule ];
 
-    # Resolve OFFLINE: pin the `nixpkgs` registry at the test's own nixpkgs source
-    # (a path-flake) and pre-seed both that source and the built `hello`, so
-    # `nix profile install nixpkgs#hello` evaluates from the store and the output
-    # is already realised — no fetch, no build. Production uses a github: ref over
-    # the network; the documented command is identical.
+    # Pin the `nixpkgs` registry at the test's own source and pre-seed it with the built `hello`, so the install is offline.
     devEnvNix.nixpkgs = lib.mkForce "path:${pkgs.path}";
     system.extraDependencies = [ pkgs.hello pkgs.path ];
   };
@@ -31,24 +19,16 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("default.target")
     machine.wait_for_unit("nix-daemon.socket")
 
-    # The skill's canonical "install a tool with nix" step. It resolves via the
-    # pinned `nixpkgs` registry alias and installs into the user's nix profile.
+    # The skill's canonical install step.
     machine.succeed("nix profile install nixpkgs#hello")
 
-    # The installed tool is on PATH (login shell picks up ~/.nix-profile/bin) and
-    # runs — proving the documented workflow end to end.
+    # A login shell picks up ~/.nix-profile/bin and the tool runs.
     hello = machine.succeed("bash -l -c 'command -v hello'").strip()
     assert "nix-profile" in hello, f"hello not under the nix profile: {hello!r}"
     machine.succeed("bash -l -c 'hello' >/dev/null")
 
-    # Build sandbox must be off (see nix-config.nix). Assert the config, not a
-    # build: the VM has namespaces so a build can't reproduce it. Why: PR #445.
+    # The build sandbox must be off (see nix-config.nix); the VM has namespaces, so only the config can show it.
     sandbox = machine.succeed("nix config show sandbox").strip()
     assert sandbox == "false", f"nix build sandbox must be disabled, got {sandbox!r}"
-
-    # NOTE: the NON-LOGIN exec PATH (the sandbox-nix-profile-not-in-path bug) is
-    # fixed at the CONTAINER-IMAGE Env layer (pkgs/sandbox-os PID-1 PATH), which a
-    # nixosTest VM boot doesn't exercise — see nixos-tests/image-env.nix (checks the
-    # built image config) + the Tier-2 cluster exec test.
   '';
 }

@@ -1,18 +1,7 @@
 /**
- * Tier 1 contract test — the web-service reverse proxy.
- *
- * Drives createWebServiceProxy over a FAKE pod target (a real local http.Server
- * standing in for the in-pod service, doing HTTP echo + a raw upgrade echo) and a
- * fake WebServiceRegistry / resolvePodTarget. Asserts:
- *   - matches() gates only /c/<id>/<service>/... paths (not /c/<id> alone)
- *   - parseProxyPath splits id / service / rest
- *   - handleHttp pipes method+body+headers through and streams the response back
- *   - handleUpgrade splices a WebSocket-style upgrade and echoes bytes
- *   - unknown service -> 404, suspended/unreachable pod -> 503,
- *     declared-but-not-running -> friendly 502 page
- *
- * RED against the Design boilerplate (createWebServiceProxy throws NOT_IMPLEMENTED).
- * See docs/WEB_SERVICES_PROXY.md.
+ * Contract tests for the web-service reverse proxy. createWebServiceProxy is driven
+ * over a real local http.Server standing in for the in-pod service (HTTP echo plus
+ * a raw upgrade echo) and a fake WebServiceRegistry / resolvePodTarget.
  */
 
 import { AddressInfo } from "node:net";
@@ -29,8 +18,7 @@ import {
   type WebServiceRegistry,
 } from "../../src/proxy/webServiceProxy.js";
 
-// A fake in-pod service: echoes HTTP (method + path + body) and echoes raw bytes
-// on an `upgrade`. Stands in for marimo/xterm listening on podIP:port.
+// A fake in-pod service that echoes HTTP requests and raw bytes on an `upgrade`.
 function fakeInPodService(): Promise<{ server: Server; port: number }> {
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
@@ -46,7 +34,7 @@ function fakeInPodService(): Promise<{ server: Server; port: number }> {
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
       );
       if (head?.length) socket.write(head);
-      socket.on("data", (d) => socket.write(d)); // echo
+      socket.on("data", (d) => socket.write(d));
     });
     server.listen(0, "127.0.0.1", () =>
       resolve({ server, port: (server.address() as AddressInfo).port }),
@@ -57,7 +45,7 @@ function fakeInPodService(): Promise<{ server: Server; port: number }> {
 const MARIMO: WebServiceDescriptor = {
   name: "marimo",
   displayName: "marimo",
-  port: 0, // filled with the fake service port in beforeEach
+  port: 0,
   basePath: "/c/conv-1/marimo",
   unit: "webservice-marimo",
 };
@@ -77,9 +65,7 @@ function fakeRegistry(port: number, opts: { running?: boolean } = {}): WebServic
   };
 }
 
-/** A registry that flips to running after N isRunning() calls (models a service
- *  that takes a moment to come up after start), and records start() calls + serves
- *  a canned journalctl tail. */
+/** A registry that flips to running after N isRunning() calls, records start() calls and serves a canned log tail. */
 function startingRegistry(
   port: number,
   opts: { runningAfter?: number; logs?: string } = {},
@@ -119,9 +105,8 @@ describe("web-service proxy", () => {
       service: "marimo",
       rest: "/foo/bar",
     });
-    // service with no extra path -> rest "/"
     expect(parseProxyPath("/c/conv-1/marimo")).toMatchObject({ service: "marimo", rest: "/" });
-    // /c/<id> alone is the UI deep-link space, NOT a proxy path.
+    // /c/<id> alone is the UI deep-link space.
     expect(parseProxyPath("/c/conv-1")).toBeNull();
     expect(parseProxyPath("/conversations/conv-1")).toBeNull();
   });
@@ -157,8 +142,7 @@ describe("web-service proxy", () => {
     const proxy = makeProxy(fakeRegistry(svc.port));
     const { status, body, echoPath } = await proxyGet(proxy, "/c/conv-1/marimo/app?x=1");
     expect(status).toBe(200);
-    // Default (no stripBasePath): the FULL prefixed path reaches the pod (marimo
-    // serves under --base-url /c/conv-1/marimo).
+    // Without stripBasePath the full prefixed path reaches the pod.
     expect(echoPath).toBe("/c/conv-1/marimo/app?x=1");
     expect(body).toContain("GET");
   });
@@ -167,7 +151,6 @@ describe("web-service proxy", () => {
     const touched: string[] = [];
     const proxy = makeProxy(fakeRegistry(svc.port), undefined, (id) => touched.push(id));
     await proxyGet(proxy, "/c/conv-1/marimo/app");
-    // A user using the web service is real activity → the idle sweep must not suspend it.
     expect(touched).toContain("conv-1");
   });
 
@@ -181,7 +164,7 @@ describe("web-service proxy", () => {
     });
     const { status } = await proxyGet(proxy, "/c/conv-1/marimo/x");
     expect(status).toBe(503);
-    expect(touched).toEqual([]); // resolve failed → no touch
+    expect(touched).toEqual([]);
   });
 
   it("stripBasePath forwards only the remainder (service serves at root — code-server)", async () => {
@@ -194,7 +177,6 @@ describe("web-service proxy", () => {
     const proxy = makeProxy(registry);
     const { status, echoPath } = await proxyGet(proxy, "/c/conv-1/marimo/app?x=1");
     expect(status).toBe(200);
-    // The /c/conv-1/marimo prefix is stripped → the pod sees just /app.
     expect(echoPath).toBe("/app?x=1");
   });
 
@@ -221,18 +203,15 @@ describe("web-service proxy", () => {
   });
 
   it("declared-but-not-running HTML nav -> auto-starts + serves a loading page (200)", async () => {
-    const registry = startingRegistry(svc.port, { runningAfter: 99 /* stays down */ });
+    const registry = startingRegistry(svc.port, { runningAfter: 99 });
     const proxy = makeProxy(registry);
-    // A browser navigation (Accept: text/html) to a dead service.
     const { status, body } = await proxyGet(proxy, "/c/conv-1/marimo/", {
       accept: "text/html",
     });
     expect(status).toBe(200);
-    // It kicked off a start...
     expect(registry.starts).toContain("marimo");
-    // ...and returned a loading page (spinner + a poll that reloads when healthy).
     expect(body.toLowerCase()).toContain("starting");
-    // The page polls the status endpoint (not a static "go click Start" dead-end).
+    // The page polls the status endpoint.
     expect(body).toContain("__scooter_status");
   });
 
@@ -250,8 +229,7 @@ describe("web-service proxy", () => {
   });
 
   it("a NON-HTML request to a dead service still gets a 502 (no HTML for an XHR/asset)", async () => {
-    // marimo's own asset/XHR fetches shouldn't receive an HTML loading page — that
-    // would corrupt them. Only a top-level navigation gets the loading UX.
+    // An HTML loading page would corrupt an asset or XHR fetch.
     const proxy = makeProxy(startingRegistry(svc.port, { runningAfter: 99 }));
     const { status } = await proxyGet(proxy, "/c/conv-1/marimo/assets/app.js", {
       accept: "*/*",
@@ -260,7 +238,6 @@ describe("web-service proxy", () => {
   });
 
   it("once the service is up, the loading page's status endpoint reports running", async () => {
-    // runningAfter:0 → the very first isRunning() call returns true.
     const registry = startingRegistry(svc.port, { runningAfter: 0 });
     const proxy = makeProxy(registry);
     const { body } = await proxyGet(proxy, "/c/conv-1/marimo/__scooter_status");
@@ -279,8 +256,7 @@ describe("web-service proxy", () => {
 
 // ---- helpers: run the proxy through a throwaway front server ------------------
 
-/** Stand up a front http.Server whose handler/upgrade delegate to the proxy, then
- *  issue a real request so we exercise the actual node streaming path. */
+/** Stand up a front http.Server delegating to the proxy, so a real request exercises the node streaming path. */
 async function withFront(
   proxy: WebServiceProxy,
   fn: (port: number) => Promise<void>,

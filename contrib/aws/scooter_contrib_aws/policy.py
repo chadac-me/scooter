@@ -1,14 +1,8 @@
-"""IAM policy guardrails — validate, bound-check, classify, summarize.
+"""IAM policy guardrails: validate, bound-check, classify, summarize.
 
-The security core of the AWS permissions broker. Pure functions (no AWS), ported
-faithfully from the OpenHands agent-token-broker. Three layers gate every
-request:
-  1. validate_policy        — structural + prod-account + deny-list checks
-  2. (global deny list)     — BLOCKED_ACTIONS / BLOCKED_PATTERNS (in layer 1)
-  3. validate_policy_within_bounds — per-account allowlist coverage
-
-A permission BOUNDARY on every dynamic role is the AWS-enforced ceiling on top of
-these application-level checks (see iam.py).
+Pure functions gating every request in three layers: structural and prod-account
+checks, the global deny list, and per-account allowlist coverage. The permission
+boundary on every dynamic role (see iam.py) is the AWS-enforced ceiling on top.
 """
 
 from __future__ import annotations
@@ -18,7 +12,7 @@ import re
 
 from .models import RiskLevel
 
-# --- Layer 2: global deny list (privilege escalation, audit/security tamper) ---
+# --- Layer 2: global deny list ---
 BLOCKED_ACTIONS: list[str] = [
     # IAM privilege escalation
     "iam:CreateUser",
@@ -54,7 +48,7 @@ BLOCKED_ACTIONS: list[str] = [
     "account:CloseAccount",
 ]
 
-# Wildcard-pattern blocked actions (fnmatch, e.g. guardduty:Delete*).
+# fnmatch patterns of blocked actions.
 BLOCKED_PATTERNS: list[str] = [
     "guardduty:Delete*",
     "guardduty:Disable*",
@@ -108,10 +102,7 @@ def _is_prod_account(target_account: str) -> bool:
 
 
 def validate_policy(policy_document: dict, target_account: str = "") -> list[str]:
-    """Layer 1+2: structural + deny-list + prod-account checks.
-
-    Returns a list of error strings (empty = valid).
-    """
+    """Layers 1 and 2 (structural, deny-list and prod-account checks), returning error strings."""
     errors: list[str] = []
     is_prod = _is_prod_account(target_account)
 
@@ -176,7 +167,7 @@ def validate_policy(policy_document: dict, target_account: str = "") -> list[str
 
 
 def classify_risk(policy_document: dict, target_account: str) -> RiskLevel:
-    """prod+write → HIGH; write or prod → MEDIUM; else LOW. Drives STS duration."""
+    """prod+write is HIGH, write or prod is MEDIUM, else LOW; drives the STS duration."""
     is_prod = _is_prod_account(target_account)
     has_write = False
     for stmt in policy_document.get("Statement", []):
@@ -192,11 +183,7 @@ def classify_risk(policy_document: dict, target_account: str) -> RiskLevel:
 
 
 def is_read_only_policy(policy_document: dict) -> bool:
-    """True iff EVERY action in the policy is read-only (Get*/List*/Describe*/…),
-    with at least one statement/action present. Used for opt-in auto-approval of
-    read-only requests — a wildcard (`*` or `service:*`) is NOT read-only (it grants
-    writes), so it fails this check and still needs a human. Deny statements are
-    ignored (a Deny can't grant anything)."""
+    """True iff every Allow action is read-only and at least one is present; a wildcard is not read-only."""
     saw_action = False
     for stmt in policy_document.get("Statement", []):
         if stmt.get("Effect", "Allow") != "Allow":
@@ -215,36 +202,20 @@ def covered_by_auto_policy(
     auto_allowed_policy: dict | None,
     auto_allowed_managed_policies: list[str],
 ) -> bool:
-    """True iff a request is FULLY covered by the account's auto-approve tier — i.e.
-    it can be granted with no human approval. A generalization of the read-only
-    auto-approve gate: instead of "every action is read-only", it's "every action +
-    resource is covered by auto_allowed_policy (fnmatch glob superset) AND every
-    managed ARN matches auto_allowed_managed_policies (fnmatch)".
-
-    Coverage is strict — an UNCOVERED action/resource or ANY managed ARN not matched
-    means NOT auto-approvable (falls through to human approval). This runs AFTER the
-    3 validation layers, so it never widens the ceiling: it only decides whether an
-    already-in-bounds request skips the approval interrupt.
-
-    Empty auto tiers = nothing auto-approves. A request with NO grants (no doc + no
-    ARNs) is not auto-approvable (there's nothing to have opted in)."""
+    """True iff every action, resource and managed ARN is covered by the account's auto-approve tier; an empty tier or an empty request is never covered."""
     has_doc = bool(policy_document and policy_document.get("Statement"))
     has_arns = bool(managed_policy_arns)
     if not has_doc and not has_arns:
         return False
 
-    # Inline doc: every statement must be within auto_allowed_policy (reuses the same
-    # coverage check as the ceiling — no auto_allowed_policy => no inline coverage).
     if has_doc:
         if not auto_allowed_policy or not auto_allowed_policy.get("Statement"):
             return False
-        assert policy_document is not None  # narrowed by has_doc
+        assert policy_document is not None
         if validate_policy_within_bounds(policy_document, auto_allowed_policy):
-            return False  # some action/resource not covered
+            return False
 
-    # Managed ARNs: each must match an auto_allowed_managed_policies fnmatch pattern.
-    # ARNs are CASE-SENSITIVE (a role name is), so match case-sensitively — unlike the
-    # case-insensitive action/resource matching in _pattern_list_covers.
+    # ARNs are case-sensitive, unlike actions and resources.
     for arn in managed_policy_arns:
         if not any(fnmatch.fnmatchcase(arn, p) for p in auto_allowed_managed_policies):
             return False
@@ -252,9 +223,7 @@ def covered_by_auto_policy(
 
 
 def validate_policy_within_bounds(policy_document: dict, allowed_policy: dict) -> list[str]:
-    """Layer 3: every requested action+resource must be covered by the account's
-    allowed_policy (same Statement structure, fnmatch patterns). An unrestricted
-    account uses Action ["*"], Resource ["*"]."""
+    """Layer 3: every requested action and resource must be covered by the account's allowed_policy (fnmatch patterns)."""
     allowed_stmts = allowed_policy.get("Statement", [])
     if not allowed_stmts:
         return ["Account has no allowed_policy statements — all requests denied"]
@@ -290,7 +259,7 @@ def _pattern_list_covers(patterns: list[str], value: str) -> bool:
 
 
 def summarize_policy(policy_document: dict) -> str:
-    """A human-readable one-line summary of the policy (for the approval UI)."""
+    """A one-line summary of the policy for the approval UI."""
     parts: list[str] = []
     for stmt in policy_document.get("Statement", []):
         actions = _normalize_actions(stmt.get("Action", []))

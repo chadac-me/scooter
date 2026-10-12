@@ -1,9 +1,8 @@
-"""AWS permissions provider — dynamic, approval-gated AWS access.
+"""AWS permissions provider: dynamic, approval-gated AWS access.
 
-Builds the PermissionService (Postgres/SQLite store + boto3 IAM provisioner),
-wires it into the aws-permissions transport, and registers async startup hooks
-(open the store, start the expired-role sweep). Off unless aws_enabled + an
-account registry are configured. See docs/AWS_PERMISSIONS_BROKER.md.
+Builds the PermissionService (store plus boto3 IAM provisioner), wires it into the
+aws-permissions transport and registers the startup hooks; off unless aws_enabled
+and an account registry are configured. See docs/AWS_PERMISSIONS_BROKER.md.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ from .permissions_transport import AwsPermissions
 
 logger = logging.getLogger(__name__)
 
-# Test seam: set to a fake IamProvisioner to bypass real boto3 (tests only).
+# Test seam: a fake IamProvisioner that bypasses boto3.
 _iam_override = None
 
 
@@ -38,11 +37,7 @@ def _load_registry() -> dict[str, dict]:
         with open(settings.aws_accounts_file) as f:
             return json.load(f)
     except Exception:
-        # Finding #3: returning {} here makes `enabled = aws_enabled and bool(registry)`
-        # compute False, so a CONFIGURED-but-broken file (bad path / perms / malformed
-        # JSON) silently disables the AWS provider — the broker boots "healthy" and
-        # every request gets a misleading 503, indistinguishable from a deliberately
-        # disabled provider. If the operator explicitly enabled AWS, fail fast instead.
+        # A configured-but-broken file must fail fast rather than silently disable the provider.
         logger.exception(
             "failed to read aws_accounts_file",
             extra={"path": settings.aws_accounts_file, "aws_enabled": settings.aws_enabled},
@@ -53,39 +48,18 @@ def _load_registry() -> dict[str, dict]:
 
 
 async def notify_host(req) -> None:
-    """Tell the agent-host a request is pending so it raises the approval
-    interrupt in the conversation.
+    """Tell the agent-host a request is pending so it raises the approval interrupt.
 
-    The request is ALREADY stored PENDING before this runs, so the broker never
-    loses it — but a dropped notify costs the user a visible Approve window until
-    something re-queries /aws/pending (the agent-host does that on revive). So:
-
-      * CHECK the status. The previous version did `await client.post(...)` and
-        discarded the response, so a 404 (unknown conversation) or a 503 (the host
-        couldn't activate the conversation to raise the interrupt) vanished with no
-        log line anywhere — the approval simply never appeared and nothing said why.
-      * RETRY the transient cases. 5xx/503 and connect/timeout errors are retried
-        with exponential backoff; the host's raise is idempotent (it keys on the
-        request id, and the UI folds interrupts into a map by id), so a duplicate
-        delivery is a no-op rather than a second approval panel.
-      * DON'T retry a 4xx other than 408/429 — a 404/400 is a permanent addressing
-        or payload problem that will fail identically every time; log it loudly and
-        stop, so a misconfiguration is visible instead of silently hammered.
-
-    Still best-effort overall: this never raises to the caller (PermissionService
-    catches too), because a notify failure must not fail an already-stored request.
+    Transient failures (5xx, 408/429, connect errors) are retried with backoff
+    because the host's raise is idempotent; other 4xx are logged and not retried.
+    Never raises, since the request is already stored pending and a dropped notify
+    only delays the approval window until the host re-queries /aws/pending.
     """
     if not settings.aws_agent_host_url:
         return
     import httpx
 
-    # The broker addresses the conversation by the SHORT id parsed from the sandbox
-    # SA name (core/auth.py _SA_PATTERN: `sandbox-{shortId}`); the agent-host resolves
-    # it via getByShortId (which also hydrates a suspended/evicted conversation).
-    # The GENERIC approvals route, addressed by contrib name. The host knows only
-    # "aws wants a human to answer request X"; what is being approved stays here,
-    # which is why the payload is a rendered message rather than aws's fields.
-    # Why: PR #651.
+    # The conversation is addressed by the short id from the sandbox SA name, and the generic approvals route carries a rendered message rather than aws's fields.
     url = (
         f"{settings.aws_agent_host_url.rstrip('/')}"
         f"/conversations/{req.conversation_id}/approvals/aws"
@@ -140,7 +114,6 @@ async def notify_host(req) -> None:
                     },
                 )
                 return
-            # 4xx that won't change on a retry -> permanent; stop and say so.
             if 400 <= resp.status_code < 500 and resp.status_code not in (408, 429):
                 logger.error(
                     "notify returned a permanent error; not retrying (unknown conversation or bad payload)",
@@ -186,15 +159,13 @@ async def notify_host(req) -> None:
 
 @register_provider
 def aws(ctx: BrokerContext) -> Provider:
-    # The first factory to declare a parameter: aws needs the enforcement point and
-    # the shared broker DB, neither of which a provider may assemble for itself.
     registry = _load_registry()
     enabled = settings.aws_enabled and bool(registry)
 
     transport = AwsPermissions()
 
     if not enabled:
-        # Mounted but inert: routes return 503 until configured (set_service unset).
+        # Mounted but inert: routes return 503 while set_service is unset.
         return Provider(name="aws", transports=[transport], enabled=False)
 
     store = PermissionStore(ctx.store_config)
@@ -206,8 +177,7 @@ def aws(ctx: BrokerContext) -> Provider:
     async def _notify_host(req) -> None:
         await notify_host(req)
 
-    # Authorization (the broker's enforcement point): per-account approver gate on
-    # approve/deny. Built by the app, never here — FGA off -> NoopAuthorizer.
+    # The per-account approver gate on approve/deny, built by the app.
     authorizer = ctx.authorizer
 
     service = PermissionService(
@@ -222,16 +192,13 @@ def aws(ctx: BrokerContext) -> Provider:
         on_request=_notify_host,
         authorizer=authorizer,
     )
-    # Admin seam: approve/deny require an APPROVER identity (the agent-host
-    # relaying the user's pick — recognized by auth via approver_service_accounts).
+    # approve/deny require an approver identity, which auth recognizes via approver_service_accounts.
     transport.set_service(service, is_admin=lambda identity: identity.is_approver)
 
     _sweep_task: list[asyncio.Task] = []
 
     async def seed_approver_tuples() -> None:
-        """Seed OpenFGA approver tuples from the account registry's per-account
-        `approvers` list (deploy config). Idempotent (grant of an existing tuple
-        is a no-op). No-op when FGA is off (NoopAuthorizer.grant does nothing)."""
+        """Seed OpenFGA approver tuples from each account's `approvers` list, idempotently."""
         for alias, acct in registry.items():
             for approver in acct.get("approvers", []) or []:
                 try:
@@ -245,10 +212,7 @@ def aws(ctx: BrokerContext) -> Provider:
                         "failed seeding approver tuple",
                         extra={"approver": approver, "account_alias": alias},
                     )
-        # Ask the AUTHORIZER, not a config flag. The line would be a lie under
-        # NoopAuthorizer (grant() does nothing), and "is FGA configured" is the
-        # app's question — a contrib gets the authorizer, never the settings that
-        # chose it (#595, #624). Same answer, from the object that does the work.
+        # Under NoopAuthorizer grant() does nothing, so the log line would be a lie.
         if not isinstance(authorizer, NoopAuthorizer):
             logger.info(
                 "seeded approver tuples from the account registry",

@@ -1,31 +1,9 @@
 /**
- * Tier 3 — the tool policy against REAL Claude, via the real SDK and a real `claude`
- * CLI subprocess.
- *
- * WHY THIS EXISTS: the bug it guards is invisible to unit tests. `toolPolicy.spec.ts`
- * proves the decision function, but the failure was never in the decision — it was in
- * the SDK WIRING. An unwired tool raised a permission prompt in a headless subprocess
- * nobody could answer, the turn stalled, and readMessages threw
- * `[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use`.
- *
- * WHAT THIS TEST DOES AND DOES NOT PROVE — measured, not assumed. Running the suite
- * against a PRE-FIX build (permissionMode + PreToolUse removed), with an isolated
- * CLAUDE_CONFIG_DIR so no local pre-approval interferes:
- *
- *   - "does not hang"          -> passes pre-fix TOO. Does NOT reproduce the hang.
- *   - "model sees the reason"  -> FAILS pre-fix. This is the real regression guard.
- *   - "allowed tool works"     -> passes both. Guards the other direction.
- *
- * So this file proves the REDIRECT and proves deny-by-default did not break what
- * worked. It does not reproduce the production hang: that involved scooter-env MCP
- * tools over the BYOC tunnel, a shape this local harness cannot construct. Reproducing
- * it needs a deployed conversation — see the deploy step in the PR. Do not read a green
- * run here as proof the hang is impossible.
- *
- * Gated — needs credentials and makes real model calls:
- *   RUN_REAL_CLAUDE=1 npx vitest run --project claude-sdk-provider realClaude
- *
- * Auth: CLAUDE_CODE_OAUTH_TOKEN, or an existing `claude` login on this machine.
+ * Tier 3: the tool policy against real Claude, via the real SDK and a real `claude`
+ * CLI subprocess. It proves that a denied tool's redirect reaches the model and that
+ * deny-by-default leaves allowed tools working; it does not construct scooter-env
+ * tools over the BYOC tunnel. Gated on RUN_REAL_CLAUDE=1 and authenticated with
+ * CLAUDE_CODE_OAUTH_TOKEN or an existing `claude` login.
  */
 import { describe, it, expect } from "vitest";
 
@@ -34,8 +12,7 @@ import type { ExecBackend, ExecRequest, TerminalHandle } from "./types.js";
 const run = process.env.RUN_REAL_CLAUDE === "1";
 const TIMEOUT = 180_000;
 
-/** A local ExecBackend: the sandbox tools run as subprocesses here, so the test needs
- *  no cluster. The policy under test is about WHICH tools may run, not where. */
+/** A local ExecBackend running the sandbox tools as subprocesses, so the test needs no cluster. */
 function localExec(): ExecBackend {
   return {
     async run(): Promise<never> {
@@ -69,8 +46,7 @@ function localExec(): ExecBackend {
   };
 }
 
-/** A throwaway CLAUDE_CONFIG_DIR carrying ONLY credentials — no pre-approved tools, so
- *  the permission flow behaves as it does in-cluster. */
+/** A throwaway CLAUDE_CONFIG_DIR carrying only credentials, so no pre-approved tools alter the permission flow. */
 function cleanConfigDir(): string {
   const { mkdtempSync, copyFileSync, existsSync } = require("node:fs") as typeof import("node:fs");
   const { tmpdir, homedir } = require("node:os") as typeof import("node:os");
@@ -85,10 +61,7 @@ function cleanConfigDir(): string {
 async function realTurn(prompt: string) {
   const { createSdkAcpClient } = await import("./sdkClient.js");
   const client = await createSdkAcpClient({
-    // ISOLATE from this machine's `claude` config. The developer running this test has
-    // tools pre-approved in ~/.claude; the in-cluster agent-host does NOT — and that
-    // difference is the entire bug. Without this the harness silently tests the
-    // permissive local setup and a pre-fix build appears to pass.
+    // Isolate from this machine's `claude` config, whose pre-approved tools the in-cluster agent-host does not have.
     extraEnv: { CLAUDE_CONFIG_DIR: cleanConfigDir() },
     oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
     model: process.env.REAL_CLAUDE_MODEL ?? "claude-sonnet-4-5",
@@ -121,17 +94,16 @@ describe.skipIf(!run)("real Claude — tool policy", () => {
   it(
     "a DENIED tool completes the turn (NB: passes pre-fix too — see the file header)",
     async () => {
-      // THE REGRESSION. WebSearch is unwired: before this fix it raised a headless
-      // permission prompt, the turn stalled, and the SDK threw stop_reason=tool_use.
+      // WebSearch is denied, not wired.
       const { text, threw } = await realTurn(
         "Use your WebSearch tool to search for 'kubernetes operator pattern'. " +
           "If you cannot, say what you would use instead.",
       );
 
-      // The turn must COMPLETE. This is the whole point — not what the model said.
+      // The turn must complete, whatever the model said.
       expect(threw, `the turn threw: ${threw?.message}`).toBeUndefined();
       expect(text.length, "the model must have replied").toBeGreaterThan(0);
-      // And it must NOT be the specific failure this fix targets.
+      // And it must not be the headless-prompt stall.
       expect(threw?.message ?? "").not.toMatch(/stop_reason=tool_use|ede_diagnostic/);
     },
     TIMEOUT,
@@ -140,21 +112,14 @@ describe.skipIf(!run)("real Claude — tool policy", () => {
   it(
     "the model SEES the deny reason and reports it, rather than stalling",
     async () => {
-      // The SDK docs say a deny message reaches the model and it "may adjust its
-      // approach". Assert the reason arrived — the model must be able to tell the user
-      // the tool is unavailable, which is only possible if it received our text.
-      //
-      // NOT asserting it names `web_search`: this harness runs without mcpEndpointUrl,
-      // so the scooter-env tools genuinely are not present. Naming a tool it cannot see
-      // would be the wrong behaviour to demand. In-cluster the redirect names it; that
-      // belongs in a deployed test, not here.
+      // The deny reason must reach the model; this harness runs without mcpEndpointUrl, so it cannot be expected to name `web_search`.
       const { text, threw } = await realTurn(
         "Search the web for the current Kubernetes release. If a tool is unavailable, " +
           "say so explicitly and explain what happened.",
       );
       expect(threw).toBeUndefined();
       expect(text).toMatch(/not available|unavailable|cannot|can't/i);
-      expect(text).toMatch(/websearch/i); // it identifies WHICH tool was refused
+      expect(text).toMatch(/websearch/i); // it identifies which tool was refused
     },
     TIMEOUT,
   );
@@ -162,7 +127,7 @@ describe.skipIf(!run)("real Claude — tool policy", () => {
   it(
     "an ALLOWED sandbox tool still runs end to end",
     async () => {
-      // Guards the other direction: deny-by-default must not break what should work.
+      // Deny-by-default must not break what should work.
       const { text, toolCalls, threw } = await realTurn(
         "Run the shell command `echo scooter-policy-ok` and tell me its output.",
       );

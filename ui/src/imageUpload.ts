@@ -1,8 +1,7 @@
 /**
  * Client-side image helpers for the composer upload path: pull image parts out of
  * an assistant-ui message's content, and downscale/re-encode them under a byte cap
- * before they're sent (the agent-host also hard-rejects over its cap; this keeps
- * the payload sane + avoids a rejected send).
+ * before they are sent.
  */
 
 /** An image ready to send: raw base64 (no data-url prefix) + its mime. */
@@ -28,11 +27,8 @@ export function base64Bytes(b64: string): number {
   return Math.floor((b64.length * 3) / 4) - pad;
 }
 
-/**
- * Pull the image parts out of an assistant-ui message content array. assistant-ui
- * stores an image part as { type: "image", image: <data-url> }; we also accept our
- * own { type: "image", data, mimeType } shape. Non-image parts are ignored.
- */
+/** Pull the image parts out of an assistant-ui message content array, accepting both
+ *  `{ type: "image", image: <data-url> }` and `{ type: "image", data, mimeType }`. */
 export async function imagesFromContent(content: unknown): Promise<OutboundImage[]> {
   if (!Array.isArray(content)) return [];
   const out: OutboundImage[] = [];
@@ -40,18 +36,17 @@ export async function imagesFromContent(content: unknown): Promise<OutboundImage
     if (!part || typeof part !== "object") continue;
     const p = part as { type?: string; image?: string; data?: string; mimeType?: string };
     if (p.type !== "image") continue;
-    // Direct { data, mimeType } format (our own shape)
+    // Our own { data, mimeType } shape.
     if (p.data && p.mimeType) {
       out.push({ data: p.data, mimeType: p.mimeType });
     }
-    // assistant-ui { image: <data-url> } format
+    // assistant-ui's { image: <data-url> } shape.
     else if (typeof p.image === "string" && p.image.length > 0) {
-      // Handle data: URLs (the expected format)
       if (p.image.startsWith("data:")) {
         const parsed = parseDataUrl(p.image);
         if (parsed) out.push(parsed);
       }
-      // Convert blob: URLs to data: URLs (browser creates these for pasted images)
+      // The browser creates blob: URLs for pasted images; convert them to data: URLs.
       else if (p.image.startsWith("blob:")) {
         console.log("[imageUpload] Converting blob URL to data URL:", p.image.slice(0, 50));
         try {
@@ -68,16 +63,10 @@ export async function imagesFromContent(content: unknown): Promise<OutboundImage
 }
 
 /**
- * Pull image parts out of a WHOLE appended composer message — reading BOTH
- * `message.content` AND `message.attachments[].content`.
- *
- * This is the critical bit: @assistant-ui's composer does NOT merge attachment
- * content into `message.content`. On send it builds `content: [{type:"text"}]`
- * (text only) and puts each completed attachment — whose own `.content` holds the
- * `{type:"image", image:<data-url>}` part from SimpleImageAttachmentAdapter — in a
- * SEPARATE `message.attachments[]` array. So reading `content` alone finds zero
- * images and every upload is silently dropped. We must union both. Why this can't
- * change: it mirrors @assistant-ui/core's composer send shape (see PR #448).
+ * Pull image parts out of a whole appended composer message, reading both
+ * `message.content` and `message.attachments[].content`, because the composer keeps
+ * each completed attachment's content in `message.attachments[]` rather than merging
+ * it into `message.content`.
  */
 export async function imagesFromMessage(message: unknown): Promise<OutboundImage[]> {
   const m = message as { content?: unknown; attachments?: unknown };
@@ -92,16 +81,14 @@ export async function imagesFromMessage(message: unknown): Promise<OutboundImage
 }
 
 /**
- * Downscale + re-encode an image (data-url in) so its longest edge <= MAX_EDGE and
- * its bytes <= maxBytes, stepping JPEG quality down until it fits. Returns the
- * re-encoded OutboundImage, or null if it can't be loaded. Browser-only (uses
- * canvas); in a non-DOM context it returns the source unchanged.
+ * Downscale and re-encode a data-url image so its longest edge is at most MAX_EDGE
+ * and its bytes at most maxBytes, stepping JPEG quality down until it fits and
+ * returning null when it cannot be loaded.
  */
 export async function downscaleImage(
   dataUrl: string,
   maxBytes = CLIENT_IMAGE_MAX_BYTES,
 ): Promise<OutboundImage | null> {
-  // Defensive: ensure dataUrl is actually a string
   if (typeof dataUrl !== "string" || dataUrl.length === 0) {
     console.warn("[imageUpload] downscaleImage called with invalid dataUrl:", typeof dataUrl);
     return null;
@@ -111,7 +98,7 @@ export async function downscaleImage(
   if (!src) return null;
   // No canvas (SSR/tests) — pass through; the server still enforces the cap.
   if (typeof document === "undefined" || typeof Image === "undefined") return src;
-  // Already small enough and not huge-dimensioned -> keep as-is (avoid re-encode).
+  // Already under the cap, so skip the re-encode.
   if (base64Bytes(src.data) <= maxBytes) return src;
 
   const img = await loadImage(dataUrl).catch(() => null);
@@ -158,10 +145,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
-/**
- * Convert a blob: URL to a data: URL by fetching the blob and reading it as base64.
- * Used when SimpleImageAttachmentAdapter creates blob URLs for pasted images.
- */
+/** Convert a blob: URL (which the browser creates for pasted images) to a data: URL. */
 async function blobUrlToDataUrl(blobUrl: string): Promise<string> {
   const response = await fetch(blobUrl);
   const blob = await response.blob();

@@ -11,15 +11,15 @@ dependencies = [
   "pydantic",
   "pydantic-settings",
   "kubernetes",   # TokenReview
-  "sqlalchemy",   # the registry + shares stores
-  "asyncpg",      # Postgres driver (shared agent-shared-db)
-  "aiosqlite",    # SQLite driver (local/dev default)
-  "openfga-sdk",  # OpenFGA authorization (the broker's enforcement point)
+  "sqlalchemy",   # the registry and shares stores
+  "asyncpg",      # Postgres driver
+  "aiosqlite",    # SQLite driver for local dev
+  "openfga-sdk",  # OpenFGA authorization
   "pyjwt",        # conversation-token verification (core/conv_token.py)
-  "fastmcp",      # serves the agent-facing /mcp endpoint (broker/mcp/routes.py)
+  "fastmcp",      # the agent-facing /mcp endpoint (broker/mcp/routes.py)
   "scooter-schema", # generated SQLAlchemy models for the broker DB (lib/py/scooter-schema)
   "scooter-lib",    # shared structured-logging convention (lib/py/scooter-lib)
-  "scooter-broker-lib", # the extension surface: types/registry/autolink + the generic sources/transports
+  "scooter-broker-lib", # the provider extension surface
 ]
 
 [project.scripts]
@@ -34,6 +34,5 @@ include = ["broker*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-# tests/ on sys.path so `from conftest import ...` resolves explicitly rather than
-# relying on pytest's rootdir insertion (which does NOT fire in every layout).
+# tests/ on sys.path so `from conftest import ...` resolves in every layout.
 pythonpath = ["tests"]

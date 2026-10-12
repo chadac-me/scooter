@@ -1,28 +1,10 @@
-"""The /mcp endpoint — authenticate, establish the per-call context, let fastmcp serve.
+"""The /mcp endpoint: authenticate, establish the per-call context, let fastmcp serve.
 
-Three pieces meet here:
-
-  * `authenticate_mcp` (core/auth.py) produces an Identity whose conversation is bound
-    to the presented credentials — an allowlisted control-plane SA token plus a signed
-    conversation token, or a sandbox's own SA.
-  * each enabled provider's `McpTools` transport carries a `FastMCP` server, mounted
-    NAMESPACE-LESS so tool names stay flat (`github_comment`, not
-    `github_github_comment`) — the skills name these and ui/src/toolCallView.ts
-    matches on them.
-  * a per-provider middleware establishes the `ToolContext` for the duration of a
-    call, and applies the attachment gate when listing.
-
-WHY THE MIDDLEWARE IS PER-PROVIDER rather than one on the parent. A tool needs ITS
-provider's credential-injecting upstream, which depends on which tool is executing and
-not on the request, so a single parent middleware would need a tool-name→provider map
-— and reading a mounted server's tool names is async, which the sync app factory
-cannot do. fastmcp's `mount` invokes a mounted server's own middleware ("Mounted
-servers now always have their lifespan and middleware invoked"), so binding the
-middleware to the provider at mount time removes the map entirely.
-
-STATELESS, because the broker runs 2+ replicas (modules/broker.nix) and a load
-balancer will not pin an agent to one of them. The same stance the agent-host's
-endpoint takes (`sessionIdGenerator: undefined`), which is proven against goose.
+`authenticate_mcp` produces an Identity bound to the presented credentials; each enabled
+provider's `McpTools` server is mounted namespace-less so tool names stay flat (the skills
+and ui/src/toolCallView.ts match on them); and a per-provider middleware establishes the
+`ToolContext` for a call and applies the attachment gate when listing. The endpoint is
+stateless because the broker runs several replicas behind a load balancer.
 """
 
 from __future__ import annotations
@@ -45,21 +27,12 @@ from scooter_lib.logging_config import format_error
 
 logger = logging.getLogger(__name__)
 
-# Where the authenticated Identity is parked for the middleware to pick up. The ASGI
-# scope rather than a ContextVar: the auth middleware and the tool middleware are in
-# the same request task, and the scope is the thing ASGI already guarantees is
-# per-request.
+# The ASGI scope key where the auth middleware parks the Identity for the tool middleware.
 SCOPE_IDENTITY = "scooter_identity"
 
 
 class _Upstream:
-    """Issue a request to a provider's upstream with its credential injected.
-
-    Mirrors HttpProxy's injection exactly — build the request, let the Credential
-    mutate it, send — so a provider's tool and its raw proxy route cannot drift in how
-    they authenticate. That matters because the two are meant to be interchangeable:
-    the skills tell the agent to prefer the tool and fall back to the raw route.
-    """
+    """Issue a request to a provider's upstream with its credential injected the same way HttpProxy does."""
 
     def __init__(self, provider: Provider, identity: Identity, upstream: str) -> None:
         self._provider = provider
@@ -92,12 +65,7 @@ class _Upstream:
 
 
 class _Links:
-    """The conversation's links, read from the agent-host and cached for ONE call.
-
-    Cached because the attachment gates ask for them once per tool: four providers
-    attached to a conversation would otherwise mean four identical HTTP round trips on
-    every `tools/list`, on the latency path of the agent's first turn.
-    """
+    """The conversation's links, read from the agent-host and cached for one call since every gate asks for them."""
 
     def __init__(self, agent_host_url: str, conversation_id: str) -> None:
         self._agent_host_url = agent_host_url
@@ -108,15 +76,10 @@ class _Links:
         if self._cached is None:
             try:
                 links = await list_links(self._agent_host_url, self._conversation_id)
-                # APPENDED, never prepended: the conversation_map is the FALLBACK, so a
-                # real link always wins. first_target takes the first COMPLETE target in
-                # order, so position is the whole precedence rule.
+                # The resource map is appended so a real link always wins by position.
                 self._cached = links + await self._resource_map()
             except httpx.HTTPError as exc:
-                # A gate that cannot read the links must not CRASH tools/list — the
-                # agent would get no tools at all, including the ungated ones. Degrade
-                # to "nothing is attached": the gated tools are absent, which is the
-                # same outcome as a genuinely unattached conversation.
+                # Degrade to "nothing is attached" rather than crash tools/list.
                 logger.warning(
                     "could not read conversation links; gated tools will be absent",
                     extra={"conversation_id": self._conversation_id, "error": format_error(exc)},
@@ -125,22 +88,7 @@ class _Links:
         return self._cached
 
     async def _resource_map(self) -> list[dict[str, Any]]:
-        """The webhooks conversation_map rows, shaped as links.
-
-        THE FALLBACK the agent-host's tools had, which this must not silently lose: a
-        conversation created before `ref` existed has a link carrying neither a usable
-        ref nor a parseable URL, and the mapping is the only record of its target.
-
-        Read from the AGENT-HOST (GET /conversations/{id}/resource-map), not from the
-        table — the broker reading the webhooks service's own table would breach the
-        per-service split contrib/README.md exists to keep.
-
-        `resource_id` goes in `url` deliberately. Each provider resolves a link with its
-        `parse_*_resource_id`, which tries the short form FIRST and then falls back to
-        the URL parser — so one field covers both an html_url link and an `o/r#7`
-        mapping, with no second code path in any contrib. Slack is the exception: its
-        channel/ts are their own columns, so they become a real `ref`.
-        """
+        """The webhooks conversation_map rows shaped as links, read via the agent-host's resource-map endpoint, with `resource_id` in `url` because each provider's `parse_*_resource_id` accepts either form."""
         if not self._agent_host_url or not self._conversation_id:
             return []
         url = f"{self._agent_host_url.rstrip('/')}/conversations/{self._conversation_id}/resource-map"
@@ -150,8 +98,7 @@ class _Links:
                 response.raise_for_status()
                 mappings = (response.json() or {}).get("mappings") or []
         except (httpx.HTTPError, ValueError) as exc:
-            # Best-effort, exactly as the agent-host's lookup was: a DB blip must not
-            # break a tool call, it just means "no fallback target".
+            # Best-effort: a failure means no fallback target, not a broken tool call.
             logger.warning(
                 "could not read the conversation resource-map; using links alone",
                 extra={"conversation_id": self._conversation_id, "error": format_error(exc)},
@@ -188,14 +135,7 @@ def _identity_from_scope() -> Identity | None:
 
 
 class ProviderToolMiddleware(Middleware):
-    """Establish the ToolContext for one provider's tools, and apply their gates.
-
-    MUST subclass fastmcp's `Middleware`: the base provides the dispatch that routes a
-    message to `on_list_tools` / `on_call_tool`, so a duck-typed object with the right
-    method names is simply "not callable" at dispatch time. Worse, `list_tools`
-    SWALLOWS that into a warning and returns no tools from the provider — so a broken
-    middleware presents as "this integration contributes nothing", not as an error.
-    """
+    """Establish the ToolContext for one provider's tools and apply their gates; it must subclass fastmcp's `Middleware`, since the base provides the dispatch to `on_list_tools` / `on_call_tool`."""
 
     def __init__(self, provider: Provider, upstream: str, agent_host_url: str) -> None:
         super().__init__()
@@ -212,9 +152,7 @@ class ProviderToolMiddleware(Middleware):
         )
 
     async def on_list_tools(self, context, call_next):
-        """THE ATTACHMENT GATE. A provider's reply tool is offered only when that
-        provider is actually linked to this conversation — the thing that stopped the
-        agent raw-curling Slack into the root channel."""
+        """The attachment gate: a provider's gated tool is offered only when that provider is linked to this conversation."""
         tools = await call_next(context)
         identity = _identity_from_scope()
         if identity is None:
@@ -230,9 +168,7 @@ class ProviderToolMiddleware(Middleware):
                 with tool_context(ctx):
                     allowed = await gate(ctx)
             except Exception as exc:
-                # A gate that throws means "not attached", never "attached": a tool
-                # offered because its gate errored is the ungated-reply-tool failure
-                # the gate exists to prevent.
+                # A gate that throws means "not attached", never "attached".
                 logger.warning(
                     "tool gate FAILED; leaving the tool unlisted",
                     extra={
@@ -250,30 +186,20 @@ class ProviderToolMiddleware(Middleware):
     async def on_call_tool(self, context, call_next):
         identity = _identity_from_scope()
         if identity is None:
-            # No verified caller: refuse rather than run a tool with no conversation.
-            # Unreachable through the mounted app (auth runs first), so this is the
-            # belt to that braces.
+            # Unreachable through the mounted app, since auth runs first.
             raise RuntimeError("no verified identity for this tool call")
         with tool_context(self._context(identity)):
             return await call_next(context)
 
 
 class _AuthMiddleware:
-    """Authenticate every request to the mounted MCP app and stash the Identity.
-
-    Pure ASGI rather than BaseHTTPMiddleware: the MCP app streams, and
-    BaseHTTPMiddleware buffers the response body, which breaks SSE.
-    """
+    """Authenticate every request to the mounted MCP app and stash the Identity, as pure ASGI because BaseHTTPMiddleware would buffer the streamed response."""
 
     def __init__(self, app: ASGIApp, authenticate) -> None:
         self.app = app
         self.authenticate = authenticate
-        # RE-EXPOSE the wrapped app's lifespan. fastmcp's streamable-HTTP app starts a
-        # session-manager task group in its lifespan, and mounting an ASGI app does NOT
-        # run that app's lifespan — the parent owns the only lifespan ASGI knows about.
-        # Without composing it into the broker's, EVERY tool call fails with "task group
-        # was not initialized", which is a runtime failure a mount-time check cannot see.
-        # Why: issue #700.
+        # The wrapped app's lifespan is re-exposed so the broker's lifespan can compose it,
+        # since mounting an ASGI app does not run its lifespan.
         self.lifespan = getattr(app, "lifespan", None)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -293,22 +219,10 @@ class _AuthMiddleware:
 
 
 async def assert_tool_names_unique(providers: list[Provider]) -> None:
-    """Fail STARTUP if two providers contribute a tool of the same name.
-
-    Tool names are flat (mounted namespace-less, so the skills and
-    ui/src/toolCallView.ts can match on a name), so a name is a global identity and a
-    collision has nothing to arbitrate it but mount order — which differs between a
-    rebuild and a rollback. A contrib that duplicates a capability therefore names the
-    tool for its provider (`brave_web_search`), which is also what lets several search
-    providers be enabled at once; this catches the case where someone did not.
-
-    Awaited from the lifespan rather than run at mount time: reading a server's tools is
-    async and the app factory is sync. Why: PR #707.
-    """
+    """Fail startup if two providers contribute a tool of the same name, since tool names are flat and nothing but mount order would arbitrate a collision."""
     owner_of: dict[str, str] = {}
     for provider, server in collect_mcp_servers(providers):
-        # run_middleware=False: the gates need a conversation (none at startup), and a
-        # gated-out tool must still count. Why: PR #707.
+        # The gates need a conversation, and a gated-out tool must still count.
         for tool in await server.list_tools(run_middleware=False):
             owner = owner_of.get(tool.name)
             if owner is not None and owner != provider.name:
@@ -322,11 +236,7 @@ async def assert_tool_names_unique(providers: list[Provider]) -> None:
 
 
 def create_mcp_app(providers: list[Provider], *, authenticate, agent_host_url: str = "") -> ASGIApp:
-    """The ASGI app serving POST /mcp, with auth in front of it.
-
-    Returns an app to mount rather than an APIRouter: fastmcp serves MCP as its own
-    ASGI app, and wrapping it keeps its streaming intact.
-    """
+    """The ASGI app serving POST /mcp with auth in front of it, to be mounted rather than included so fastmcp's streaming stays intact."""
     from fastmcp import FastMCP
 
     parent = FastMCP(name="scooter-broker")
@@ -339,10 +249,8 @@ def create_mcp_app(providers: list[Provider], *, authenticate, agent_host_url: s
             if candidate:
                 upstream = candidate
                 break
-        # Bound to the provider, on the provider's OWN server — which is what removes
-        # the need for a tool-name→provider map. See the module docstring.
+        # Bound to the provider's own server, so no tool-name-to-provider map is needed.
         server.add_middleware(ProviderToolMiddleware(provider, upstream, agent_host_url))
-        # namespace=None: flat tool names.
         parent.mount(server)
 
     logger.info(

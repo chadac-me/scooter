@@ -1,11 +1,8 @@
 /**
- * Tier 1 (ui) — IntegrityAgent full-fidelity rendering + fire-and-forget send.
- *
- * Proves the core guarantee: an IntegrityAgent driven by a scripted integrity
- * stream (text + a tool call + a reasoning block, each in a checksum envelope)
- * folds — via the AbstractAgent base applier — into the SAME full-fidelity
- * message state assistant-ui renders from a locally-driven /agui run. And a send
- * is fire-and-forget: POST /agui without consuming its SSE.
+ * IntegrityAgent unit tests: a scripted integrity stream (text, tool call, reasoning)
+ * folds through the AbstractAgent base applier into the same full-fidelity message state
+ * assistant-ui renders from a local /agui run, a send is a fire-and-forget POST /agui, and
+ * the render pump's reconnect, watchdog and interrupt tracking converge on the server log.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -14,9 +11,7 @@ import { firstValueFrom, take, toArray } from "rxjs";
 import { createIntegrityAgent } from "./integrityAgent.js";
 import type { RunAgentInput } from "@ag-ui/client";
 
-// A scripted integrity stream: TEXT + TOOL_CALL_* + REASONING_*, checksum-wrapped
-// (shapes mirror bridge.ts AguiEvent + integrityStream.ts IntegrityFrame). The
-// inner events ARE @ag-ui/core BaseEvents, so IntegrityAgent.run() emits them as-is.
+// A scripted integrity stream whose inner events are @ag-ui/core BaseEvents.
 const FRAMES = [
   { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
   { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "m1", role: "assistant" } },
@@ -34,9 +29,7 @@ const FRAMES = [
   { kind: "synced" },
 ];
 
-/** A fetch stub: the SSE ReadableStream for the integrity stream, and an empty
- *  JSON tail for the /tail fast-first-paint fetch (so seedTail no-ops in tests
- *  that only script the stream). Pass `tailEvents` to exercise the tail seed. */
+/** A fetch stub serving the scripted SSE stream and a JSON /tail body (empty unless `tailEvents` is given). */
 function sseFetch(frames: unknown[], tailEvents: unknown[] = []): typeof fetch {
   const body = frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join("");
   return vi.fn(async (url: string) => {
@@ -58,10 +51,7 @@ function sseFetch(frames: unknown[], tailEvents: unknown[] = []): typeof fetch {
 
 const EMPTY_INPUT = { threadId: "c1", runId: "r1", messages: [], tools: [], context: [], state: {}, forwardedProps: {} } as unknown as RunAgentInput;
 
-/** A full snapshot of the UI-visible surface an IntegrityAgent drives, so a
- *  recovery test can assert the WHOLE state healed (chat feed + queue + running +
- *  interrupts + error), not just one field. `feed` is the folded message text so a
- *  test can prove the transcript itself is intact after a reconnect. */
+/** A snapshot of the whole UI-visible surface an IntegrityAgent drives, so a recovery test can assert every field healed. */
 function uiState(agent: ReturnType<typeof createIntegrityAgent>) {
   const messages = (agent as unknown as { messages: Array<{ role?: string; content?: unknown }> }).messages ?? [];
   const feed = messages.map((m) => {
@@ -84,15 +74,11 @@ function uiState(agent: ReturnType<typeof createIntegrityAgent>) {
 describe("IntegrityAgent", () => {
   it("run() emits the integrity log's events as BaseEvents (text + tool call + reasoning)", async () => {
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(FRAMES) });
-    // run() is a CONTINUOUS stream (reconnects when a stream ends) — it never
-    // completes, so take exactly the scripted event count (synced carries no
-    // event and is skipped).
+    // run() never completes, so take exactly the scripted event count.
     const expected = FRAMES.filter((f) => f.kind === "event");
     const events = await firstValueFrom(agent.run(EMPTY_INPUT).pipe(take(expected.length), toArray()));
     const types = events.map((e) => (e as { type: string }).type);
-    // `synced` is skipped (no event); every "event" frame is forwarded.
     expect(types).toEqual(expected.map((f) => (f.event as { type: string }).type));
-    // Full fidelity: text, tool call, AND reasoning are all present.
     expect(types).toContain("TEXT_MESSAGE_CONTENT");
     expect(types).toContain("TOOL_CALL_START");
     expect(types).toContain("REASONING_MESSAGE_CONTENT");
@@ -100,19 +86,12 @@ describe("IntegrityAgent", () => {
   });
 
   it("REPLAY through the base applier keeps the tool call in fromAgUiMessages (refresh path)", async () => {
-    // Mirrors RuntimeProvider's render pump: drive the base AbstractAgent applier
-    // over the integrity stream (via agent.renderPump), then convert agent.messages
-    // the way the pump does. This is the page-refresh replay path where tool calls
-    // went missing — assert they SURVIVE into the assistant-ui thread messages.
+    // Drive the render pump as RuntimeProvider does, then convert agent.messages the way the pump does.
     const { fromAgUiMessages } = await import("@assistant-ui/react-ag-ui");
     const fetchSpy = vi.fn(sseFetch(FRAMES)) as unknown as typeof fetch;
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: fetchSpy });
 
-    // Drive the render pump exactly as RuntimeProvider does. The pump folds each
-    // SSE connection fresh (one connection == one fold == one fetch of the log),
-    // then reconnects after a delay. Stop the pump once the FIRST fold has gone
-    // quiet (a short debounce after the last message change) so we assert on a
-    // single fold's result — exactly one fetch drove it.
+    // Stop the pump once the first fold has gone quiet so the assertions cover a single fold.
     const stop = agent.renderPump();
     const settled = new Promise<void>((resolve) => {
       let timer: ReturnType<typeof setTimeout>;
@@ -127,25 +106,18 @@ describe("IntegrityAgent", () => {
     });
     await settled;
 
-    // agent.messages should carry the tool call (applier attaches it to a msg).
     const agMsgs = (agent as unknown as { messages: Array<{ id: string; role: string; toolCalls?: Array<{ function: { arguments: string } }> }> }).messages;
     const withTool = agMsgs.filter((m) => (m.toolCalls?.length ?? 0) > 0);
     expect(withTool.length, "applier should attach the tool call to a message").toBeGreaterThan(0);
 
-    // NO DOUBLE-APPLICATION: the pump folds each connection fresh (setMessages([])
-    // per connection) so the log's full-log replay rebuilds identical state rather
-    // than doubling. Without that the args come out doubled ('{"cmd":"ls"}{"cmd":"ls"}')
-    // and messages duplicate. Also assert exactly ONE fetch drove this replay.
+    // The fold is not doubled by the replay.
     expect(withTool[0].toolCalls![0].function.arguments).toBe('{"cmd":"ls"}');
-    // Exactly one assistant-with-toolcall and one tool-result message (not two each).
     expect(agMsgs.filter((m) => m.id === "t1" && m.role === "assistant").length).toBe(1);
-    // Exactly ONE integrity-stream fetch drove this replay (the /tail seed is a
-    // separate fetch and doesn't re-fold the stream).
+    // The /tail seed is a separate fetch that does not re-fold the stream.
     const streamFetches = (fetchSpy as unknown as ReturnType<typeof vi.fn>).mock.calls
       .filter((c) => String(c[0]).includes("events.integrity"));
     expect(streamFetches.length, "one stream fetch per fold").toBe(1);
 
-    // And it must survive the conversion the pump feeds the thread.
     const threadMsgs = fromAgUiMessages(agent.messages as never);
     expect(JSON.stringify(threadMsgs), "fromAgUiMessages must keep the tool call").toContain("run_command");
     agent.dispose();
@@ -155,7 +127,7 @@ describe("IntegrityAgent", () => {
     const fetchSpy = vi.fn(async (url: string, init?: RequestInit) => {
       void url;
       void init;
-      // Return a never-ending body; if send() consumed it, the await would hang.
+      // A never-ending body, so consuming it would hang the await.
       return new Response(new ReadableStream(), { status: 200 });
     }) as unknown as typeof fetch;
     const agent = createIntegrityAgent({
@@ -176,12 +148,7 @@ describe("IntegrityAgent", () => {
   });
 
   it("send() cancels the POST /agui response body (frees the HTTP/2 flow-control window)", async () => {
-    // POST /agui is itself an SSE endpoint: the server streams the whole run's
-    // events into the response until RUN_FINISHED. We drive the render off the
-    // integrity stream instead, so we must NOT leave this body unread — an
-    // unconsumed body fills the per-stream (and then connection-level) HTTP/2
-    // window and stalls OTHER streams on the same connection (notably
-    // events.integrity). The fix cancels the body once the POST is accepted.
+    // An unread POST /agui body would fill the HTTP/2 flow-control window and stall the integrity stream.
     const cancel = vi.fn(async () => {});
     const body = { cancel } as unknown as ReadableStream<Uint8Array>;
     const fetchSpy = vi.fn(
@@ -203,7 +170,7 @@ describe("IntegrityAgent", () => {
 
     const call = (fetchSpy as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     const sent = JSON.parse(call[1].body);
-    expect(sent.priority).toBe(10); // preempts the running turn (uninterruptible-loop fix)
+    expect(sent.priority).toBe(10); // preempts the running turn
     agent.dispose();
   });
 
@@ -233,16 +200,13 @@ describe("IntegrityAgent", () => {
   }
 
   it("SEEDS the recent tail (fast first paint) before the full replay", async () => {
-    // The /tail fetch returns a couple of runs; the pump folds them + paints them
-    // immediately, then the (empty, in this test) stream re-folds. We assert the
-    // tail messages showed up — i.e. first paint didn't wait for the stream.
+    // The tail paints immediately, before the stream re-folds.
     const tail = [
       { type: "TEXT_MESSAGE_START", messageId: "tm1", role: "assistant" },
       { type: "TEXT_MESSAGE_CONTENT", messageId: "tm1", delta: "recent context" },
       { type: "TEXT_MESSAGE_END", messageId: "tm1" },
     ];
-    // Stream serves only a synced marker (no events) so it can't be the source of
-    // the message — only the tail seed can.
+    // The stream serves no events, so only the tail seed can be the message's source.
     const fetchSpy = vi.fn(sseFetch([{ kind: "synced" }], tail)) as unknown as typeof fetch;
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: fetchSpy });
 
@@ -265,17 +229,14 @@ describe("IntegrityAgent", () => {
   });
 
   it("does NOT blank the thread when the tail folds to nothing (in-flight final run)", async () => {
-    // The reported bug: /tail returns events, but they fold to NO renderable
-    // message (the tail's last run is still in-flight — RUN_STARTED + partial, no
-    // RUN_FINISHED). The seed must not blank the thread; the full replay (which
-    // has the complete history) must still populate it.
+    // A tail whose last run is still in flight folds to no renderable message, and must not blank the thread.
     const inflightTail = [
       { type: "RUN_STARTED", threadId: "c1", runId: "live" },
       { type: "TEXT_MESSAGE_START", messageId: "p1", role: "assistant" },
       { type: "TEXT_MESSAGE_CONTENT", messageId: "p1", delta: "typing…" },
-      // no TEXT_MESSAGE_END, no RUN_FINISHED — an in-flight run
+      // no TEXT_MESSAGE_END, no RUN_FINISHED: an in-flight run
     ];
-    // The full stream DOES have a complete message.
+    // The full stream has a complete message.
     const stream = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "m1", role: "assistant" } },
@@ -286,16 +247,13 @@ describe("IntegrityAgent", () => {
     ];
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(stream, inflightTail) });
     await foldTo(agent);
-    // NOT blank — the full replay populated it despite the empty tail fold.
+    // The full replay populated it despite the empty tail fold.
     expect(JSON.stringify(agent.messages)).toContain("full history here");
     agent.dispose();
   });
 
   it("SUPPRESSES per-event renders during replay, then renders once at `synced`", async () => {
-    // A long conversation must not visibly build top-down on switch: while
-    // replaying (before the `synced` marker) isReplaying() is true and the pump
-    // suppresses renders; at `synced` it flips false and fires once with the whole
-    // history. Model on RuntimeProvider.push (which reads isReplaying()).
+    // Renders are suppressed while isReplaying() and fire once at `synced`, as RuntimeProvider.push reads them.
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(FRAMES) });
     let replayingWhenNotified: boolean[] = [];
     let effectiveRenders = 0; // renders the pump would actually apply (isReplaying()===false)
@@ -312,8 +270,7 @@ describe("IntegrityAgent", () => {
       });
       setTimeout(done, 1200);
     });
-    // FRAMES has 13 events; without suppression the pump would apply ~13 renders.
-    // With it, the effective (non-replaying) renders collapse to ~1 (the synced one).
+    // Without suppression the pump would apply one render per event.
     expect(effectiveRenders).toBeLessThanOrEqual(2);
     expect(effectiveRenders).toBeGreaterThan(0); // the history DID render (once)
     expect(agent.isReplaying()).toBe(false);     // replay finished
@@ -321,8 +278,7 @@ describe("IntegrityAgent", () => {
   });
 
   it("the PROGRESS/CONTEXT indicators do not replay their history on reconnect", async () => {
-    // A pending-interrupt change notifies WITHOUT integrityAgent's own replay guard,
-    // so push() really does run mid-replay — hence the guard there too.
+    // A pending-interrupt change notifies without the agent's own replay guard, so push() runs mid-replay.
     const frames = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "CONTEXT_USAGE", usedTokens: 10_000, contextWindow: 200_000 } },
@@ -343,21 +299,21 @@ describe("IntegrityAgent", () => {
       const { unsubscribe: unsub } = agent.subscribe({
         onMessagesChanged: () => {
           clearTimeout(timer); timer = setTimeout(done, 150);
-          // Model RuntimeProvider.push EXACTLY: it returns early while replaying.
+          // RuntimeProvider.push returns early while replaying.
           if (agent.isReplaying()) return;
           samples.push({ fill: agent.contextFill() });
         },
       });
       setTimeout(done, 1200);
     });
-    // 10k/200k = 0.05 is the intermediate reading; only the settled tail may show.
+    // 0.05 is the intermediate reading, so only the settled tail may show.
     expect(samples.some((s) => s.fill !== null && Math.abs(s.fill - 0.05) < 1e-9)).toBe(false);
     expect(agent.contextFill()).toBeCloseTo(0.6, 5);
     agent.dispose();
   });
 
   it("a 401 surfaces the auth error EVEN WHILE REPLAYING (never behind the replay guard)", async () => {
-    // A 401 never reaches `synced`, so a deferred banner is a banner that never shows.
+    // A 401 never reaches `synced`, so a deferred banner would never show.
     const agent = createIntegrityAgent({
       baseUrl: "http://host",
       conversationId: "c1",
@@ -372,8 +328,7 @@ describe("IntegrityAgent", () => {
   });
 
   it("an IN-FLIGHT run is still reported the moment replay ends (the silent-run case)", async () => {
-    // The log ends with RUN_STARTED and no terminal, so runIsActive() must be true at
-    // `synced` — the one push that does run.
+    // The log ends with RUN_STARTED and no terminal, so runIsActive() must be true at `synced`.
     const frames = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "TOOL_CALL_START", toolCallId: "t1", toolCallName: "slow_build" } },
@@ -383,20 +338,18 @@ describe("IntegrityAgent", () => {
     const stop = agent.renderPump();
     await new Promise((r) => setTimeout(r, 600));
     expect(agent.isReplaying()).toBe(false);
-    expect(agent.runIsActive()).toBe(true);        // the thinking dot stays on
-    expect(agent.activeTool()).toBe("slow_build"); // ...and names what it is doing
+    expect(agent.runIsActive()).toBe(true);
+    expect(agent.activeTool()).toBe("slow_build");
     stop();
     agent.dispose();
   });
 
   it("an external (ext-) interrupt SURVIVES a concurrent goose run's RUN_STARTED/RUN_FINISHED", async () => {
-    // The AWS-request bug: raiseInterrupt emits RUN_FINISHED(runId ext-aws1); the
-    // still-live goose run then emits its own RUN_STARTED/RUN_FINISHED (no
-    // interrupt), which used to CLEAR the pending interrupt → gone on reload.
+    // The concurrent goose run's RUN_STARTED/RUN_FINISHED must not clear the pending ext- interrupt.
     const frames = [
       { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "ext-aws1",
         outcome: { type: "interrupt", interrupts: [{ id: "aws1", reason: "confirmation", message: "approve AWS?" }] } } },
-      // The concurrent goose run continues and finishes normally:
+      // The concurrent goose run continues and finishes normally.
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "g9" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "m9", role: "assistant" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "m9", delta: "still working" } },
@@ -407,7 +360,7 @@ describe("IntegrityAgent", () => {
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
     await foldTo(agent);
     const pending = agent.getPendingInterrupts();
-    expect(pending.map((p) => p.id)).toContain("aws1"); // NOT cleared by the goose run
+    expect(pending.map((p) => p.id)).toContain("aws1");
     agent.dispose();
   });
 
@@ -436,7 +389,7 @@ describe("IntegrityAgent", () => {
     ];
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
     await foldTo(agent);
-    // The stream ran a full turn to completion -> not running.
+    // A full turn ran to completion.
     expect(agent.runIsActive()).toBe(false);
     agent.dispose();
   });
@@ -476,7 +429,7 @@ describe("IntegrityAgent", () => {
     ];
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
     await foldTo(agent);
-    expect(agent.getRunRetrying()).toBeNull(); // cleared — no longer showing "retrying…"
+    expect(agent.getRunRetrying()).toBeNull();
     agent.dispose();
   });
 
@@ -488,8 +441,8 @@ describe("IntegrityAgent", () => {
     ];
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
     await foldTo(agent);
-    expect(agent.getRunRetrying()).toBeNull(); // no longer retrying
-    expect(agent.getRunError()).toMatch(/exited unexpectedly/); // the terminal error stands
+    expect(agent.getRunRetrying()).toBeNull();
+    expect(agent.getRunError()).toMatch(/exited unexpectedly/);
     agent.dispose();
   });
 
@@ -497,7 +450,7 @@ describe("IntegrityAgent", () => {
     const frames = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1", ts: 1000 } },
       { kind: "event", event: { type: "TOOL_CALL_START", toolCallId: "t1", toolCallName: "bash" } },
-      { kind: "synced" }, // synced while bash is mid-execution (the stuck-on-a-tool case)
+      { kind: "synced" }, // synced while bash is mid-execution
     ];
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
     await foldTo(agent);
@@ -523,9 +476,9 @@ describe("IntegrityAgent", () => {
 
   it("collects SYSTEM_MESSAGE events into getSystemMessages, anchored to the preceding message (deduped)", async () => {
     const frames = [
-      // A system message BEFORE any real message → afterMessageId null.
+      // A system message before any real message has afterMessageId null.
       { kind: "event", event: { type: "SYSTEM_MESSAGE", messageId: "sys-0", source: "scheduler", text: "spawned" } },
-      // A real user turn, then a system message that followed it → anchored to u1.
+      // A system message following a user turn anchors to u1.
       { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "u1", role: "user" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "hi" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_END", messageId: "u1" } },
@@ -553,13 +506,13 @@ describe("IntegrityAgent", () => {
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
     await foldTo(agent);
     expect(agent.runIsActive()).toBe(true);
-    expect(agent.activeTool()).toBeNull(); // between tool calls — running, but no tool
+    expect(agent.activeTool()).toBeNull(); // between tool calls
     agent.dispose();
   });
 
   it("runIsActive() IGNORES out-of-band ext- runs (a broker interrupt isn't 'thinking')", async () => {
     const frames = [
-      // An external interrupt run — must NOT flip runIsActive on.
+      // An external interrupt run must not flip runIsActive on.
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "ext-aws1" } },
       { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "ext-aws1",
         outcome: { type: "interrupt", interrupts: [{ id: "aws1", reason: "confirmation" }] } } },
@@ -611,7 +564,7 @@ describe("IntegrityAgent", () => {
     const frames = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "RUN_ERROR", threadId: "c1", runId: "r1", message: "boom" } },
-      // The user retries — a new run begins; the old error must not stick.
+      // A new run begins, so the old error must not stick.
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r2" } },
       { kind: "synced" },
     ];
@@ -645,7 +598,7 @@ describe("IntegrityAgent", () => {
     ];
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
     await foldTo(agent);
-    // Latest snapshot wins — both queued messages, in order.
+    // The latest snapshot wins.
     expect(agent.getQueuedMessages().map((m) => m.text)).toEqual(["queued A", "queued B"]);
     agent.dispose();
   });
@@ -653,7 +606,7 @@ describe("IntegrityAgent", () => {
   it("getQueuedMessages() clears when the queue drains (empty snapshot)", async () => {
     const frames = [
       { kind: "event", event: { type: "QUEUE_UPDATED", items: [{ id: "q1", text: "queued A", priority: 0 }] } },
-      // The run pulled it out to run — queue is now empty.
+      // The run pulled it out, so the queue is now empty.
       { kind: "event", event: { type: "QUEUE_UPDATED", items: [] } },
       { kind: "synced" },
     ];
@@ -664,41 +617,35 @@ describe("IntegrityAgent", () => {
   });
 
   it("getQueuedMessages() is EMPTY once the run goes idle, even if the clearing snapshot was missed", async () => {
-    // The reported "message stuck in the queue" bug: a QUEUE_UPDATED with an item
-    // arrives, then the run FINISHES, but the clearing QUEUE_UPDATED([]) never
-    // reached the live client. An idle run cannot hold a queued item (the queue
-    // only has items WHILE a run is draining them), so the UI must show it empty.
+    // An idle run cannot hold a queued item, even if the clearing QUEUE_UPDATED([]) never arrived.
     const frames = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "QUEUE_UPDATED", items: [{ id: "q1", text: "stuck follow-up", priority: 0 }] } },
-      // Run finishes — no clearing QUEUE_UPDATED([]) follows (the missed-snapshot case).
+      // The run finishes with no clearing QUEUE_UPDATED([]) after it.
       { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "r1" } },
       { kind: "synced" },
     ];
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
     await foldTo(agent);
-    expect(agent.getQueuedMessages()).toEqual([]); // no phantom — the run is idle
+    expect(agent.getQueuedMessages()).toEqual([]);
     agent.dispose();
   });
 
   it("IDLE WATCHDOG: a run stuck 'running' (dropped RUN_FINISHED) recovers via a forced reconnect", async () => {
-    // The "agent seems dead" repro: connection 1 streams RUN_STARTED then goes
-    // SILENT (the live RUN_FINISHED was dropped) with the stream held open, so
-    // `running` sticks true forever. The idle-watchdog forces a reconnect; the
-    // re-fold from the log (connection 2, which HAS RUN_FINISHED) heals `running`.
+    // Connection 1 streams RUN_STARTED then stays open and silent, so only a watchdog reconnect to connection 2 (which has RUN_FINISHED) can clear `running`.
     let conn = 0;
-    // A never-closing body for connection 1 (stream stays open, no terminal event).
+    // A never-closing body for connection 1.
     const stuckBody = () => {
       const enc = new TextEncoder();
       return new ReadableStream({
         start(c) {
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "synced" })}\n\n`));
-          // deliberately DO NOT close — the connection stays open + silent.
+          // deliberately not closed
         },
       });
     };
-    // Connection 2: the full, correct log (RUN_STARTED + RUN_FINISHED), then close.
+    // Connection 2: the full log, then close.
     const healedBody = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "r1" } },
@@ -716,44 +663,38 @@ describe("IntegrityAgent", () => {
 
     const agent = createIntegrityAgent({
       baseUrl: "http://host", conversationId: "c1", fetchImpl,
-      idleReconnectMs: 80, // tiny watchdog so the test doesn't wait 25s
+      idleReconnectMs: 80, // tiny watchdog window
     });
     const stop = agent.renderPump();
 
-    // Wait for the stuck connection to establish (running=true).
+    // Wait for the stuck connection to establish.
     await new Promise((r) => setTimeout(r, 60));
-    expect(agent.runIsActive()).toBe(true); // stuck "running"
+    expect(agent.runIsActive()).toBe(true);
 
-    // The watchdog fires (~80ms idle) -> aborts conn 1 -> reconnects (conn 2) ->
-    // re-folds the log with RUN_FINISHED -> running clears.
+    // The watchdog aborts connection 1 and the re-fold from connection 2 clears running.
     await new Promise((r) => setTimeout(r, 400));
-    expect(conn).toBeGreaterThanOrEqual(2); // a reconnect happened
-    expect(agent.runIsActive()).toBe(false); // healed
+    expect(conn).toBeGreaterThanOrEqual(2);
+    expect(agent.runIsActive()).toBe(false);
 
     stop();
     agent.dispose();
   });
 
   it("IDLE WATCHDOG: a stuck pending interrupt (dropped PERMISSION_RESOLVED) heals via a forced reconnect", async () => {
-    // A broker/external interrupt is settled ONLY by PERMISSION_RESOLVED. If that
-    // live frame is dropped, the approval sticks forever with NO active run to
-    // re-arm a reconnect. The watchdog also triggers on a stale PENDING INTERRUPT
-    // (once per pending set) so the re-fold from the log — which HAS the
-    // PERMISSION_RESOLVED — clears it.
+    // With no active run, only the watchdog's pending-interrupt trigger can re-fold the dropped PERMISSION_RESOLVED.
     let conn = 0;
     const stuckBody = () => {
       const enc = new TextEncoder();
       return new ReadableStream({
         start(c) {
-          // An external interrupt raised, then the stream goes silent (the settling
-          // PERMISSION_RESOLVED was dropped). No RUN is running.
+          // An external interrupt, then silence with no run running.
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "ext-1", outcome: { type: "interrupt", interrupts: [{ id: "aws1", reason: "confirmation", message: "approve AWS?" }] } } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "synced" })}\n\n`));
-          // deliberately DO NOT close.
+          // deliberately not closed
         },
       });
     };
-    // Connection 2: the full log, now WITH the settling PERMISSION_RESOLVED.
+    // Connection 2: the full log with the settling PERMISSION_RESOLVED.
     const healedBody = [
       { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "ext-1", outcome: { type: "interrupt", interrupts: [{ id: "aws1", reason: "confirmation", message: "approve AWS?" }] } } },
       { kind: "event", event: { type: "PERMISSION_RESOLVED", toolCallId: "aws1", optionId: "approve" } },
@@ -776,24 +717,22 @@ describe("IntegrityAgent", () => {
     const stop = agent.renderPump();
 
     await new Promise((r) => setTimeout(r, 60));
-    expect(agent.getPendingInterrupts().map((p) => p.id)).toContain("aws1"); // stuck approval
-    expect(agent.runIsActive()).toBe(false); // NOT running — only the interrupt is stuck
+    expect(agent.getPendingInterrupts().map((p) => p.id)).toContain("aws1");
+    expect(agent.runIsActive()).toBe(false);
 
     await new Promise((r) => setTimeout(r, 400));
-    expect(conn).toBeGreaterThanOrEqual(2); // a reconnect happened
-    expect(agent.getPendingInterrupts().map((p) => p.id)).not.toContain("aws1"); // healed
+    expect(conn).toBeGreaterThanOrEqual(2);
+    expect(agent.getPendingInterrupts().map((p) => p.id)).not.toContain("aws1");
 
     stop();
     agent.dispose();
   });
 
   it("IDLE WATCHDOG: a LEGITIMATELY pending interrupt does not churn reconnects forever (one-shot per set)", async () => {
-    // A real approval the user hasn't answered stays pending in the log across a
-    // re-fold. The watchdog must re-fold at most ONCE for that pending set — never
-    // reconnect every T seconds while the user decides (that would thrash the log).
+    // The watchdog must re-fold at most once for a pending set the user has not answered.
     let conn = 0;
     const interruptFrame = { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "ext-1", outcome: { type: "interrupt", interrupts: [{ id: "aws1", reason: "confirmation", message: "approve AWS?" }] } } };
-    // Every connection serves the SAME still-pending log then stays open + silent.
+    // Every connection serves the same still-pending log then stays open and silent.
     const pendingBody = () => {
       const enc = new TextEncoder();
       return new ReadableStream({
@@ -814,11 +753,10 @@ describe("IntegrityAgent", () => {
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl, idleReconnectMs: 80 });
     const stop = agent.renderPump();
 
-    // Give it long enough for MANY watchdog windows (5+ at 80ms) to elapse.
+    // Long enough for several watchdog windows to elapse.
     await new Promise((r) => setTimeout(r, 500));
-    expect(agent.getPendingInterrupts().map((p) => p.id)).toContain("aws1"); // still pending (real approval)
-    // One-shot: exactly ONE healing reconnect for the pending set (conn 1 initial +
-    // conn 2 the single re-fold). NOT a reconnect every window.
+    expect(agent.getPendingInterrupts().map((p) => p.id)).toContain("aws1");
+    // The initial connection plus exactly one healing reconnect.
     expect(conn).toBe(2);
 
     stop();
@@ -826,17 +764,12 @@ describe("IntegrityAgent", () => {
   });
 
   it("IDLE WATCHDOG: recovery heals the WHOLE UI surface at once (feed + running + queue + interrupts + error)", async () => {
-    // A realistic 'agent seemed dead' snapshot: the live stream shows a completed
-    // first turn, a SECOND run in flight (RUN_STARTED), a phantom queued follow-up,
-    // a stale error banner, AND a stuck interrupt — because the live frames that
-    // would have cleared each (RUN_FINISHED, QUEUE_UPDATED([]), the next
-    // RUN_STARTED, PERMISSION_RESOLVED) were all dropped. One watchdog reconnect
-    // re-folds the persisted log and every field must heal together.
+    // Every live frame that would have cleared a field was dropped, so one watchdog reconnect must heal all of them together.
     let conn = 0;
     const stuckBody = () => {
       const enc = new TextEncoder();
       const frames = [
-        // First turn: a real user message + assistant reply (must SURVIVE recovery).
+        // A first turn that must survive recovery.
         { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "u1", role: "user" } },
         { kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "list the files" } },
         { kind: "event", event: { type: "TEXT_MESSAGE_END", messageId: "u1" } },
@@ -845,25 +778,23 @@ describe("IntegrityAgent", () => {
         { kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "a1", delta: "here you go" } },
         { kind: "event", event: { type: "TEXT_MESSAGE_END", messageId: "a1" } },
         { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "r1" } },
-        // A stale RUN_ERROR the NEXT run should clear (self-heal class).
+        // A stale RUN_ERROR the next run should clear.
         { kind: "event", event: { type: "RUN_ERROR", message: "transient blip" } },
-        // Second run starts + a follow-up queues behind it + a permission interrupt.
+        // A second run, a queued follow-up and a permission interrupt.
         { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r2" } },
         { kind: "event", event: { type: "QUEUE_UPDATED", items: [{ id: "q1", text: "and then delete tmp", priority: 0 }] } },
         { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "ext-1", outcome: { type: "interrupt", interrupts: [{ id: "perm1", reason: "confirmation", message: "ok to delete?" }] } } },
         { kind: "synced" },
-        // ...then the stream goes SILENT. The frames that would resolve r2 +
-        // clear the queue + settle perm1 never arrive on this connection.
+        // The frames that would resolve r2, clear the queue and settle perm1 never arrive on this connection.
       ];
       return new ReadableStream({
         start(c) {
           for (const f of frames) c.enqueue(enc.encode(`data: ${JSON.stringify(f)}\n\n`));
-          // deliberately DO NOT close.
+          // deliberately not closed
         },
       });
     };
-    // Connection 2 — the PERSISTED log, fully resolved: r2 finished, the queue
-    // cleared, the error superseded, the permission settled.
+    // Connection 2: the persisted log, fully resolved.
     const healedBody = [
       { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "u1", role: "user" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "list the files" } },
@@ -895,55 +826,51 @@ describe("IntegrityAgent", () => {
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl, idleReconnectMs: 80 });
     const stop = agent.renderPump();
 
-    // BEFORE recovery: the UI is visibly wedged on multiple fronts.
+    // Before recovery the UI is wedged on every front.
     await new Promise((r) => setTimeout(r, 60));
     const before = uiState(agent);
-    expect(before.running).toBe(true);                    // r2 stuck running
-    expect(before.queue).toEqual(["and then delete tmp"]); // phantom queue
-    expect(before.interrupts).toContain("perm1");          // stuck approval
-    expect(before.feedText).toContain("here you go");      // first turn present
+    expect(before.running).toBe(true);
+    expect(before.queue).toEqual(["and then delete tmp"]);
+    expect(before.interrupts).toContain("perm1");
+    expect(before.feedText).toContain("here you go");
 
-    // AFTER the watchdog reconnect: EVERY field heals from the persisted log.
+    // After the watchdog reconnect every field heals from the persisted log.
     await new Promise((r) => setTimeout(r, 400));
     const after = uiState(agent);
-    expect(conn).toBeGreaterThanOrEqual(2);                // a reconnect happened
-    expect(after.running).toBe(false);                     // r2 finished
+    expect(conn).toBeGreaterThanOrEqual(2);
+    expect(after.running).toBe(false);
     expect(after.activeTool).toBeNull();
-    expect(after.queue).toEqual([]);                       // queue cleared
-    expect(after.interrupts).not.toContain("perm1");       // approval settled
-    expect(after.runError).toBeNull();                     // error superseded
-    // The transcript is intact AND grew (the second turn's reply is now folded).
+    expect(after.queue).toEqual([]);
+    expect(after.interrupts).not.toContain("perm1");
+    expect(after.runError).toBeNull();
+    // The transcript is intact and grew by the second turn's reply.
     expect(after.feedText).toContain("here you go");
     expect(after.feedText).toContain("done, tmp deleted");
 
     stop();
     agent.dispose();
   });
-  // --- IDLE DESYNC BUG: watchdog must fire on IDLE conversations too -----------
+  // --- the watchdog must fire on idle conversations too -----------
 
   it("IDLE DESYNC: a dropped stream on an IDLE conversation (running===false) forces a reconnect", async () => {
-    // THE REPORTED BUG: conversation is IDLE (no run in-flight, no pending
-    // interrupt), the stream dies (e.g. ingress restart), and the UI never
-    // reconnects because the watchdog only checked `running || interruptStuck`.
-    // This test MUST FAIL before the fix.
+    // A stream that dies on an idle conversation must still be reconnected by the liveness check.
     let conn = 0;
     const idleDeadBody = () => {
       const enc = new TextEncoder();
       return new ReadableStream({
         start(c) {
-          // A complete, finished turn — running===false.
+          // A complete, finished turn.
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "m1", role: "assistant" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: "done" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "TEXT_MESSAGE_END", messageId: "m1" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "r1" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "synced" })}\n\n`));
-          // Stream is now synced + idle (running===false, no interrupts) and DIES
-          // (deliberately do NOT close or send heartbeats — simulates a silent drop).
+          // The stream then goes silent with no close and no heartbeats.
         },
       });
     };
-    // Connection 2: same history, proves reconnect happened.
+    // Connection 2: the same history.
     const healedBody = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "m1", role: "assistant" } },
@@ -964,30 +891,25 @@ describe("IntegrityAgent", () => {
 
     const agent = createIntegrityAgent({
       baseUrl: "http://host", conversationId: "c1", fetchImpl,
-      idleReconnectMs: 100, // liveness window: reconnect if NO frame for >100ms
+      idleReconnectMs: 100,
     });
     const stop = agent.renderPump();
 
-    // Wait for connection 1 to sync (idle, running===false).
+    // Wait for connection 1 to sync.
     await new Promise((r) => setTimeout(r, 60));
-    expect(agent.runIsActive()).toBe(false); // idle
-    expect(agent.getPendingInterrupts()).toHaveLength(0); // no approvals
+    expect(agent.runIsActive()).toBe(false);
+    expect(agent.getPendingInterrupts()).toHaveLength(0);
 
-    // Wait past the liveness window (>100ms of silence) — the watchdog MUST
-    // reconnect even though running===false and no interrupts are pending.
+    // Past the liveness window the watchdog must reconnect even with nothing running or pending.
     await new Promise((r) => setTimeout(r, 250));
-    expect(conn).toBeGreaterThanOrEqual(2); // reconnect happened (FAILS before fix)
+    expect(conn).toBeGreaterThanOrEqual(2);
 
     stop();
     agent.dispose();
   });
 
   it("HEARTBEAT IS ACTIVITY: a quiet stream that receives ONLY heartbeats does NOT reconnect", async () => {
-    // Defect 2 guard: if we fix "heartbeats count as activity" but break the
-    // liveness check, a healthy quiet stream churns reconnects every window.
-    // Feed ONLY `: ping\n\n` (no data: frames) for 3× the idle window — assert
-    // NO reconnect (the heartbeats keep it alive). MUST FAIL if heartbeats don't
-    // reset the activity clock.
+    // Only heartbeats arrive for several idle windows, and they must keep the stream alive.
     let conn = 0;
     const heartbeatBody = () => {
       const enc = new TextEncoder();
@@ -995,13 +917,13 @@ describe("IntegrityAgent", () => {
       let closeTimer: any;
       return new ReadableStream({
         start(c) {
-          // Synced immediately (no history).
+          // Synced immediately with no history.
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "synced" })}\n\n`));
-          // Then ONLY heartbeats (`: ping\n\n`) every 40ms, no events.
+          // Then only heartbeats every 40ms.
           timer = setInterval(() => {
             c.enqueue(enc.encode(`: ping\n\n`));
           }, 40);
-          // Keep the stream open for ~500ms (5× the 100ms window).
+          // Keep the stream open for five idle windows.
           closeTimer = setTimeout(() => { clearInterval(timer); c.close(); }, 500);
         },
         cancel() {
@@ -1021,24 +943,22 @@ describe("IntegrityAgent", () => {
 
     const agent = createIntegrityAgent({
       baseUrl: "http://host", conversationId: "c1", fetchImpl,
-      idleReconnectMs: 100, // liveness: reconnect if NO frame for >100ms
+      idleReconnectMs: 100,
     });
     const stop = agent.renderPump();
 
-    // Wait 3× the idle window (heartbeats are arriving every 40ms).
+    // Wait several idle windows while heartbeats arrive.
     await new Promise((r) => setTimeout(r, 350));
 
-    // NO reconnect — the heartbeats kept the stream alive.
-    expect(conn).toBe(1); // FAILS if heartbeats don't count as activity
+    // The heartbeats kept the stream alive.
+    expect(conn).toBe(1);
 
     stop();
     agent.dispose();
   });
 
   it("HEARTBEAT STOPS: when heartbeats STOP arriving, the watchdog reconnects EXACTLY ONCE", async () => {
-    // Heartbeats arrive normally, then STOP (simulates a stalled connection that
-    // never closes). The liveness check must fire EXACTLY ONE reconnect — not a
-    // storm, and not zero (the stream is dead).
+    // Heartbeats stop without the connection closing, and the liveness check must fire exactly one reconnect.
     let conn = 0;
     const stalledBody = () => {
       const enc = new TextEncoder();
@@ -1046,13 +966,13 @@ describe("IntegrityAgent", () => {
       return new ReadableStream({
         start(c) {
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "synced" })}\n\n`));
-          // Heartbeats for ~80ms, then SILENCE (stalled connection).
+          // Heartbeats for ~80ms, then silence.
           let count = 0;
           timer = setInterval(() => {
             if (count++ < 3) {
               c.enqueue(enc.encode(`: ping\n\n`));
             } else {
-              clearInterval(timer); // stop sending, but DO NOT close
+              clearInterval(timer); // stop sending without closing
             }
           }, 25);
         },
@@ -1078,12 +998,10 @@ describe("IntegrityAgent", () => {
     });
     const stop = agent.renderPump();
 
-    // Wait long enough for the heartbeats to stop + the liveness window to expire.
-    // Heartbeats run for 3×25ms = 75ms, then stop. Liveness window = 100×2.4 = 240ms.
-    // So reconnect should happen at ~75+240 = 315ms. Wait 450ms to be safe.
+    // Heartbeats stop at ~75ms and the liveness window is 240ms, so the reconnect lands at ~315ms.
     await new Promise((r) => setTimeout(r, 450));
 
-    // EXACTLY ONE reconnect (conn 1 stalled → conn 2), not a storm.
+    // Exactly one reconnect, not a storm.
     expect(conn).toBe(2);
 
     stop();
@@ -1091,25 +1009,22 @@ describe("IntegrityAgent", () => {
   });
 
   it("POST-RECONNECT CONVERGENCE: the folded state matches the server log EXACTLY (same events, order, checksum)", async () => {
-    // The most important test: after ANY forced reconnect (idle desync, stalled
-    // heartbeat, whatever), the client's folded state must equal the server's
-    // authoritative log EXACTLY — same event set, same order, same final message
-    // content. Not "it reconnected" — "it CONVERGED".
+    // After a forced reconnect the folded state must equal the server's log exactly.
     let conn = 0;
     const partialBody = () => {
       const enc = new TextEncoder();
       return new ReadableStream({
         start(c) {
-          // Connection 1: partial history (RUN_STARTED, partial message, NO RUN_FINISHED).
+          // Connection 1: partial history with no RUN_FINISHED.
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "m1", role: "assistant" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: "partial…" } })}\n\n`));
           c.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "synced" })}\n\n`));
-          // Stream stalls (no RUN_FINISHED, no more content).
+          // The stream stalls here.
         },
       });
     };
-    // Connection 2: the FULL, COMPLETE log from the server.
+    // Connection 2: the complete log.
     const completeLog = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "m1", role: "assistant" } },
@@ -1136,22 +1051,20 @@ describe("IntegrityAgent", () => {
     });
     const stop = agent.renderPump();
 
-    // Wait for connection 1 (partial state).
+    // Wait for connection 1's partial state.
     await new Promise((r) => setTimeout(r, 60));
     const partial = uiState(agent);
-    expect(partial.running).toBe(true); // stuck mid-run
+    expect(partial.running).toBe(true);
     expect(partial.feedText).toContain("partial…");
-    expect(partial.feedText).not.toContain("complete now"); // missing tail
+    expect(partial.feedText).not.toContain("complete now");
 
-    // Wait for reconnect + re-fold from the complete log.
+    // Wait for the reconnect and re-fold from the complete log.
     await new Promise((r) => setTimeout(r, 300));
     const converged = uiState(agent);
-    expect(conn).toBe(2); // reconnected
-    // CONVERGENCE: the folded state now matches the server's complete log.
-    expect(converged.running).toBe(false); // RUN_FINISHED applied
-    expect(converged.feedText).toContain("partial… complete now"); // FULL content
-    // The final message text is EXACTLY what the server log contains (not doubled,
-    // not truncated).
+    expect(conn).toBe(2);
+    expect(converged.running).toBe(false);
+    expect(converged.feedText).toContain("partial… complete now");
+    // The final text is neither doubled nor truncated.
     const messages = (agent as unknown as { messages: Array<{ content?: unknown }> }).messages;
     const finalContent = messages.map((m) => {
       const c = m.content;
@@ -1164,9 +1077,7 @@ describe("IntegrityAgent", () => {
   });
 
   it("NO DUPLICATES ON RECONNECT: replay after reconnect does not double-apply already-folded events", async () => {
-    // The server dedups by checksum (each event has one). Assert a replay after
-    // reconnect does not double tool-call args or duplicate messages — the
-    // page-refresh replay bug guard, but for a mid-session reconnect.
+    // A replay after a mid-session reconnect must not double tool-call args or duplicate messages.
     let conn = 0;
     const log = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
@@ -1180,7 +1091,7 @@ describe("IntegrityAgent", () => {
       { kind: "synced" },
     ];
     const body = log.map((f) => `data: ${JSON.stringify(f)}\n\n`).join("");
-    const stalled = () => new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(body)); /* DO NOT close */ } });
+    const stalled = () => new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(body)); /* not closed */ } });
 
     const fetchImpl = vi.fn(async (url: string) => {
       if (typeof url === "string" && url.includes("/tail")) {
@@ -1188,7 +1099,7 @@ describe("IntegrityAgent", () => {
       }
       conn += 1;
       if (conn === 1) return new Response(stalled(), { status: 200, headers: { "content-type": "text/event-stream" } });
-      // Connection 2: the SAME log (a replay).
+      // Connection 2: the same log.
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }) as unknown as typeof fetch;
 
@@ -1199,15 +1110,13 @@ describe("IntegrityAgent", () => {
     const stop = agent.renderPump();
 
     await new Promise((r) => setTimeout(r, 60)); // connection 1 folds
-    await new Promise((r) => setTimeout(r, 300)); // reconnect + replay
+    await new Promise((r) => setTimeout(r, 300)); // reconnect and replay
 
-    expect(conn).toBe(2); // reconnected
-    // NO DOUBLE-APPLICATION: tool args are NOT doubled.
+    expect(conn).toBe(2);
     const messages = (agent as unknown as { messages: Array<{ toolCalls?: Array<{ function: { arguments: string } }> }> }).messages;
     const withTool = messages.filter((m) => (m.toolCalls?.length ?? 0) > 0);
     expect(withTool.length).toBe(1);
-    expect(withTool[0].toolCalls![0].function.arguments).toBe('{"cmd":"ls"}'); // NOT '{"cmd":"ls"}{"cmd":"ls"}'
-    // Exactly ONE assistant message with the tool call (not two).
+    expect(withTool[0].toolCalls![0].function.arguments).toBe('{"cmd":"ls"}');
     expect(messages.filter((m) => JSON.stringify(m).includes("bash")).length).toBe(1);
 
     stop();
@@ -1215,9 +1124,7 @@ describe("IntegrityAgent", () => {
   });
 
   it("EVENTS WHILE DISCONNECTED ARE NOT LOST: append N events server-side during a drop, all N appear on reconnect", async () => {
-    // The server keeps appending events to the log while a client is disconnected.
-    // On reconnect, the replay MUST contain ALL those events (in order), not just
-    // the ones the client saw before the drop.
+    // The replay after a reconnect must contain every event appended during the drop, in order.
     let conn = 0;
     const initialLog = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
@@ -1228,16 +1135,16 @@ describe("IntegrityAgent", () => {
     const initialBody = () => new ReadableStream({
       start(c) {
         for (const f of initialLog) c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(f)}\n\n`));
-        // Stream stalls (no close).
+        // The stream stalls here.
       },
     });
 
-    // While disconnected, the server appended MORE events to the log (a tool call).
+    // The server appended more events while the client was disconnected.
     const reconnectedLog = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "m1", role: "assistant" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: "initial" } },
-      // NEW events appended while the client was disconnected:
+      // Appended while the client was disconnected.
       { kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: " + new events" } },
       { kind: "event", event: { type: "TEXT_MESSAGE_END", messageId: "m1" } },
       { kind: "event", event: { type: "TOOL_CALL_START", toolCallId: "t1", toolCallName: "bash" } },
@@ -1266,30 +1173,25 @@ describe("IntegrityAgent", () => {
     await new Promise((r) => setTimeout(r, 60));
     const before = uiState(agent);
     expect(before.feedText).toContain("initial");
-    expect(before.feedText).not.toContain("new events"); // not yet
+    expect(before.feedText).not.toContain("new events");
 
     await new Promise((r) => setTimeout(r, 300)); // reconnect
     const after = uiState(agent);
     expect(conn).toBe(2);
-    // ALL new events appeared, in order.
     expect(after.feedText).toContain("initial + new events");
-    expect(after.running).toBe(false); // RUN_FINISHED applied
+    expect(after.running).toBe(false);
     const messages = (agent as unknown as { messages: Array<{ toolCalls?: Array<{ function: { name: string } }> }> }).messages;
     const tools = messages.flatMap((m) => m.toolCalls ?? []).map((tc) => tc.function.name);
-    expect(tools).toContain("bash"); // the new tool call appeared
+    expect(tools).toContain("bash");
 
     stop();
     agent.dispose();
   });
 
   it("BACKGROUNDED TAB: visibilitychange forces a reconnect + resync when the tab becomes visible", async () => {
-    // Browsers throttle background-tab timers, so a backgrounded tab misses the
-    // watchdog window entirely. A visibilitychange handler must force a
-    // reconnect-and-refold when the tab becomes visible so the user sees current
-    // state, not stale pre-background state. This test will FAIL until F3 is
-    // implemented.
+    // A backgrounded tab misses the watchdog window, so visibilitychange must force a reconnect.
 
-    // Mock document for Node test environment
+    // A mock document for the Node test environment.
     const listeners = new Map<string, Set<EventListener>>();
     const mockDocument = {
       visibilityState: "hidden",
@@ -1316,7 +1218,7 @@ describe("IntegrityAgent", () => {
     const stalledBody = () => new ReadableStream({
       start(c) {
         for (const f of stalledLog) c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(f)}\n\n`));
-        // Stream stalls (simulates: tab was backgrounded, stream went silent, tab now foreground again).
+        // The stream stalls while the tab is backgrounded.
       },
     });
     const freshLog = [
@@ -1346,19 +1248,18 @@ describe("IntegrityAgent", () => {
 
     await new Promise((r) => setTimeout(r, 60));
     const before = uiState(agent);
-    expect(before.running).toBe(true); // stale (stuck mid-run)
+    expect(before.running).toBe(true);
     expect(before.feedText).not.toContain("fresh state");
 
-    // Simulate the tab becoming visible (fire visibilitychange).
-    // The agent MUST listen for this and force a reconnect.
+    // The tab becomes visible.
     mockDocument.visibilityState = "visible";
     mockDocument.dispatchEvent(new Event("visibilitychange"));
 
     // Wait for the forced reconnect to complete.
     await new Promise((r) => setTimeout(r, 200));
     const after = uiState(agent);
-    expect(conn).toBeGreaterThanOrEqual(2); // visibilitychange forced a reconnect (FAILS before F3)
-    expect(after.running).toBe(false); // fresh state from the log
+    expect(conn).toBeGreaterThanOrEqual(2);
+    expect(after.running).toBe(false);
     expect(after.feedText).toContain("fresh state");
 
     stop();
@@ -1367,9 +1268,7 @@ describe("IntegrityAgent", () => {
   });
 
   it("STREAM AUTH ERROR: a 401 on the stream surfaces getStreamAuthError() (not a silent retry loop), then self-clears on recovery", async () => {
-    // An expired ingress/auth session in front of the agent-host makes the stream
-    // 401. The UI must SURFACE this durably (so it can show a banner) instead of
-    // silently reconnecting forever pretending the agent is alive.
+    // An expired auth session 401s the stream, which must be surfaced rather than silently retried.
     let authValid = false; // starts expired
     const okBody = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
@@ -1388,12 +1287,10 @@ describe("IntegrityAgent", () => {
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl, idleReconnectMs: 0 });
     const stop = agent.renderPump();
 
-    // The auth error is surfaced (not silently swallowed).
     await new Promise((r) => setTimeout(r, 60));
     expect(agent.getStreamAuthError()).toBe(true);
 
-    // Auth renewed (the ingress refreshed the session) — the next reconnect
-    // succeeds and the flag self-clears, no reload required.
+    // Once auth is renewed the next reconnect succeeds and the flag self-clears.
     authValid = true;
     await new Promise((r) => setTimeout(r, 5200)); // past the 5s auth back-off
     expect(agent.getStreamAuthError()).toBe(false);
@@ -1422,11 +1319,7 @@ describe("IntegrityAgent", () => {
   });
 
   it("cancel() RETRIES a 404 through the assignment window, then succeeds", async () => {
-    // The first ~1-2s of a conversation: no owner assigned, the router's cache has no
-    // hostIP, and the cancel POST lands on a random pod that answers 404 — while this
-    // client is actively STREAMING the conversation, so it demonstrably exists.
-    // Observed live: an immediate Stop 404'd in the same second as the run's first
-    // prompt and the status bar never cleared. Retrying rides out the window.
+    // Before the controller assigns an owner the cancel POST lands on a pod that answers 404, which retrying rides out.
     let calls = 0;
     const fetchSpy = vi.fn(async () => {
       calls++;
@@ -1440,9 +1333,7 @@ describe("IntegrityAgent", () => {
 
   it("cancel() still throws when the 404 persists (a truly deleted conversation)", async () => {
     const fetchSpy = vi.fn(async () => new Response("nf", { status: 404 })) as unknown as typeof fetch;
-    // cancelRetryDelayMs: the production 700ms × 9 attempts (~5.6s, sized to outlast a
-    // slow controller assignment tick) would blow the unit-test budget waiting on a
-    // response that never changes — compress the schedule, keep the attempt count.
+    // A compressed retry schedule keeps the attempt count within the unit-test budget.
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: fetchSpy, cancelRetryDelayMs: 5 });
     await expect(agent.cancel()).rejects.toThrow(/cancel request failed: 404/);
     expect(fetchSpy, "all 9 attempts must fire before giving up").toHaveBeenCalledTimes(9);
@@ -1460,7 +1351,6 @@ describe("IntegrityAgent", () => {
     expect(calls).toBe(1);
     agent.dispose();
   });
-
 
   it("cancel() THROWS on a network error (fetch rejects) rather than swallowing it", async () => {
     const fetchSpy = vi.fn(async () => {
@@ -1541,13 +1431,7 @@ describe("IntegrityAgent", () => {
 
   // --- the cluster's out-of-order tool-call shape --------------------------------
   //
-  // TIER-1 ISOLATION of a Tier-2 failure. On k3d, a COMPLETE durable log (verified:
-  // …TOOL_CALL_START, TOOL_CALL_END, TOOL_CALL_ARGS, TOOL_CALL_RESULT, …,
-  // RUN_FINISHED) still rendered no tool card, no assistant reply, and "Working…"
-  // forever. The distinctive feature of the real sequence: the bridge surfaces the
-  // command as TOOL_CALL_ARGS only when terminal/create delivers it — AFTER
-  // TOOL_CALL_END (goose's terminal-handoff shape). This replays the EXACT captured
-  // sequence, byte-for-byte in structure, and asserts the fold survives it.
+  // The bridge surfaces the command as TOOL_CALL_ARGS after TOOL_CALL_END (goose's terminal-handoff shape), and the fold must survive that sequence.
   it("folds the cluster's exact sequence: TOOL_CALL_ARGS arriving AFTER TOOL_CALL_END", async () => {
     const frames = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
@@ -1583,11 +1467,7 @@ describe("IntegrityAgent", () => {
     agent.dispose();
   });
 
-
-  // Same sequence, but delivered the way the CLUSTER delivers it: the browser connects
-  // to a near-empty log, is told `synced` immediately, and the run's events then arrive
-  // LIVE, paced out over seconds, on a stream that never closes (keepalive pings). The
-  // batch-replay variant above passes; if THIS fails, the bug is in the live path.
+  // The same sequence delivered live after an immediate `synced`, paced, on a stream that never closes.
   it("folds the same sequence delivered LIVE after synced, paced, on an open stream", async () => {
     const events = [
       { type: "RUN_STARTED", threadId: "c1", runId: "r1" },
@@ -1615,13 +1495,13 @@ describe("IntegrityAgent", () => {
       }
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
-          controller.enqueue(enc.encode('data: {"kind":"synced"}\n\n')); // caught up on an EMPTY log
+          controller.enqueue(enc.encode('data: {"kind":"synced"}\n\n')); // caught up on an empty log
           for (const e of events) {
             await new Promise((r) => setTimeout(r, 25)); // paced, like a live run
             controller.enqueue(enc.encode(`data: ${JSON.stringify({ kind: "event", event: e })}\n\n`));
           }
           controller.enqueue(enc.encode(": ping\n\n"));
-          // NEVER closes — a live stream stays open.
+          // A live stream never closes.
         },
       });
       return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
@@ -1648,29 +1528,14 @@ describe("IntegrityAgent", () => {
 
 describe("seedTail + full replay must not leave DUPLICATE message ids", () => {
   it("the seeded tail is not double-counted by the replay that follows it", async () => {
-    // REGRESSION GUARD for the white-screen crash (MessageRepository performOp/link:
-    // "A message with the same id already exists in the parent tree"), which unmounts
-    // <ConversationRuntime> and blanks the whole page.
-    //
-    // This exercises the seeded-first-connection path, which NO other test covers: the
-    // rest pass no tailEvents, so seedTail no-ops. renderPump folds every physical
-    // connection "seeded from an EMPTY message list" so the replay rebuilds rather than
-    // doubles — but the `firstConn && seeded` branch exempts itself (a raw
-    // `this.messages = []` instead of setMessages([])) to avoid flashing the fast first
-    // paint away.
-    //
-    // NOTE: this path was a SUSPECT for the duplicate and is NOT the culprit — this test
-    // passes today. Keeping it as a guard: the exemption is genuinely subtle, it is the
-    // one place the "always fold from empty" invariant is deliberately broken, and it was
-    // previously untested. The actual source of the duplicate seen on CI is still
-    // unidentified; toRepositorySnapshot now dedupes so it cannot crash the thread.
+    // The seeded-first-connection path keeps the painted tail instead of resetting to empty, and duplicate ids would crash the message repository.
     const tail = [
       { type: "TEXT_MESSAGE_START", messageId: "u1", role: "user" },
       { type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "hello" },
       { type: "TEXT_MESSAGE_END", messageId: "u1" },
       { type: "RUN_FINISHED", threadId: "c1", runId: "r0" },
     ];
-    // The full replay contains that SAME turn (the tail is a suffix of the log).
+    // The full replay contains the same turn, since the tail is a suffix of the log.
     const frames = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r0" } },
       ...tail.map((event) => ({ kind: "event", event })),
@@ -1707,9 +1572,7 @@ describe("seedTail + full replay must not leave DUPLICATE message ids", () => {
 
 describe("an UNCREATED conversation never reaches the server", () => {
   it("renderPump does NOT open a stream while conversationId is undefined", async () => {
-    // The reported bug: the pump streamed a local placeholder, 404'd, and reconnected
-    // three times in four seconds — which produced a duplicate start whose dangling run
-    // injected a spurious "interrupted by a restart" message.
+    // Streaming a local placeholder would 404 and reconnect in a loop.
     const fetchImpl = vi.fn(async () => new Response("", { status: 404 }));
     const agent = createIntegrityAgent({
       baseUrl: "http://host",
@@ -1750,10 +1613,7 @@ describe("an UNCREATED conversation never reaches the server", () => {
     stop();
 
     expect(fetchImpl).toHaveBeenCalled();
-    // What matters is WHICH id is addressed, not the order. The pump starts immediately
-    // (deferring its start broke stop-run — the run's events were missed) and simply
-    // skips connections until an id exists; every request it does make must name the
-    // SERVER id, never the local key.
+    // Every request the pump makes must name the server id, never the local key.
     const urls = fetchImpl.mock.calls.map((c) => String((c as unknown[])[0]));
     for (const u of urls) expect(u).toContain("/conversations/server-1/");
     expect(urls.some((u) => u.includes("/events.integrity"))).toBe(true);

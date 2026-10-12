@@ -1,20 +1,14 @@
-# nixosTest: the webServices option renders a proxyable unit + the
-# discovery manifest, honours explicit-start, and serves under its base path.
-#
-# Uses a FAKE web service (a python http.server under a base path) rather than the
-# marimo built-in, so the VM stays hermetic (no lazy `nix build marimo` inside the
-# test). Proves the contract the agent-host WebServiceRegistry + proxy rely on:
-#   - /run/scooter/web-services.json lists { name, port, basePath, unit }
-#   - the unit is NOT auto-started (explicit-start model)
-#   - `systemctl start webservice-<name>` brings it up, listening on its port
-#   - it serves content under the declared basePath (sub-path serving)
+# nixosTest: the webServices option renders a proxyable unit and the discovery
+# manifest, honours explicit start, and serves under its base path. A fake python
+# http.server stands in for a real web service so the VM stays hermetic. This is
+# the contract the agent-host WebServiceRegistry and proxy rely on:
+# /run/scooter/web-services.json lists { name, port, basePath, unit }, the unit is
+# not auto-started, and `systemctl start webservice-<name>` brings it up on its port.
 
 { pkgs, lib, sandboxModule }:
 
 let
-  # A tiny sub-path-aware server: 200 only under /c/<id>/demo/, 404 elsewhere —
-  # stands in for marimo --base-url. Reads CONVERSATION_ID from the env like the
-  # real services do.
+  # A tiny sub-path-aware server: 200 under /c/<id>/demo/, 404 elsewhere, reading CONVERSATION_ID from the env like the real services.
   demoServer = pkgs.writeShellScript "demo-web-service" ''
     set -euo pipefail
     base="/c/''${CONVERSATION_ID:-unknown}/demo"
@@ -39,19 +33,10 @@ pkgs.testers.runNixOSTest {
   nodes.machine = { lib, ... }: {
     imports = [ sandboxModule ];
 
-    # Reproduce production's env delivery: the provisioner injects CONVERSATION_ID as
-    # CONTAINER env, which lands on PID 1's environ but NOT in systemd's manager env.
-    # The kernel passes unrecognized `key=VALUE` cmdline args to INIT's environment —
-    # exactly how a container's runtime seeds init's environ — so kernelParams puts
-    # CONVERSATION_ID on /proc/1/environ while leaving the systemd manager env (and thus
-    # every unit's `environment`) without it. The web-services module must recover it
-    # from /proc/1/environ (the fix). We deliberately do NOT set it via the service
-    # `environment` — that would mask the bug.
+    # Unrecognised kernel cmdline args land on PID 1's environ but not in the systemd manager env, reproducing how the container runtime delivers CONVERSATION_ID in production.
     boot.kernelParams = [ "CONVERSATION_ID=conv-test" ];
 
-    # The built-in `terminal` (ttyd + tmux) — enabled to prove it RENDERS a proxyable
-    # unit + manifest entry. NOT started here (ttyd is a lazy tool that would `nix build`
-    # inside the VM); we only assert the declaration, like a marimo/vscode would.
+    # The built-in `terminal` is enabled to assert its declaration only; starting it would `nix build` ttyd inside the VM.
     webServices.terminal.enable = true;
 
     webServices.demo = {
@@ -59,10 +44,8 @@ pkgs.testers.runNixOSTest {
       port = 9911;
       displayName = "Demo";
       command = "${demoServer}";
-      # No environment.CONVERSATION_ID here on purpose — the module must source it from
-      # PID 1's environ, so a 200 under /c/conv-test/demo/ proves the fix end-to-end.
-      # extraConfig escape hatch: arbitrary generic systemd config merged into the
-      # unit (proves the deferredModule merge).
+      # No environment.CONVERSATION_ID: the module must source it from PID 1's environ.
+      # Arbitrary systemd config merged into the unit.
       extraConfig = {
         unitConfig.X-Web-Service-Test = "yes";
         serviceConfig.LimitNOFILE = 4242;
@@ -73,7 +56,7 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     machine.wait_for_unit("default.target")
 
-    # 1. Discovery manifest lists the service (the agent-host reads this).
+    # 1. The discovery manifest lists the service.
     manifest = machine.succeed("cat /run/scooter/web-services.json")
     import json
     data = json.loads(manifest)
@@ -82,60 +65,47 @@ pkgs.testers.runNixOSTest {
     assert svc["unit"] == "webservice-demo", svc
     assert svc["basePath"].endswith("/demo"), svc
 
-    # 1b. The service's port is OPEN in the firewall — the actual bug: the default
-    # NixOS firewall (on) DROPs inbound TCP from other pods, so the agent-host's
-    # pod-to-pod proxy (podIP:port, NOT loopback) hung. Assert the port is accepted
-    # by the nixos-fw chain (localhost curls below never exercise this — loopback is
-    # always allowed). See web-service-proxy-blocked-by-firewall.
-    machine.succeed("systemctl is-active --quiet firewall")  # firewall IS on (defense-in-depth)
+    # 1b. The service's port is open in the firewall, which the loopback curls below never exercise.
+    machine.succeed("systemctl is-active --quiet firewall")
     machine.succeed("iptables -S nixos-fw | grep -E -- '--dport 9911 .*-j nixos-fw-accept'")
 
-    # 2. Explicit-start: the unit exists but is NOT running until asked.
+    # 2. Explicit start: the unit exists but is not running until asked.
     machine.succeed("systemctl cat webservice-demo.service >/dev/null")
     machine.fail("systemctl is-active --quiet webservice-demo.service")
 
-    # extraConfig (deferredModule) merged into the unit.
+    # extraConfig merged into the unit.
     unit = machine.succeed("systemctl cat webservice-demo.service")
     assert "X-Web-Service-Test=yes" in unit, unit
     assert "LimitNOFILE=4242" in unit, unit
     machine.fail("curl -fsS http://localhost:9911/c/conv-test/demo/ >/dev/null")
 
-    # 2b. CONVERSATION_ID is on PID 1's environ (via kernelParams, the container-env
-    # analog) but NOT in the systemd manager env — so the service unit does NOT declare
-    # it. A working base path can therefore only come from the module's ExecStartPre
-    # recovering it from /proc/1/environ.
+    # 2b. CONVERSATION_ID is on PID 1's environ but not declared by the unit, so a working base path can only come from the module recovering it from /proc/1/environ.
     machine.succeed("tr '\\0' '\\n' < /proc/1/environ | grep -q '^CONVERSATION_ID=conv-test'")
     assert "CONVERSATION_ID" not in machine.succeed("systemctl cat webservice-demo.service"), "must not be in the unit env"
 
-    # 3. Start it (the agent-host does this via exec on the UI Start button).
+    # 3. Start it, as the agent-host does via exec.
     machine.succeed("systemctl start webservice-demo.service")
     machine.wait_for_open_port(9911)
 
-    # 4. Serves under the base path — proving the ExecStartPre recovered CONVERSATION_ID
-    # from /proc/1/environ (else base = /c//demo → this 200 would be a 404). 404 outside
-    # it (sub-path serving). See bug: web-service CONVERSATION_ID empty in the unit.
+    # 4. Serves under the base path and 404s outside it.
     machine.succeed("curl -fsS http://localhost:9911/c/conv-test/demo/ | grep -q demo-ok")
     machine.succeed("test $(curl -s -o /dev/null -w '%{http_code}' http://localhost:9911/other) = 404")
 
-    # 4b. scooter-service CLI drives the units without a rebuild (human/agent shell).
+    # 4b. The scooter-service CLI drives the units without a rebuild.
     machine.succeed("command -v scooter-service")
-    machine.succeed("scooter-service list | grep -q demo")            # lists the service
-    machine.succeed("scooter-service status demo | grep -q active")   # running now
-    machine.succeed("scooter-service stop demo")                      # stop it
-    machine.succeed("! systemctl is-active --quiet webservice-demo.service")  # stopped
-    machine.succeed("scooter-service start demo")                     # start again
+    machine.succeed("scooter-service list | grep -q demo")
+    machine.succeed("scooter-service status demo | grep -q active")
+    machine.succeed("scooter-service stop demo")
+    machine.succeed("! systemctl is-active --quiet webservice-demo.service")
+    machine.succeed("scooter-service start demo")
     machine.wait_until_succeeds("systemctl is-active --quiet webservice-demo.service", timeout=30)
-    machine.fail("scooter-service start nope")                        # unknown → non-zero
+    machine.fail("scooter-service start nope")
 
-    # 5. The built-in `terminal` renders correctly (declaration only — not started, so no
-    #    lazy ttyd build in the VM). It's in the manifest and its unit runs ttyd + tmux
-    #    under the /terminal base path.
+    # 5. The built-in `terminal` is in the manifest and its unit runs ttyd + tmux under the /terminal base path.
     term = { s["name"]: s for s in data["services"] }["terminal"]
     assert term["unit"] == "webservice-terminal", term
     assert term["basePath"].endswith("/terminal"), term
-    # ExecStart points at the terminal wrapper script; its CONTENTS run ttyd + tmux under
-    # the /terminal base path, writable. Resolve the store path (appears twice in the
-    # ExecStart value — path= + argv[0]) with `head -1`, then read the body.
+    # The wrapper's store path appears twice in the ExecStart value, so take the first.
     exec_start = machine.succeed(
         "systemctl show webservice-terminal.service -p ExecStart --value "
         "| grep -oE '/nix/store/[a-z0-9]+-terminal-web-service' | head -1"
@@ -143,6 +113,6 @@ pkgs.testers.runNixOSTest {
     wrapper = machine.succeed(f"cat '{exec_start}'")
     assert "ttyd" in wrapper and "tmux" in wrapper, wrapper
     assert "--base-path" in wrapper and "--writable" in wrapper, wrapper
-    machine.fail("systemctl is-active --quiet webservice-terminal.service")  # explicit-start
+    machine.fail("systemctl is-active --quiet webservice-terminal.service")
   '';
 }

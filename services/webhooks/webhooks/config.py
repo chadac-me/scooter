@@ -1,13 +1,8 @@
 """Webhooks service configuration.
 
-Stays in the app by design (PR #567). `DatabaseSettings` satisfies
-`scooter_webhooks_lib.store.DatabaseConfig` structurally — the lib's store takes
-one as an argument rather than importing this module, so the DSN assembly below
-(and the secretKeyRef password it exists for) remains the app's business.
-
-The agent-host client takes the same treatment (PR #575): `app.py` hands it this
-settings object at startup, so a contrib handler can spawn a conversation through
-the lib without reaching into the app.
+`DatabaseSettings` structurally satisfies `scooter_webhooks_lib.store.DatabaseConfig`,
+and `app.py` hands the settings object to the lib's store and agent-host client at
+startup, so the lib never imports this module.
 """
 
 import hmac
@@ -23,27 +18,21 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class DatabaseSettings(BaseSettings):
-    """Conversation-mapping store. SQLite by default (dev). For a durable
-    Postgres store, either set DSN directly (postgresql+asyncpg://...) OR provide
-    DB_PASSWORD (+ optionally DB_HOST/DB_USER/DB_NAME/DB_PORT) and the DSN is
-    assembled — so the password can come from a k8s secretKeyRef without baking a
-    full connection string (with the password) into the manifest."""
+    """Conversation-mapping store settings: SQLite by default, or a Postgres DSN given directly or assembled from DB_PASSWORD plus the DB_* components so the password can come from a secretKeyRef."""
 
     dsn: str = "sqlite+aiosqlite:////tmp/webhooks.db"
-    db_host: str = "local"  # also informational, for logging
+    db_host: str = "local"
     db_port: int = 5432
     db_user: str = "webhooks"
-    db_password: str = ""  # set (e.g. via secretKeyRef) -> Postgres DSN assembled
+    db_password: str = ""  # when set, a Postgres DSN is assembled
     db_name: str = "webhooks"
-    db_sslmode: str = ""  # e.g. "require" for RDS; empty = no ssl param
+    db_sslmode: str = ""  # e.g. "require" for RDS; empty means no ssl param
 
     model_config = {"env_prefix": "", "case_sensitive": False}
 
     @model_validator(mode="after")
     def _assemble_dsn(self) -> "DatabaseSettings":
-        # If a password is provided and DSN wasn't explicitly set to Postgres,
-        # build the asyncpg DSN from the components. (A DSN that already names a
-        # driver wins — explicit override.)
+        # An explicit Postgres DSN wins over the assembled one.
         if self.db_password and not self.dsn.startswith("postgresql"):
             dsn = (
                 f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
@@ -58,40 +47,33 @@ class DatabaseSettings(BaseSettings):
 class WebhooksSettings(ScooterBaseSettings):
     """Settings specific to the webhooks service."""
 
-    # Overrides the lib's "" default on purpose: empty means "auto-linking off"
-    # to the broker, but a misconfiguration here. Don't collapse them. PR #572.
+    # Overrides the lib's "" default, which means "auto-linking off" to the broker but a misconfiguration here.
     agent_host_url: str = "http://agent-host.agent-sandbox.svc.cluster.local:8080"
 
-    # Root log level (LOG_LEVEL env). INFO by default; DEBUG for verbose tracing.
+    # Root log level, from LOG_LEVEL.
     log_level: str = "INFO"
 
-    # Bring-your-own-Claude: the HS256 signing key for join tokens (SAME secret the agent-host
-    # signs with). Set → webhooks verifies + proxies /claude-bridge/connect to the agent-host's
-    # internal /remote-agent/connect. Empty → the bridge is disabled (closes with 4404).
+    # Bring-your-own-Claude: the HS256 signing key for join tokens, shared with the agent-host; empty disables the bridge.
     remote_agent_join_secret: str = ""
 
-    # Shared API key for internal relay endpoints
+    # Shared API key for internal relay endpoints.
     relay_api_key: str = ""
 
-    # Test webhook (/webhooks/test) for e2e — OFF in prod.
+    # The /webhooks/test endpoint for e2e, off in prod.
     test_webhook_enabled: bool = False
 
-    # Trigger pattern (text mention) + issue/PR label that spawns a conversation
+    # Trigger pattern (text mention) and issue/PR label that spawn a conversation.
     mention_pattern: str = "@agent"
     label_trigger: str = "scooter"
 
     # Comment/review authors to drop (comma-separated), matched case-insensitively.
-    # GitLab payloads carry no bot flag, so this is the only author lever there.
     ignore_usernames: str = ""
 
-    # Deployment policy, read by handlers through scooter_webhooks_lib.policy.
-    # Fallback for when a handler cannot resolve the agent's own "<slug>[bot]"
-    # login: drop any Bot-authored comment/review that doesn't mention the agent.
-    # Its own comments otherwise come back as webhooks — at interrupt priority
-    # for reviews (PR #530).
+    # Deployment policy read through scooter_webhooks_lib.policy: drop a Bot-authored
+    # comment or review that does not mention the agent, so its own comments do not come back as webhooks.
     ignore_bot_authors: bool = True
 
-    # Pipe-separated repo descriptions
+    # Pipe-separated repo descriptions.
     repo_descriptions: str = ""
 
     model_config = {"env_prefix": "", "case_sensitive": False}

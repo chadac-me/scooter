@@ -1,8 +1,7 @@
 /**
- * UI unit test — the composer image-upload helpers (multimodal, stage 4).
- * imagesFromContent pulls image parts out of a message; parseDataUrl/base64Bytes
- * are the small utilities; downscaleImage passes through in a non-DOM context (the
- * server still enforces the cap).
+ * UI unit test for the composer image-upload helpers: imagesFromContent pulls image
+ * parts out of a message, parseDataUrl/base64Bytes are the small utilities, and
+ * downscaleImage passes through in a non-DOM context (the server still enforces the cap).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -58,9 +57,7 @@ describe("imagesFromContent", () => {
 });
 
 describe("imagesFromMessage (the real composer shape)", () => {
-  // @assistant-ui's composer sends { content: [text-only], attachments: [{content:[image]}] }.
-  // The image is in attachments[], NOT content — the regression that silently dropped
-  // every upload (PR #448). imagesFromMessage must union both.
+  // The composer puts the image in attachments[], not content, so imagesFromMessage must union both.
   it("extracts an image the composer put in message.attachments, not message.content", async () => {
     const message = {
       role: "user",
@@ -138,12 +135,10 @@ describe("imagesFromContent: blob URL conversion", () => {
       throw new Error(`Unexpected fetch URL: ${urlStr}`);
     }) as typeof global.fetch;
 
-    // Mock FileReader
     const mockFileReader = {
       readAsDataURL: vi.fn(function (this: FileReader, blob: Blob) {
-        // Simulate async FileReader
+        // FileReader is asynchronous.
         setTimeout(() => {
-          // Create a simple base64 data URL from the blob
           const result = `data:${blob.type};base64,bW9ja2VkYmxvYmRhdGE=`; // "mockedblobdata"
           Object.defineProperty(this, "result", { value: result, writable: true });
           this.onloadend?.({ target: this } as ProgressEvent<FileReader>);
@@ -225,11 +220,7 @@ describe("imagesFromContent: blob URL conversion", () => {
   });
 
   it("handles the SimpleImageAttachmentAdapter paste flow", async () => {
-    // Simulate what SimpleImageAttachmentAdapter does:
-    // 1. User pastes a screenshot
-    // 2. Adapter creates a blob URL
-    // 3. Message content has { type: "image", image: "blob:..." }
-    // 4. imagesFromContent() converts it to data URL
+    // The adapter turns a pasted screenshot into a blob URL in the message content, which imagesFromContent converts to a data URL.
     
     const pastedImageData = new Uint8Array([137, 80, 78, 71]); // PNG header
     const blob = new Blob([pastedImageData], { type: "image/png" });

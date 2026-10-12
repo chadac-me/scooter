@@ -1,14 +1,8 @@
-"""Echo (test) provider — a built-in provider for end-to-end credential-path
-testing, driven through the UI.
+"""The `test` provider for end-to-end credential-path testing.
 
-It carries no real secret. Its `whoami` transport authenticates the caller (the
-SAME per-conversation SA-token / TokenReview path every real provider uses) and
-returns the validated Identity, plus records the call. A dummy-agent
-conversation can hit `/test/whoami` (via the in-pod `agent-broker` shim) and the
-test asserts the broker confirmed the right identity (conversation_id / service
-account / IRSA) — proving the full UI -> agent -> pod -> broker -> back trip.
-
-Enabled only when config.test_provider_enabled (off in prod).
+It carries no real secret: its `whoami` transport authenticates the caller through the
+same SA-token path every real provider uses, returns the validated Identity and records
+the call. Enabled only when config.test_provider_enabled.
 """
 
 from __future__ import annotations
@@ -22,13 +16,11 @@ from scooter_broker_lib.sources.static_token import StaticTokenSource
 from scooter_broker_lib.transports.git_credential import GitCredential
 from scooter_broker_lib.transports.whoami import WhoAmI
 
-# A deterministic fake git credential the test provider vends, so the full
-# `git clone` / `git-credential-broker` path can be exercised end-to-end without
-# a real GitHub App. The host is a sentinel that maps to the `test` provider via
-# GIT_BROKER_HOST_MAP in the sandbox.
+# A deterministic fake git credential, for a sentinel host that GIT_BROKER_HOST_MAP in the
+# sandbox maps to the `test` provider.
 TEST_GIT_HOST = "test-git.local"
 TEST_GIT_USERNAME = "test-user"
-TEST_GIT_PASSWORD = "test-broker-token"  # noqa: S105 (fake, test-only)
+TEST_GIT_PASSWORD = "test-broker-token"  # noqa: S105
 
 
 @dataclass
@@ -41,27 +33,19 @@ class CallRecorder:
         self.calls.append(identity)
 
 
-# Shared recorder the WhoAmI transport writes to and tests can read.
+# Shared recorder the WhoAmI transport writes to and tests read.
 recorder = CallRecorder()
 
 
 @register_provider
 def echo() -> Provider:
-    """The test provider. enabled only when config.test_provider_enabled.
-
-    Carries two transports: `whoami` (identity echo) and `git-credential` (vends
-    a fixed fake credential for TEST_GIT_HOST) so the broker-backed git auth path
-    is testable end-to-end. Both still go through the same SA-token/TokenReview
-    auth as every real provider.
-    """
+    """The test provider, carrying a `whoami` transport and a `git-credential` transport that vends a fixed fake credential for TEST_GIT_HOST."""
     return Provider(
         name="test",
         transports=[
             WhoAmI(recorder=recorder),
             GitCredential(host=TEST_GIT_HOST, username=TEST_GIT_USERNAME),
         ],
-        # Fixed fake token, so /test/git-credentials returns it for an
-        # authenticated caller.
         credential=StaticTokenSource(token=TEST_GIT_PASSWORD),
         enabled=settings.test_provider_enabled,
     )

@@ -1,9 +1,4 @@
-"""Sandbox AWS tools — render_aws_config (the pure, profile-aware piece).
-
-RED-first against the boilerplate. The credential_process helper + request CLI
-(which need a live broker + SA token) are exercised in the cluster e2e; here we
-pin the ~/.aws/config generation that makes profiles work.
-"""
+"""Sandbox AWS tools: the ~/.aws/config render and the CLI against a faked broker call."""
 
 import json
 
@@ -21,7 +16,6 @@ def test_render_emits_a_profile_per_enabled_account():
     cfg = render_aws_config(REGISTRY)
     assert "[profile dev]" in cfg
     assert "[profile prod]" in cfg
-    # Disabled accounts are not offered as profiles.
     assert "[profile off]" not in cfg
 
 
@@ -33,13 +27,12 @@ def test_render_wires_credential_process_per_profile():
 
 def test_render_sets_region_when_present():
     cfg = render_aws_config(REGISTRY)
-    # The prod profile carries its account's region.
     assert "us-west-2" in cfg
 
 
 # --- credential_process helper ------------------------------------------
 def test_credentials_helper_emits_credential_process_json(monkeypatch, capsys):
-    """When an active grant exists, print the AWS credential_process JSON."""
+    """An active grant prints the AWS credential_process JSON."""
     def fake_call(method, path, body=None):
         if path.startswith("requests"):
             return 200, {"requests": [{"request_id": "r1", "status": "active", "target_account": "dev"}]}
@@ -57,7 +50,7 @@ def test_credentials_helper_emits_credential_process_json(monkeypatch, capsys):
 
 
 def test_credentials_helper_fails_closed_with_actionable_error(monkeypatch, capsys):
-    """No active grant -> non-zero + a verbose 'how to request' message (fail closed)."""
+    """No active grant fails closed with a 'how to request' message."""
     monkeypatch.setattr(cli, "_call", lambda *a, **k: (200, {"requests": []}))
     rc = cli.credentials_main(["--profile", "dev"])
     err = capsys.readouterr().err
@@ -66,8 +59,7 @@ def test_credentials_helper_fails_closed_with_actionable_error(monkeypatch, caps
 
 
 def test_request_sends_conversation_url_from_env(monkeypatch, tmp_path, capsys):
-    """`scooter-aws request` attaches CONVERSATION_URL (the agent's own convo link)
-    so the approval UI / requester can jump to it; and tells the agent to share it."""
+    """`scooter-aws request` attaches CONVERSATION_URL and tells the agent to share it."""
     captured = {}
 
     def fake_call(method, path, body=None):
@@ -83,14 +75,11 @@ def test_request_sends_conversation_url_from_env(monkeypatch, tmp_path, capsys):
     assert rc == 0
     assert captured["body"]["conversation_url"] == "https://ui/?thread=conv-1"
     out = capsys.readouterr().out
-    assert "https://ui/?thread=conv-1" in out  # the agent is told to share the link
+    assert "https://ui/?thread=conv-1" in out
 
 
 def test_escalate_posts_to_escalate_route_with_parent(monkeypatch, tmp_path, capsys):
-    """`scooter-aws escalate <parent_request_id> --policy … --justification …` POSTs
-    /aws/escalate with parent_request_id — the SUPPORTED way to expand perms after a
-    request was already made. Without this subcommand the agent had no way to escalate
-    (the skill mentioned 'escalate' but the CLI didn't expose it)."""
+    """`scooter-aws escalate <parent_request_id> …` POSTs /aws/escalate with parent_request_id."""
     captured = {}
 
     def fake_call(method, path, body=None):
@@ -113,24 +102,19 @@ def test_escalate_posts_to_escalate_route_with_parent(monkeypatch, tmp_path, cap
 
 
 def test_escalate_requires_a_policy_or_managed(monkeypatch, capsys):
-    """Escalation must carry the ADDITIONAL scope — refuse an empty escalate."""
+    """An escalate with no additional scope is refused."""
     monkeypatch.setattr(cli, "_call", lambda *a, **k: (201, {"request_id": "x", "status": "pending"}))
     with __import__("pytest").raises(SystemExit):
         cli.cli_main(["escalate", "abc123", "--profile", "dev", "--justification", "why"])
 
 
 def test_pick_active_request_takes_newest_nonexpired_not_the_first_zombie():
-    """The credential helper must NOT take the FIRST (oldest) active request — a
-    zombie whose STS creds lapsed hours ago (teardown stuck) sits at the front of the
-    oldest-first list and would hand the SDK an already-expired token. Pick the
-    NEWEST active request that isn't past its expiry."""
+    """The newest active request that is not past its expiry wins over an older expired one."""
     from scooter_contrib_aws.cli import _pick_active_request
 
     reqs = [
-        # oldest, ALREADY EXPIRED (the zombie the old code picked)
         {"request_id": "old", "status": "active", "target_account": "prod",
          "requested_at": "2026-07-07T10:00:00Z", "expires_at": "2026-07-07T11:00:00Z"},
-        # newest, still valid
         {"request_id": "new", "status": "active", "target_account": "prod",
          "requested_at": "2026-07-07T18:00:00Z", "expires_at": "2999-01-01T00:00:00Z"},
     ]
@@ -154,9 +138,7 @@ def test_pick_active_request_ignores_other_accounts_and_nonactive():
 
 
 def test_pick_active_request_falls_back_to_newest_when_all_expired():
-    """If EVERY active request is past expiry, still return the newest — the broker
-    auto-refreshes on status(), so even a lapsed one may re-vend a live token; better
-    than 'not granted' when a valid role exists."""
+    """When every active request is past expiry the newest is still returned, since the broker re-vends on status()."""
     from scooter_contrib_aws.cli import _pick_active_request
 
     reqs = [
@@ -175,8 +157,7 @@ def test_pick_active_request_none_when_no_active():
 
 
 def test_refresh_posts_to_the_refresh_route(monkeypatch, capsys):
-    """`scooter-aws refresh <id>` POSTs /{id}/refresh — the manual escape hatch to
-    force a fresh STS token when the cached one has expired within the role TTL."""
+    """`scooter-aws refresh <id>` POSTs /{id}/refresh."""
     captured = {}
 
     def fake_call(method, path, body=None):
@@ -192,8 +173,7 @@ def test_refresh_posts_to_the_refresh_route(monkeypatch, capsys):
 
 
 def test_request_reports_auto_approval(monkeypatch, tmp_path, capsys):
-    """A read-only auto-approved request (status 'active') tells the agent creds
-    are ready, not 'waiting for approval'."""
+    """An auto-approved request tells the agent creds are ready, not to wait."""
     monkeypatch.setattr(cli, "_call", lambda *a, **k: (201, {"request_id": "abc123", "status": "active"}))
     monkeypatch.delenv("CONVERSATION_URL", raising=False)
     pol = tmp_path / "p.json"
@@ -206,9 +186,7 @@ def test_request_reports_auto_approval(monkeypatch, tmp_path, capsys):
 
 
 def test_request_pending_tells_agent_to_poll_status(monkeypatch, tmp_path, capsys):
-    """A write request comes back 'pending' — the agent isn't paused or auto-notified,
-    so the output MUST tell it to poll `scooter-aws status <id>` (a common failure is
-    re-requesting in a loop). Pins the wait-for-approval guidance."""
+    """A pending request tells the agent to poll `scooter-aws status <id>` and not to re-request."""
     monkeypatch.setattr(cli, "_call", lambda *a, **k: (201, {"request_id": "req-9", "status": "pending"}))
     monkeypatch.delenv("CONVERSATION_URL", raising=False)
     pol = tmp_path / "p.json"
@@ -217,6 +195,6 @@ def test_request_pending_tells_agent_to_poll_status(monkeypatch, tmp_path, capsy
     rc = cli.cli_main(["request", "--profile", "dev", "--policy", str(pol), "--justification", "write"])
     assert rc == 0
     out = capsys.readouterr().out.lower()
-    assert "scooter-aws status req-9" in out       # told HOW to poll
-    assert "active" in out and "poll" in out         # told WHAT to wait for
-    assert "not" in out and "another request" in out  # told not to re-request
+    assert "scooter-aws status req-9" in out
+    assert "active" in out and "poll" in out
+    assert "not" in out and "another request" in out

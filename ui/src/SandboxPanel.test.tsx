@@ -1,7 +1,4 @@
-/**
- * UI unit test — the Sandbox panel view (pure): pod status + (when running) the web
- * services, or a Start prompt when the pod is down.
- */
+/** The Sandbox panel view (pure): pod status plus the web services when running, or a Start prompt when the pod is down. */
 
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
@@ -112,9 +109,7 @@ describe("SandboxPanelView", () => {
 
 describe("SandboxPanelView — rescan services", () => {
   it("offers Rescan even when NO services are declared", () => {
-    // This is the case that matters: the agent just ran `scooter-rebuild` to add
-    // the first service, and the panel still says "no services". Hiding the button
-    // here would leave the user with no way to look again.
+    // After the agent adds the first service the panel still says "no services", so the button must be offered here.
     const html = renderToStaticMarkup(
       createElement(SandboxPanelView, {
         ...base,
@@ -188,9 +183,7 @@ describe("SandboxPanelView — size picker", () => {
   });
 
   it("does NOT match a CPU preset when the allotment carries a GPU", () => {
-    // gpu-small and a hypothetical cpu-only 4/16Gi differ ONLY by the gpu count;
-    // ignoring gpu here would highlight the wrong preset and a user "re-picking" it
-    // would silently drop their GPU.
+    // gpu-small and a cpu-only 4/16Gi preset differ only by the gpu count, so ignoring it would highlight the wrong preset.
     const html = renderToStaticMarkup(
       createElement(SandboxPanelView, {
         ...base,
@@ -256,13 +249,12 @@ describe("SandboxPanelView — size picker", () => {
     );
     expect(html).toContain('data-testid="sandbox-size-hint"');
     expect(html).toContain("Builds and test suites.");
-    // Under the select, NOT inside an option label (which would truncate the numbers).
+    // Under the select, not inside an option label.
     expect(html).not.toMatch(/<option[^>]*>[^<]*Builds and test suites/);
   });
 
   it("keeps the hint line out of the way when there is nothing to say", () => {
-    // Three quiet cases: the preset has no hint, the deployment set none at all, and
-    // "Custom" (no preset selected). An empty muted line would just be noise.
+    // No hint on the preset, no hints in the deployment, and Custom all render no line.
     for (const props of [
       { sizes: { ...sizes, medium: { ...sizes.medium, hint: "" } }, resources: { limits: { cpu: "2", memory: "4Gi" } } },
       { sizes, resources: { limits: { cpu: "2", memory: "4Gi" } } },
@@ -279,8 +271,7 @@ describe("SandboxPanelView — size picker", () => {
   });
 
   it("shows the hint alongside the restart note, not instead of it", () => {
-    // They answer different questions ("should I pick this?" vs "did it apply
-    // yet?"), so one must not suppress the other.
+    // They answer different questions, so one must not suppress the other.
     const html = renderToStaticMarkup(
       createElement(SandboxPanelView, {
         ...base,

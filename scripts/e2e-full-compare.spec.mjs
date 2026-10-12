@@ -58,9 +58,7 @@ describe("compare", () => {
     expect(cmp.newFailures).toEqual([]);
   });
 
-  // A spec the baseline never ran cannot be attributed to this change — it may
-  // be new, renamed, or newly added to the full allowlist. Calling it a
-  // regression is the failure mode that makes the comment untrustworthy.
+  // A spec the baseline never ran cannot be attributed to this change.
   it("does not call a failure NEW when the baseline never ran that spec", () => {
     const cmp = compare(report([["fresh", false]]), report([["a", true]]));
     expect(cmp.newFailures).toEqual([]);
@@ -76,14 +74,7 @@ describe("compare", () => {
     expect(cmp.currentFailures.map((s) => s.fullTitle)).toEqual([title("a")]);
   });
 
-  /**
-   * The trap this whole comparison could walk into. A shard that dies before
-   * writing its report contributes NO specs, so every spec it owned is simply
-   * absent from the merged report — indistinguishable from "passed" by set
-   * difference, and it would render as a page of green "fixed" rows. The merged
-   * report records how many shard reports actually landed for exactly this
-   * reason; a short count must void the comparison, not decorate it.
-   */
+  /** A shard that dies before writing its report contributes no specs, which set difference reads as passes, so a short shard count must void the comparison. */
   it("voids the comparison when a shard report is missing", () => {
     const cmp = compare(
       report([["a", true]], { shardReports: 3 }),
@@ -111,11 +102,7 @@ describe("compare", () => {
   });
 });
 
-/**
- * The counts, not the names, are what a reader reads first — "did this get
- * worse" is a subtraction, and making them do it from two bulleted lists is why
- * the first version of this comment was hard to act on.
- */
+/** The counts come before the names, since "did this get worse" is a subtraction. */
 describe("the per-test history table", () => {
   // Baseline: a green in all 3, b red in all 3, c flaky (red in 1 of 3), d green.
   const window3 = [
@@ -204,19 +191,15 @@ describe("the per-test history table", () => {
       ]),
       window3,
     );
-    // Window aggregates are the trap: 2 specs failed at least once across the
-    // three runs, so an aggregate column would show "2" against this run's "1"
-    // and imply a fix. Per run the baseline failed 1, 2, 1 — this run's 1 is
-    // squarely inside that, i.e. no change at all.
+    // Per run the baseline failed 1, 2, 1, so this run's 1 is inside the swing; a
+    // window aggregate would read as a fix.
     expect(cmp.totals.perRunFailed).toEqual([1, 2, 1]);
     expect(cmp.totals.currentFailed).toBe(1);
     expect(cmp.totals.currentPassed).toBe(3);
   });
 
   it("will not say ❌ for a new-failure count inside the suite's own swing", () => {
-    // The baseline failed 1, 2, 1 — a swing of 1 with no change between runs. So
-    // one new failure here is exactly the noise, and a ❌ over it is the same ❌
-    // this comment would print on a quiet night.
+    // A swing of 1 between runs, so one new failure here is the noise.
     const cmp = compare(
       report([
         ["a", false], // green in all 3 → fails here
@@ -270,21 +253,16 @@ describe("the per-test history table", () => {
     expect(body).toContain("| test | −3 | −2 | −1 | this run | rate | |");
     // Zero newly-failing is a claim worth printing, not a count to hide.
     expect(body).toContain("🆕 0 new");
-    // b is red in every baseline run and failed here too: 100%, and "broken"
-    // rather than anything that implicates this change.
+    // b is red in every baseline run and failed here too: 100% and "broken".
     expect(body).toMatch(/❌ \| ❌ \| ❌ \| ❌ \| 100% \| 🔴 broken/);
-    // c is flaky in the window and PASSED here — counted in the header, and kept
-    // out of the table, because a known flake passing is not news.
+    // c is flaky in the window and passed here: counted in the header, kept out of
+    // the table.
     expect(body).toContain("🌗 1 flaky");
     expect(body).not.toContain("› c ");
   });
 });
 
-/**
- * The window is what keeps this comment honest. Two consecutive nightlies on
- * main differ by several specs in each direction with no change between them,
- * so a one-run baseline manufactures regressions that nobody caused.
- */
+/** Two consecutive nightlies on main differ by several specs with no change between them, so a one-run baseline manufactures regressions. */
 describe("compare against a window of baseline runs", () => {
   it("does not call a failure NEW when any baseline run was already red", () => {
     const cmp = compare(report([["a", false]]), [
@@ -364,8 +342,6 @@ describe("renderMarkdown", () => {
     expect(body).toContain("🆕 <b>1 new</b>");
     expect(body).toContain("main@abc1234");
     expect(body).toContain("a");
-    // The counts come before the names: a reader wants "did this get worse" in
-    // one glance, which a list of spec titles cannot answer.
     // The counts come first, then the per-test evidence.
     expect(body.indexOf("🆕 <b>1 new</b>")).toBeLessThan(
       body.indexOf("| test |"),

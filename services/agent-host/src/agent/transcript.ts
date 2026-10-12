@@ -1,22 +1,10 @@
 /**
- * Reconstruct a plain-text conversation transcript from the persisted AG-UI
- * event log — for REINJECTING history into a freshly-revived goose session.
- *
- * When a conversation is revived (agent-host restart or idle-suspend → resume), a
- * brand-new ACP session is spawned with NO memory of prior turns; ACP's prompt
- * carries only ContentBlock[], with no channel to seed history. So on the first
- * prompt of a revived session the bridge prepends this transcript as a text block
- * ("[Previous conversation]…") ahead of the user's actual message.
- *
- * We fold the user + assistant TEXT_MESSAGE_* turns AND a compact record of the
- * TOOL activity (which tool ran, with what args, and a trimmed result). The tool
- * turns are what carry the actual WORK — files read/written, commands run, their
- * output — so a deliberate mid-session model switch (or any revive) continues
- * with the new model KNOWING what was done, not just the chit-chat around it.
- * Reasoning, permission and run-control events are still skipped: they reference
- * session-scoped state (tool ids, terminals) that no longer exists in the new
- * session and add no continuity value. Long tool args/results are truncated so a
- * tool-heavy history stays token-frugal.
+ * Reconstruct a plain-text transcript from the persisted AG-UI event log for
+ * reinjecting history into a freshly revived agent session, which starts with no
+ * memory of prior turns. The transcript folds the user and assistant text turns
+ * plus a compact record of tool activity (which tool, its args, a trimmed result),
+ * since the tool turns carry the actual work; reasoning, permission and
+ * run-control events reference session-scoped state and are skipped.
  */
 
 import type { AguiEvent } from "../bridge.js";
@@ -26,9 +14,7 @@ export interface TranscriptTurn {
   text: string;
 }
 
-/** Per-field truncation for a tool turn's args/result — a long build log or file
- *  dump shouldn't dominate the reinjected history. Whole-transcript capping still
- *  happens in buildHistoryPreamble; this just keeps any single tool turn bounded. */
+/** Per-field truncation for a tool turn's args/result, so a long build log does not dominate the history. */
 const TOOL_FIELD_MAX = 800;
 
 function clip(s: string, max = TOOL_FIELD_MAX): string {
@@ -37,18 +23,11 @@ function clip(s: string, max = TOOL_FIELD_MAX): string {
   return t.slice(0, max) + `… (${t.length - max} more chars)`;
 }
 
-/**
- * Fold a persisted event log into ordered turns. Text streams
- * (TEXT_MESSAGE_START(role) → CONTENT(delta)* → END) become one user/assistant
- * turn each. Tool streams (TOOL_CALL_START(name) → ARGS(delta)* → END, and a later
- * TOOL_CALL_RESULT) become one `tool` turn — `name(args) → result` — emitted in
- * call order, interleaved with the text turns. Empty text turns are dropped.
- */
+/** Fold a persisted event log into ordered turns: one user/assistant turn per text stream and one `name(args) → result` tool turn per tool call, interleaved in call order, with empty text turns dropped. */
 export function foldTurns(events: Iterable<AguiEvent>): TranscriptTurn[] {
   const role = new Map<string, "user" | "assistant">();
   const buf = new Map<string, string>();
-  // Tool call accumulators, keyed by toolCallId. `index` is the position in
-  // `turns` of this call's placeholder, so a later TOOL_CALL_RESULT can fill it in.
+  // Tool call accumulators keyed by toolCallId; `index` is the placeholder's position in `turns`.
   const tool = new Map<string, { name: string; args: string; index: number }>();
   const turns: TranscriptTurn[] = [];
 
@@ -77,8 +56,7 @@ export function foldTurns(events: Iterable<AguiEvent>): TranscriptTurn[] {
         buf.delete(e.messageId);
         break;
       }
-      // Tool activity: emit the call in ORDER at START (so it interleaves with text
-      // correctly), then backfill the result onto the same turn when it arrives.
+      // Emit the call at START so it interleaves with text, then backfill the result onto the same turn.
       case "TOOL_CALL_START": {
         const entry = { name: e.toolCallName, args: "", index: turns.length };
         tool.set(e.toolCallId, entry);
@@ -112,18 +90,7 @@ const ROLE_LABEL: Record<TranscriptTurn["role"], string> = {
   tool: "Tool",
 };
 
-/**
- * Build the history preamble to prepend to the first prompt after a revive.
- * Returns "" when there are no prior turns (a brand-new conversation, or a log
- * with only the current message excluded upstream) — the caller then prepends
- * nothing. `maxChars` caps the transcript from the OLDEST end (keeps the most
- * recent turns, which matter most) so a long conversation can't blow the prompt.
- *
- * The cap is generous: this history is the ONLY continuity a deliberate mid-work
- * model switch has (the new goose session starts blank), so under-injecting silently
- * strands the user's work. Individual tool args/results are already clipped in
- * foldTurns, so a large cap here bounds the TRANSCRIPT, not any one runaway turn.
- */
+/** Build the history preamble to prepend to the first prompt after a revive, or "" when there are no prior turns; `maxChars` trims from the oldest end and is generous because this history is the only continuity a revived session has. */
 export function buildHistoryPreamble(events: Iterable<AguiEvent>, maxChars = 48_000): string {
   const turns = foldTurns(events);
   if (turns.length === 0) return "";
@@ -131,7 +98,7 @@ export function buildHistoryPreamble(events: Iterable<AguiEvent>, maxChars = 48_
   const lines = turns.map((t) => `${ROLE_LABEL[t.role]}: ${t.text}`);
   let body = lines.join("\n\n");
   if (body.length > maxChars) {
-    // Trim from the front (oldest), keep the tail; mark the elision.
+    // Trim from the oldest end and mark the elision.
     body = "…(earlier messages omitted)…\n\n" + body.slice(body.length - maxChars);
   }
   return (

@@ -27,7 +27,7 @@ const catalog = {
   defaultFor: Object.fromEntries(LIVE.map((m) => [m.id, m.defaultFor])),
 };
 
-/** The options the picker WOULD render, built from the same helpers it uses. */
+/** The options the picker would render, built from the same helpers it uses. */
 function renderedOptions(): Array<{ value: string; text: string; provider: string }> {
   const groups = groupModelsByProvider(catalog.available, catalog.providers, catalog.default);
   if (!groups) {
@@ -55,7 +55,7 @@ function renderedOptions(): Array<{ value: string; text: string; provider: strin
 
 describe("the LIVE production model catalog", () => {
   it("GROUPS by provider — the branch where every picker bug has lived", () => {
-    // If this is null the live catalog has gone untagged and every
+    // A null here means the live catalog has gone untagged and the tests below prove nothing.
     const groups = groupModelsByProvider(catalog.available, catalog.providers, catalog.default);
     expect(groups, "the live catalog no longer groups — the tests below prove nothing").not.toBeNull();
     expect(groups!.map((g) => g.provider).sort()).toEqual(["byoc", "claude-code"]);
@@ -74,7 +74,7 @@ describe("the LIVE production model catalog", () => {
   });
 
   it("REGRESSION: exactly ONE option is labelled (default)", () => {
-    // @chadac: "the (default) can only apply to one model". Previously claude-opus-5 was
+    // The "(default)" label can only apply to one option.
     const defaulted = renderedOptions().filter((o) => o.text.includes("(default)"));
     expect(defaulted.map((o) => o.value)).toHaveLength(1);
     expect(defaulted[0].text).toContain(catalog.default!);
@@ -90,35 +90,35 @@ describe("the LIVE production model catalog", () => {
   });
 
   it("exactly one model is provider-exclusive, so routing's reach is explicit", () => {
-    // A group pick only BINDS for a model offered by one provider;
+    // A group pick only binds for a model offered by one provider.
     expect(LIVE.filter((m) => m.providers.length === 1).map((m) => m.id)).toEqual([
       "claude-haiku-4-5",
     ]);
   });
 
   it("exactly one model is provider-exclusive, so routing's reach is explicit", () => {
-    // A group pick only BINDS for a model offered by one provider;
+    // A group pick only binds for a model offered by one provider.
     expect(LIVE.filter((m) => m.providers.length === 1).map((m) => m.id)).toEqual([
       "claude-haiku-4-5",
     ]);
   });
 
   it("exactly one model is provider-exclusive, so routing's reach is explicit", () => {
-    // A group pick only BINDS for a model offered by one provider;
+    // A group pick only binds for a model offered by one provider.
     expect(LIVE.filter((m) => m.providers.length === 1).map((m) => m.id)).toEqual([
       "claude-haiku-4-5",
     ]);
   });
 
   it("exactly one model is provider-exclusive, so routing's reach is explicit", () => {
-    // A group pick only BINDS for a model offered by one provider;
+    // A group pick only binds for a model offered by one provider.
     expect(LIVE.filter((m) => m.providers.length === 1).map((m) => m.id)).toEqual([
       "claude-haiku-4-5",
     ]);
   });
 
   it("GUARD: the live catalog can still tell per-provider labelling from global", () => {
-    // THE TRAP THIS SUITE EXISTS TO CLOSE. Replacing the per-provider check with
+    // Per-provider labelling must differ from global-default labelling on the live catalog, or the check above is vacuous.
     const perProvider = renderedOptions().map((o) => o.text);
     const globalOnly = (() => {
       const groups = groupModelsByProvider(catalog.available, catalog.providers, catalog.default)!;

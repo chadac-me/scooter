@@ -1,13 +1,8 @@
-"""GitHub's resource shapes and owner lookup — moved here with the provider.
-
-These cases were in the webhooks app's test_resource_shapes / test_identity_resolve
-until github became a contrib (PR #591). The knowledge is github's, so the tests
-are too.
+"""GitHub's resource shapes and owner lookup.
 
 `conversation_map` holds ("pull_request", "chadac/scooter#487") while
-`resource_links` holds ("pr", the html_url) — the same PR. An exact-match lookup in
-either shape found nothing written in the other, so forwards were dropped and the
-agent's reply tools were never armed (issue #563).
+`resource_links` holds ("pr", the html_url) for the same PR, so each shape must
+resolve to the other.
 """
 
 from __future__ import annotations
@@ -15,7 +10,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-import scooter_contrib_github.resources  # noqa: F401  (registers the shapes)
+import scooter_contrib_github.resources  # noqa: F401
 from scooter_contrib_github import identity as gh_identity
 from scooter_contrib_github.config import settings
 from scooter_webhooks_lib import identity as lib_identity
@@ -61,7 +56,6 @@ async def test_issue_urls_use_the_issues_path_not_pull():
 
 
 async def test_the_callers_own_shape_is_tried_first():
-    # A row written in the caller's own terms must still win without a rewrite.
     assert link_variants("github", "pull_request", "chadac/scooter#1")[0] == (
         "pull_request",
         "chadac/scooter#1",
@@ -69,20 +63,16 @@ async def test_the_callers_own_shape_is_tried_first():
 
 
 async def test_an_unparseable_id_invents_no_url():
-    # No guessing: an id that names nothing known must not resolve to someone
-    # else's resource — the agent stays quiet instead.
+    # An id that names nothing known must not resolve to someone else's resource.
     assert resource_id_variants("github", "pull_request", "not-a-resource-id") == ["not-a-resource-id"]
 
 
 async def test_type_aliases_are_two_way():
     assert canonical_resource_type("github", "pr") == "pull_request"
-    # An unknown type passes through rather than being mangled into a wrong one.
     assert canonical_resource_type("github", "discussion") == "discussion"
 
 
 async def test_canonical_link_stores_the_long_type_and_the_url():
-    # URL form is what resource_links already (almost entirely) holds, and the long
-    # type is what conversation_map holds + what the UI renders.
     assert canonical_link("github", "pr", "chadac/scooter#7") == (
         "pull_request",
         "https://github.com/chadac/scooter/pull/7",

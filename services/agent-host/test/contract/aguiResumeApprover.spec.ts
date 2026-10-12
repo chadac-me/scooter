@@ -1,23 +1,8 @@
 /**
- * Tier 1 contract — the HUMAN who answers an approval reaches the handler.
- *
- * An approval interrupt is authorized against the answering person: `onAnswer`
- * relays the approver to the broker, which checks a configured claim (email by
- * default) against its OpenFGA `approver` tuples. So "who answered" is a security
- * input, not telemetry.
- *
- * The bug this pins (PR #649): the UI answers via `POST /agui { resume: [...] }`,
- * and that path carried NO identity — `onResume`'s signature had no approver
- * parameter at all, so `answerPermission` was called without one and the interrupt
- * fell back to `{ id: conversationId }`. The greyed-Approve check (a separate
- * management route) used the real viewer, so the two halves authorized DIFFERENT
- * principals: the UI would tell a user they may approve, then approve as the
- * conversation. With FGA on, no tuple matches that principal and the approval is
- * rejected; with FGA off it succeeds and records the conversation id as the
- * approver, so the audit trail names no human.
- *
- * These assert on the identity the handler RECEIVES, because that is the value
- * that goes on the wire to the broker.
+ * The human who answers an approval via `POST /agui { resume }` reaches the handler.
+ * The broker authorizes the approver against a configured claim (email by default)
+ * and its OpenFGA `approver` tuples, so the identity is a security input. These
+ * assert on what the handler receives, since that is what goes to the broker.
  */
 
 import { describe, it, expect } from "vitest";
@@ -55,7 +40,7 @@ async function resumeWith(
     });
     await res.text();
   } catch {
-    /* the stream stays open on ok:true; we only need the handler's argument */
+    /* The stream stays open on ok:true; only the handler's argument matters. */
   } finally {
     clearTimeout(timer);
     await server.close();
@@ -63,7 +48,7 @@ async function resumeWith(
   return seen;
 }
 
-/** A header-auth ingress: the common case (x-auth-user / x-auth-email). */
+/** A header-auth ingress resolver (x-auth-user / x-auth-email). */
 const headerResolver = (req: { headers: Record<string, string | string[] | undefined> }) => {
   const id = req.headers["x-auth-user"] as string | undefined;
   return id
@@ -82,8 +67,7 @@ describe("/agui resume — the approver identity", () => {
   });
 
   it("carries the EMAIL claim, not just the id", async () => {
-    // The broker's default approver_claim is `email`; an identity narrowed to {id}
-    // resolves to the id and never matches an email-seeded approver tuple.
+    // The broker's default approver_claim is `email`, so an identity narrowed to {id} never matches an email-seeded tuple.
     const [approver] = await resumeWith(
       { "x-auth-user": "sub-abc123", "x-auth-email": "alice@example.com" },
       headerResolver,
@@ -92,8 +76,7 @@ describe("/agui resume — the approver identity", () => {
   });
 
   it("leaves the approver undefined when the caller is anonymous", async () => {
-    // Not a synthetic principal: a deployment with no ingress identity keeps its
-    // existing behavior rather than authorizing something that isn't a person.
+    // A deployment with no ingress identity gets no synthetic principal.
     const [approver] = await resumeWith({}, headerResolver);
     expect(approver).toBeUndefined();
   });
@@ -104,7 +87,7 @@ describe("/agui resume — the approver identity", () => {
   });
 
   it("gives every entry in a batched resume the same answerer", async () => {
-    // One HTTP request == one human, so the identity is resolved once for the batch.
+    // One HTTP request is one human, so the identity is resolved once for the batch.
     const seen = await resumeWith({ "x-auth-user": "alice" }, headerResolver, [
       { interruptId: "req-1", status: "resolved" as const, payload: { optionId: "approve" } },
       { interruptId: "req-2", status: "resolved" as const, payload: { optionId: "deny" } },
@@ -115,8 +98,7 @@ describe("/agui resume — the approver identity", () => {
   });
 
   it("still answers when the identity resolver throws", async () => {
-    // A broken resolver must not block a security decision the user already made;
-    // it degrades to anonymous (the broker then applies its own fallback).
+    // A broken resolver degrades to anonymous rather than blocking the answer.
     const seen = await resumeWith({}, (() => {
       throw new Error("identity backend down");
     }) as never);

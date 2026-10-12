@@ -1,7 +1,4 @@
-/**
- * Adapter: wraps an in-process FakeAcpTransport as an AcpClient so the bridge
- * can be driven without spawning a real `goose acp` subprocess.
- */
+/** Wraps an in-process FakeAcpTransport as an AcpClient so the bridge can be driven without a real `goose acp` subprocess. */
 
 import type {
   AcpClient,
@@ -45,13 +42,11 @@ export function acpClientFromTransport(
       await transport.cancel(sessionId);
     },
     async killActiveTerminals() {
-      // The in-process transport tracks its own terminals; expose a hook if set so
-      // a cancel test can assert terminals were killed. No-op otherwise.
+      // The transport may expose a hook so a cancel test can assert terminals were killed.
       await transport.killActiveTerminals?.();
     },
     isAlive() {
-      // In-process fake: alive unless a test simulates the agent process dying via
-      // transport.isAlive(). Default true so existing tests are unaffected.
+      // Alive unless a test simulates the agent process dying via transport.isAlive().
       return transport.isAlive?.() ?? true;
     },
     onSessionUpdate(cb) {
@@ -59,9 +54,7 @@ export function acpClientFromTransport(
       return () => updateCbs.delete(cb);
     },
     onTerminalCreated(cb) {
-      // A test can drive this via transport.emitTerminalCreated (if it models a
-      // terminal-based shell tool); otherwise it simply never fires. This keeps the
-      // fake AcpClient shape-complete without every test needing terminal plumbing.
+      // Fires only when the transport models a terminal-based shell tool.
       terminalCreatedCbs.add(cb);
       transport.onTerminalCreated?.((terminalId, command, args) => {
         for (const c of terminalCreatedCbs) c(terminalId, command, args);

@@ -1,8 +1,8 @@
 /**
- * UI unit test — the composer FILE-upload helpers (non-image attachments). Mirrors
- * imageUpload.test.ts: filesFromContent/filesFromMessage pull file parts out of a
- * message; base64Bytes is the size utility; SandboxFileAttachmentAdapter turns a File
- * into a `{type:"file"}` content part and enforces the client size cap.
+ * The composer file-upload helpers (non-image attachments): filesFromContent and
+ * filesFromMessage pull file parts out of a message, base64Bytes is the size utility,
+ * and SandboxFileAttachmentAdapter turns a File into a `{type:"file"}` content part
+ * and enforces the client size cap.
  */
 
 import { describe, it, expect, vi } from "vitest";

@@ -1,7 +1,4 @@
-"""Runtime ownership guard: assert a connection is pointed at the database this
-service owns, so a mis-wired DSN fails fast at startup instead of writing into
-another database's tables. NOT generated.
-"""
+"""Runtime ownership guard: assert a connection is pointed at the database this service owns, so a mis-wired DSN fails fast at startup."""
 
 from __future__ import annotations
 
@@ -9,8 +6,7 @@ DATABASES = ("webhooks", "scheduler", "broker", "byoc", "agent_host")
 
 
 def check_database(actual: str, expected: str) -> None:
-    """Raise if ``actual`` (the connected database) is not ``expected``. Pure —
-    the testable core the async/sync helpers below wrap."""
+    """Raise if ``actual`` (the connected database) is not ``expected``."""
     if actual != expected:
         raise RuntimeError(
             f'scooter_schema: connected to database "{actual}" but this service owns '
@@ -19,8 +15,7 @@ def check_database(actual: str, expected: str) -> None:
 
 
 async def assert_database(conn, expected: str) -> None:
-    """Assert an async SQLAlchemy connection is on ``expected``. ``conn`` is an
-    ``AsyncConnection`` (e.g. ``async with engine.connect() as conn``)."""
+    """Assert an async SQLAlchemy connection is on ``expected``."""
     from sqlalchemy import text
 
     result = await conn.execute(text("select current_database()"))

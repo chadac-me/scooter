@@ -51,12 +51,7 @@ export type ReasoningRootProps = Omit<
     open?: boolean;
     onOpenChange?: (open: boolean) => void;
     defaultOpen?: boolean;
-    /**
-     * Whether the reasoning is currently streaming. When provided, it
-     * supersedes `defaultOpen`: the disclosure auto-opens while streaming
-     * with a bottom-pinned live preview, auto-collapses when streaming
-     * ends, and the first manual toggle takes over permanently.
-     */
+    /** Whether the reasoning is streaming; when provided it supersedes `defaultOpen`, auto-opening with a live preview while streaming, auto-collapsing when it ends, and ceding to the first manual toggle. */
     streaming?: boolean;
   };
 
@@ -341,11 +336,7 @@ Reasoning.Text = ReasoningText;
 Reasoning.Fade = ReasoningFade;
 
 /**
- * @deprecated This wrapper targets the legacy `components.ReasoningGroup`
- * prop on `<MessagePrimitive.Parts>`. Use `<MessagePrimitive.GroupedParts>`
- * with a `groupBy` returning `"group-reasoning"` and compose `ReasoningRoot`
- * / `ReasoningTrigger` / `ReasoningContent` / `ReasoningText` directly.
- * See `thread.tsx` for an example.
+ * @deprecated Targets the legacy `components.ReasoningGroup` prop; use `<MessagePrimitive.GroupedParts>` with a `groupBy` returning `"group-reasoning"` and compose the Reasoning parts directly, as in `thread.tsx`.
  */
 const ReasoningGroup = memo(ReasoningGroupImpl);
 ReasoningGroup.displayName = "ReasoningGroup";

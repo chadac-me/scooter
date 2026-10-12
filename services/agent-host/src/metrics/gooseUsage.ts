@@ -1,22 +1,10 @@
 /**
- * Reads per-session token usage from goose's local session store.
- *
- * goose (>= 1.10) persists sessions to a SQLite DB under its $HOME:
- *   $HOME/.local/share/goose/sessions/sessions.db
- * containing token-usage statistics per session. goose does NOT report usage
- * over ACP (the PromptResponse carries only stopReason — goose issue #8132), so
- * reading this DB out-of-band is the only token source available today.
- *
- * IMPORTANT robustness notes (this couples us to goose's schema, which is
- * undocumented and may change across versions):
- *   - The reader INTROSPECTS the DB (table/column discovery) rather than
- *     hard-coding a schema, and returns `undefined` if it can't find usage —
- *     metrics then simply omit cost for that run (graceful degradation).
- *   - goose's $HOME is on an emptyDir in our deployment, so the DB is ephemeral.
- *     We read usage PER-RUN (right after RUN_FINISHED) and emit immediately; we
- *     never rely on it for history.
- *
- * DESIGN STAGE: signatures + types only. No implementation.
+ * Reads per-session token usage from goose's SQLite session store
+ * ($HOME/.local/share/goose/sessions/sessions.db), since goose does not report usage
+ * over ACP. The schema is undocumented, so the reader introspects the columns rather
+ * than hard-coding them and returns `undefined` when it cannot find usage, and the
+ * DB lives on an ephemeral emptyDir, so usage is read and emitted per run rather
+ * than relied on for history.
  */
 
 import { DatabaseSync } from "node:sqlite";
@@ -28,9 +16,7 @@ import { debug, debugError } from "../debug.js";
 /** goose's session DB, relative to its $HOME. */
 const DB_RELATIVE = [".local", "share", "goose", "sessions", "sessions.db"];
 
-/** Token columns we look for, in preference order (accumulated = cumulative per
- *  session, which is what we want to diff per-run; fall back to the per-turn
- *  columns if a goose version lacks the accumulated ones). */
+/** Token columns to look for, in preference order (the cumulative accumulated_* columns first). */
 const COLS = {
   input: ["accumulated_input_tokens", "input_tokens"],
   output: ["accumulated_output_tokens", "output_tokens"],
@@ -40,36 +26,23 @@ const COLS = {
 } as const;
 
 export interface GooseUsageReaderConfig {
-  /** goose's $HOME (the agent-host's HOME). The DB is resolved relative to it. */
+  /** goose's $HOME, which the DB path is resolved relative to. */
   gooseHome: string;
 }
 
 export interface GooseUsageReader {
-  /**
-   * Best-effort cumulative token usage for an ACP session id, as currently
-   * recorded in goose's session DB. Returns `undefined` if the DB/columns/row
-   * aren't found (so the caller omits cost rather than reporting a false 0).
-   *
-   * Callers compute a PER-RUN delta by diffing successive reads for a session
-   * (this returns the cumulative total; the metrics layer keeps the last value).
-   */
+  /** The cumulative token usage recorded for an ACP session id, or `undefined` when the DB, columns or row are not found. */
   readSessionUsage(acpSessionId: string): Promise<TokenUsage | undefined>;
 
   /** Close any open DB handle. */
   close(): Promise<void>;
 }
 
-/**
- * Open a reader over goose's session DB. Does not throw if the DB is absent
- * (readSessionUsage will return undefined) — a deployment without the expected
- * goose layout still runs, just without cost metrics.
- */
+/** Open a reader over goose's session DB; an absent DB makes readSessionUsage return undefined rather than throw. */
 export function createGooseUsageReader(config: GooseUsageReaderConfig): GooseUsageReader {
   const dbPath = join(config.gooseHome, ...DB_RELATIVE);
 
-  // The DB is opened lazily on first read (goose creates it on its first run, so
-  // it may not exist when the reader is constructed). We re-resolve the column
-  // set each open since a goose upgrade could change the schema under us.
+  // The DB is opened lazily on first read, since goose creates it on its first run.
   let db: DatabaseSync | undefined;
   let available: { table: string; cols: Partial<Record<keyof typeof COLS, string>> } | undefined;
   let openedOnce = false;
@@ -82,11 +55,9 @@ export function createGooseUsageReader(config: GooseUsageReaderConfig): GooseUsa
     if (openedOnce) return db !== undefined && available !== undefined;
     openedOnce = true;
     try {
-      // readonly so we never contend with goose's writer; open() throws if absent.
+      // Read-only so it never contends with goose's writer; throws if absent.
       db = new DatabaseSync(dbPath, { readOnly: true });
-      // goose stores sessions in the `sessions` table keyed by id. Confirm the
-      // table + the token columns exist (introspection, so a schema change
-      // degrades to "no cost" rather than a crash).
+      // Introspect the `sessions` table so a schema change degrades to "no cost" rather than a crash.
       const cols = new Set(
         (db.prepare("SELECT name FROM pragma_table_info('sessions')").all() as Array<{ name: string }>).map(
           (r) => r.name,
@@ -107,11 +78,8 @@ export function createGooseUsageReader(config: GooseUsageReaderConfig): GooseUsa
       available = { table: "sessions", cols: resolved };
       return true;
     } catch (err) {
-      // Finding #13: this is logged ONCE (openedOnce guards re-entry). An ABSENT
-      // DB (ENOENT — goose hasn't run yet) is expected, so stay quiet (debug);
-      // but a PRESENT-but-unreadable DB (EACCES/corrupt) silently disabling all
-      // cost metrics is worth surfacing — log it loudly WITH the error, so the
-      // operator knows WHY cost is missing instead of guessing.
+      // An absent DB is expected (goose has not run yet), but a present-but-unreadable
+      // one silently disabling cost metrics is worth surfacing.
       if ((err as { code?: string })?.code === "ENOENT") {
         debug("[metrics] goose sessions.db absent (%s); cost will be omitted until goose runs", dbPath);
       } else {
@@ -125,7 +93,7 @@ export function createGooseUsageReader(config: GooseUsageReaderConfig): GooseUsa
     async readSessionUsage(acpSessionId: string): Promise<TokenUsage | undefined> {
       if (!open() || !db || !available) return undefined;
       const { cols } = available;
-      // Build a SELECT of just the columns we found.
+      // SELECT just the columns found.
       const select: Array<[keyof TokenUsage, string]> = [];
       if (cols.input) select.push(["inputTokens", cols.input]);
       if (cols.output) select.push(["outputTokens", cols.output]);
@@ -135,7 +103,7 @@ export function createGooseUsageReader(config: GooseUsageReaderConfig): GooseUsa
       try {
         const sql = `SELECT ${select.map(([, c]) => `"${c}" AS "${c}"`).join(", ")} FROM sessions WHERE id = ? LIMIT 1`;
         const row = db.prepare(sql).get(acpSessionId) as Record<string, number | null> | undefined;
-        if (!row) return undefined; // unknown session -> no false 0
+        if (!row) return undefined; // unknown session
         const usage: TokenUsage = {};
         for (const [field, col] of select) {
           const v = row[col];

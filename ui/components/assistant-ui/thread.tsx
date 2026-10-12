@@ -66,11 +66,9 @@ import {
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
 /**
- * Optional component overrides for the thread. `AssistantMessage` and
- * `Welcome` replace whole sections; the remaining slots override how the
- * assistant message renders tool calls and part groups. Tool UIs registered
- * by name (toolkit `render`, `useAssistantDataUI`) take precedence over
- * `ToolFallback`.
+ * Optional component overrides for the thread. `AssistantMessage` and `Welcome` replace
+ * whole sections, and the remaining slots override how the assistant message renders tool
+ * calls and part groups; tool UIs registered by name take precedence over `ToolFallback`.
  */
 export type ThreadComponents = {
   AssistantMessage?: ComponentType | undefined;
@@ -90,16 +88,13 @@ export type ThreadProps = {
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
-/** Hoisted so its identity is stable: ThreadPrimitive.Messages memoizes the
- *  rendered message array on [messagesLength, children], so an inline arrow
- *  rebuilds every message element on every commit. */
+/** Hoisted for a stable identity, since ThreadPrimitive.Messages memoizes on its children. */
 const renderMessage = () => <ThreadMessage />;
 
 const ThreadComponentsContext =
   createContext<ThreadComponents>(EMPTY_COMPONENTS);
 
-// Startup exposes a loading placeholder thread; treat it as a new chat so
-// the composer mounts centered. Loads after startup keep the docked layout.
+// The startup loading placeholder counts as a new chat so the composer mounts centered.
 const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 &&
   (!s.thread.isLoading || s.threads.isLoading);
@@ -114,40 +109,7 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
   );
 };
 
-/** Keep the view pinned to the bottom as content grows — and land at the tail on
- *  a conversation SWITCH/LOAD.
- *
- *  Two problems this fixes, both rooted in assistant-ui's autoScroll giving up
- *  whenever it *thinks* the user scrolled up:
- *
- *   1. LAND AT TAIL: the runtime remounts per conversation and history streams in
- *      async (tail seed → full replay), so the library's one-shot initialize-scroll
- *      fires before layout and leaves the view at the top.
- *
- *   2. BIG-CHUNK BREAK (the reported bug): when a long message or a big tool result
- *      appends in one frame, scrollHeight jumps by more than the library's 1px
- *      bottom threshold while scrollTop is unchanged. Its scroll handler reads that
- *      as "not at bottom" (and, since scrollTop didn't DECREASE, not a user scroll-up
- *      either) and latches isAtBottom=false — so autoScroll disengages and you're
- *      stranded mid-scroll, forced to scroll down again.
- *
- *  Our own `stick` intent flag is the fix: it flips false ONLY on a genuine upward
- *  user gesture (scrollTop actually decreased), never on content growth. While stuck,
- *  a ResizeObserver (on every scroll-content child) + a MutationObserver (for newly
- *  mounted subtrees) re-pin to the bottom on any size change, chasing the growing
- *  bottom across a few frames of reflow — and restoring the store's isAtBottom so the
- *  library re-engages too. NB: this pairs with removing `scroll-smooth` from the
- *  viewport (see below) — instant pins don't fight a CSS scroll animation. */
-/** Page older history in as the user scrolls toward the top.
- *
- *  The initial snapshot paints only the trailing window, so the top of the
- *  viewport is a seam, not the start of the conversation. When it comes into
- *  reach we fetch the next older page and PREPEND it — which grows scrollHeight
- *  above the current position, so the content under the user's eye would jump
- *  down by exactly that growth. Restoring scrollTop by the delta keeps it still.
- *
- *  Never fires while pinned to the bottom: that is the streaming case, where the
- *  user is reading the newest output and a prepend is pure cost. */
+/** Page older history in as the user scrolls toward the top, restoring scrollTop by the prepended growth so the content under the eye stays still. */
 function useLoadOlderOnScroll() {
   const { hasOlderHistory, loadOlderHistory } = useConversationInterrupts();
   const hasMessages = useAuiState((s) => s.thread.messages.length > 0);
@@ -163,15 +125,14 @@ function useLoadOlderOnScroll() {
     const maybeLoad = async () => {
       if (loading) return;
       if (el.scrollTop > TRIGGER_PX) return;
-      // At the very bottom we are following a live run; leave history alone.
+      // At the very bottom the user is following a live run.
       if (el.scrollHeight - el.scrollTop - el.clientHeight <= 2) return;
       loading = true;
       const before = el.scrollHeight;
       try {
         const added = await loadOlderHistory();
         if (added > 0) {
-          // Hold the viewport still across the prepend. Two frames: React commits
-          // the taller list first, and the height is only correct after layout.
+          // Two frames, because the height is only correct after React commits and layout runs.
           requestAnimationFrame(() => {
             requestAnimationFrame(() => {
               const grew = el.scrollHeight - before;
@@ -182,7 +143,7 @@ function useLoadOlderOnScroll() {
           return;
         }
       } catch {
-        /* best-effort — a later scroll retries */
+        /* a later scroll retries */
       }
       loading = false;
     };
@@ -193,6 +154,12 @@ function useLoadOlderOnScroll() {
   }, [hasOlderHistory, loadOlderHistory, hasMessages]);
 }
 
+/**
+ * Keep the view pinned to the bottom as content grows and land at the tail on a
+ * conversation switch. A `stick` intent flag flips false only on a genuine upward user
+ * scroll, never on content growth, which is where assistant-ui's own autoScroll gives
+ * up; while stuck, a ResizeObserver and a MutationObserver re-pin on any size change.
+ */
 function useStickToBottom() {
   const hasMessages = useAuiState((s) => s.thread.messages.length > 0);
   const store = useThreadViewportStore();
@@ -202,12 +169,10 @@ function useStickToBottom() {
     const el = document.querySelector<HTMLElement>('[data-slot="aui_thread-viewport"]');
     if (!el) return;
 
-    // Our intent flag — are we following the bottom? Starts true; only a real
-    // upward user scroll turns it off; returning to the bottom turns it back on.
+    // Whether we are following the bottom; only a real upward user scroll turns it off.
     let stick = true;
     let lastTop = el.scrollTop;
-    // While set, ignore the scroll event our own re-pin triggers (so it can't
-    // self-cancel `stick`).
+    // While set, the scroll event our own re-pin triggers is ignored.
     let pinning = 0;
 
     const atBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight <= 2;
@@ -216,41 +181,25 @@ function useStickToBottom() {
       try {
         store.getState().scrollToBottom?.({ behavior: "instant" });
       } catch {
-        /* store shape varies across versions — the raw scrollTop below is the real fix */
+        /* the store shape varies across versions; the raw scrollTop set is what matters */
       }
     };
     const pin = () => {
       pinning++;
-      el.scrollTop = el.scrollHeight; // instant, synchronous — no smooth lag to fight
-      syncStore(); // keep the library's isAtBottom true so ITS autoScroll stays on
+      el.scrollTop = el.scrollHeight;
+      syncStore(); // keep the library's isAtBottom true so its autoScroll stays on
       requestAnimationFrame(() => {
         pinning = Math.max(0, pinning - 1);
         lastTop = el.scrollTop;
       });
     };
 
-    // Re-assert the pin until the bottom SETTLES. A big message/tool card keeps
-    // growing for a few frames AFTER it mounts (markdown reflow, wrapping, image
-    // load), so a single scrollTop set lands short — chase the growing bottom.
-    //
-    // A FIXED frame budget (we used 12) is racy: a big single-frame append under
-    // load can keep reflowing past the budget, or slow rAF scheduling lets the
-    // reflow outrun the chase, and the view is left stranded MANY viewports up until
-    // some later event re-pins (the reported e2e flake — peak ~2200px on a 665px
-    // viewport). So chase until we're genuinely at the bottom for a couple of
-    // consecutive frames, not for a blind count. A high safety cap (~2s at 60fps)
-    // bounds a pathological never-settling layout without reintroducing the strand.
-    // Settle signal is scrollHeight STABILITY, not atBottom(): we pin() every frame,
-    // so we're always at the bottom right after a pin — that tells us nothing about
-    // whether the content is still reflowing. Instead keep chasing while scrollHeight
-    // keeps changing (the append is still growing), and stop once it has held steady
-    // for a few consecutive frames. A high safety cap (~2s @ 60fps) bounds a
-    // pathological never-settling layout without reintroducing the strand.
+    // Re-pin every frame until scrollHeight has held steady for a few frames, since a big message keeps reflowing after it mounts and pinning once lands short.
     let chaseFrame: number | null = null;
-    const CHASE_MAX_FRAMES = 120; // ~2s @ 60fps — a hard stop, not the common path
-    const CHASE_STABLE_FRAMES = 3; // scrollHeight unchanged this many frames → settled
+    const CHASE_MAX_FRAMES = 120; // a hard stop for a never-settling layout
+    const CHASE_STABLE_FRAMES = 3; // scrollHeight unchanged this many frames means settled
     const chase = () => {
-      // Don't restart a running chase; it self-extends. Why re-arming thrashes rAF: PR #402.
+      // A running chase self-extends, so it is not restarted.
       if (chaseFrame !== null) return;
       let frames = 0;
       let stableFrames = 0;
@@ -261,9 +210,6 @@ function useStickToBottom() {
         stableFrames = h === lastHeight ? stableFrames + 1 : 0;
         lastHeight = h;
         pin();
-        // Stop only once the content has STOPPED growing (height stable) — so a big
-        // single-frame append that reflows over many frames is chased the whole way,
-        // never left stranded. The frame cap is just a runaway backstop.
         if (stableFrames >= CHASE_STABLE_FRAMES || ++frames >= CHASE_MAX_FRAMES) {
           chaseFrame = null;
           return;
@@ -275,31 +221,22 @@ function useStickToBottom() {
 
     const onScroll = () => {
       if (pinning > 0) return; // our own re-pin
-      if (el.scrollTop < lastTop - 1) stick = false; // genuine scroll UP → stop following
-      else if (atBottom()) stick = true; //             back at bottom → resume
+      if (el.scrollTop < lastTop - 1) stick = false; // a genuine scroll up stops following
+      else if (atBottom()) stick = true; // back at the bottom resumes it
       lastTop = el.scrollTop;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
 
-    // Follow content growth. A big message / tool card appends in one frame; a
-    // ResizeObserver on the viewport's border-box does NOT see that (scrollHeight
-    // isn't the border-box), so observe EVERY direct child of the scroll content —
-    // the message group grows as children are added, and a re-pin fires immediately.
-    // Re-observe on DOM mutations so newly-added subtrees are covered too.
+    // The viewport's border-box does not change with scrollHeight, so every direct child of the scroll content is observed instead.
     const ro = new ResizeObserver(() => {
       if (!stick) return;
-      // Re-pin SYNCHRONOUSLY here, not only via the rAF chase. The ResizeObserver
-      // callback runs with layout (before paint), so this follows the growth even
-      // when rAF is starved — the residual flake was a severely stalled frame (a
-      // normally-instant test taking 7s) where the rAF chase never got scheduled in
-      // time and the view stranded ~3 viewports up. The chase() still runs for the
-      // multi-frame reflow tail; this guarantees the first, biggest jump is caught.
+      // The synchronous pin runs with layout, so the first jump is caught even when rAF is starved.
       pin();
       chase();
     });
     const observeContent = () => {
       ro.disconnect();
-      // The inner scroll content (holds the message group + footer).
+      // The inner scroll content holds the message group and footer.
       const inner = el.firstElementChild as HTMLElement | null;
       if (inner) {
         ro.observe(inner);
@@ -309,25 +246,24 @@ function useStickToBottom() {
       }
     };
     observeContent();
-    // New messages add/replace subtrees under the scroll content — re-attach the RO
-    // so growth in a freshly-mounted message still triggers the follow.
+    // Re-attach the ResizeObserver when new messages mount so their growth is followed too.
     const mo = new MutationObserver(() => {
       observeContent();
       if (!stick) return;
-      pin(); // synchronous follow (see the ResizeObserver note) + the chase tail
+      pin();
       chase();
     });
-    // Observe only new-message mounts, not the whole subtree. Why subtree:true janks: PR #402.
+    // Observing the whole subtree janks, so only new-message mounts are observed.
     const messageGroup = el.querySelector<HTMLElement>(
       '[data-slot="aui_message-group"]',
     );
     if (messageGroup) {
       mo.observe(messageGroup, { childList: true, subtree: false });
     } else {
-      mo.observe(el, { childList: true, subtree: true }); // group not mounted yet — fall back
+      mo.observe(el, { childList: true, subtree: true }); // the group is not mounted yet
     }
 
-    // Land at the tail on first paint + chase the async history replay's late layout.
+    // Land at the tail on first paint and chase the history replay's late layout.
     chase();
 
     return () => {
@@ -348,45 +284,25 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root bg-chat @container flex h-full flex-col"
       style={{
-        // Widen the readable column — the chat should take a larger part of the page.
-        // 78rem fills most of the available width on wide monitors while staying
-        // readable; the composer + messages both track this.
+        // The composer and messages both track this width.
         ["--thread-max-width" as string]: "78rem",
-        // A raised card surface so the composer reads as a distinct input on the
-        // grey chat (was a near-chat tint that only the border defined).
+        // A raised card surface so the composer reads as a distinct input on the chat background.
         ["--composer-bg" as string]: "var(--color-card)",
         ["--composer-radius" as string]: "1.5rem",
         ["--composer-padding" as string]: "8px",
       }}
     >
       <ThreadPrimitive.Viewport
-        // Scroll-LOCK to the bottom by default: as the agent streams tokens / new
-        // messages arrive, the view follows the latest content. turnAnchor="bottom"
-        // flips assistant-ui's autoScroll on (it's OFF under the "top" anchor, which
-        // pins the latest user turn to the top and does NOT follow streaming — the
-        // "it doesn't stick to the bottom" bug). The lock releases automatically when
-        // the user scrolls UP (isAtBottom goes false in the viewport store) and
-        // re-engages when they click the scroll-to-bottom arrow (ThreadScrollToBottom
-        // below, which fires scrollToBottom + restores isAtBottom).
+        // The "bottom" anchor turns assistant-ui's autoScroll on, so the view follows streaming until the user scrolls up.
         turnAnchor="bottom"
         autoScroll
         data-slot="aui_thread-viewport"
-        // NO `scroll-smooth` here: useStickToBottom re-pins to the bottom on every
-        // content-size change with an INSTANT scrollTop set. With CSS smooth-scroll on,
-        // that set animates and interleaves with the library's own scroll animation —
-        // the two fight and the view visibly thrashes (jumping up and down) before it
-        // settles. Instant pinning is invisible + lands immediately. The manual
-        // scroll-to-bottom arrow still animates: it passes behavior:"smooth" itself.
+        // No `scroll-smooth`, because useStickToBottom's instant pins would fight a CSS scroll animation.
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll"
       >
         <div
           className={cn(
-            // min-h-full (not flex-1): fill the viewport so the sticky footer's
-            // mt-auto pins the composer to the bottom, WITHOUT flex-growing the
-            // content — a flex-1 grow made the viewport scrollHeight drift so
-            // assistant-ui's isAtBottom check missed by >1px and pinned it false,
-            // which stopped streaming from following. min-h-full keeps
-            // scrollHeight == real content height so sticky-to-bottom works.
+            // min-h-full keeps scrollHeight equal to the real content height, which assistant-ui's isAtBottom check depends on.
             "mx-auto flex min-h-full w-full max-w-(--thread-max-width) flex-col px-4 pt-4",
             isEmpty && "justify-center",
           )}
@@ -404,24 +320,15 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
 
           <ThreadPrimitive.ViewportFooter
             className={cn(
-              // bg-chat (not bg-background): the footer is sticky over the chat
-              // surface, so it must MATCH it — otherwise the warm paper body shows
-              // as a distinct panel behind the composer (a box-in-a-box). It stays
-              // opaque so messages scrolling under it are covered.
+              // The sticky footer must match the chat surface and stay opaque over the messages scrolling under it.
               "aui-thread-viewport-footer bg-chat flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
               !isEmpty &&
                 "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
             <ThreadScrollToBottom />
-            {/* Inline run status — the thinking indicator (what the agent's doing +
-                for how long) + Stop, right where the conversation is, following the
-                scroll. Replaces the old detached bottom bar. */}
             <InlineRunStatus />
-            {/* Context-window fill bar — how full the conversation's context is. */}
             <ContextFillBar />
-            {/* ModelPicker moved INTO the composer action row (next to ＋); see
-                ComposerAction below. It no longer sits above the input. PR #465. */}
             <Composer />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
@@ -438,9 +345,7 @@ const ThreadMessage: FC = () => {
     useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
   const isEditing = useAuiState((s) => s.message.composer.isEditing);
-  // A spliced-in SYSTEM event (platform-injected: webhook, scheduler, background job,
-  // broker) is carried as an assistant message with a `sys:` id + a marker text part.
-  // Render it inline (chronological) as an auto-collapsed event chip, not a bubble.
+  // A spliced-in system event arrives as an assistant message with a `sys:` id and a marker text part.
   const sysId = useAuiState((s) => s.message.id);
   const sysText = useAuiState((s) => {
     const first = (s.message.content as Array<{ type?: string; text?: string }>)?.[0];
@@ -469,9 +374,7 @@ function systemSourceIcon(source: string): string {
   }
 }
 
-/** A SYSTEM event rendered INLINE in the conversation at its chronological slot —
- *  auto-collapsed to a single de-emphasized line ("⚙️ system · <source> · <preview>")
- *  so it reads as a platform event, not a user turn. Click to expand the full body. */
+/** A system event rendered inline at its chronological slot, collapsed to one de-emphasized line until clicked. */
 const SystemEventMessage: FC<{ source: string; text: string }> = ({ source, text }) => {
   const [open, setOpen] = useState(false);
   const preview = text.replace(/\s+/g, " ").trim();
@@ -512,12 +415,7 @@ const SystemEventMessage: FC<{ source: string; text: string }> = ({ source, text
 };
 
 const ThreadScrollToBottom: FC = () => {
-  // The stock ScrollToBottom scrolls to the CURRENT scrollHeight, which in a long
-  // conversation lands short of the true bottom: the last message / markdown / tool
-  // cards are still laying out when the click fires, so scrollHeight grows AFTER the
-  // scroll. Fix: after the built-in scroll (which also restores isAtBottom so
-  // auto-follow re-engages), hard-scroll the real viewport element to its bottom
-  // across the next few frames to catch that late layout — landing at the VERY end.
+  // The stock scroll lands short while the last message is still laying out, so re-assert the bottom over the next few frames.
   const store = useThreadViewportStore();
   const onClick = () => {
     store.getState().scrollToBottom({ behavior: "smooth" });
@@ -525,8 +423,8 @@ const ThreadScrollToBottom: FC = () => {
     if (!el) return;
     let n = 0;
     const settle = () => {
-      el.scrollTop = el.scrollHeight; // jump to the true bottom as content settles
-      if (++n < 6) requestAnimationFrame(settle); // re-assert over ~6 frames
+      el.scrollTop = el.scrollHeight;
+      if (++n < 6) requestAnimationFrame(settle);
     };
     requestAnimationFrame(settle);
   };
@@ -586,8 +484,7 @@ const Composer: FC = () => {
       <ComposerPrimitive.AttachmentDropzone asChild>
         <div
           data-slot="aui_composer-shell"
-          // border-input (not border-border/60): the composer is a CONTROL, so its
-          // boundary needs 3:1 — on the light theme --border is divider-weight. PR #538.
+          // The composer is a control, so its boundary needs the 3:1 contrast of border-input.
           className="border-input data-[dragging=true]:border-ring focus-within:border-ring dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
           <ComposerAttachments />
@@ -608,7 +505,7 @@ const Composer: FC = () => {
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      {/* Left cluster: attach + the model selector, inline in the composer. */}
+      {/* Attach and the model selector. */}
       <div className="flex items-center gap-1">
         <ComposerAddAttachment />
         <ModelPicker />
@@ -646,11 +543,7 @@ const ComposerAction: FC = () => {
             </ComposerPrimitive.StopDictation>
           </AuiIf>
         </AuiIf>
-        {/* Send vs Stop is gated on OUR run state (useConversationInterrupts), NOT
-            the runtime's thread.isRunning — the latter is ALWAYS false in the
-            single-source model (the runtime never sees a real run), so the stock
-            Cancel never appeared. ComposerSendOrStop shows Stop-in-the-composer
-            while a goose run is in flight and wires it to our cancel(). */}
+        {/* Send vs Stop is gated on the log-derived run state, since the runtime's thread.isRunning never sees a real run. */}
         <ComposerSendOrStop />
       </div>
     </div>
@@ -708,9 +601,7 @@ const AssistantMessage: FC = () => {
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
 
-  // reserves space for action bar and compensates with `-mb` for consistent msg spacing
-  // keeps hovered action bar from shifting layout (autohide doesn't support absolute positioning well)
-  // for pt-[n] use -mb-[n + 6] & min-h-[n + 6] to preserve compensation
+  // Reserve space for the action bar and compensate with `-mb` (for pt-[n] use -mb-[n + 6] and min-h-[n + 6]) so hovering it does not shift the layout.
   const ACTION_BAR_PT = "pt-1.5";
   const ACTION_BAR_HEIGHT = `-mb-7.5 min-h-7.5 ${ACTION_BAR_PT}`;
 
@@ -722,7 +613,7 @@ const AssistantMessage: FC = () => {
     >
       <div
         data-slot="aui_assistant-message-content"
-        // [contain-intrinsic-size:auto_24px] fixes issue #4104, don't change without checking for regressions
+        // The contain-intrinsic-size value is load-bearing for layout; check for regressions before changing it.
         className="text-foreground px-2 leading-relaxed wrap-break-word [contain-intrinsic-size:auto_24px] [content-visibility:auto]"
       >
         <MessagePrimitive.GroupedParts
@@ -774,10 +665,7 @@ const AssistantMessage: FC = () => {
               case "data":
                 return part.dataRendererUI;
               case "indicator":
-                // Suppressed: the thinking status is shown ONCE, by the RunStatusBar's
-                // pulsing dot (driven by the log-derived isRunning). This per-message
-                // ● came from a DIFFERENT state source (the ag-ui base applier's run
-                // tracking) and could disagree with the bar — so we don't render it.
+                // The thinking status is shown once by the run status bar from the log-derived run state.
                 return null;
               default:
                 return null;
@@ -791,12 +679,7 @@ const AssistantMessage: FC = () => {
         data-slot="aui_assistant-message-footer"
         className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
       >
-        {/* No BranchPicker: this UI renders SOLELY from the integrity log (a single
-            timeline), so message "branches" (versions) aren't a real feature. The
-            picker only ever surfaced a SPURIOUS "2/2" — the composer optimistically
-            appends the user message, then our render pump's runtime.thread.reset()
-            re-adds it from the log, which assistant-ui records as a 2nd branch.
-            Hiding the picker removes the confusing artifact. */}
+        {/* No BranchPicker, because the UI renders from a single log timeline and branches are not a real feature. */}
         <AssistantActionBar />
       </div>
     </MessagePrimitive.Root>
@@ -869,10 +752,6 @@ const UserMessage: FC = () => {
           <UserActionBar />
         </div>
       </div>
-
-      {/* No BranchPicker on the user message either — see the assistant-message
-          note: the "2/2" was a spurious branch from the reset-vs-append collision,
-          not a real message version. */}
     </MessagePrimitive.Root>
   );
 };

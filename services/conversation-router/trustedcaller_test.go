@@ -18,7 +18,7 @@ func withBearer(token string) *http.Request {
 	return r
 }
 
-// reviewer answers `username` for the one token it knows, and rejects anything else.
+// reviewer answers `username` for the one token it knows and rejects anything else.
 func reviewer(knownToken, username string) reviewTokenFunc {
 	return func(_ context.Context, token string) (string, bool, error) {
 		if token != knownToken {
@@ -67,15 +67,14 @@ func TestTrustedCallerRejectsEverythingElse(t *testing.T) {
 	if tc(context.Background(), withBearer("forged")) {
 		t.Error("an unauthenticated token must not be trusted")
 	}
-	// A VALID token for a different SA — e.g. a sandbox's own SA — must not pass.
+	// A valid token for a different SA must not pass.
 	other := newTrustedCaller(reviewer("good", "system:serviceaccount:agent-sandbox:conv-abc"), allowed)
 	if other(context.Background(), withBearer("good")) {
 		t.Error("a valid token for a non-allowlisted SA must not be trusted")
 	}
 }
 
-// A TokenReview that ERRORS (RBAC missing, apiserver unreachable) must fail CLOSED —
-// never trusted, never a panic, never a failed create.
+// A TokenReview that errors must fail closed: never trusted, never a panic, never a failed create.
 func TestTrustedCallerFailsClosedOnReviewError(t *testing.T) {
 	failing := func(context.Context, string) (string, bool, error) {
 		return "", false, errors.New("tokenreviews.authentication.k8s.io is forbidden")
@@ -96,8 +95,7 @@ func TestTrustedCallerDisabledWithoutAnAllowlist(t *testing.T) {
 }
 
 func TestTrustedServiceAccountsParsesTheSharedEnvVar(t *testing.T) {
-	// Same variable the agent-host reads (WEBHOOKS_SERVICE_ACCOUNT), so one setting
-	// configures both ends of the trust chain.
+	// The same variable the agent-host reads, so one setting configures both ends of the trust chain.
 	t.Setenv("WEBHOOKS_SERVICE_ACCOUNT", " "+webhooksSA+" ,system:serviceaccount:agent-sandbox:agent-scheduler,")
 	got := trustedServiceAccounts()
 	if len(got) != 2 || !got[webhooksSA] || !got["system:serviceaccount:agent-sandbox:agent-scheduler"] {

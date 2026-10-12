@@ -1,17 +1,10 @@
 /**
- * Tier 2 — broker credential flow (IRSA / per-conversation identity).
+ * Tier 2: the broker credential flow with per-conversation identity.
  *
- * Proves the full credential path on a real cluster: a per-conversation Sandbox
- * pod, with its projected broker-audience SA token, calls the broker via the
- * in-pod `agent-broker` shim; the broker validates the token with K8s
- * TokenReview and confirms the caller's identity is sandbox-{conversationId}.
- *
- * This is the cluster half of the UI-driven credential test — the same path a
- * `!agent-broker test/whoami` message exercises end to end.
- *
- * Gated: RUN_CLUSTER_TESTS=1 RUN_BROKER_TESTS=1 (needs the broker deployed with
- * its `test` provider enabled). Provisioner sets BROKER_URL + projects the
- * broker token (mirrors modules/conversation.nix).
+ * A per-conversation Sandbox pod calls the broker via the in-pod `agent-broker` shim with its
+ * projected broker-audience SA token; the broker validates it with a K8s TokenReview and
+ * confirms the caller is sandbox-{conversationId}. Gated on RUN_CLUSTER_TESTS=1 and
+ * RUN_BROKER_TESTS=1, with the broker deployed and its `test` provider enabled.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -48,8 +41,6 @@ maybe("broker credential flow (IRSA)", () => {
   });
 
   it("the broker authenticates the pod as its per-conversation identity", async () => {
-    // `agent-broker test/whoami` reads the projected SA token and hits the
-    // broker, which does a real TokenReview.
     const { stdout, exitCode } = await cluster.exec(
       SELECTOR(id),
       ["agent-broker", "test/whoami"],
@@ -72,9 +63,7 @@ maybe("broker credential flow (IRSA)", () => {
   });
 
   it("git-credential-broker vends a credential for an authenticated pod", async () => {
-    // Invoke the helper exactly as git would: `get` with the credential
-    // description on stdin. It reads the projected SA token, maps the host to
-    // the broker `test` provider (GIT_BROKER_HOST_MAP) and returns git creds.
+    // Invoke the helper as git would, with the credential description on stdin.
     const { stdout, exitCode } = await cluster.exec(
       SELECTOR(id),
       [
@@ -90,10 +79,7 @@ maybe("broker credential flow (IRSA)", () => {
   });
 
   it("git itself uses the broker helper (credential.helper broker)", async () => {
-    // `git credential fill` runs the configured helper chain. The entrypoint set
-    // credential.helper=broker, so this proves git -> git-credential-broker ->
-    // broker end to end (the same path `git clone https://test-git.local/...`
-    // takes). HOME must match the entrypoint's so the global config applies.
+    // `git credential fill` runs the configured helper chain, so this covers git to broker end to end.
     const { stdout, exitCode } = await cluster.exec(
       SELECTOR(id),
       [

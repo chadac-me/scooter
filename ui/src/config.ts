@@ -1,8 +1,4 @@
-/**
- * Shared agent-host connection config for the plain-fetch API clients (settings
- * page, etc). The streaming runtime builds its own from the same VITE var; this
- * is the non-streaming counterpart so components don't each re-read the env.
- */
+/** Shared agent-host connection config for the plain-fetch API clients, the non-streaming counterpart of the runtime's own config from the same VITE var. */
 
 import type { AgentHostConfig } from "./client.js";
 

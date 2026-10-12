@@ -1,21 +1,11 @@
 #!/usr/bin/env node
 /**
- * One-shot CLI: run the mirror→Postgres event backfill.
- *
- * Invoked by the agent-event-backfill Job (modules/event-backfill.nix), which
- * mounts the history mirror read-only and provides the Postgres DSN. Run once
- * during the cutover, with `historyMirror.retainForMigration = true` so the PVC
- * outlives the cutover and the backfill can read history out of it.
- *
- * Usage:
- *   node dist/scripts/runEventBackfill.js <mirror-root-path>
- *
- * Reads the agent_host DSN from the SAME AGENT_HOST_DB_* env the live service uses (see
- * db/agentHostDsn.ts), so it loads into the exact database + credentials agent-host reads from.
- *
- * Exits 0 only if EVERY conversation verified (rows == lines, chain matches).
- * A partial success (127 of 128) exits 1 and the Job fails, because the mirror
- * is reclaimed after this runs and destroying history is the failure we prevent.
+ * One-shot CLI for the mirror-to-Postgres event backfill, invoked by the
+ * agent-event-backfill Job (modules/event-backfill.nix) as
+ * `node dist/scripts/runEventBackfill.js <mirror-root-path>`. It reads the agent_host
+ * DSN from the same AGENT_HOST_DB_* env the live service uses (db/agentHostDsn.ts)
+ * and exits 0 only if every conversation verified, since the mirror is reclaimed
+ * after it runs.
  */
 
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -50,7 +40,7 @@ async function main() {
   try {
     const report = await backfillAll(db, mirrorRoot);
 
-    // Log the full report for operator review
+    // Log the full report for operator review.
     console.log("\n=== BACKFILL REPORT ===");
     console.log(JSON.stringify(report, null, 2));
     console.log("=======================\n");

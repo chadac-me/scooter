@@ -1,12 +1,8 @@
-# The contribs THIS repo's own builds and renders ship.
-#
-# Deliberately outside contrib/: that directory is vendored wholesale into
-# sandbox-os-src (reconverge-inputs.nix), so anything in it ships inside every
-# sandbox image. This is a property of this repo, not of the vended template.
-#
-# `contribs.<name>.enable` defaults false so a deployment opts in (#728). The
-# build-time consumers -- the python packages, the sandbox image, the UI
-# manifest -- have no deployment to read, so they read this.
+# The contribs this repo's own builds and renders ship. It lives outside contrib/
+# because that directory is vendored wholesale into every sandbox image, and this
+# is a property of this repo rather than the vended template. `contribs.<name>.enable`
+# defaults false, so the build-time consumers (the python packages, the sandbox
+# image, the UI manifest) read this.
 {
   contribs = {
     airtable.enable = true;

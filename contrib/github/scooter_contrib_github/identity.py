@@ -1,9 +1,4 @@
-"""Owner resolution for GitHub: a login -> the email Scooter matches on.
-
-Registered into `scooter_webhooks_lib.identity`, which owns the orchestration
-(#575). This is the provider-specific half that used to sit in the webhooks app's
-`identity_resolve`. Why: PR #591.
-"""
+"""Owner resolution for GitHub: a login to the email Scooter matches on, registered into `scooter_webhooks_lib.identity`."""
 
 from __future__ import annotations
 
@@ -24,8 +19,7 @@ _GITHUB_API = "https://api.github.com"
 
 @register_email_resolver("github")
 async def github_email(login: str) -> str | None:
-    """The PUBLIC email for a GitHub login (GET /users/{login}); often null (users
-    keep it private). Best-effort — no App/token required for the public endpoint."""
+    """The public email for a GitHub login (GET /users/{login}), often null."""
     if not login:
         return None
     headers = {"Accept": "application/vnd.github+json"}

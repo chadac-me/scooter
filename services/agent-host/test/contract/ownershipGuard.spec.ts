@@ -1,7 +1,6 @@
 /**
- * OwnershipGuard fencing core — the multi-replica guard that stops a REASSIGNED pod from
- * appending to a conversation the new owner now drives. Pure (no k8s); the watch loop
- * feeds observe().
+ * The OwnershipGuard fencing core, the multi-replica guard that stops a reassigned pod
+ * from appending to a conversation the new owner drives. The watch loop feeds observe().
  */
 import { describe, it, expect } from "vitest";
 
@@ -19,7 +18,7 @@ describe("allowAllGuard (fencing disabled)", () => {
 describe("OwnershipTracker", () => {
   it("fails OPEN for an unobserved conversation (no CR yet)", () => {
     const t = new OwnershipTracker("agent-host-0");
-    expect(t.canWrite(C)).toBe(true); // must be able to write before the CR exists
+    expect(t.canWrite(C)).toBe(true);
   });
 
   it("allows when THIS pod is the host", () => {
@@ -36,17 +35,17 @@ describe("OwnershipTracker", () => {
 
   it("refuses after being REASSIGNED away (the fencing case)", () => {
     const t = new OwnershipTracker("agent-host-0");
-    t.observe("conv-1", { hostPod: "agent-host-0", generation: 1 }); // we host it
+    t.observe("conv-1", { hostPod: "agent-host-0", generation: 1 });
     expect(t.canWrite(C)).toBe(true);
-    t.observe("conv-1", { hostPod: "agent-host-1", generation: 2 }); // reassigned away, gen++
-    expect(t.canWrite(C)).toBe(false); // the stale owner must stop writing
+    t.observe("conv-1", { hostPod: "agent-host-1", generation: 2 });
+    expect(t.canWrite(C)).toBe(false);
   });
 
   it("allows again if reassigned BACK to this pod (gen advances)", () => {
     const t = new OwnershipTracker("agent-host-0");
-    t.observe("conv-1", { hostPod: "agent-host-1", generation: 2 }); // owned elsewhere
+    t.observe("conv-1", { hostPod: "agent-host-1", generation: 2 });
     expect(t.canWrite(C)).toBe(false);
-    t.observe("conv-1", { hostPod: "agent-host-0", generation: 3 }); // back to us
+    t.observe("conv-1", { hostPod: "agent-host-0", generation: 3 });
     expect(t.canWrite(C)).toBe(true);
   });
 
@@ -54,7 +53,7 @@ describe("OwnershipTracker", () => {
     const t = new OwnershipTracker("agent-host-0");
     t.observe("conv-1", { hostPod: "agent-host-1", generation: 1 });
     expect(t.canWrite(C)).toBe(false);
-    t.observe("conv-1", null); // CR deleted
+    t.observe("conv-1", null);
     expect(t.canWrite(C)).toBe(true);
   });
 });

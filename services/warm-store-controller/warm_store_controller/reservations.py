@@ -1,6 +1,4 @@
-"""In-flight PV reservations: a sandbox paired with a PV, excluded locally before the API
-sees anything (a just-patched PV still reads Available). See PR #403.
-"""
+"""In-flight PV reservations: a sandbox paired with a PV, excluded locally while a just-patched PV still reads Available."""
 
 from __future__ import annotations
 
@@ -33,8 +31,7 @@ class Reservations:
         self._by_sandbox: dict[str, Reservation] = {}
 
     def claim(self, pv: str, sandbox: str) -> Reservation:
-        """Reserve `pv` for `sandbox`; raises AlreadyClaimed if either side is taken.
-        Re-claiming the same pair refreshes the deadline. PR #403."""
+        """Reserve `pv` for `sandbox`, refreshing the deadline for the same pair and raising AlreadyClaimed if either side is taken."""
         with self._lock:
             now = self._clock.time()
             self._expire(now)
@@ -57,9 +54,7 @@ class Reservations:
             return res
 
     def release(self, pv: str) -> None:
-        """Give up the reservation on `pv`, both directions — whether the PVC was realised
-        or a failed write is rolling back. IDEMPOTENT, unlike claim(): the loop calls this
-        for every realised PVC every pass, so "already released" is the steady state."""
+        """Give up the reservation on `pv` in both directions, idempotently."""
         with self._lock:
             res = self._by_pv.pop(pv, None)
             if res is not None and self._by_sandbox.get(res.sandbox) is res:
@@ -80,19 +75,17 @@ class Reservations:
             return res.pv if res else None
 
     def in_flight_reservations(self) -> set[str]:
-        """Reserved PV names — a read-only view for logging and pre-filtering. NOT a
-        substitute for claim(): deciding from this, then claiming, is the check-then-act
-        race claim() closes."""
+        """Reserved PV names, a read-only view that is no substitute for claim()."""
         with self._lock:
             self._expire(self._clock.time())
             return set(self._by_pv)
 
     def _expire(self, now: float) -> None:
-        """Drop lapsed reservations from BOTH indexes. Caller holds the lock."""
+        """Drop lapsed reservations from both indexes; the caller holds the lock."""
         stale = [pv for pv, res in self._by_pv.items() if res.expires_at <= now]
         for pv in stale:
             res = self._by_pv.pop(pv)
-            # Only if it still points at THIS reservation. PR #403.
+            # Only if the sandbox index still points at this reservation.
             if self._by_sandbox.get(res.sandbox) is res:
                 del self._by_sandbox[res.sandbox]
 

@@ -1,13 +1,10 @@
 /**
- * Published-shares panel — the static pages Scooter published from this conversation,
- * each a stable /s/<uuid>/ link that persists past the session. Rendered as the
- * right-panel "Shares" tab.
- *
- * Data path: the browser has no sandbox SA token, so it can't call the broker's
- * /shares directly. `loadShares` hits the agent-host proxy (GET
- * /conversations/:id/shares), which relays to the broker under its own control SA
- * (scoped to this conversation's short-id). `configured:false` means the broker path
- * isn't wired (local/fake) — RightPanel hides the tab then.
+ * Published-shares panel: the static pages Scooter published from this conversation,
+ * each a stable /s/<uuid>/ link that persists past the session, rendered as the
+ * right-panel "Shares" tab. The browser has no sandbox SA token, so `loadShares` goes
+ * through the agent-host proxy (GET /conversations/:id/shares), which relays to the
+ * broker under its own control SA. `configured:false` means the broker path is not
+ * wired and RightPanel hides the tab.
  */
 
 import { useEffect, useState } from "react";
@@ -18,8 +15,7 @@ import { agentHostConfig } from "./config.js";
 
 export type { ShareView } from "./client.js";
 
-/** Poll the current conversation's published static shares (a late publish still shows).
- *  Returns the list plus `configured` (false = broker path off, so the tab is hidden). */
+/** Poll the current conversation's published shares; `configured` false means the broker path is off and the tab is hidden. */
 export function useShares(): { shares: ShareView[]; configured: boolean } {
   const { currentId } = useSessions();
   const [shares, setShares] = useState<ShareView[]>([]);

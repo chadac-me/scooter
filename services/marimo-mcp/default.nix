@@ -1,9 +1,7 @@
 { lib, buildNpmPackage, nodejs, ... }:
 
-# The isolated marimo MCP server (marimo protocol client + notebook tools). Built as
-# its OWN npm package; the agent-host image symlinks it into
-# node_modules/@scooter/marimo-mcp so agent-host resolves it at build + runtime.
-# See services/agent-host/default.nix (same pattern as claude-sdk-provider).
+# The isolated marimo MCP server (marimo protocol client + notebook tools), built as
+# its own npm package that agent-host symlinks into node_modules/@scooter/marimo-mcp.
 
 buildNpmPackage {
   pname = "marimo-mcp";
@@ -14,7 +12,7 @@ buildNpmPackage {
 
   npmFlags = [ "--legacy-peer-deps" ];
 
-  # Keep node_modules (mcp-sdk + zod v3) so the runtime import resolves.
+  # Keep node_modules so the runtime import resolves.
   dontNpmPrune = true;
 
   installPhase = ''

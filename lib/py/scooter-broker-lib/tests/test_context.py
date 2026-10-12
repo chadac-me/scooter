@@ -1,11 +1,4 @@
-"""A factory gets the substrate iff it asks for it — and never silently gets none.
-
-The registry decides by ARITY, so the nine factories that take no parameter had to
-keep working untouched when the context was added; that is the property worth pinning,
-along with the refusal that stops a context-wanting provider from being built with no
-authorizer (which, since NoopAuthorizer allows everything, would look identical to a
-working deployment while enforcing nothing).
-"""
+"""A factory gets the substrate iff it asks for it, and never silently gets none."""
 
 from __future__ import annotations
 
@@ -35,7 +28,7 @@ def _ctx() -> BrokerContext:
 
 
 def _empty_package(name: str) -> types.ModuleType:
-    """A package with no modules, so discovery scans nothing but the registry."""
+    """A package with no modules, so discovery scans only the registry."""
     mod = types.ModuleType(name)
     mod.__path__ = []
     sys.modules[name] = mod
@@ -53,7 +46,6 @@ def test_zero_arg_factory_is_called_with_no_arguments():
 
 
 def test_zero_arg_factory_works_with_no_context_at_all():
-    # The pre-context call shape: a contrib's own test does exactly this.
     @registry.register_provider
     def plain() -> Provider:
         return Provider(name="plain", transports=[], enabled=True)
@@ -76,8 +68,7 @@ def test_factory_declaring_a_parameter_receives_the_context():
 
 
 def test_context_wanting_factory_is_absent_rather_than_unauthorized(caplog):
-    """No context -> the provider does not build. It must never be built with none:
-    NoopAuthorizer allows everything, so an unenforced provider looks healthy."""
+    """Without a context the provider does not build, since NoopAuthorizer would make an unenforced provider look healthy."""
 
     @registry.register_provider
     def needs(ctx: BrokerContext) -> Provider:  # pragma: no cover - must not run

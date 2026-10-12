@@ -8,12 +8,7 @@ import (
 func sp(s string) *string { return &s }
 func bp(b bool) *bool     { return &b }
 
-// assembleList is the whole GET /conversations body. These lock down the ways it can go wrong:
-// leaking someone else's conversation under "mine", and getting the metadata⋈links join wrong.
-//
-// There is no existence join to get wrong: phase and sandbox_ref are columns, and an ended
-// conversation has no row to omit because end() deletes it. TestListsWhateverRowsExist pins that
-// rule — every row that exists is listed.
+// assembleList is the whole GET /conversations body: visibility under "mine" and the metadata-links join.
 func TestAssembleList(t *testing.T) {
 	metas := []ConversationRow{
 		{ID: "a", ThreadID: "a", Title: "Alpha", CreatedAt: 100, LastActivityAt: 900, Owner: sp("alice"), Starred: bp(true),
@@ -22,9 +17,7 @@ func TestAssembleList(t *testing.T) {
 			Phase: sp("Suspended"), SandboxRef: sp("conv-bb")},
 	}
 
-	// statusForPhase is the phase->dot mapping the sidebar reads. Failed is terminal (the
-	// zombie-repair escalation force-deleted the sandbox) and MUST NOT read as "running" —
-	// the regression this locks down (a dead conversation showing the blue active dot).
+	// Failed is terminal and must not read as "running".
 	t.Run("statusForPhase maps each phase", func(t *testing.T) {
 		for phase, want := range map[string]string{
 			"Suspended": "suspended",
@@ -47,12 +40,11 @@ func TestAssembleList(t *testing.T) {
 		if len(rows) != 2 {
 			t.Fatalf("want 2 rows, got %d", len(rows))
 		}
-		// Order is the store's (ORDER BY last_activity_at DESC, created_at DESC), not this
-		// function's — a and b arrive in that order and must come out in it.
+		// The order is the store's, and a and b must come out as they arrived.
 		if rows[0].ID != "a" || rows[1].ID != "b" {
 			t.Fatalf("wrong order: %s,%s", rows[0].ID, rows[1].ID)
 		}
-		// phase->status: Assigned => running, Suspended => suspended.
+		// Assigned maps to running, Suspended to suspended.
 		if rows[0].Status != "running" || rows[1].Status != "suspended" {
 			t.Errorf("status mapping wrong: %q %q", rows[0].Status, rows[1].Status)
 		}
@@ -60,24 +52,20 @@ func TestAssembleList(t *testing.T) {
 		if !a.Starred || a.IdleMs != 100 || a.AgeMs != 900 || a.Sandbox.Name != "conv-aa" {
 			t.Errorf("row a projection wrong: %+v", a)
 		}
-		// links: distinct sorted sources, full link list.
+		// Distinct sorted sources, full link list.
 		if len(a.Sources) != 2 || a.Sources[0] != "github" || a.Sources[1] != "slack" {
 			t.Errorf("sources wrong: %v", a.Sources)
 		}
 		if len(a.Links) != 2 {
 			t.Errorf("links not attached: %v", a.Links)
 		}
-		// a conversation with no links gets empty (non-null) arrays. b is the link-less one.
+		// A conversation with no links gets empty, non-null arrays.
 		if rows[1].Sources == nil || rows[1].Links == nil {
 			t.Errorf("empty enrichment must be [] not null: %+v", rows[1])
 		}
 	})
 
-	// The ORDER BY in Store.Conversations is now the only thing establishing the endpoint's order,
-	// which makes "assembleList must not reorder" a load-bearing contract with nothing else
-	// guarding it. This pins it WITHOUT touching the query: feed an order that matches neither
-	// timestamp and require it back verbatim. A map iteration or a regroup added to assembleList
-	// fails here instead of silently shuffling the sidebar.
+	// Feed an order that matches neither timestamp and require it back verbatim.
 	t.Run("does not reorder: input order is returned verbatim", func(t *testing.T) {
 		scrambled := []ConversationRow{
 			{ID: "m", ThreadID: "m", Title: "M", CreatedAt: 200, LastActivityAt: 500},
@@ -110,8 +98,7 @@ func TestAssembleList(t *testing.T) {
 	})
 }
 
-// The JSON must match agent-host's contract: userTitled/starred always present as booleans, and
-// a nil model/owner/parentId omitted (not null) — the UI reads these verbatim.
+// The JSON must match agent-host's contract: userTitled/starred always present, and a nil model/owner/parentId omitted rather than null.
 func TestListRowJSONShape(t *testing.T) {
 	rows := assembleList(
 		[]ConversationRow{{ID: "x", ThreadID: "x", Title: "X", CreatedAt: 1, LastActivityAt: 2, Phase: sp("Assigned")}},
@@ -134,17 +121,12 @@ func TestListRowJSONShape(t *testing.T) {
 	}
 }
 
-// A SUBAGENT is a conversation with a parent. The UI's whole sub-conversation rendering —
-// nesting it under its parent in the sidebar and listing it in the parent's Subagents panel —
-// keys off `parentId` arriving on the row, and off the subagent being LISTED at all. Neither
-// was covered: a subagent dropped by the visibility filter, or serialized without its parent
-// link, renders as an independent top-level chat, which is exactly what it must never do.
+// A subagent is a conversation with a parent, and the UI's nesting keys off `parentId` arriving on a listed row.
 func TestAssembleListSubagent(t *testing.T) {
 	metas := []ConversationRow{
 		{ID: "parent", ThreadID: "parent", Title: "Parent", CreatedAt: 100, LastActivityAt: 900, Owner: sp("alice"),
 			Phase: sp("Assigned"), SandboxRef: sp("conv-p")},
-		// A subagent inherits its parent's owner (session manager spawnChild) and carries parentId.
-		// It SHARES the parent's sandbox, so its row points at the same ref.
+		// A subagent inherits its parent's owner, carries parentId, and shares the parent's sandbox.
 		{ID: "sub", ThreadID: "sub", Title: "research", CreatedAt: 200, LastActivityAt: 800, Owner: sp("alice"),
 			ParentID: sp("parent"), Phase: sp("Assigned"), SandboxRef: sp("conv-p")},
 	}
@@ -174,8 +156,7 @@ func TestAssembleListSubagent(t *testing.T) {
 		if m["parentId"] != "parent" {
 			t.Errorf("serialized parentId = %v, want \"parent\"", m["parentId"])
 		}
-		// …and a TOP-LEVEL row must omit it rather than send null: the UI treats any
-		// present parentId as "this is a subagent".
+		// A top-level row must omit it rather than send null, since the UI treats any present parentId as a subagent.
 		b0, _ := json.Marshal(rows[0])
 		var m0 map[string]any
 		_ = json.Unmarshal(b0, &m0)
@@ -185,8 +166,7 @@ func TestAssembleListSubagent(t *testing.T) {
 	})
 
 	t.Run("a subagent is not hidden from its owner under mine", func(t *testing.T) {
-		// The subagent inherits the parent's owner, so "mine" must show both. If it did
-		// not, the parent would render with a child it can never display.
+		// The subagent inherits the parent's owner, so "mine" must show both.
 		rows := assembleList(metas, nil, 1000, "alice", "mine")
 		var sawSub bool
 		for _, r := range rows {

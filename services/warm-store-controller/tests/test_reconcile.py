@@ -1,7 +1,4 @@
-"""Tier 1 — the pure warm-store reconcile core (no k8s). Locks the pool decisions:
-return-on-suspend, leak-recovery, GC-by-tag, top-up, LRU-evict. These tests ARE the spec
-(red-first); reconcile.py is implemented to turn them green.
-"""
+"""Tier 1: the pure warm-store reconcile core, no k8s."""
 
 from warm_store_controller.reconcile import (
     PoolPvc,
@@ -28,7 +25,6 @@ def kinds(actions) -> set[str]:
 # --- top-up ----------------------------------------------------------------
 
 def test_topup_when_no_ready_pvc_for_current_tag():
-    # Empty pool, min_ready=1 -> warm one new PVC for the current tag.
     actions = reconcile(pvcs=[], sandboxes=[], cfg=cfg(min_ready=1))
     warms = [a for a in actions if isinstance(a, WarmNew)]
     assert len(warms) == 1
@@ -36,21 +32,17 @@ def test_topup_when_no_ready_pvc_for_current_tag():
 
 
 def test_topup_ready_and_in_flight_warming_both_count():
-    # A ready PVC satisfies min_ready...
     pvcs = [PoolPvc(name="r1", image_tag=TAG, state="ready")]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=1))
     assert not any(isinstance(a, WarmNew) for a in actions)
 
-    # ...and so does an IN-FLIGHT warming PVC (its Job is building) — we must NOT warm another
-    # every tick while one is in progress (the over-warm bug). A warming PVC with no resolved
-    # job status is treated as in-flight.
+    # An in-flight warming PVC satisfies min_ready too.
     pvcs = [PoolPvc(name="w1", image_tag=TAG, state="warming", warm_job_status="running")]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=1))
     assert not any(isinstance(a, WarmNew) for a in actions)
 
 
 def test_topup_ignores_ready_of_other_tag():
-    # A ready PVC for a DIFFERENT tag doesn't satisfy the current tag's min_ready.
     pvcs = [PoolPvc(name="r-old", image_tag=OLD, state="ready")]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=1))
     assert any(isinstance(a, WarmNew) and a.image_tag == TAG for a in actions)
@@ -61,14 +53,13 @@ def test_topup_multiple_to_reach_min_ready():
     assert sum(isinstance(a, WarmNew) for a in actions) == 3
 
 
-# --- warming → ready promotion (the pool-warms-forever bug guard) -----------
+# --- warming to ready promotion ----------------------------------------------
 
 def test_promote_warming_pvc_on_job_success():
     pvcs = [PoolPvc(name="w1", image_tag=TAG, state="warming", warm_job_status="succeeded")]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=1))
     rels = [a for a in actions if isinstance(a, Relabel) and a.pvc == "w1"]
     assert rels and rels[0].state == "ready"
-    # Promoted PVC satisfies min_ready → NO new warm.
     assert not any(isinstance(a, WarmNew) for a in actions)
 
 
@@ -79,12 +70,10 @@ def test_discard_warming_pvc_on_job_failure():
 
 
 def test_in_flight_warming_does_not_over_warm():
-    # A warm still RUNNING counts toward min_ready → we do NOT spawn another every tick
-    # (the live-observed over-warm bug: 0 ready + 1 warming would warm again and again).
     pvcs = [PoolPvc(name="w1", image_tag=TAG, state="warming", warm_job_status="running")]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=1))
     assert not any(isinstance(a, WarmNew) for a in actions)
-    # ...but with min_ready=2 and only 1 in-flight, we top up exactly ONE more.
+    # With min_ready=2 and one in flight, exactly one more is warmed.
     actions2 = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=2))
     assert sum(isinstance(a, WarmNew) for a in actions2) == 1
 
@@ -98,7 +87,6 @@ def test_warming_retired_tag_is_discarded():
 # --- GC by tag -------------------------------------------------------------
 
 def test_gc_deletes_retired_tag_pvc():
-    # A ready PVC for a retired tag -> delete (its lower is gone; DB would dangle).
     pvcs = [PoolPvc(name="r-old", image_tag=OLD, state="ready")]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=0))
     assert DeletePvc("r-old", reason="retired-tag") in [
@@ -107,8 +95,6 @@ def test_gc_deletes_retired_tag_pvc():
 
 
 def test_gc_does_not_delete_claimed_retired_tag_still_in_use():
-    # A retired-tag PVC that's still CLAIMED + bound to a live pod must NOT be yanked
-    # out from under a running conversation — GC waits until it's returned/unbound.
     pvcs = [PoolPvc(name="c-old", image_tag=OLD, state="claimed", claimed_by="conv-x", bound_to_pod=True)]
     sboxes = [SandboxRef(conv_id="conv-x", image_tag=OLD, suspended=False)]
     actions = reconcile(pvcs=pvcs, sandboxes=sboxes, cfg=cfg(min_ready=0))
@@ -118,19 +104,16 @@ def test_gc_does_not_delete_claimed_retired_tag_still_in_use():
 # --- return-on-suspend -----------------------------------------------------
 
 def test_return_claimed_pvc_when_sandbox_suspended_clean():
-    # Sandbox suspended + clean unmount -> relabel its claimed PVC back to `ready`
-    # (self-enriching: it carries this agent's installs), clearing claimed-by.
     pvcs = [PoolPvc(name="p1", image_tag=TAG, state="claimed", claimed_by="conv-a", bound_to_pod=False)]
     sboxes = [SandboxRef(conv_id="conv-a", image_tag=TAG, suspended=True, unmount_marker="clean")]
     actions = reconcile(pvcs=pvcs, sandboxes=sboxes, cfg=cfg(min_ready=1))
     rels = [a for a in actions if isinstance(a, Relabel) and a.pvc == "p1"]
     assert len(rels) == 1
     assert rels[0].state == "ready"
-    assert rels[0].labels.get("scooter.io/claimed-by") is None  # cleared
+    assert rels[0].labels.get("scooter.io/claimed-by") is None
 
 
 def test_return_discards_pvc_on_unclean_unmount():
-    # A crash / dirty overlay work/ -> DISCARD the PVC (delete), don't return it dirty.
     pvcs = [PoolPvc(name="p1", image_tag=TAG, state="claimed", claimed_by="conv-a", bound_to_pod=False)]
     sboxes = [SandboxRef(conv_id="conv-a", image_tag=TAG, suspended=True, unmount_marker="unclean")]
     actions = reconcile(pvcs=pvcs, sandboxes=sboxes, cfg=cfg(min_ready=0))
@@ -139,10 +122,7 @@ def test_return_discards_pvc_on_unclean_unmount():
 
 
 def test_unknown_marker_backs_off_no_delete_no_return():
-    # THE PRODUCER-LOOP FIX (read-failure ≠ unclean). A suspended sandbox whose unmount marker
-    # could NOT be read (Job errored / never scheduled / PVC terminating) must NOT be treated as
-    # dirty. A read failure is not evidence of dirtiness — back off: leave the PVC claimed, retry
-    # next pass. Deleting here is exactly how healthy pool volumes got destroyed.
+    # A marker that could not be read is not evidence of dirtiness.
     pvcs = [PoolPvc(name="p1", image_tag=TAG, state="claimed", claimed_by="conv-a", bound_to_pod=False)]
     sboxes = [SandboxRef(conv_id="conv-a", image_tag=TAG, suspended=True, unmount_marker="unknown")]
     actions = reconcile(pvcs=pvcs, sandboxes=sboxes, cfg=cfg(min_ready=0))
@@ -151,10 +131,7 @@ def test_unknown_marker_backs_off_no_delete_no_return():
 
 
 def test_terminating_claimed_pvc_gets_no_second_delete():
-    # THE SELF-SUSTAINING SPIN (re-delete of an already-terminating PVC). Once a PVC is
-    # Terminating (deletionTimestamp set) it is resolved — even an `unclean` sandbox must produce
-    # NO further DeletePvc for it. Re-deleting is a no-op that, via the marker re-read, spawns
-    # check Jobs that can never schedule and get misread as unclean → another delete → the loop.
+    # A terminating PVC is resolved, even with an `unclean` sandbox.
     pvcs = [
         PoolPvc(name="p1", image_tag=TAG, state="claimed", claimed_by="conv-a",
                 bound_to_pod=False, terminating=True),
@@ -166,8 +143,6 @@ def test_terminating_claimed_pvc_gets_no_second_delete():
 
 
 def test_terminating_ready_pvc_is_not_counted_and_a_replacement_is_warmed():
-    # A terminating `ready` PVC is on its way out: it must not be counted toward min_ready, so the
-    # pool tops up a replacement rather than trusting a dying volume.
     pvcs = [PoolPvc(name="r-dying", image_tag=TAG, state="ready", terminating=True)]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=1))
     assert not any(isinstance(a, DeletePvc) and a.pvc == "r-dying" for a in actions)
@@ -175,8 +150,6 @@ def test_terminating_ready_pvc_is_not_counted_and_a_replacement_is_warmed():
 
 
 def test_no_return_while_pod_still_bound():
-    # Suspended flag set but a pod still holds the RWO PVC -> wait (don't relabel yet;
-    # relabeling `ready` could let a second pod claim it while the first is unmounting).
     pvcs = [PoolPvc(name="p1", image_tag=TAG, state="claimed", claimed_by="conv-a", bound_to_pod=True)]
     sboxes = [SandboxRef(conv_id="conv-a", image_tag=TAG, suspended=True, unmount_marker="clean")]
     actions = reconcile(pvcs=pvcs, sandboxes=sboxes, cfg=cfg(min_ready=1))
@@ -186,8 +159,6 @@ def test_no_return_while_pod_still_bound():
 # --- leak recovery ---------------------------------------------------------
 
 def test_leak_recovery_claimed_pvc_with_no_sandbox():
-    # A claimed PVC whose owning Sandbox no longer exists AND no pod holds it -> return
-    # to `ready` (the sandbox died without a clean return).
     pvcs = [PoolPvc(name="p1", image_tag=TAG, state="claimed", claimed_by="ghost", bound_to_pod=False)]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=1))
     rels = [a for a in actions if isinstance(a, Relabel) and a.pvc == "p1"]
@@ -195,7 +166,6 @@ def test_leak_recovery_claimed_pvc_with_no_sandbox():
 
 
 def test_no_leak_recovery_while_pod_bound():
-    # Orphaned label but a pod still mounts it -> NOT a leak; leave it (the pod is alive).
     pvcs = [PoolPvc(name="p1", image_tag=TAG, state="claimed", claimed_by="ghost", bound_to_pod=True)]
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=1))
     assert not any(isinstance(a, Relabel) and a.pvc == "p1" for a in actions)
@@ -204,8 +174,6 @@ def test_no_leak_recovery_while_pod_bound():
 # --- LRU eviction ----------------------------------------------------------
 
 def test_lru_evicts_ready_past_max_total():
-    # More ready PVCs than max_total for the current tag -> evict the coldest (oldest
-    # last-used) down to max_total. 3 ready, max_total=2 -> delete 1 (the oldest).
     pvcs = [
         PoolPvc(name="r-old", image_tag=TAG, state="ready", last_used="2026-08-01T00:00:00Z"),
         PoolPvc(name="r-mid", image_tag=TAG, state="ready", last_used="2026-08-05T00:00:00Z"),
@@ -214,7 +182,7 @@ def test_lru_evicts_ready_past_max_total():
     actions = reconcile(pvcs=pvcs, sandboxes=[], cfg=cfg(min_ready=0, max_total=2))
     dels = [a for a in actions if isinstance(a, DeletePvc)]
     assert len(dels) == 1
-    assert dels[0].pvc == "r-old"  # coldest evicted
+    assert dels[0].pvc == "r-old"
 
 
 def test_no_evict_within_max_total():
@@ -229,6 +197,5 @@ def test_active_claimed_pvc_is_noop():
     pvcs = [PoolPvc(name="p1", image_tag=TAG, state="claimed", claimed_by="conv-a", bound_to_pod=True)]
     sboxes = [SandboxRef(conv_id="conv-a", image_tag=TAG, suspended=False)]
     actions = reconcile(pvcs=pvcs, sandboxes=sboxes, cfg=cfg(min_ready=0))
-    # No warm (min_ready=0), no delete, no relabel for the active PVC.
     assert not any(isinstance(a, (DeletePvc,)) and getattr(a, "pvc", None) == "p1" for a in actions)
     assert not any(isinstance(a, Relabel) and a.pvc == "p1" for a in actions)

@@ -32,10 +32,10 @@ func TestIsConversationListRoute(t *testing.T) {
 		method, path string
 		want         bool
 	}{
-		{"GET", "/conversations", true},         // the list — served from the store, not a pod
-		{"GET", "/conversations/events", true},  // the live list stream — same
-		{"GET", "/conversations/abc123", false}, // one conversation — route to its owner
-		{"POST", "/conversations", false},       // create — a single pod must own it
+		{"GET", "/conversations", true},         // the list, served from the store
+		{"GET", "/conversations/events", true},  // the live list stream
+		{"GET", "/conversations/abc123", false}, // one conversation, routed to its owner
+		{"POST", "/conversations", false},       // create
 		{"GET", "/healthz", false},
 		{"GET", "/conversations/abc/events.integrity", false}, // per-conversation stream
 	}
@@ -46,8 +46,7 @@ func TestIsConversationListRoute(t *testing.T) {
 	}
 }
 
-// /conversations/events must NOT parse as a conversation whose id is "events" — that would route
-// the live sidebar stream to one arbitrary pod instead of the store-backed list stream.
+// /conversations/events must not parse as a conversation whose id is "events".
 func TestEventsIsNotAConversationID(t *testing.T) {
 	if id, ok := ConvIDFromPath("/conversations/events"); ok {
 		t.Errorf("/conversations/events parsed as conversation id %q — it is the list events stream", id)
@@ -83,7 +82,7 @@ func TestIsNonScoped(t *testing.T) {
 }
 
 func TestTargetURL(t *testing.T) {
-	// Route by POD IP (Deployments give random pods no stable DNS).
+	// Route by pod IP.
 	u := TargetURL("10.42.0.49", 8080)
 	want := "http://10.42.0.49:8080"
 	if u.String() != want {
@@ -92,7 +91,7 @@ func TestTargetURL(t *testing.T) {
 }
 
 func TestFallbackURL(t *testing.T) {
-	// Non-scoped / unassigned / stale-IP → the agent-host ClusterIP Service (any ready pod).
+	// Non-scoped, unassigned and stale-IP requests go to the agent-host ClusterIP Service.
 	u := FallbackURL("agent-host", "agent-sandbox", 8080)
 	want := "http://agent-host.agent-sandbox.svc.cluster.local:8080"
 	if u.String() != want {

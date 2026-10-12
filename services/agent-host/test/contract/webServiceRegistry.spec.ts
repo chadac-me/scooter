@@ -1,10 +1,8 @@
 /**
- * Tier 1 contract test — WebServiceRegistry over a fake exec client.
- *
- * Asserts the manifest parse + systemctl coupling: list/get read the in-pod
- * discovery manifest, isRunning maps `systemctl is-active`, start/stop go through
+ * WebServiceRegistry over a fake exec client: list/get read the in-pod discovery
+ * manifest, isRunning maps `systemctl is-active`, start/stop go through
  * `scooter-service` (which persists the enabled set for boot restore) and drop the
- * cache, and logs() tails the unit journal. See docs/WEB_SERVICES_PROXY.md.
+ * cache, and logs() tails the unit journal.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -69,7 +67,7 @@ describe("parseManifest", () => {
     expect(parseManifest(MANIFEST)).toHaveLength(1);
     expect(parseManifest(MANIFEST)[0]).toMatchObject({ name: "marimo", port: 2718 });
     expect(parseManifest("not json")).toEqual([]);
-    expect(parseManifest(JSON.stringify({ services: [{ name: "x" }] }))).toEqual([]); // no port
+    expect(parseManifest(JSON.stringify({ services: [{ name: "x" }] }))).toEqual([]);
   });
 
   it("carries a declared resource requirement through", () => {
@@ -80,9 +78,7 @@ describe("parseManifest", () => {
   });
 
   it("drops ill-typed dimensions but keeps the service", () => {
-    // The manifest is generated Nix, but it lands in the pod as a plain file. A bad
-    // `resources` block must not cost the service its proxy entry — losing the route
-    // would be a far worse failure than losing an advisory warning.
+    // A bad `resources` block must not cost the service its proxy entry.
     const json = JSON.stringify({
       services: [{ name: "marimo", port: 2718, resources: { cpu: 4, memory: "8Gi", gpu: "one" } }],
     });
@@ -92,8 +88,7 @@ describe("parseManifest", () => {
   });
 
   it("omits `resources` entirely when nothing usable is declared", () => {
-    // Absent must stay distinguishable from "declared zero": absent means we can't
-    // judge and say nothing, whereas a zero would read as a real requirement.
+    // Absent stays distinguishable from a declared zero, which would read as a real requirement.
     for (const r of [undefined, null, "big", {}, { cpu: 4 }]) {
       const json = JSON.stringify({ services: [{ name: "m", port: 1, resources: r }] });
       expect(parseManifest(json)[0].resources).toBeUndefined();
@@ -108,25 +103,22 @@ describe("WebServiceRegistry", () => {
     expect(await reg.list("conv-1")).toHaveLength(1);
     expect((await reg.get("conv-1", "marimo"))?.port).toBe(2718);
     expect(await reg.get("conv-1", "nope")).toBeNull();
-    // cached: download called once despite three reads.
     expect(exec.download).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT cache an empty result — retries until the pod's manifest is readable", async () => {
-    // The pod is ContainerCreating on the first read (download throws → []), then
-    // Ready on the next. An empty [] must NOT be memoized, or the Sandbox tab shows
-    // "no services" forever even once the pod is up (the real bug).
+    // The pod is ContainerCreating on the first read, then Ready on the next.
     let ready = false;
     const download = vi.fn(async () => {
       if (!ready) throw new Error("pod not ready");
       return MANIFEST;
     });
     const reg = make(fakeExec({ download }));
-    expect(await reg.list("conv-1")).toEqual([]); // creating → empty, not cached
+    expect(await reg.list("conv-1")).toEqual([]);
     ready = true;
-    expect(await reg.list("conv-1")).toHaveLength(1); // retried → services appear
+    expect(await reg.list("conv-1")).toHaveLength(1);
     expect(download).toHaveBeenCalledTimes(2);
-    // Now non-empty IS cached: a third read doesn't re-download.
+    // The non-empty result is cached.
     expect(await reg.list("conv-1")).toHaveLength(1);
     expect(download).toHaveBeenCalledTimes(2);
   });
@@ -143,12 +135,11 @@ describe("WebServiceRegistry", () => {
     const execute = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
     const download = vi.fn(async () => MANIFEST);
     const reg = make(fakeExec({ execute, download }));
-    await reg.list("conv-1"); // populate cache (download #1)
+    await reg.list("conv-1");
     await reg.start("conv-1", "marimo");
-    // Via scooter-service (which records the enabled set on the PVC), NOT raw systemctl,
-    // so the boot restore oneshot can bring it back after a suspend/resume pod recreate.
+    // scooter-service records the enabled set on the PVC so boot restore can bring it back.
     expect(execute).toHaveBeenCalledWith({ command: "scooter-service", args: ["start", "marimo"] });
-    await reg.list("conv-1"); // cache dropped -> download #2
+    await reg.list("conv-1");
     expect(download).toHaveBeenCalledTimes(2);
   });
 
@@ -225,9 +216,7 @@ describe("WebServiceRegistry", () => {
 
 describe("picking up a scooter-rebuild", () => {
   it("re-reads the manifest once the cached read expires", async () => {
-    // The agent declares a service with `scooter-rebuild`; switch-to-configuration
-    // repoints /run/scooter/web-services.json. Nothing in the pod tells the host,
-    // so an unexpiring cache served the original list for the life of the process.
+    // A `scooter-rebuild` repoints /run/scooter/web-services.json without telling the host.
     let clock = 1_000;
     const { exec, state } = mutableExec(MANIFEST);
     const reg = make(exec, { ttlMs: 10_000, now: () => clock });
@@ -235,7 +224,7 @@ describe("picking up a scooter-rebuild", () => {
     expect((await reg.list("c1")).map((s) => s.name)).toEqual(["marimo"]);
     state.manifest = TWO;
 
-    // Still inside the TTL: the cached read stands (no extra exec).
+    // Still inside the TTL, so the cached read stands.
     const readsAfterFirst = state.reads;
     expect((await reg.list("c1")).map((s) => s.name)).toEqual(["marimo"]);
     expect(state.reads).toBe(readsAfterFirst);
@@ -251,13 +240,12 @@ describe("picking up a scooter-rebuild", () => {
 
     await reg.list("c1");
     state.manifest = TWO;
-    // No clock movement: this is the UI's Rescan button.
+    // No clock movement; this is the UI's Rescan button.
     expect((await reg.list("c1", { force: true })).map((s) => s.name)).toEqual(["marimo", "docs"]);
   });
 
   it("serves cached reads within the TTL so listing is not an exec per call", async () => {
-    // The cache exists because list() is called on a 4s poll AND by the proxy; the
-    // fix must not turn every call into a pod exec.
+    // list() is called on a 4s poll and by the proxy.
     const { exec, state } = mutableExec(MANIFEST);
     const reg = make(exec, { ttlMs: 10_000, now: () => 5_000 });
     await reg.list("c1");
@@ -267,8 +255,7 @@ describe("picking up a scooter-rebuild", () => {
   });
 
   it("keeps retrying while the manifest reads empty (pod still coming up)", async () => {
-    // An empty read means "couldn't read it yet", never "no services" — it must not
-    // be cached, or the panel says "no services" forever once the pod is ready.
+    // An empty read means "could not read it yet", never "no services".
     const { exec, state } = mutableExec("");
     const reg = make(exec, { ttlMs: 10_000, now: () => 5_000 });
     expect(await reg.list("c1")).toEqual([]);

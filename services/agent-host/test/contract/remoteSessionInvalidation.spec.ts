@@ -1,19 +1,8 @@
 /**
- * Tier 1 contract — a remote session that DIED (container restart) is re-established, not
- * silently served blank.
- *
- * THE LIVE FAILURE (aeonai, 2026-08-23). The BYO container was recreated; its per-session SDK
- * clients vanished. The cloud bridge still held its CACHED ready session (sdk_<old>) and its
- * already-seeded reinjection marker, so the next prompt went out against a session the new
- * container instance never created. The container's compat fallback served it from the BLANK
- * primary client: no history, no error — the agent "gets confused because it receives no
- * context", and the log proves it (session minted 14:35, container started 14:54, ZERO
- * new_session calls, zero preambles).
- *
- * The contract: when a remote prompt fails with "unknown session", the bridge drops that
- * provider's cached session and retries the run ONCE — the retry re-initializes, creates a
- * session on the CURRENT container instance, and (because the session key is new) the history
- * reinjection fires again. The user sees a normal, context-full turn instead of amnesia.
+ * A remote session that died with a container restart is re-established rather than
+ * served blank: when a remote prompt fails with "unknown session", the bridge drops that
+ * provider's cached session and retries the run once, creating a session on the current
+ * container instance, whose new key makes the history reinjection fire again.
  */
 
 import { describe, it, expect } from "vitest";
@@ -38,8 +27,7 @@ const priorLog: AguiEvent[] = [
   { type: "TEXT_MESSAGE_END", messageId: "u1" } as never,
 ];
 
-/** A client whose prompt REJECTS "unknown session" until `reviveAfter` clients exist —
- *  modelling the old container's dead session vs the recreated container. */
+/** Clients whose first generation rejects prompts with "unknown session", modelling the old container's dead session. */
 function makeAgents() {
   const exec = createSandboxExecBackend(createFakeSandboxApi());
   let instances = 0;
@@ -64,8 +52,7 @@ function makeAgents() {
         }
         if (prop === "prompt") {
           return (params: { prompt: Array<{ text?: string }> }) => {
-            // Generation 1 is the STALE cached session: the (restarted) container does not
-            // know it any more.
+            // Generation 1 is the stale cached session the restarted container no longer knows.
             if (generation === 1) return Promise.reject(new Error("unknown session sdk_stale (container restarted?)"));
             prompts.push(params.prompt);
             return (target as never as { prompt: (x: unknown) => unknown }).prompt(params);
@@ -86,30 +73,27 @@ describe("remote session invalidation", () => {
       exec: a.exec,
       acpClient: () => Promise.resolve(a.createClient()),
       loadHistory: async () => priorLog,
-      deathRetryBaseMs: 5, // the pump's real backoff, shrunk for the test
+      deathRetryBaseMs: 5,
     });
 
     const events: AguiEvent[] = [];
     bridge.onEvent((e) => events.push(e));
     await bridge.prompt({ threadId: "t1", text: "continue please" });
 
-    // The retry created a SECOND client + session (the recreated container's world)...
+    // The retry created a second client and session.
     expect(a.counts().instances).toBe(2);
     expect(a.counts().newSessions).toBe(2);
-    // ...its prompt carried the transcript again (new session key -> reinjection re-fires)...
+    // Its prompt carried the transcript again.
     expect(a.prompts).toHaveLength(1);
     expect(a.prompts[0].some((b) => (b.text ?? "").includes("the earlier work")),
       "the fresh session must be re-seeded — serving it blank is the amnesia bug").toBe(true);
-    // ...and the run ENDED well: the pump emits the intermediate RUN_ERROR + RUN_RETRYING for
-    // the failed attempt (that is its contract), but the LAST terminal is a normal finish.
+    // The pump emits RUN_ERROR + RUN_RETRYING for the failed attempt, but the last terminal is a normal finish.
     const terminals = events.filter((e) => e.type === "RUN_FINISHED" || e.type === "RUN_ERROR");
     expect(terminals[terminals.length - 1]?.type).toBe("RUN_FINISHED");
   });
 
   it("a NON-session error retries on the SAME session — no session churn", async () => {
-    // The pump's existing backoff handles transient failures; what must NOT happen is the
-    // invalidation firing for them — tearing down and re-seeding a healthy session on every
-    // model blip would double transcripts and thrash the container.
+    // The pump's backoff handles transient failures without invalidating a healthy session.
     const exec = createSandboxExecBackend(createFakeSandboxApi());
     let clients = 0;
     let attempts = 0;
@@ -133,7 +117,7 @@ describe("remote session invalidation", () => {
       config: BRIDGE_CONFIG, exec, acpClient: factory, deathRetryBaseMs: 5,
     });
     await bridge.prompt({ threadId: "t1", text: "hi" }).catch(() => undefined);
-    expect(attempts).toBeGreaterThan(1); // the pump retried (existing behaviour)
-    expect(clients).toBe(1); // but never invalidated the session for a non-session error
+    expect(attempts).toBeGreaterThan(1);
+    expect(clients).toBe(1);
   });
 });
