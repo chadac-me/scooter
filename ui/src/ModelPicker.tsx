@@ -96,7 +96,17 @@ export function ModelPicker() {
         }}
       >
         {(() => {
-          const label = (m: string) => `${m}${m === catalog.default ? " (default)" : ""}`;
+          // PER-GROUP default. Comparing against the single global `catalog.default`
+          // marked claude-opus-5 "(default)" under BOTH byoc and claude-code, which
+          // reads as a bug even though it is the default for each. defaultFor says
+          // which providers a model is the default FOR, so each group marks its own.
+          const defaultsFor = catalog.defaultFor ?? {};
+          const label = (m: string, provider?: string) => {
+            const isDefault = provider
+              ? (defaultsFor[m] ?? []).includes(provider)
+              : m === catalog.default;
+            return `${m}${isDefault ? " (default)" : ""}`;
+          };
           // Two-level view when the catalog tags models with a source provider: group
           // each model under its provider ("byoc › claude-opus-4-8"), so the source is
           // obvious. Falls back to a flat list when no model is tagged (legacy catalogs).
@@ -113,7 +123,7 @@ export function ModelPicker() {
                 // group, and a bare model id made the two options indistinguishable -- so
                 // picking "claude-code > claude-opus-5" could not move a run off BYOC,
                 // whose provider wins on priority whenever a container is connected.
-                <option key={`${g.provider}:${m}`} value={`${g.provider}:${m}`}>{label(m)}</option>
+                <option key={`${g.provider}:${m}`} value={`${g.provider}:${m}`}>{label(m, g.provider)}</option>
               ))}
             </optgroup>
           ));

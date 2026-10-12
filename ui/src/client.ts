@@ -55,6 +55,10 @@ export interface ModelCatalog {
    *  [] / absent = offered on every provider (legacy, hint-less catalogs). Lets the
    *  picker group each model under its source provider. */
   providers?: Record<string, string[]>;
+  /** model id -> the provider tags it is the DEFAULT for. Lets the picker mark
+   *  "(default)" PER GROUP; comparing against the single global `default` labelled
+   *  a model that is default on two providers under both. */
+  defaultFor?: Record<string, string[]>;
 }
 
 /** Fetch the offered models. Returns an empty catalog if the server is

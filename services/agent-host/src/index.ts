@@ -1524,6 +1524,9 @@ export async function main(
         providers: Object.fromEntries(
           config.modelCatalog.models.map((m) => [m.id, m.providers]),
         ),
+        defaultFor: Object.fromEntries(
+          config.modelCatalog.models.map((m) => [m.id, m.defaultFor]),
+        ),
       },
       resolveUser,
       mcpHandler: mcpEndpoint ? (req, res, body) => mcpEndpoint.handle(req, res, body) : undefined,

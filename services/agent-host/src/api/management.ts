@@ -126,6 +126,10 @@ export interface ManagementDeps {
     hints?: Record<string, string>;
     /** model id -> provider tags offering it ([] = every provider). */
     providers?: Record<string, string[]>;
+    /** model id -> the provider tags this model is the DEFAULT for. Without it a UI
+     *  can only compare against the single global default, so a model that is the
+     *  default on two providers gets labelled "(default)" under both. */
+    defaultFor?: Record<string, string[]>;
   };
   /** Raw handler for the agent-self-modify MCP endpoint (goose's
    *  modify_environment tool). It writes the response itself (the MCP transport
@@ -494,6 +498,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
       // model id -> the provider tags offering it ([] = every provider). Lets the UI label
       // which choices apply to the BYO container vs the cloud floor.
       providers: models.providers ?? {},
+      // model id -> the providers it is the default FOR, so the UI can mark
+      // "(default)" per group instead of against one global default.
+      defaultFor: models.defaultFor ?? {},
     },
   }));
 

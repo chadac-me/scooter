@@ -60,3 +60,33 @@ describe("ModelPicker inherited-vs-explicit derivation", () => {
     expect(typeof html).toBe("string");
   });
 });
+describe("the (default) label is PER PROVIDER", () => {
+  it("marks a model default only under the providers it is the default FOR", () => {
+    // claude-opus-5 ships defaultFor: ["byoc", "claude-code"], so it IS the default
+    // for both and "(default)" twice is correct. The bug is a model default on ONE
+    // provider being labelled under both, which comparing against the single global
+    // `catalog.default` did.
+    const defaultFor: Record<string, string[]> = {
+      "claude-opus-5": ["byoc"],
+      "claude-sonnet-5": ["claude-code"],
+    };
+    const label = (m: string, provider: string) =>
+      `${m}${(defaultFor[m] ?? []).includes(provider) ? " (default)" : ""}`;
+
+    // opus is the byoc default only
+    expect(label("claude-opus-5", "byoc")).toBe("claude-opus-5 (default)");
+    expect(label("claude-opus-5", "claude-code")).toBe("claude-opus-5");
+    // sonnet is the cloud default only
+    expect(label("claude-sonnet-5", "claude-code")).toBe("claude-sonnet-5 (default)");
+    expect(label("claude-sonnet-5", "byoc")).toBe("claude-sonnet-5");
+  });
+
+  it("a model that is genuinely default for BOTH is marked under both", () => {
+    const defaultFor: Record<string, string[]> = { "claude-opus-5": ["byoc", "claude-code"] };
+    const label = (m: string, provider: string) =>
+      `${m}${(defaultFor[m] ?? []).includes(provider) ? " (default)" : ""}`;
+    expect(label("claude-opus-5", "byoc")).toBe("claude-opus-5 (default)");
+    expect(label("claude-opus-5", "claude-code")).toBe("claude-opus-5 (default)");
+  });
+});
+
