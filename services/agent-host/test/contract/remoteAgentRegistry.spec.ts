@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   createRemoteAgentRegistry,
+  createRemotePersonalizedProvider,
   isHumanTrigger,
   HUMAN_TRIGGER_SOURCES,
   type AgentConnection,
@@ -131,3 +132,46 @@ describe("remote agent registry", () => {
 // not hold the socket logged `SKIP registered=false` and fell silently to the cloud floor, which
 // was reproduced live at 5 replicas. The registry itself (register/get/has/replace) is still
 // covered above; only the provider moved.
+
+// The caller's WIRING, not the service's behaviour. tunnelService.spec.ts proves the
+// service injects mcpHeadersFor when it HAS it (line 189); this proves the provider
+// actually hands it over. The gap between those two was a live 401 on every
+// tunnelled MCP call -- "missing or invalid conversation token", 572 times in
+// production -- because startTunnelClient got mcpUrlFor and brokerMcpUrlFor but not
+// mcpHeadersFor. The offer ships headers:[] on purpose (#700), so the token exists
+// ONLY if it is injected server-side here.
+// The OFFER's shape, which is cheap to pin here. The wiring that feeds the inbound
+// tunnel client (mcpHeadersFor -> the injected conversation token) is covered by the
+// VM test nixos-tests/byoc-mcp-e2e.nix, which makes REAL MCP calls through a real
+// tunnel: without the fix all four return 401 "missing or invalid conversation
+// token", with it all four return 200. A unit test cannot reach that path without
+// standing up the whole inbound stream, so it is asserted where it is observable.
+describe("remote-personalized: the MCP offer", () => {
+  it("offers both targets, and NEVER a credential with them", () => {
+    const provider = createRemotePersonalizedProvider({
+      registry: createRemoteAgentRegistry(),
+      controllerUrl: "http://controller:8080",
+      mcpUrlFor: (c: string) => `http://mcp/${c}`,
+      mcpHeadersFor: (c: string) => [{ name: "Authorization", value: `Bearer ${c}` }],
+      brokerMcpUrlFor: () => "http://broker/mcp",
+    });
+    const offered = provider.mcpServersFor?.("conv-1") ?? [];
+    expect(offered.map((s) => s.name).sort()).toEqual(["scooter-broker", "scooter-env"]);
+    // headers:[] is deliberate (#700): a credential handed to the container is a
+    // credential the user holds, so the token is injected server-side instead.
+    for (const s of offered) expect(s.headers).toEqual([]);
+  });
+
+  it("OFFERS scooter-broker only when the broker resolver is supplied", () => {
+    const provider = createRemotePersonalizedProvider({
+      registry: createRemoteAgentRegistry(),
+      controllerUrl: "http://controller:8080",
+      mcpUrlFor: (c: string) => `http://mcp/${c}`,
+      mcpHeadersFor: (c: string) => [{ name: "Authorization", value: `Bearer ${c}` }],
+      // brokerMcpUrlFor omitted: the target must not be advertised, because the
+      // inbound stream could not resolve it.
+    });
+    const names = (provider.mcpServersFor?.("conv-1") ?? []).map((s) => s.name);
+    expect(names).toEqual(["scooter-env"]);
+  });
+});

@@ -17,6 +17,9 @@
   # that package bakes the unfree claude CLI and would make this check
   # unevaluatable in pure mode.
 , byocController ? null
+  # agent-host too, for byoc-mcp-e2e.nix: the FULL round trip needs the cloud side
+  # that actually replies to a tunnel open.
+, agentHost ? null
 , deploymentModules ? [ ] }:
 
 let
@@ -96,5 +99,10 @@ in
 # that imports this without the packages still gets the dev-env suite.
 // lib.optionalAttrs (byocController != null) {
   byoc-tunnel = import ./byoc-tunnel.nix { inherit pkgs lib byocController; };
+}
+# The full container -> controller -> agent-host -> broker round trip. Separate
+# from byoc-tunnel because it needs agent-host, and HEAVY (three VMs).
+// lib.optionalAttrs (byocController != null && agentHost != null) {
+  byoc-mcp-e2e = import ./byoc-mcp-e2e.nix { inherit pkgs lib byocController agentHost; };
 }
 

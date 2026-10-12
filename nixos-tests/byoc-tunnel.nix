@@ -35,6 +35,8 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "byoc-tunnel";
+  # A HARD ceiling on the whole run, backing up the per-wait bounds.
+  globalTimeout = 420;
 
   nodes = {
     # The cloud: just the controller. A real agent-host needs Postgres + a sandbox,
@@ -76,9 +78,15 @@ pkgs.testers.runNixOSTest {
     import json
 
     start_all()
-    cloud.wait_for_unit("byoc-controller.service")
-    cloud.wait_for_open_port(${toString PORT})
-    laptop.wait_for_unit("multi-user.target")
+    # EXPLICIT bounds: an exited service still satisfies wait_for_unit, so an
+    # unbounded port wait can hang a run with the cause unread in the journal.
+    try:
+        cloud.wait_for_unit("byoc-controller.service", timeout=90)
+        cloud.wait_for_open_port(${toString PORT}, timeout=90)
+    except Exception:
+        cloud.execute("journalctl -u byoc-controller --no-pager | tail -40 >&2")
+        raise
+    laptop.wait_for_unit("multi-user.target", timeout=90)
 
     # --- the controller answers at all ------------------------------------------
     cloud.succeed("curl -sf http://localhost:${toString PORT}/healthz")
@@ -163,7 +171,7 @@ pkgs.testers.runNixOSTest {
         )
         # Background it: the socket must stay OPEN while we poll status.
         laptop.succeed(
-            f"(setsid python3 /tmp/attach.py "
+            f"(setsid timeout 300 python3 /tmp/attach.py "
             f"'ws://cloud:${toString PORT}/byoc/ws/{session}?token={token}' 300 "
             f"> /tmp/attach.out 2>/tmp/attach.err &) ; sleep 1"
         )
@@ -217,7 +225,7 @@ pkgs.testers.runNixOSTest {
             "PY"
         )
         cloud.succeed(
-            f"(setsid python3 /tmp/readers.py {session} 2 > /tmp/readers.out 2>&1 &) ; sleep 1"
+            f"(setsid timeout 60 python3 /tmp/readers.py {session} 2 > /tmp/readers.out 2>&1 &) ; sleep 1"
         )
         cloud.wait_until_succeeds("grep -q READY /tmp/readers.out", timeout=20)
 

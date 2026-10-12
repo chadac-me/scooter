@@ -246,6 +246,11 @@ export function createRemotePersonalizedProvider(deps: {
             // a container-supplied frame.
             conversationId: ctx.conversationId ?? "",
             mcpUrlFor: deps.mcpUrlFor,
+            // WITHOUT THIS every tunnelled MCP call gets 401 "missing or invalid
+            // conversation token". The offer ships headers:[] on purpose (#700: a
+            // credential handed to the container is one the user holds), so the
+            // token is injected HERE as the target resolves.
+            mcpHeadersFor: deps.mcpHeadersFor,
             // WITHOUT THIS the inbound stream cannot resolve scooter-broker, so a
             // container that was OFFERED it (offeredTunnelServers) calls a target
             // the server refuses -- and the SDK eats a 30s CONNECT_TIMEOUT on every
