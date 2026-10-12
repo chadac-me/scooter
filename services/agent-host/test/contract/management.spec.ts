@@ -410,6 +410,9 @@ describe("management API", () => {
     expect(json).toEqual({
       default: "opus", available: ["opus", "sonnet"], hints: { sonnet: "fast/cheap" },
       providers: {}, // id -> provider tags offering it; {} when the deployment doesn't tag
+      // id -> the providers it is the DEFAULT for, so a UI marks "(default)" per
+      // group rather than against one global default.
+      defaultFor: {},
     });
   });
 
@@ -419,7 +422,30 @@ describe("management API", () => {
       models: { default: "opus", available: ["opus"] },
     });
     const { json } = await call(api, "GET", "/models");
-    expect(json).toEqual({ default: "opus", available: ["opus"], hints: {}, providers: {} });
+    expect(json).toEqual({
+      default: "opus", available: ["opus"], hints: {}, providers: {}, defaultFor: {},
+    });
+  });
+
+  it("GET /models carries defaultFor, so a UI can mark the default PER PROVIDER", async () => {
+    // Without this the UI only has the single global `default` to compare against,
+    // and a model that is the default on ONE provider gets labelled "(default)"
+    // under every group. Observed as claude-opus-5 reading as default on both byoc
+    // and claude-code.
+    const api = createManagementApi({
+      sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {},
+      models: {
+        default: "opus",
+        available: ["opus", "sonnet"],
+        providers: { opus: ["byoc", "cloud"], sonnet: ["cloud"] },
+        defaultFor: { opus: ["byoc"], sonnet: ["cloud"] },
+      },
+    });
+    const { json } = await call(api, "GET", "/models");
+    expect((json as { defaultFor: Record<string, string[]> }).defaultFor).toEqual({
+      opus: ["byoc"],
+      sonnet: ["cloud"],
+    });
   });
 
   it("POST /conversations/:id/suspend + resume flip status", async () => {

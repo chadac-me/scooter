@@ -178,6 +178,12 @@ spawnService("agent-host", "node", [join(REPO_ROOT, "services/agent-host/dist/in
   MIRROR_STATE_PATH: process.env.MIRROR_STATE_PATH ?? "/tmp/agent-host-e2e-mirror",
   GOOSE_MODEL: process.env.GOOSE_MODEL ?? "model-default",
   AGENT_AVAILABLE_MODELS: process.env.AGENT_AVAILABLE_MODELS ?? "model-default,model-fast,model-smart",
+  // The env here is an explicit ALLOWLIST, not process.env passthrough — a var the
+  // playwright config sets but this omits never reaches agent-host. AGENT_MODELS_JSON
+  // carries the PROVIDER-TAGGED catalog, which is what makes the picker render its
+  // grouped (optgroup) branch; without it the stack falls back to the legacy
+  // untagged form and the grouped branch is structurally untestable.
+  ...(process.env.AGENT_MODELS_JSON ? { AGENT_MODELS_JSON: process.env.AGENT_MODELS_JSON } : {}),
   // Durable conversation metadata + event log in the ephemeral PG — the row the router lists and
   // hydrates from, and the source of the conversations_changed NOTIFY the router pushes.
   AGENT_HOST_DB_DSN: DSN,

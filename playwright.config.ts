@@ -126,6 +126,19 @@ export default defineConfig({
             MIRROR_STATE_PATH: "/tmp/agent-host-e2e-mirror",
             GOOSE_MODEL: "model-default",
             AGENT_AVAILABLE_MODELS: "model-default,model-fast,model-smart",
+            // PROVIDER-TAGGED catalog, so the picker renders its GROUPED (optgroup)
+            // branch. Without tags groupModelsByProvider returns null and the picker
+            // falls back to a flat list — which is why every existing model-selection
+            // test passed while provider selection was broken: the grouped branch was
+            // structurally unreachable in e2e.
+            //
+            // Mirrors production's shape: one model on BOTH providers (the ambiguous
+            // case), one on each alone, and a per-provider default.
+            AGENT_MODELS_JSON: JSON.stringify([
+              { id: "model-default", providers: ["byoc", "claude-code"], defaultFor: ["byoc", "claude-code"] },
+              { id: "model-fast", providers: ["claude-code"] },
+              { id: "model-smart", providers: ["byoc"] },
+            ]),
             // The MCP endpoint takes its conversation from a signed token, so the stack
             // needs a signing key exactly as production does (the kubenix module provides
             // it there). Without this the endpoint rejects every request and the fake
