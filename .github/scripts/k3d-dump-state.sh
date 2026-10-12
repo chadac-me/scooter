@@ -29,6 +29,18 @@ nix shell nixpkgs#kubectl nixpkgs#jq nixpkgs#docker-client nixpkgs#systemd -c ba
       kubectl -n agent-sandbox logs "$pod" --previous --tail=200 || true
     done
   done
+  # These Jobs create the agent-pg-* secrets every service mounts.
+  for j in agent-postgres-init agent-db-migrate; do
+    for job in $(kubectl -n agent-sandbox get job -l "app.kubernetes.io/name=$j" -o name 2>/dev/null); do
+      echo "===== JOB LOG: $job (all containers) ====="
+      # By job: a finished pod may be gone or unlabelled.
+      timeout 20 kubectl -n agent-sandbox logs "$job" --all-containers --tail=200 2>&1 | tail -60 || true
+      kubectl -n agent-sandbox describe "$job" 2>/dev/null | grep -iE "^(Pods|Completions|Failed)" || true
+    done
+  done
+  echo "===== agent-pg-* secrets present ====="
+  kubectl -n agent-sandbox get secrets 2>/dev/null | grep agent-pg || echo "(NONE — services cannot start)"
+
   # The conv-* sandbox pods carry none of the `app` labels above, and one sandbox
   # that never goes ready reads as many unrelated spec failures.
   for pod in $(kubectl -n agent-sandbox get pods -o name 2>/dev/null | grep "^pod/conv-"); do
