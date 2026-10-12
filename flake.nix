@@ -292,7 +292,7 @@
           # Tier-1-style config-correctness tests for the dev-environment sandbox
           devEnvTests =
             if pkgs.stdenv.isLinux
-            then import ./nixos-tests { inherit pkgs lib stubOverlay deploymentModules; }
+            then import ./nixos-tests { inherit pkgs lib stubOverlay deploymentModules byocController; }
             else { };
 
           # The contrib sandbox surface, without building an image
