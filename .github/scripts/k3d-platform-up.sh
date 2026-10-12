@@ -196,6 +196,9 @@ nix shell nixpkgs#kubectl -c bash -c "
     -l app.kubernetes.io/name=agent-postgres-init --timeout=180s
   kubectl -n agent-sandbox wait --for=condition=complete job \
     -l app.kubernetes.io/name=agent-db-migrate --timeout=180s
+  # Pods started before those Jobs wedge on a then-missing secret.
+  kubectl -n agent-sandbox delete pod \
+    --field-selector=status.phase!=Running,status.phase!=Succeeded 2>/dev/null || true
   # podCap=1 lands each conversation on a different pod so per-pod-view bugs are
   # visible; AGENT_HOST_MIN_REPLICAS because the controller is the autoscaler and
   # would otherwise scale the fleet back down before the tests create anything.
