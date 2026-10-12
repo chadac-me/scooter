@@ -36,6 +36,8 @@ export interface RunContext {
   source?: string;
   /** The resolved model for this run (a provider may only serve certain models). */
   model?: string;
+  /** The provider the user explicitly picked; undefined = priority decides. */
+  provider?: string;
 }
 
 /** One selectable ACP backend (goose/bedrock, in-process claude SDK, a remote personalized agent).
@@ -79,8 +81,10 @@ export async function pickAcpProvider(
   providers: readonly AcpProvider[],
   ctx: RunContext,
 ): Promise<AcpProvider | undefined> {
+  // An eligible explicit pick outranks priority; an ineligible one falls through.
+  const candidates = ctx.provider ? reorderPicked(providers, ctx.provider) : providers;
   let best: AcpProvider | undefined;
-  for (const p of providers) {
+  for (const p of candidates) {
     // Awaited because eligibility can require a NETWORK call (the BYOC provider asks the
     // controller who owns this owner's container). A provider that throws must not take the run
     // down with it — the floor has to stay reachable — so a rejection reads as "not eligible".
@@ -95,11 +99,18 @@ export async function pickAcpProvider(
       ok = false;
     }
     if (!ok) continue;
+    if (ctx.provider && p.id === ctx.provider) return p;
     if (best === undefined || p.priority > best.priority || (p.priority === best.priority && p.id < best.id)) {
       best = p;
     }
   }
   return best;
+}
+
+/** Picked provider first, so an eligible pick short-circuits the scan. */
+function reorderPicked(providers: readonly AcpProvider[], picked: string): readonly AcpProvider[] {
+  const hit = providers.find((p) => p.id === picked);
+  return hit ? [hit, ...providers.filter((p) => p !== hit)] : providers;
 }
 
 // The bridge (bridge.ts) owns per-run resolution: at the start of each run it calls

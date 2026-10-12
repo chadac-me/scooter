@@ -1,0 +1,54 @@
+[
+  {
+    "default": false,
+    "defaultFor": [],
+    "hint": "Most capable, most expensive \u2014 hardest reasoning + long agentic runs.",
+    "id": "claude-fable-5",
+    "providers": [
+      "byoc",
+      "claude-code"
+    ]
+  },
+  {
+    "default": false,
+    "defaultFor": [],
+    "hint": "Previous Opus generation; same price as Opus 5.",
+    "id": "claude-opus-4-8",
+    "providers": [
+      "byoc",
+      "claude-code"
+    ]
+  },
+  {
+    "default": true,
+    "defaultFor": [
+      "byoc",
+      "claude-code"
+    ],
+    "hint": "Balanced default \u2014 deep reasoning at Opus-tier price.",
+    "id": "claude-opus-5",
+    "providers": [
+      "byoc",
+      "claude-code"
+    ]
+  },
+  {
+    "default": false,
+    "defaultFor": [],
+    "hint": "Fast + cheaper \u2014 simple edits, config/CI fixes.",
+    "id": "claude-sonnet-5",
+    "providers": [
+      "byoc",
+      "claude-code"
+    ]
+  },
+  {
+    "default": false,
+    "defaultFor": [],
+    "hint": "UI-only alias (claude-code ignores the pick for inference).",
+    "id": "claude-haiku-4-5",
+    "providers": [
+      "claude-code"
+    ]
+  }
+]
