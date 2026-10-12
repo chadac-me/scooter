@@ -188,6 +188,10 @@ nix shell nixpkgs#kubectl -c bash -c "
   kubectl -n agent-sandbox create secret generic agent-conv-token-secret \
     --from-literal=secret=\"\$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')\" \
     --dry-run=client -o yaml | kubectl apply -f -
+  # BYOC's join-token key, required once scooter.byoc.enable is on.
+  kubectl -n agent-sandbox create secret generic agent-remote-join-secret \
+    --from-literal=secret=\"\$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')\" \
+    --dry-run=client -o yaml | kubectl apply -f -
   # Postgres accepts TCP before it is usable (roles from agent-postgres-init,
   # schema from agent-db-migrate), so wait on both Jobs, selected by label since
   # their names carry a spec hash.
