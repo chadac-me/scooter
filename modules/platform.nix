@@ -1272,13 +1272,14 @@ in
                   # The SDK runs `claude --dangerously-skip-permissions`, which is refused
                   # under root unless IS_SANDBOX marks a sandboxed context.
                   { name = "IS_SANDBOX"; value = "1"; }
-                ] ++ lib.optional (!cfg.fakeAgent && defaultModelId != null)
+                ] ++ lib.optional (defaultModelId != null)
                   # The default model, derived from availableModels.<id>.default (or the
                   # deprecated agent.model).
                   { name = "GOOSE_MODEL"; value = defaultModelId; }
-                ++ lib.optional (!cfg.fakeAgent && hasModels)
-                  # The catalog (ids + hints + default) behind list_models / switch_model
-                  # and the per-conversation override.
+                ++ lib.optional hasModels
+                  # The catalog is DATA, not an agent capability: a fake agent still has
+                  # models to list, group by provider and switch between, and gating it on
+                  # fakeAgent left the cluster tier unable to test any of that.
                   { name = "AGENT_MODELS_JSON"; value = modelsJson; }
                 ++ lib.optional cfg.fakeAgent
                   # Run the bundled dummy ACP agent (no model, no cluster) for the cluster e2e.

@@ -11,6 +11,8 @@
  */
 
 import { readToken } from "./claudeCreds.js";
+import { selectBackend } from "./agentBackend.js";
+import "./echoBackend.js"; // self-registers
 import { startLoginServer } from "./loginServer.js";
 import { runRemoteAgentClient } from "./remoteAgentClient.js";
 import { hostname } from "node:os";
@@ -18,8 +20,8 @@ import { generateDeviceKey, loadDeviceIdentity, saveDeviceIdentity } from "./dev
 
 const log = (m: string) => console.log(`[remote-agent] ${m}`);
 
-function parseArgs(argv: string[]): { cmd?: string; url?: string; join?: string; model?: string } {
-  const out: { cmd?: string; url?: string; join?: string; model?: string } = {};
+function parseArgs(argv: string[]): { cmd?: string; url?: string; join?: string; model?: string; backend?: string } {
+  const out: { cmd?: string; url?: string; join?: string; model?: string; backend?: string } = {};
   const rest = [...argv];
   if (rest[0] && !rest[0].startsWith("--")) out.cmd = rest.shift();
   for (let i = 0; i < rest.length; i++) {
@@ -27,6 +29,7 @@ function parseArgs(argv: string[]): { cmd?: string; url?: string; join?: string;
     if (a === "--url") out.url = rest[++i];
     else if (a === "--join") out.join = rest[++i];
     else if (a === "--model") out.model = rest[++i];
+    else if (a === "--backend") out.backend = rest[++i];
   }
   return out;
 }
@@ -69,7 +72,9 @@ async function main() {
     process.exit(2);
   }
 
-  const oauthToken = await ensureLogin();
+  // Only a Claude backend needs the subscription token.
+  const backend = selectBackend(args.backend);
+  const oauthToken = backend.needsClaudeAuth ? await ensureLogin() : undefined;
 
   // The controller's HTTP base: the connect URL is ws://host/byoc/ws/<session-id> and the registration/challenge routes are siblings of `ws`, so strip the whole `/ws/<id>` tail.
   const httpBase = args.url.replace(/^ws/, "http").replace(/\/ws\/[^/]*\/?$/, "");
@@ -108,6 +113,7 @@ async function main() {
     },
     oauthToken,
     model: args.model,
+    backend: args.backend,
     log,
   });
   process.on("SIGTERM", () => client.stop());

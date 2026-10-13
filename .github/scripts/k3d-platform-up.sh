@@ -110,6 +110,7 @@ push_attrs=(
   conversation-controller-image
   conversation-router-image
   db-migrator-image
+  byoc-controller-image
 )
 
 
@@ -186,6 +187,10 @@ nix shell nixpkgs#kubectl -c bash -c "
   # The conv-token signing key, which modules/platform.nix requires; created
   # out-of-band like a real deploy, idempotently.
   kubectl -n agent-sandbox create secret generic agent-conv-token-secret \
+    --from-literal=secret=\"\$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')\" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  # BYOC's join-token key, required once scooter.byoc.enable is on.
+  kubectl -n agent-sandbox create secret generic agent-remote-join-secret \
     --from-literal=secret=\"\$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')\" \
     --dry-run=client -o yaml | kubectl apply -f -
   # Postgres accepts TCP before it is usable (roles from agent-postgres-init,

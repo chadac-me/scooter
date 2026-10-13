@@ -94,6 +94,13 @@
             inherit claudeSdkProvider;
             claude-code = pkgs.claude-code;
           };
+          # The same container WITHOUT the unfree claude CLI, for `--backend echo`:
+          # it drives no model, so it needs neither the CLI nor a subscription, and
+          # this variant evaluates in pure mode (CI, nixosTests).
+          remoteAgentEcho = pkgs.callPackage ./services/remote-agent {
+            inherit claudeSdkProvider;
+            claude-code = null;
+          };
 
           # agent-host OCI image.
 
@@ -468,6 +475,7 @@
 
             # nix build .#remote-agent  ->  the BYO-Claude container app (bin)
             remote-agent = remoteAgent;
+            remote-agent-echo = remoteAgentEcho;
             # nix build .#remote-agent-image -> the BYO-Claude remote agent OCI image,
             # evaluated alone because the unfree claude CLI keeps it out of the shared tree.
             remote-agent-image =

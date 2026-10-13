@@ -8,7 +8,8 @@
 import { WebSocket } from "ws";
 import { pruneSkillDirs, writeSkillPayloads } from "./skills.js";
 // The SDK-backed AcpClient, the same package the agent-host imports cloud-side.
-import { createSdkAcpClient } from "@scooter/claude-sdk-provider";
+import { selectBackend } from "./agentBackend.js";
+import "./echoBackend.js"; // self-registers
 
 import { REMOTE_PROTOCOL_VERSION, type WireFrame } from "./protocol.js";
 import { parsePermissionAnswer } from "./permissionAnswer.js";
@@ -24,8 +25,11 @@ export interface RemoteAgentClientDeps {
   joinToken: string;
   /** Fetch a fresh challenge nonce from the controller; absent means token-only mode. */
   challengeNonce?: () => Promise<string>;
-  /** The user's Claude subscription OAuth token, which stays local. */
-  oauthToken: string;
+  /** The user's Claude subscription OAuth token, which stays local. Absent for a
+   *  backend that needs no Claude auth (see selectBackend). */
+  oauthToken?: string;
+  /** Which agent to drive; defaults to the Claude SDK. */
+  backend?: string;
   /** Model for the SDK query(). */
   model?: string;
   /** Agent identity/skills as the system prompt. */
@@ -140,16 +144,18 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
           })
         : undefined;
       if (mcp) log(`MCP: ${mcp.servers.map((s) => s.name).join(", ")} proxied over the tunnel`);
-      const sdk = await createSdkAcpClient({
+      // The backend decides WHICH agent runs; every one returns the same AcpClient.
+      const sdk = await selectBackend(deps.backend).create({
         oauthToken: deps.oauthToken,
         mcpServers: mcp?.servers.map((m) => ({ name: m.name, url: m.url })),
-        // The per-session model sent by the cloud in new_session, then the container's --model flag, then a default.
-        model: model ?? deps.model ?? "claude-sonnet-4-5",
+        // The per-session model sent by the cloud in new_session, then the container's --model flag.
+        model: model ?? deps.model,
         exec,
-        systemPrompt: deps.systemPrompt ?? "You are Scooter, a helpful agent.",
+        systemPrompt: deps.systemPrompt,
         claudeCodePath: deps.claudeCodePath,
         // Without settingSources the SDK loads no filesystem settings, and without `skills` the Skill tool is left out of allowedTools.
         ...(skillCwd ? { cwd: skillCwd, settingSources: ["project" as const], skills: "all" as const } : {}),
+        log: deps.log,
       });
       // Route the SDK's notifications up the wire, stamped.
       sdk.onSessionUpdate((sessionId, update) =>
@@ -192,6 +198,11 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       }
       // Channel B exec_result frames go to the tunnel backend's waiters.
       if (frame.ch === "exec") {
+        for (const cb of frameCbs) cb(frame);
+        return;
+      }
+      // MCP replies; without this every call hangs.
+      if (frame.ch === "tunnel") {
         for (const cb of frameCbs) cb(frame);
         return;
       }
