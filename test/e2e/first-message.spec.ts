@@ -1,4 +1,4 @@
-// The first message of a new conversation is answered, whichever pods serve its requests.
+// A new conversation's first message is answered, whichever pod serves.
 import { expect } from "@playwright/test";
 
 import { test } from "./fixtures.js";
@@ -18,7 +18,7 @@ fullOnly("needs several agent-host pods behind the router")("first message", () 
       expect(created.ok(), `create: ${created.status()}`).toBeTruthy();
       const { id } = (await created.json()) as { id: string };
 
-      // The message and the UI's follow-up reads leave together, as the app sends them.
+      // Message and follow-up reads leave together, like the app.
       const turn = page.request.post("/agui", {
         headers: { Accept: "text/event-stream" },
         data: { threadId: id, runId: `r-${round}`, messages: [{ id: "m1", role: "user", content: token }] },

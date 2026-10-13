@@ -31,8 +31,8 @@ export interface PgEventStoreConfig {
 /**
  * The append fence. Every insert carries this pod's claim and the row decides, so a
  * superseded pod learns it lost from the write it was already making, with no extra
- * query on a path that runs once per streamed token. The row must exist and must not
- * contradict the claim.
+ * query on a path that runs once per streamed token.
+ * The row must name this pod.
  */
 export interface AppendFence {
   /** This pod's name, the identity the row must not contradict. */
@@ -121,8 +121,7 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
               where exists (
                 select 1 from ${conversations}
                  where ${conversations.id} = ${id}
-                   and (${conversations.hostPod} is null
-                        or (${conversations.hostPod} = ${fence.pod}${rightEpoch}))
+                   and ${conversations.hostPod} = ${fence.pod}${rightEpoch}
               )`;
   };
 

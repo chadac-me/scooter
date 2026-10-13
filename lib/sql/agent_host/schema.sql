@@ -73,6 +73,8 @@ CREATE TABLE "conversations" (
 
 -- The sidebar lists newest-active first.
 CREATE INDEX "conversations_by_activity" ON "conversations" ("last_activity_at" DESC);
+-- The router resolves a sandbox short-id to its conversation.
+CREATE INDEX "conversations_by_sandbox_ref" ON "conversations" ("sandbox_ref");
 
 -- Per-owner filtering for the conversation list.
 CREATE INDEX "conversations_by_owner" ON "conversations" ("owner");
@@ -87,8 +89,7 @@ CREATE INDEX "conversations_by_owner" ON "conversations" ("owner");
 --   migrations/<ts>_notify_conversation_changes.sql
 -- Keep the two in sync by hand when the notified columns change (that migration and the
 -- router's assembleList are the only two places that must agree on which changes push).
--- The assignment columns are deliberately NOT notified: reassignment churn would wake every
--- listening sidebar for a change no sidebar renders.
+-- Assignment changes notify 'conversation_assignment' instead, for the router.
 
 -- The conversation EVENT LOG — the durable replacement for events.jsonl on the
 -- wiped emptyDir, and for the NFS mirror that existed only to survive that.

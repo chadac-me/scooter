@@ -363,9 +363,11 @@ in
       roles.conversation-router = {
         metadata = { name = "conversation-router"; namespace = cfg.namespace; };
         rules = [
-          # The router reads status for routing and creates the CR on POST
-          # /conversations; assignment and lifecycle stay the controller's.
-          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations" ]; verbs = [ "get" "list" "watch" "create" ]; }
+          # Creates CRs, and mirrors its claims onto their status.
+          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations" ]; verbs = [ "create" "delete" ]; }
+          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations/status" ]; verbs = [ "patch" ]; }
+          # Ready agent-host pods, to resolve an assigned pod name.
+          { apiGroups = [ "" ]; resources = [ "pods" ]; verbs = [ "get" "list" "watch" ]; }
         ];
       };
       roleBindings.conversation-router = {

@@ -59,8 +59,8 @@ function fakeDb(): {
           const a = assigned.get(conversation_id);
           const allowed =
             a !== undefined && // the row must EXIST
-            (a.hostPod == null || // unclaimed: assignment has not landed yet
-              (a.hostPod === pod && (gen === undefined || Number(a.hostGeneration ?? 0) === Number(gen))));
+            a.hostPod === pod &&
+            (gen === undefined || Number(a.hostGeneration ?? 0) === Number(gen));
           if (!allowed) return { rows: [], rowCount: 0 };
         }
         // Honour ON CONFLICT the way Postgres does, so a store that adds onConflictDoNothing is caught.
@@ -230,14 +230,13 @@ describe("eventStore — the append fence", () => {
     expect(rows).toHaveLength(1);
   });
 
-  it("an UNCLAIMED row appends — the first turn beats the controller's assignment", async () => {
-    // A row naming nobody is not a contradiction.
+  it("an UNCLAIMED row refuses appends: no assignment, no writer", async () => {
     const { db, rows, assign } = fakeDb();
     assign(CONV, { hostPod: null });
 
     await fencedStore(db, "host-1", 3).appendEvent(CONV, run(1)[0]);
 
-    expect(rows).toHaveLength(1);
+    expect(rows).toEqual([]);
   });
 
   it("FAILS CLOSED on a missing row: no row means DELETED, not 'not created yet'", async () => {

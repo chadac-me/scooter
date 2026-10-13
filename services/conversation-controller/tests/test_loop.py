@@ -13,13 +13,13 @@ from conversation_controller.reconcile import Pod, SandboxRef
 @pytest.fixture(autouse=True)
 def _reset_zombie_state():
     """Reset the zombie repair's module-level per-conversation state between tests."""
-    for attr in ("_zombie_progress", "_zombie_suspects"):
+    for attr in ("_zombie_progress", "_zombie_suspects", "_prev_gen"):
         state = getattr(loop_mod, attr, None)
         if state is not None:
             state.clear()
     forget_warned()
     yield
-    for attr in ("_zombie_progress", "_zombie_suspects"):
+    for attr in ("_zombie_progress", "_zombie_suspects", "_prev_gen"):
         state = getattr(loop_mod, attr, None)
         if state is not None:
             state.clear()

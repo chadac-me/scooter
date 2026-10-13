@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -68,6 +69,22 @@ type conversationRowWriter interface {
 // crRemover rolls back the CR; optional, so some creators cannot.
 type crRemover interface {
 	Remove(ctx context.Context, name string) error
+}
+
+// mirrorClaim copies a claim onto the CR status, best-effort.
+func mirrorClaim(dyn dynamic.Interface, namespace string) func(context.Context, Assignment, string) {
+	return func(ctx context.Context, as Assignment, ip string) {
+		body, _ := json.Marshal(map[string]interface{}{"status": map[string]interface{}{
+			"phase": "Assigned", "hostPod": as.Pod, "hostIP": ip, "generation": as.Gen,
+		}})
+		mctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		_, err := dyn.Resource(conversationGVR).Namespace(namespace).Patch(
+			mctx, as.ConvID, types.MergePatchType, body, metav1.PatchOptions{}, "status")
+		if err != nil && !apierrors.IsNotFound(err) {
+			logger("assign").Warn("CR status mirror failed", convAttr(as.ConvID), errAttr(err))
+		}
+	}
 }
 
 // dualCreator writes both the Conversation CR and the `conversations` row on create, so the row can be the source of truth for existence.
