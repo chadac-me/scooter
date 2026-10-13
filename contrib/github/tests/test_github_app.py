@@ -44,3 +44,17 @@ async def test_github_app_source_mints_and_caches(monkeypatch):
 
     await src.get(_identity())
     assert calls["n"] == 1
+
+
+def test_app_jwt_survives_a_fast_clock(monkeypatch):
+    """GitHub rejects an exp over 10 minutes ahead; a 30s-fast host must stay inside it."""
+    import time
+
+    import jwt
+
+    real = time.time()
+    monkeypatch.setattr(time, "time", lambda: real + 30)
+    token = GitHubAppSource(app_id="123", private_key=_rsa_key(), installation_id=42)._generate_jwt()
+    claims = jwt.decode(token, options={"verify_signature": False})
+    assert claims["exp"] - real <= 10 * 60, "exp lands past GitHub's 10-minute limit"
+    assert claims["iat"] <= real, "iat must not be in GitHub's future"

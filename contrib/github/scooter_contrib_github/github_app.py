@@ -35,7 +35,8 @@ class GitHubAppSource(CredentialSource):
 
     def _generate_jwt(self) -> str:
         now = int(time.time())
-        payload = {"iat": now - 60, "exp": now + 10 * 60, "iss": self.app_id}
+        # GitHub caps exp at 10 minutes; 9 tolerates a fast clock.
+        payload = {"iat": now - 60, "exp": now + 9 * 60, "iss": self.app_id}
         return jwt.encode(payload, self._load_private_key(), algorithm="RS256")
 
     async def get(self, identity: Identity) -> Credential:
