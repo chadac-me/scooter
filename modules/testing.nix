@@ -47,9 +47,11 @@ in
     scooter = {
       fakeAgent = lib.mkForce tcfg.fakeAgent;
       webhooks.testWebhook = lib.mkForce tcfg.testWebhook;
-      # Near-zero requests for scheduling density, with real limits because a tiny memory limit would OOM-kill the systemd pod at boot.
+      # Requests must stay something the node can honour, or the scheduler admits every
+      # sandbox a leaking suite creates and the admitted pods starve instead of queueing.
+      # Limits stay real because a tiny memory limit would OOM-kill the systemd pod at boot.
       sandboxResources = lib.mkForce {
-        requests = { cpu = "50m"; memory = "64Mi"; };
+        requests = { cpu = "250m"; memory = "256Mi"; };
         limits = { cpu = "1"; memory = "1Gi"; };
       };
     };
