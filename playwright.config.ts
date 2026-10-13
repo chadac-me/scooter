@@ -22,6 +22,9 @@ const clusterUrl = process.env.E2E_CLUSTER_URL ?? "";
 
 export default defineConfig({
   testDir: "./test/e2e",
+  // test/e2e/support holds the harness and its vitest specs, which playwright's default
+  // testMatch would otherwise load as browser tests.
+  testIgnore: "**/support/**",
   // The full-target ceiling must exceed the helpers it contains (startLongRun waits 90s
   // there, completeTurn 120s).
   timeout: full ? 180_000 : 60_000,

@@ -165,7 +165,7 @@ own run already reproduced the flake (the answer is in already).
 
 The full comment also carries an **`On main recently`** row — the spec's record
 across the last few nightly `e2e-full` runs, read from their uploaded reports.
-That is prior evidence, not a control: a nightly runs the whole suite, so its
+That is prior evidence, not a control: a nightly runs the whole suite ×5, so its
 rate includes contention the targeted run does not have, and scoring a quiet
 clean run against it would overstate the result. Read it for one thing in
 particular — *the spec is failing on `main` but the control reproduced nothing*
@@ -184,7 +184,7 @@ with the PR skips the push — for a test-only fix, all of them.
 |---|---|---|
 | `flake-check` | flake focus (targeted ×20) | **fast** — fake stack |
 | `e2e-full-flake-check` | flake focus full (k3d, targeted ×5) | **full** — a real k3d cluster |
-| `e2e-full` | e2e full (k3d) | the whole full suite, once |
+| `e2e-full` | e2e full (k3d) | the whole full suite, once (the nightly sweeps it ×5) |
 
 Both full-target jobs run on the **self-hosted fleet**, the same runners as the
 nightly. A control on different hardware is being asked to reproduce a
@@ -255,6 +255,47 @@ Two cases where the comment deliberately refuses to give a verdict: no baseline 
 retained, and a shard died before writing its report (its specs are then absent from
 the merge, which a set difference would happily render as a page of green "newly
 passing" rows nobody verified).
+
+### The nightly is a sweep, not a pass
+
+On `schedule` and `workflow_dispatch` every test runs **×5** (`--repeat-each`, across
+8 shards instead of 4), so the night measures a *rate* rather than one red/green.
+`scripts/e2e-full-flake-report.mjs` renders it into the job's **step summary** and the
+**`e2e-full-flake-report`** artifact, splitting what the baseline diff cannot:
+
+- **🔴 always red** (5/5) — broken against the current platform, not a flake. Fix or
+  quarantine it; a 5/5 test does not need a reproduction job.
+- **🌗 flaky** (1/5, 3/5 …) — ranked by rate, with the same test's rate on earlier
+  nights beside it. Take the top one to `e2e-full-flake-check`, which is still where a
+  fix is proven.
+
+A rate also makes the trend readable: a test going 1/5 → 3/5 → 4/5 across three nights
+is degrading, which a per-night pass/fail list cannot show. The PR path is unchanged —
+the `e2e-full` label runs a single pass, because a PR wants a verdict and five passes
+are the fleet for an hour and a half.
+
+Two things the sweep does **not** repeat: the cluster-smoke vitest step (`--repeat-each`
+is Playwright-only, and it is the shard's bring-up precondition) and the k3d bring-up
+itself (paid once per shard, so a sweep costs far less than 5× a nightly). Shard
+weights scale with the repeat budget for the e2e tests only — `resolveWeights` in
+`test/e2e/support/shard-tests.mjs` — or a shard holding cluster tests is packed as
+though those scaled too.
+
+The budget, planned: 134 tests, ~1430s of work per shard at ×1/4 shards (the observed
+25–31 min), ~3480s at ×5/8 shards — so a sweep shard is **~1h** including bring-up, and
+the nightly's `e2e-full` goes from ~30 min to ~1h05 wall clock if the fleet has eight
+runners free, and queues into waves if it does not. `timeout-minutes: 150` bounds a
+wedged cluster rather than the sweep.
+
+Two consequences worth knowing before reading a sweep night:
+
+- **A night is red almost by construction.** Five chances to fail is five times the
+  chance any one test does, so the shard gate and the workflow conclusion say even
+  less than before. The rates are the output; the colour is not.
+- **The baseline window carries rates now.** `scripts/e2e-full-compare.mjs` still scores
+  a baseline night as red when the spec failed *at all* that night, which is a stricter
+  (and better-founded) baseline than one pass gave it — and the `On main recently` row
+  in a `flake-focus-full` comment prints each night as `2/5` rather than `F`.
 
 **Which one you need depends on where the flake was seen.** A flake reported by
 the nightly `e2e-full` usually cannot reproduce on the fast target at all: the
