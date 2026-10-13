@@ -8,6 +8,9 @@
 
 import { Readable, Writable } from "node:stream";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
 import {
   AgentSideConnection,
   ndJsonStream,
@@ -38,13 +41,10 @@ class FakeAgent implements Agent {
   private titled = new Set<string>();
   // Each tool call gets a fresh id, as real ACP agents mint one per call.
   private toolCallSeq = 0;
-  /** The scooter-env MCP endpoint newSession offers per session, with the headers carrying the bearer conversation token it needs. */
   /** The per-session model from newSession. */
   private sessionModel = new Map<string, string>();
-  /** Every offered MCP target, "<sessionId>:<name>" -> {url, headers}. */
-  private mcpAll = new Map<string, { url: string; headers: Record<string, string> }>();
-  private mcpUrl = new Map<string, string>();
-  private mcpHeaders = new Map<string, Record<string, string>>();
+  /** Offered MCP servers per session, by name. */
+  private mcp = new Map<string, Map<string, { url: string; headers: Record<string, string> }>>();
 
   async initialize(_p: InitializeRequest): Promise<InitializeResponse> {
     return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: false } };
@@ -60,91 +60,37 @@ class FakeAgent implements Agent {
       ).mcpServers ?? [];
     const reqModel = (p as { model?: string }).model;
     if (typeof reqModel === "string" && reqModel) this.sessionModel.set(sessionId, reqModel);
-    // Every offered target, so none goes unqueried.
+    const servers = new Map<string, { url: string; headers: Record<string, string> }>();
     for (const srv of offered) {
       if (typeof srv.url !== "string" || !srv.name) continue;
-      this.mcpAll.set(`${sessionId}:${srv.name}`, {
+      servers.set(srv.name, {
         url: srv.url,
         headers: Object.fromEntries((srv.headers ?? []).map((h) => [h.name, h.value])),
       });
     }
-    const env = offered.find((s) => s.name === "scooter-env" && typeof s.url === "string");
-    if (env?.url) {
-      this.mcpUrl.set(sessionId, env.url);
-      // `headers` is HttpHeader[] ({name,value}) per the ACP schema.
-      this.mcpHeaders.set(
-        sessionId,
-        Object.fromEntries((env.headers ?? []).map((h) => [h.name, h.value])),
-      );
-    }
+    this.mcp.set(sessionId, servers);
     return { sessionId };
   }
 
-  /** Every tool name the offered MCP endpoint lists, or why it could not be reached. */
-  private async listTools(sessionId: string): Promise<string> {
-    const url = this.mcpUrl.get(sessionId);
-    if (!url) return "(no MCP endpoint offered)";
-    return this.listToolsAt({ url, headers: this.mcpHeaders.get(sessionId) ?? {} });
-  }
-
-  /** Tool names at one offered target, or why it could not be reached. */
-  private async listToolsAt(t: { url: string; headers: Record<string, string> }): Promise<string> {
-    const url = t.url;
+  /** Call a tool on an offered MCP server with the official client. */
+  private async callTool(sessionId: string, server: string, name: string, args: Record<string, unknown>): Promise<string> {
+    const srv = this.mcp.get(sessionId)?.get(server);
+    if (!srv) return `no ${server} MCP endpoint was offered to this session`;
+    const client = new Client({ name: "scooter-fake-agent", version: "0" });
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json, text/event-stream",
-          ...t.headers,
-        },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
-      });
-      const body = await res.text();
-      if (!res.ok) return `(tools/list ${res.status}: ${body.slice(0, 120)})`;
-      const frame = body.includes("data:")
-        ? (body.split("\n").filter((l) => l.startsWith("data:")).pop() ?? "").slice(5).trim()
-        : body;
-      const tools = (JSON.parse(frame || "{}") as { result?: { tools?: Array<{ name?: string }> } })
-        .result?.tools ?? [];
-      return tools.map((t) => t.name ?? "?").join(",") || "(none)";
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(srv.url), { requestInit: { headers: srv.headers } }),
+      );
+      const res = await client.callTool({ name, arguments: args });
+      const text = (res.content as Array<{ type: string; text?: string }>)
+        .map((c) => c.text ?? "")
+        .join("\n")
+        .trim();
+      return res.isError ? `MCP ${name} error: ${text}` : text;
     } catch (err) {
-      return `(tools/list threw: ${err instanceof Error ? err.message : String(err)})`;
-    }
-  }
-
-  /** Call one scooter-env MCP tool with a standalone tools/call (the endpoint is stateless); the reply may be an SSE frame. */
-  private async callTool(sessionId: string, name: string, args: unknown): Promise<string> {
-    const url = this.mcpUrl.get(sessionId);
-    if (!url) return "no scooter-env MCP endpoint was offered to this session";
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        ...(this.mcpHeaders.get(sessionId) ?? {}),
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: { name, arguments: args },
-      }),
-    });
-    const body = await res.text();
-    if (!res.ok) return `MCP ${name} failed: ${res.status} ${body.slice(0, 200)}`;
-    const frame = body.includes("data:")
-      ? (body.split("\n").filter((l) => l.startsWith("data:")).pop() ?? "").slice(5).trim()
-      : body;
-    try {
-      const parsed = JSON.parse(frame) as {
-        result?: { content?: Array<{ text?: string }> };
-        error?: { message?: string };
-      };
-      if (parsed.error) return `MCP ${name} error: ${parsed.error.message ?? "unknown"}`;
-      return (parsed.result?.content ?? []).map((c) => c.text ?? "").join("\n").trim();
-    } catch {
-      return `MCP ${name} returned unparseable body: ${frame.slice(0, 200)}`;
+      return `MCP ${name} failed: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      await client.close().catch(() => {});
     }
   }
 
@@ -185,16 +131,17 @@ class FakeAgent implements Agent {
       return { stopReason: "end_turn" };
     }
 
-    // Reports the tools actually reachable, not merely offered.
-    if (userText.startsWith("~tools")) {
-      // Per target: a healthy one must not mask a dead one.
-      const parts: string[] = [];
-      for (const [key, t] of this.mcpAll) {
-        if (!key.startsWith(`${sessionId}:`)) continue;
-        parts.push(`${key.slice(sessionId.length + 1)}=${await this.listToolsAt(t)}`);
+    // "~call <server> <tool> [json-args]": a real tool call.
+    if (userText.startsWith("~call ")) {
+      const [, server, tool, ...rest] = userText.split(/\s+/);
+      let args: Record<string, unknown> = {};
+      try {
+        args = rest.length ? (JSON.parse(rest.join(" ")) as Record<string, unknown>) : {};
+      } catch {
+        args = {};
       }
-      const text = parts.length ? parts.join(" | ") : "(no MCP endpoint offered)";
-      await u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `tools ${text}` } });
+      const out = await this.callTool(sessionId, server ?? "", tool ?? "", args);
+      await u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `call ${server} ${tool}: ${out}` } });
       return { stopReason: "end_turn" };
     }
 
@@ -225,7 +172,7 @@ class FakeAgent implements Agent {
     if (userText.startsWith("~subagent")) {
       const title = userText.slice("~subagent".length).trim() || "research task";
       await u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Delegating…" } });
-      const out = await this.callTool(sessionId, "spawn_subagent", {
+      const out = await this.callTool(sessionId, "scooter-env", "spawn_subagent", {
         prompt: `!sleep ${SUBAGENT_LIFETIME_S}`,
         title,
       });
