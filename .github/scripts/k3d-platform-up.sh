@@ -110,6 +110,7 @@ push_attrs=(
   conversation-controller-image
   conversation-router-image
   db-migrator-image
+  byoc-controller-image
 )
 
 
