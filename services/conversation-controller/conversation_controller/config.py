@@ -28,6 +28,8 @@ class Config:
     # than the grace window.
     reap_orphans: bool = True
     orphan_grace_seconds: float = 600.0
+    # Delete overlay-store PVCs suspended this long; 0 disables.
+    overlay_retention_seconds: float = 7 * 86400.0
     # Agent-host autoscaling: the controller scales the agent-host Deployment to fit demand, so
     # no HPA may also write its replicas.
     autoscale: bool = True
@@ -49,6 +51,7 @@ class Config:
 =os.environ.get("POD_NAME") or os.environ.get("HOSTNAME", "unknown"),
             reap_orphans=os.environ.get("REAP_ORPHANED_SANDBOXES", "1") != "0",
             orphan_grace_seconds=float(os.environ.get("ORPHAN_GRACE_SECONDS", "600")),
+            overlay_retention_seconds=float(os.environ.get("OVERLAY_RETENTION_SECONDS", str(7 * 86400))),
             autoscale=os.environ.get("AUTOSCALE_AGENT_HOST", "1") != "0",
             min_replicas=int(os.environ.get("AGENT_HOST_MIN_REPLICAS", "2")),
             max_replicas=int(os.environ.get("AGENT_HOST_MAX_REPLICAS", "10")),
