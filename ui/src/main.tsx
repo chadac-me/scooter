@@ -12,6 +12,7 @@ import { loadConversations, loadConversationsResult, loadWhoami } from "./client
 import { subscribeConversations } from "./conversationStream.js";
 import { initTelemetryFromServer, installGlobalErrorHandlers } from "./telemetry.js";
 import { loadContribManifest } from "./contribManifest.js";
+import { installTitleSync } from "./pageTitle.js";
 
 // Telemetry is configured at runtime from nginx's /telemetry/config.json, so the first
 // requests of a page load go untraced while that fetch is in flight; the error handlers
@@ -58,9 +59,16 @@ subscribeConversations({ baseUrl: BASE_URL }, "all", {
 });
 
 // Deep-link support (?thread=<id>): requestSelect's pending target selects the
-// conversation once the poll/stream delivers it.
+// conversation once the poll/stream delivers it. A bare URL instead opens a NEW
+// conversation rather than resuming the persisted selection — only on the chat path,
+// so /settings leaves whatever sits behind it alone. A reload keeps its conversation,
+// because the subscriber below has already written ?thread= into the URL.
 const threadParam = new URLSearchParams(globalThis.location?.search ?? "").get("thread");
 if (threadParam) sessionStore.requestSelect(threadParam);
+else if (viewStore.get() === "chat") sessionStore.startFresh();
+
+// The tab title tracks the selected conversation: "scooter", then "scooter - <title>".
+installTitleSync();
 
 // Reflect the selected conversation in the URL via replaceState, but never while on a
 // /settings/<tab> path, where it would rewrite the settings URL.
