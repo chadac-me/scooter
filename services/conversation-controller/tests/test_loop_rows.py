@@ -3,6 +3,7 @@
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -24,12 +25,14 @@ def pg(tmp_path):
     for b in ("initdb", "pg_ctl"):
         assert shutil.which(b), f"{b} not on PATH: these tests need a real Postgres"
     data = tmp_path / "data"
+    # Unix socket paths cap at 107 bytes; pytest's tmp_path overflows it.
+    sock = tempfile.mkdtemp(prefix="pg")
     subprocess.run(["initdb", "-D", data, "-U", "postgres", "--auth=trust", "--no-sync"],
                    check=True, capture_output=True)
     subprocess.run(["pg_ctl", "-D", data, "-w", "-l", tmp_path / "log",
-                    "-o", f"-k {tmp_path} -c listen_addresses= -c fsync=off", "start"],
+                    "-o", f"-k {sock} -c listen_addresses= -c fsync=off", "start"],
                    check=True, capture_output=True)
-    dsn = f"host={tmp_path} user=postgres dbname=postgres"
+    dsn = f"host={sock} user=postgres dbname=postgres"
     import psycopg
 
     with psycopg.connect(dsn, autocommit=True) as conn:
@@ -37,6 +40,7 @@ def pg(tmp_path):
             conn.execute(f.read_text())
     yield dsn
     subprocess.run(["pg_ctl", "-D", data, "-m", "immediate", "stop"], capture_output=True)
+    shutil.rmtree(sock, ignore_errors=True)
 
 
 def _sql(dsn, q, *args):

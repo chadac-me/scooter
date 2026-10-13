@@ -23,6 +23,12 @@ func startPG(t *testing.T) *pgxpool.Pool {
 	}
 	dir := t.TempDir()
 	data := filepath.Join(dir, "data")
+	// Unix socket paths cap at 107 bytes; test-named dirs overflow it.
+	sock, err := os.MkdirTemp("", "pg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sock) })
 	run := func(name string, args ...string) {
 		if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
 			t.Fatalf("%s %v: %v\n%s", name, args, err, out)
@@ -30,11 +36,11 @@ func startPG(t *testing.T) *pgxpool.Pool {
 	}
 	run("initdb", "-D", data, "-U", "postgres", "--auth=trust", "--no-sync")
 	run("pg_ctl", "-D", data, "-w", "-l", filepath.Join(dir, "log"),
-		"-o", "-k "+dir+" -c listen_addresses= -c fsync=off", "start")
+		"-o", "-k "+sock+" -c listen_addresses= -c fsync=off", "start")
 	t.Cleanup(func() { _ = exec.Command("pg_ctl", "-D", data, "-m", "immediate", "stop").Run() })
 
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, "host="+dir+" user=postgres dbname=postgres")
+	pool, err := pgxpool.New(ctx, "host="+sock+" user=postgres dbname=postgres")
 	if err != nil {
 		t.Fatal(err)
 	}
