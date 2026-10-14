@@ -14,7 +14,6 @@ export function displayTitle(title: string | undefined): string | undefined {
   return !t || t === DEFAULT_TITLE ? undefined : t;
 }
 
-/** The document title for a conversation title. */
 export function pageTitle(conversationTitle?: string): string {
   const t = displayTitle(conversationTitle);
   return t ? `${APP_NAME} - ${t}` : APP_NAME;

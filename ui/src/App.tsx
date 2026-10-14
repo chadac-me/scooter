@@ -96,7 +96,7 @@ export function App() {
     <RuntimeProvider>
       <div className="flex h-dvh flex-col">
         <header className="flex h-11 items-center justify-between gap-3 border-b bg-header px-3 pl-4 text-sm">
-          {/* Compact wordmark: mark + name, then the title. */}
+          {/* Compact wordmark: mark + name. */}
           <div className="flex min-w-0 items-center gap-2">
             {/* Mobile-only sessions-drawer toggle, hidden at desk+ and in settings. */}
             {view !== "settings" && (
