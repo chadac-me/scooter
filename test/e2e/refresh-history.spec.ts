@@ -36,10 +36,8 @@ test.describe("history survives a page refresh", () => {
     // Two sandbox execs on the full target, each with its own 120s turn budget, then a reload.
     test.setTimeout(isFull ? 300_000 : 120_000);
     await chat.open();
-    // completeTurn, not send: `send` only waits for the idle Send button and swallows that
-    // wait's timeout, so the next message can be submitted mid-run. That is not what caused
-    // this test's flake (a duplicate tool call id was — see fakeAgent.nextToolCallId), but
-    // waiting for the terminal event is the right contract for a multi-turn test either way.
+    // completeTurn, not send: `send` swallows its idle-Send timeout, so a multi-turn test
+    // using it can start a turn while the previous run is still in flight.
     await chat.completeTurn("!echo first-marker");
     await expect(chat.toolCalls()).toHaveCount(1, { timeout: TOOL_CARD_MS });
     await expect(chat.assistantMessages().last()).toContainText(/first-marker/i, { timeout: 30_000 });

@@ -232,10 +232,8 @@ test.describe("thread rendering details", () => {
     // 120_000 actually SHRANK the budget below the full project's 180s.
     test.setTimeout(isFull ? 300_000 : 120_000);
     await chat.open();
-    // completeTurn, not sendTurn: sendTurn returns as soon as the assistant-message count
-    // grows, which precedes the run's terminal event. That was not this test's flake (a
-    // duplicate tool call id was — see fakeAgent.nextToolCallId), but a multi-turn test
-    // should not start a turn while the previous run is still in flight.
+    // completeTurn, not sendTurn: sendTurn returns on the assistant-message count, which
+    // precedes the run's terminal event, so the next turn can start mid-run.
     await chat.completeTurn("!echo persist one");
     await expect(chat.toolCalls()).toHaveCount(1, { timeout: TOOL_CARD_MS });
     await chat.completeTurn("!echo persist two");
