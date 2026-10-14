@@ -107,8 +107,7 @@ test.describe("session selector & titles", () => {
       { timeout: 30_000 },
     );
 
-    // The bare root carries no conversation, so it opens an empty one; the earlier
-    // conversation is still listed, just not open.
+    // The bare root opens an empty conversation, not the last one.
     await page.goto("/");
     await expect(chat.input()).toBeVisible({ timeout: 20_000 });
     await expect(

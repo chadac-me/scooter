@@ -47,7 +47,7 @@ export interface SessionLink {
   title?: string;
 }
 
-/** The placeholder title a conversation carries until the user or the agent names it. */
+/** The placeholder title, until something names the conversation. */
 export const DEFAULT_TITLE = "New chat";
 const STORAGE_KEY = "kubenix-agent.sessions.v1";
 
@@ -271,7 +271,7 @@ export const sessionStore = {
     return id;
   },
 
-  /** Open on a brand-new conversation, as a bare URL does, reusing an untouched one rather than stacking another beside it. */
+  /** Open a new conversation, reusing an untouched one if present. */
   startFresh(): string {
     const spare = state.sessions.find((s) => isPristine(s) && !isServerBacked(s));
     if (!spare) return this.newSession();

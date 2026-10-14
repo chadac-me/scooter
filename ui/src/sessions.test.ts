@@ -744,7 +744,7 @@ describe("a bare URL starts on a new conversation (startFresh)", () => {
 
   it("reuses an untouched conversation rather than stacking another beside it", () => {
     const first = sessionStore.startFresh();
-    // The store is a module singleton, so assert the delta of a second bare visit, not a total.
+    // The store is a module singleton, so assert a delta, not a total.
     const rows = sessionStore.get().sessions.length;
     const again = sessionStore.startFresh();
     expect(again).toBe(first);

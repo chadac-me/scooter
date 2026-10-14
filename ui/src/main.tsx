@@ -58,16 +58,14 @@ subscribeConversations({ baseUrl: BASE_URL }, "all", {
   onUpsert: (c) => sessionStore.mergeFromServer([c], { sourcesAuthoritative: false }),
 });
 
-// Deep-link support (?thread=<id>): requestSelect's pending target selects the
-// conversation once the poll/stream delivers it. A bare URL instead opens a NEW
-// conversation rather than resuming the persisted selection — only on the chat path,
-// so /settings leaves whatever sits behind it alone. A reload keeps its conversation,
-// because the subscriber below has already written ?thread= into the URL.
+// ?thread=<id> selects that conversation once the poll delivers it.
+// A bare chat URL opens a fresh conversation instead. Reloads still
+// restore, because the subscriber below writes ?thread= back.
 const threadParam = new URLSearchParams(globalThis.location?.search ?? "").get("thread");
 if (threadParam) sessionStore.requestSelect(threadParam);
 else if (viewStore.get() === "chat") sessionStore.startFresh();
 
-// The tab title tracks the selected conversation: "scooter", then "scooter - <title>".
+// Tab title: "scooter", then "scooter - <title>".
 installTitleSync();
 
 // Reflect the selected conversation in the URL via replaceState, but never while on a
