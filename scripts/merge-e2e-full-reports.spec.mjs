@@ -60,8 +60,9 @@ describe("clusterToSuites", () => {
     expect(specs[0].errors[0]).toContain("expected 500 to be 200");
   });
 
-  // The shard runs its assigned smoke tests with vitest's -t, and the rest are
-  // reported as skipped; counting them would read as tests that passed nowhere.
+  // -t selects but does not filter loading, so every shard reports every test in the
+  // files it loaded — the other shards' as skipped. Keeping them would store each
+  // cluster test once per shard in a report retained as a baseline for 90 days.
   it("drops the tests the shard's selector skipped", () => {
     const suites = clusterToSuites(
       vitestReport("test/cluster/platform-smoke.spec.ts", [
@@ -70,8 +71,17 @@ describe("clusterToSuites", () => {
       ]),
     );
 
-    const specs = collectSpecs({ suites }).filter((s) => s.runs > 0);
-    expect(specs.map((s) => s.title)).toEqual(["mine"]);
+    expect(collectSpecs({ suites }).map((s) => s.title)).toEqual(["mine"]);
+  });
+
+  it("contributes no suite at all for a file it ran nothing from", () => {
+    expect(
+      clusterToSuites(
+        vitestReport("test/cluster/event-backfill.spec.ts", [
+          [["backfill"], "another shard's", "skipped"],
+        ]),
+      ),
+    ).toEqual([]);
   });
 
   it("keeps two tests of the same name under different suites apart", () => {

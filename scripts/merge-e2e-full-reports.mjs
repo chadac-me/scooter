@@ -19,12 +19,12 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-/** vitest's status vocabulary mapped onto playwright's; anything not run is `skipped`,
- *  which `collectSpecs` drops. */
+/** vitest's status vocabulary mapped onto playwright's; null for anything that did not
+ *  run, which is dropped rather than merged (see `clusterToSuites`). */
 function statusOf(status) {
   if (status === "passed") return "passed";
   if (status === "failed") return "failed";
-  return "skipped";
+  return null;
 }
 
 /** vitest names the file by its absolute path in the shard runner's checkout, which is
@@ -48,6 +48,12 @@ export function clusterToSuites(report) {
     const path = repoPath(file.name);
     const rootSuite = { title: "", file: path, specs: [], suites: [] };
     for (const a of file.assertionResults ?? []) {
+      const status = statusOf(a.status);
+      // vitest's -t selects, it does not filter loading: every shard reports every test
+      // in the files it loaded, the unselected ones as skipped. Merging those would
+      // store each cluster test once per shard in a report kept as a baseline for 90
+      // days, so only what this shard actually ran is merged.
+      if (!status) continue;
       let node = rootSuite;
       for (const title of a.ancestorTitles ?? []) {
         let child = node.suites.find((s) => s.title === title);
@@ -57,7 +63,6 @@ export function clusterToSuites(report) {
         }
         node = child;
       }
-      const status = statusOf(a.status);
       node.specs.push({
         title: a.title ?? "",
         file: path,
@@ -75,7 +80,8 @@ export function clusterToSuites(report) {
         ],
       });
     }
-    out.push(rootSuite);
+    // A file whose every test belonged to another shard contributes nothing.
+    if (rootSuite.specs.length || rootSuite.suites.length) out.push(rootSuite);
   }
   return out;
 }
