@@ -8,7 +8,7 @@
  *
  * Usage:
  *   node test/e2e/support/shard-tests.mjs <N>
- *   SHARDS=<N> PRIOR_REPORT=prev/report.json node test/e2e/support/shard-tests.mjs
+ *   SHARDS=<N> PRIOR_REPORT=prev/report.json REPEAT=<r> node test/e2e/support/shard-tests.mjs
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -63,6 +63,22 @@ function priorReportWeights(reportPath) {
   };
   for (const suite of report.suites ?? []) walk(suite, suite.file);
   return out;
+}
+
+/**
+ * One weight per test in seconds. `repeat` scales the e2e weights only: the cluster
+ * tests run once whatever the sweep asks for, so a shard holding them would otherwise
+ * be packed as if they scaled too.
+ */
+export function resolveWeights(tests, { prior = {}, committed = {}, repeat = 1 } = {}) {
+  const reps = Math.max(1, Number(repeat) || 1);
+  const weights = {};
+  for (const t of tests) {
+    const k = testKey(t);
+    const base = prior[k] ?? committed[k] ?? DEFAULT_WEIGHT;
+    weights[k] = t.kind === "e2e" ? base * reps : base;
+  }
+  return weights;
 }
 
 /** LPT greedy: heaviest test first, onto the currently-lightest shard. */
@@ -142,11 +158,8 @@ function main() {
 
   const prior = priorReportWeights(process.env.PRIOR_REPORT);
   const committed = committedWeights();
-  const weights = {};
-  for (const t of all) {
-    const k = testKey(t);
-    weights[k] = prior[k] ?? committed[k] ?? DEFAULT_WEIGHT;
-  }
+  const repeat = Math.max(1, Number(process.env.REPEAT ?? 1) || 1);
+  const weights = resolveWeights(all, { prior, committed, repeat });
   const source = Object.keys(prior).length
     ? "prior-report"
     : Object.keys(committed).length
@@ -170,7 +183,7 @@ function main() {
 
   const totals = include.map((s) => s.est_seconds);
   process.stderr.write(
-    `[shard-tests] ${all.length} tests → ${include.length} shards (weights: ${source})\n` +
+    `[shard-tests] ${all.length} tests → ${include.length} shards (weights: ${source}, e2e ×${repeat})\n` +
       `[shard-tests] spread: min ${Math.min(...totals)}s  max ${Math.max(...totals)}s\n` +
       include
         .map(

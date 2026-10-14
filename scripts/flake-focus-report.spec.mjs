@@ -352,6 +352,25 @@ describe("the nightly window", () => {
     expect(body).toContain("not evidence of a fix".slice(0, 10));
   });
 
+  // The nightly is a sweep, so a night carries a rate and "F" would throw away the
+  // difference between 1-in-5 and always-red.
+  it("shows each sweep night's rate, not just whether it fired", () => {
+    const sweepNight = (failures) =>
+      targeted([...Array(5 - failures).fill("passed"), ...Array(failures).fill("failed")]);
+    const h = summarizeHistory([sweepNight(0), sweepNight(2)], P);
+    expect(h.runs.map((r) => [r.failedRuns, r.totalRuns])).toEqual([
+      [0, 5],
+      [2, 5],
+    ]);
+    const body = renderMarkdown(summarize(targeted(Array(5).fill("passed")), P), {
+      pattern: P,
+      target: "full",
+      history: h,
+    });
+    expect(body).toContain("`0/5` **2/5**");
+    expect(body).not.toContain("**F**");
+  });
+
   it("warns when the window shows nothing left to fix", () => {
     const body = renderMarkdown(summarize(targeted(Array(5).fill("passed")), P), {
       pattern: P,

@@ -71,10 +71,11 @@ export default defineConfig({
         },
       },
       {
-        // CI helper scripts, whose verdict logic is unreachable from the CI job itself.
+        // CI helper scripts, whose verdict logic is unreachable from the CI job itself;
+        // the shard planner is one of them.
         test: {
           name: "ci-scripts",
-          include: ["scripts/**/*.spec.mjs"],
+          include: ["scripts/**/*.spec.mjs", "test/e2e/support/**/*.spec.mjs"],
           environment: "node",
         },
       },

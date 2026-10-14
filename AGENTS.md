@@ -165,7 +165,7 @@ own run already reproduced the flake (the answer is in already).
 
 The full comment also carries an **`On main recently`** row — the spec's record
 across the last few nightly `e2e-full` runs, read from their uploaded reports.
-That is prior evidence, not a control: a nightly runs the whole suite, so its
+That is prior evidence, not a control: a nightly runs the whole suite ×5, so its
 rate includes contention the targeted run does not have, and scoring a quiet
 clean run against it would overstate the result. Read it for one thing in
 particular — *the spec is failing on `main` but the control reproduced nothing*
@@ -184,7 +184,7 @@ with the PR skips the push — for a test-only fix, all of them.
 |---|---|---|
 | `flake-check` | flake focus (targeted ×20) | **fast** — fake stack |
 | `e2e-full-flake-check` | flake focus full (k3d, targeted ×5) | **full** — a real k3d cluster |
-| `e2e-full` | e2e full (k3d) | the whole full suite, once |
+| `e2e-full` | e2e full (k3d) | the whole full suite, once (the nightly sweeps it ×5) |
 
 Both full-target jobs run on the **self-hosted fleet**, the same runners as the
 nightly. A control on different hardware is being asked to reproduce a
@@ -255,6 +255,14 @@ Two cases where the comment deliberately refuses to give a verdict: no baseline 
 retained, and a shard died before writing its report (its specs are then absent from
 the merge, which a set difference would happily render as a page of green "newly
 passing" rows nobody verified).
+
+On `schedule` and `workflow_dispatch` every test runs ×5 across 8 shards, so the
+night reports a per-test rate rather than one red/green;
+`scripts/e2e-full-flake-report.mjs` renders it into the job's step summary and the
+`e2e-full-flake-report` artifact, separating always-red (5/5) from flaky (n/5). A
+labelled PR still runs a single pass. Because five chances to fail is five times the
+chance any one test takes it, a sweep night is red almost by construction — the rates
+are the output, not the colour.
 
 **Which one you need depends on where the flake was seen.** A flake reported by
 the nightly `e2e-full` usually cannot reproduce on the fast target at all: the

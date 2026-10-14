@@ -129,6 +129,10 @@ export function summarizeHistory(reports, pattern, labels = []) {
       label: labels[i] || `−${reports.length - i}`,
       ran: matched.length > 0,
       failed: matched.some((s) => s.failed > 0),
+      // A nightly is a sweep (every test ×5), so a night carries a rate, not just a
+      // verdict; a one-pass run reports 0/1 or 1/1 and renders as before.
+      failedRuns: matched.reduce((n, s) => n + s.failed, 0),
+      totalRuns: matched.reduce((n, s) => n + s.runs, 0),
     };
   });
   const executed = runs.filter((r) => r.ran);
@@ -304,14 +308,19 @@ export function renderMarkdown(summary, opts = {}) {
 
   // Prior evidence from the nightly window: whether the flake is live on main at all.
   if (history && history.ran > 0) {
-    const seq = history.runs
-      .map((r) => (!r.ran ? "`–`" : r.failed ? "**F**" : "`·`"))
-      .join(" ");
+    // A night that repeated the spec shows its rate; a single pass stays F / ·.
+    const cell = (r) => {
+      if (!r.ran) return "`–`";
+      if (r.totalRuns > 1)
+        return r.failed ? `**${r.failedRuns}/${r.totalRuns}**` : `\`0/${r.totalRuns}\``;
+      return r.failed ? "**F**" : "`·`";
+    };
+    const seq = history.runs.map(cell).join(" ");
     L.push(
       "",
       `#### On \`${historyRef}\` recently — ${history.failed}/${history.ran} nightly ${history.ran === 1 ? "run" : "runs"}`,
       "",
-      `${seq}  <sub>oldest → newest; \`–\` = the spec did not run (lost shard)</sub>`,
+      `${seq}  <sub>oldest → newest; a cell is that night's failures over repetitions (\`F\` / \`·\` for a night that ran one pass); \`–\` = the spec did not run (lost shard)</sub>`,
       "",
     );
     // A clean control while the nightly still fails the spec is an unrepresentative

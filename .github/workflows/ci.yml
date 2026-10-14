@@ -490,16 +490,34 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'e2e-full')
     runs-on: ubuntu-latest
-    env:
-      # Every spec on a shard competes for sandbox provisioning (CI forces
-      # CONVERSATION_POD_CAP=1), so the shard count is a provisioning-concurrency
-      # control as much as a wall-clock one; `e2e-one-shard` collapses to one shard
-      # for infrastructure work on the runner fleet.
-      E2E_FULL_SHARDS: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-one-shard') && '1' || '4' }}
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      # Only the repeat count: the planner caps the shard count at the inventory size,
+      # so `matrix.include | length` is the trustworthy figure downstream.
+      repeat: ${{ steps.budget.outputs.repeat }}
     steps:
       - uses: actions/checkout@v5
+
+      # Every spec on a shard competes for sandbox provisioning (CI forces
+      # CONVERSATION_POD_CAP=1), so the shard count is a provisioning-concurrency
+      # control as much as a wall-clock one.
+      - id: budget
+        name: resolve the sweep budget
+        env:
+          # A labelled PR stays a single pass: it wants a verdict, and five costs the
+          # fleet ~90 min. A sweep of a branch is a `workflow_dispatch` away.
+          SWEEP: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          ONE_SHARD: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-one-shard') }}
+        run: |
+          set -euo pipefail
+          # Twice the shards keeps a sweep's wall clock near a single pass's.
+          if [ "$SWEEP" = "true" ]; then repeat=5; shards=8; else repeat=1; shards=4; fi
+          # `e2e-one-shard` is infrastructure work on the bring-up, where the suite is
+          # beside the point.
+          if [ "$ONE_SHARD" = "true" ]; then repeat=1; shards=1; fi
+          echo "repeat=$repeat" >> "$GITHUB_OUTPUT"
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "each test ×$repeat across $shards shard(s)"
 
       # nix + npm install are needed because the planner's inventory comes from
       # `playwright test --list` and `vitest list`, which resolve projects, testMatch
@@ -530,6 +548,11 @@ jobs:
 
       - id: plan
         name: plan shards
+        env:
+          E2E_FULL_SHARDS: ${{ steps.budget.outputs.shards }}
+          # The planner weights the e2e tests by the repetitions they will get, so a
+          # shard carrying cluster tests (which run once either way) is not overpacked.
+          E2E_FULL_REPEAT: ${{ steps.budget.outputs.repeat }}
         run: |
           set -euo pipefail
           report=""
@@ -539,7 +562,7 @@ jobs:
           # The JSON goes to a file because `nix develop` prints a banner to stdout
           # that $(...) would capture.
           nix develop --command bash -c \
-            "npm install --silent && PRIOR_REPORT='$report' SHARDS='$E2E_FULL_SHARDS' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
+            "npm install --silent && PRIOR_REPORT='$report' SHARDS='$E2E_FULL_SHARDS' REPEAT='$E2E_FULL_REPEAT' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
           matrix=$(cat /tmp/matrix.json)
           # Fail now on a banner or stray log line rather than downstream.
           echo "$matrix" | jq -e 'has("include")' >/dev/null \
@@ -571,9 +594,12 @@ jobs:
     # Runs only when distribute did — that job carries the opt-in decision.
     if: needs.e2e-full-distribute.result == 'success'
     # The self-hosted fleet, for this job only: a shard is ~25 min of k3d and
-    # platform deploy. Safe only because the gate above is schedule/dispatch/label,
-    # none of which a fork can trigger; `runs-on` is not a security boundary on its own.
+    # platform deploy, ~60 on a sweep. Safe only because the gate above is
+    # schedule/dispatch/label, none of which a fork can trigger; `runs-on` is not a
+    # security boundary on its own.
     runs-on: [self-hosted, linux, x64, nix]
+    # Bounds a wedged cluster holding a fleet runner all day; the default 360 does not.
+    timeout-minutes: 150
     strategy:
       fail-fast: false # one shard failing must not cancel the others (collect reports all)
       matrix: ${{ fromJSON(needs.e2e-full-distribute.outputs.matrix) }}
@@ -612,7 +638,7 @@ jobs:
       # The browser stories against the real cluster, the one seam neither
       # test/cluster (curl-only) nor the fast suite (no real server) covers.
       # serves both the app and /conversations — exactly the browser's real topology).
-      - name: e2e full browser stories (shard ${{ matrix.shard }})
+      - name: e2e full browser stories ×${{ needs.e2e-full-distribute.outputs.repeat }} (shard ${{ matrix.shard }})
         # An empty --grep matches everything, so a shard with no e2e tests must skip.
         if: matrix.e2e_grep != ''
         env:
@@ -623,6 +649,9 @@ jobs:
           PLAYWRIGHT_JSON_OUTPUT_NAME: "report-full-shard-${{ matrix.shard }}.json"
           # An env var, not an inlined string, since test titles contain apostrophes.
           E2E_GREP: ${{ matrix.e2e_grep }}
+          # `retries: 0` is pinned in playwright.config.ts, so each repetition counts
+          # as an independent run and the rates below mean something.
+          E2E_FULL_REPEAT: ${{ needs.e2e-full-distribute.outputs.repeat }}
         run: |
           set -euo pipefail
           # Sourced so the background PIDs and cleanup trap live in this shell and
@@ -630,7 +659,7 @@ jobs:
           . .github/scripts/e2e-full-serve.sh
           # --grep with the alternation of escaped titles built by shard-tests.mjs;
           # the `if` above guards the empty pattern.
-          nix develop --command bash -c 'npm install && npx playwright test --project=full --reporter=json,list --grep "$E2E_GREP"'
+          nix develop --command bash -c 'npm install && npx playwright test --project=full --repeat-each="$E2E_FULL_REPEAT" --reporter=json,list --grep "$E2E_GREP"'
 
       - name: upload shard report
         if: always()
@@ -816,6 +845,41 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Sweeps are nightly-only, so there is no PR to comment on: step summary and
+      # artifact instead.
+      - name: per-test flake rates (sweep only)
+        if: always() && needs.e2e-full-distribute.outputs.repeat != '1'
+        continue-on-error: true
+        env:
+          MATRIX: ${{ needs.e2e-full-distribute.outputs.matrix }}
+          REPEAT: ${{ needs.e2e-full-distribute.outputs.repeat }}
+        run: |
+          set -euo pipefail
+          # The verdict's baseline window again, this time as the trend columns.
+          hist=()
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            hist+=(--history "$f")
+            label="$(cat "$(dirname "$f")/label" 2>/dev/null || true)"
+            hist+=(--history-label "${label:-?}")
+          done < <(find baseline -name report.json 2>/dev/null | sort)
+          shards=$(echo "$MATRIX" | jq '.include | length')
+          node scripts/e2e-full-flake-report.mjs report.json \
+            --repeat "$REPEAT" --expected-shards "$shards" "${hist[@]}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            > sweep.md
+          cat sweep.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The record a later night's trend columns read from.
+      - name: upload the sweep report
+        if: always() && hashFiles('sweep.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-full-flake-report
+          path: sweep.md
+          retention-days: 90
+          if-no-files-found: ignore
 
       # PR only; sticky, so a re-run replaces the verdict.
       - name: post the verdict on the PR
