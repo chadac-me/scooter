@@ -479,9 +479,7 @@ jobs:
         run: nix shell nixpkgs#k3d -c k3d cluster delete scooter-example || true
 
   # e2e full is sharded with the same distribute -> shard-matrix -> collect shape
-  # as e2e fast; each shard boots its own cluster. Nightly it is a SWEEP: every test
-  # runs E2E_FULL_REPEAT times so the collect job can report a per-test flake rate
-  # instead of one night's red/green.
+  # as e2e fast; each shard boots its own cluster.
   e2e-full-distribute:
     name: e2e full distribute (shard)
     needs: cluster-changes
@@ -494,9 +492,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
-      # Not the shard count: the planner caps it at the inventory size and
-      # `e2e-one-shard` rewrites the matrix, so `matrix.include | length` is the
-      # only trustworthy figure downstream.
+      # Only the repeat count: the planner caps the shard count at the inventory size,
+      # so `matrix.include | length` is the trustworthy figure downstream.
       repeat: ${{ steps.budget.outputs.repeat }}
     steps:
       - uses: actions/checkout@v5
@@ -507,19 +504,16 @@ jobs:
       - id: budget
         name: resolve the sweep budget
         env:
-          # Nightly and manual runs sweep; the `e2e-full` label on a PR is a single
-          # pass, because it wants a verdict and five costs the fleet an hour and a
-          # half. A sweep of a branch is a `workflow_dispatch` away.
+          # A labelled PR stays a single pass: it wants a verdict, and five costs the
+          # fleet ~90 min. A sweep of a branch is a `workflow_dispatch` away.
           SWEEP: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           ONE_SHARD: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-one-shard') }}
         run: |
           set -euo pipefail
-          # A sweep is five passes of a ~90-minute suite, so it gets twice the shards
-          # to keep the nightly's wall clock near a single pass; a fleet with fewer
-          # free runners just queues them.
+          # Twice the shards keeps a sweep's wall clock near a single pass's.
           if [ "$SWEEP" = "true" ]; then repeat=5; shards=8; else repeat=1; shards=4; fi
-          # `e2e-one-shard` is infrastructure work on the bring-up itself, where the
-          # suite is beside the point: one shard, one test, no repetitions.
+          # `e2e-one-shard` is infrastructure work on the bring-up, where the suite is
+          # beside the point.
           if [ "$ONE_SHARD" = "true" ]; then repeat=1; shards=1; fi
           echo "repeat=$repeat" >> "$GITHUB_OUTPUT"
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
@@ -592,8 +586,8 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   # One e2e-full shard: brings up k3d plus the full multi-replica platform (fake
-  # agent), runs its assigned cluster tests and browser stories (each one
-  # `--repeat-each` times), and uploads its report.
+  # agent), runs its assigned cluster tests and browser stories, and uploads its
+  # report.
   e2e-full-shard:
     name: e2e full shard ${{ matrix.shard }}
     needs: [cluster-changes, e2e-full-distribute]
@@ -604,8 +598,7 @@ jobs:
     # schedule/dispatch/label, none of which a fork can trigger; `runs-on` is not a
     # security boundary on its own.
     runs-on: [self-hosted, linux, x64, nix]
-    # A sweep shard is ~56 min of tests on top of the bring-up; the default 360 is
-    # enough for that but not for a wedged cluster holding a fleet runner all day.
+    # Bounds a wedged cluster holding a fleet runner all day; the default 360 does not.
     timeout-minutes: 150
     strategy:
       fail-fast: false # one shard failing must not cancel the others (collect reports all)
@@ -656,8 +649,8 @@ jobs:
           PLAYWRIGHT_JSON_OUTPUT_NAME: "report-full-shard-${{ matrix.shard }}.json"
           # An env var, not an inlined string, since test titles contain apostrophes.
           E2E_GREP: ${{ matrix.e2e_grep }}
-          # 1 on a labelled PR run, 5 on the nightly sweep; `retries: 0` is pinned in
-          # playwright.config.ts, so each repetition is an independent run.
+          # `retries: 0` is pinned in playwright.config.ts, so each repetition counts
+          # as an independent run and the rates below mean something.
           E2E_FULL_REPEAT: ${{ needs.e2e-full-distribute.outputs.repeat }}
         run: |
           set -euo pipefail
@@ -853,9 +846,8 @@ jobs:
             > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
-      # The sweep's own output: how often each test failed, which one pass cannot
-      # say. Nightly-only, so it goes to the step summary and an artifact; there is
-      # no PR to comment on.
+      # Sweeps are nightly-only, so there is no PR to comment on: step summary and
+      # artifact instead.
       - name: per-test flake rates (sweep only)
         if: always() && needs.e2e-full-distribute.outputs.repeat != '1'
         continue-on-error: true
@@ -864,8 +856,7 @@ jobs:
           REPEAT: ${{ needs.e2e-full-distribute.outputs.repeat }}
         run: |
           set -euo pipefail
-          # The same baseline window the verdict used, as the trend columns: each
-          # earlier run on main that was itself a sweep carries its own rates.
+          # The verdict's baseline window again, this time as the trend columns.
           hist=()
           while IFS= read -r f; do
             [ -n "$f" ] || continue
@@ -880,8 +871,7 @@ jobs:
             > sweep.md
           cat sweep.md >> "$GITHUB_STEP_SUMMARY"
 
-      # Readable without expanding a step summary, and the record of which tests were
-      # flaky on which night.
+      # The record a later night's trend columns read from.
       - name: upload the sweep report
         if: always() && hashFiles('sweep.md') != ''
         uses: actions/upload-artifact@v4

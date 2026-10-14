@@ -66,11 +66,9 @@ function priorReportWeights(reportPath) {
 }
 
 /**
- * One weight per test in seconds: the measured duration when a prior report has it,
- * else the committed fallback, else a flat default. `repeat` is the sweep's
- * --repeat-each and multiplies the e2e weights only, since the cluster tests run once
- * whatever the sweep asks for — a shard holding them is otherwise packed as if they
- * scaled too.
+ * One weight per test in seconds. `repeat` scales the e2e weights only: the cluster
+ * tests run once whatever the sweep asks for, so a shard holding them would otherwise
+ * be packed as if they scaled too.
  */
 export function resolveWeights(tests, { prior = {}, committed = {}, repeat = 1 } = {}) {
   const reps = Math.max(1, Number(repeat) || 1);
