@@ -95,10 +95,10 @@ def test_the_cr_never_overwrites_the_row(pg):
 def test_losing_to_a_router_claim_leaves_the_winner(pg, monkeypatch):
     _row(pg, "c1")
     rows = ConversationRows(pg)
-    snapshot = rows.list_states()
+    snapshot = rows.list_states(set(), set())
     # The router claims between the controller's read and its write.
     _sql(pg, "UPDATE conversations SET host_pod = 'pod-b', host_generation = 1 WHERE id = 'c1'")
-    monkeypatch.setattr(rows, "list_states", lambda: snapshot)
+    monkeypatch.setattr(rows, "list_states", lambda *_: snapshot)
     k = FakeK8s([Pod("pod-a", True, ip="10.0.0.1")], [_cr("c1")])
     assert ("c1", "assign-lost") in reconcile_once(k, cap=10, rows=rows)
     assert _placement(pg, "c1")[:2] == ("pod-b", 1)
@@ -129,3 +129,28 @@ def test_unreadable_rows_skip_the_tick(pg):
     rows = ConversationRows("host=/nonexistent user=postgres dbname=postgres")
     assert reconcile_once(k, cap=10, rows=rows) == []
     assert k.patches == []
+
+
+def test_list_states_skips_rows_that_need_nothing(pg):
+    _row(pg, "active", host="pod-a", gen=1, phase="Assigned")
+    _row(pg, "pending")                                           # no phase yet
+    _row(pg, "parked", gen=3, phase="Suspended", sandbox_ref="conv-parked")
+    _row(pg, "zombie", gen=2, phase="Suspended", sandbox_ref="conv-zombie")
+    _row(pg, "repairing", gen=2, phase="Suspended", sandbox_ref="conv-repairing")
+    _row(pg, "stale-host", host="pod-b", gen=4, phase="Suspended", sandbox_ref="conv-stale")
+    got = {r["id"] for r in ConversationRows(pg).list_states(running_refs={"conv-zombie"}, in_repair={"repairing"})}
+    assert got == {"active", "pending", "zombie", "repairing", "stale-host"}
+
+
+def test_a_parked_conversation_is_not_even_read(pg):
+    _row(pg, "parked", gen=3, phase="Suspended", sandbox_ref="conv-parked")
+    sb = SandboxRef("conv-parked", age_seconds=999, operating_mode="Suspended")
+    k = FakeK8s(PODS, [_cr("parked", phase="Suspended", gen=3)], sandboxes=[sb])
+    assert reconcile_once(k, cap=10, rows=ConversationRows(pg)) == []
+
+
+def test_a_zombie_is_still_seen(pg):
+    _row(pg, "zombie", gen=2, phase="Suspended", sandbox_ref="conv-zombie")
+    sb = SandboxRef("conv-zombie", age_seconds=999, operating_mode="Running")
+    k = FakeK8s(PODS, [_cr("zombie", phase="Suspended", gen=2)], sandboxes=[sb])
+    assert ("zombie", "suspend-sandbox-suspect") in reconcile_once(k, cap=10, rows=ConversationRows(pg))

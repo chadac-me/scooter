@@ -147,7 +147,8 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
         sandbox_modes = {}
     crs: dict | None = None
     if rows is not None:
-        states = rows.list_states()
+        running = {ref for ref, mode in sandbox_modes.items() if mode != "Suspended"}
+        states = rows.list_states(running, set(_zombie_progress))
         if states is None:
             logger.warning("skipping reconcile: conversations rows unreadable", extra=_C)
             return []

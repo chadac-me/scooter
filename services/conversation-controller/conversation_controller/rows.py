@@ -68,14 +68,17 @@ class ConversationRows:
             except Exception:  # noqa: BLE001
                 pass
 
-    def list_states(self) -> list[dict] | None:
-        """Every conversation's placement state, or None when Postgres is unreachable."""
+    def list_states(self, running_refs: set[str], in_repair: set[str]) -> list[dict] | None:
+        """Placement state of rows needing reconcile, or None when Postgres is unreachable."""
+        # A suspended, unhosted row with a suspended sandbox needs nothing.
         try:
             with self._cursor() as cur:
                 cur.execute(
                     "SELECT id, host_pod, host_generation, phase, sandbox_ref, creator_pod, parent_id "
-                    "FROM conversations",
-                    (),
+                    "FROM conversations "
+                    "WHERE phase IS DISTINCT FROM 'Suspended' OR host_pod IS NOT NULL "
+                    "OR sandbox_ref = ANY(%s) OR id = ANY(%s)",
+                    (sorted(running_refs), sorted(in_repair)),
                 )
                 cols = [d[0] for d in cur.description]
                 return [dict(zip(cols, r)) for r in cur.fetchall()]
