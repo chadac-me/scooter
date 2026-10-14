@@ -304,9 +304,7 @@ import { execFile } from "node:child_process";
 function kubectl(args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     execFile("kubectl", args, { maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
-      // `kubectl run --rm` exits non-zero on a non-zero container exit, so a failure here is
-      // not necessarily a failed request: hand both streams back and let the caller decide,
-      // which is also what lets a retry report the stderr of the attempts it swallowed.
+      // `kubectl run --rm` exits non-zero on a non-zero container exit, so hand both streams back and let the caller decide.
       resolve({ stdout, stderr: stderr || err?.message || "" });
     });
   });
