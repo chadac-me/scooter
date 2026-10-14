@@ -4,9 +4,8 @@
 //
 // Flow per request:
 //  1. extract the conversation id (agui body threadId / path route);
-//  2. look up its owner in the ownership cache (kept fresh by a CRD watch);
-//  3. reverse-proxy to the owner pod IP, or to any ready pod when unknown, unassigned or
-//     non-scoped.
+//  2. resolve its pod from the row, claiming if unassigned;
+//  3. proxy there; only conversation-less requests go to any pod.
 package main
 
 import (
@@ -14,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -38,9 +38,9 @@ type config struct {
 	namespace    string
 	upstreamPort int // agent-host container port
 	listenAddr   string
-	// The agent-host ClusterIP Service, the fallback for non-scoped, unassigned and stale-IP requests.
+	// The agent-host ClusterIP Service, for requests that name no conversation.
 	clusterIPService string
-	// fallback is the upstream for non-scoped, unassigned and stale-IP requests, resolved once in main(): the ClusterIP Service in cluster, or AGENT_HOST_URL in dev mode.
+	// The ClusterIP Service in cluster, or AGENT_HOST_URL in dev mode.
 	fallback *url.URL
 }
 
@@ -62,9 +62,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	// The ownership cache is never Run in dev mode (see devmode.go), so HostIP always misses and every request falls through to AGENT_HOST_URL.
-	cache := NewOwnershipCache()
 	var creator ConversationCreator
+	// Nil in dev mode, where every request goes to AGENT_HOST_URL.
+	var pods *ReadyPods
+	var dynClient dynamic.Interface
 	// Body-`owner` trust for in-cluster callers; nil outside a cluster, where a body owner is never honored.
 	var trusted TrustedCaller
 	if devModeEnabled() {
@@ -89,7 +90,9 @@ func main() {
 			log.Error("k8s client init failed", errAttr(err))
 			os.Exit(1)
 		}
-		go cache.Run(ctx, dyn, cfg.namespace)
+		dynClient = dyn
+		pods = NewReadyPods()
+		go pods.Run(ctx, dyn, cfg.namespace)
 		creator = &dynamicCreator{dyn: dyn, namespace: cfg.namespace}
 		cfg.fallback = FallbackURL(cfg.clusterIPService, cfg.namespace, cfg.upstreamPort)
 		trusted = buildTrustedCaller(kubeCfg, log)
@@ -149,11 +152,22 @@ func main() {
 		}
 	}
 
+	var resolver ownerResolver
+	if pods != nil && writeStore != nil {
+		assigner := NewAssigner(&PgAssignStore{pool: writeStore.pool}, pods)
+		assigner.OnClaim = mirrorClaim(dynClient, cfg.namespace)
+		go runAssignListener(ctx, writeStore.pool.Config().ConnConfig, assigner)
+		resolver = assigner
+		log.Info("routing by the conversations row")
+	} else if pods != nil {
+		log.Error("no write store: conversations cannot be assigned, routing to any pod")
+	}
+
 	// The live conversation-list push: one LISTEN connection fans NOTIFYs out to SSE subscribers (see events.go).
 	hub := newSSEHub()
 	go runConversationListener(ctx, store, links, hub)
 
-	srv := &http.Server{Addr: cfg.listenAddr, Handler: newRouter(ctx, cfg, cache, creator, trusted, store, writeStore, links, hub)}
+	srv := &http.Server{Addr: cfg.listenAddr, Handler: newRouter(ctx, cfg, resolver, creator, trusted, store, writeStore, links, hub)}
 	go func() {
 		<-ctx.Done()
 		log.Info("shutdown signalled, draining")
@@ -173,7 +187,7 @@ func main() {
 }
 
 // newRouter builds the HTTP handler: resolve the target, reverse-proxy, and on a dial failure to the owner IP retry once via the fallback Service.
-func newRouter(shutdownCtx context.Context, cfg config, cache *OwnershipCache, creator ConversationCreator, trusted TrustedCaller, store *Store, writeStore *WriteStore, links *LinkStore, hub *sseHub) http.Handler {
+func newRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, creator ConversationCreator, trusted TrustedCaller, store *Store, writeStore *WriteStore, links *LinkStore, hub *sseHub) http.Handler {
 	fallback := cfg.fallback
 	// A typed-nil *Store in an interface is not nil.
 	var parents parentLookup
@@ -206,14 +220,19 @@ func newRouter(shutdownCtx context.Context, cfg config, cache *OwnershipCache, c
 		// Idle star/title is served here; a live conversation falls through to the proxy so its owner stays the single writer.
 		if writeStore != nil && store != nil {
 			if field, id, ok := MetadataPatch(r.Method, r.URL.Path); ok {
-				if _, hasOwner := cache.HostIP(id); !hasOwner {
+				if resolver == nil || !resolver.Assigned(r.Context(), id) {
 					serveConversationMetadataPatch(w, r, field, id, store, writeStore)
 					return
 				}
 			}
 		}
 		// convID is resolved once and threaded into the proxy layer so every log line carries conversation_id.
-		convID, target := resolveTargetFor(cfg, cache, r, fallback)
+		convID, target, err := resolveTargetFor(cfg, resolver, r, fallback)
+		if errors.Is(err, ErrNoPods) {
+			w.Header().Set("Retry-After", "2")
+			http.Error(w, "no agent-host pod is ready", http.StatusServiceUnavailable)
+			return
+		}
 		// Retry only when the primary target is an owner IP rather than the fallback.
 		canRetry := target.Host != fallback.Host
 		serveVia(shutdownCtx, w, r, target, fallback, canRetry, convID)
@@ -298,16 +317,16 @@ func (t *trackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return h.Hijack()
 }
 
-// resolveTarget decides the upstream URL for a request: the owner pod's IP when the conversation is scoped and assigned, else the fallback.
-func resolveTarget(cfg config, cache *OwnershipCache, r *http.Request, fallback *url.URL) *url.URL {
-	_, u := resolveTargetFor(cfg, cache, r, fallback)
-	return u
+// ownerResolver maps a conversation to its pod IP.
+type ownerResolver interface {
+	Resolve(ctx context.Context, id string) (ip, convID string, found bool, err error)
+	Assigned(ctx context.Context, id string) bool
 }
 
-// resolveTargetFor is resolveTarget plus the conversation id it resolved, "" for a non-scoped or unidentifiable request.
-func resolveTargetFor(cfg config, cache *OwnershipCache, r *http.Request, fallback *url.URL) (string, *url.URL) {
+// resolveTargetFor returns a request's conversation id and upstream.
+func resolveTargetFor(cfg config, resolver ownerResolver, r *http.Request, fallback *url.URL) (string, *url.URL, error) {
 	if IsNonScoped(r.URL.Path) {
-		return "", fallback
+		return "", fallback, nil
 	}
 	convID := ""
 	if IsAguiPost(r.Method, r.URL.Path) {
@@ -315,12 +334,23 @@ func resolveTargetFor(cfg config, cache *OwnershipCache, r *http.Request, fallba
 	} else if id, ok := ConvIDFromPath(r.URL.Path); ok {
 		convID = id
 	}
-	if convID != "" {
-		if ip, ok := cache.HostIP(convID); ok {
-			return convID, TargetURL(ip, cfg.upstreamPort)
-		}
+	if convID == "" || resolver == nil {
+		return convID, fallback, nil
 	}
-	return convID, fallback
+	ip, resolved, found, err := resolver.Resolve(r.Context(), convID)
+	if errors.Is(err, ErrNoPods) {
+		return convID, nil, err
+	}
+	if err != nil {
+		// Reads still work; the fence refuses unassigned writes.
+		logger("route").Warn("assignment lookup failed, using the Service", convAttr(convID), errAttr(err))
+		return convID, fallback, nil
+	}
+	if !found {
+		// No such conversation; let agent-host answer.
+		return convID, fallback, nil
+	}
+	return resolved, TargetURL(ip, cfg.upstreamPort), nil
 }
 
 // aguiThreadID reads threadId from the POST /agui JSON body, then restores the body so the proxy forwards it unconsumed.

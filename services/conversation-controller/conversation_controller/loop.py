@@ -52,6 +52,48 @@ def _state(cr: dict, sandbox_modes: dict[str, str | None] | None = None) -> Conv
     )
 
 
+def _row_state(row: dict, sandbox_modes: dict[str, str | None], ip_of: dict[str, str]) -> ConversationState:
+    ref = row.get("sandbox_ref")
+    host = row.get("host_pod")
+    return ConversationState(
+        name=row["id"],
+        host_pod=host,
+        sandbox_mode=sandbox_modes.get(ref) if ref else None,
+        sandbox_ref=ref,
+        creator_pod=row.get("creator_pod"),
+        phase=row.get("phase") or "Pending",
+        phase_present=row.get("phase") is not None,
+        generation=int(row.get("host_generation") or 0),
+        host_ip=ip_of.get(host) if host else None,
+        parent_id=row.get("parent_id"),
+    )
+
+
+def _patch_cr(k8s, crs: dict | None, name: str, status: dict) -> None:
+    """Mirror status onto the CR; with rows as the source, a missing or failed CR is not fatal."""
+    if crs is None:
+        k8s.patch_status(name, status)
+        return
+    if name not in crs:
+        return
+    try:
+        k8s.patch_status(name, status)
+    except Exception:  # noqa: BLE001
+        logger.warning("CR status mirror failed", extra={**_C, "conversation_id": name}, exc_info=True)
+
+
+def _mirror_noop(k8s, crs: dict | None, c: ConversationState) -> None:
+    """Bring a CR's status in line with the row, e.g. after a router claim."""
+    if crs is None or c.name not in crs:
+        return
+    st = crs[c.name]
+    want = {"hostPod": c.host_pod, "hostIP": c.host_ip, "generation": c.generation}
+    if c.phase_present:
+        want["phase"] = c.phase
+    if any(st.get(k) != v for k, v in want.items()):
+        _patch_cr(k8s, crs, c.name, want)
+
+
 # Zombie repair state (one controller process, one loop). A zombie is a Suspended, unhosted
 # conversation whose Sandbox reads Running; a suspend is issued only on the second consecutive
 # sighting, re-issued only after a backoff, and after a bounded number of attempts the leaked
@@ -75,6 +117,9 @@ class _ZombieProgress:
 
 _zombie_progress: dict[str, _ZombieProgress] = {}
 
+# Last tick's generations: a fresh claim gets one tick's grace.
+_prev_gen: dict[str, int] = {}
+
 
 def _mirror_phase(rows, name: str, phase: str) -> None:
     """Mirror a phase the controller just patched onto the CR to the conversations row, if any."""
@@ -86,16 +131,6 @@ def _mirror_release(rows, name: str, generation: int) -> None:
     """Mirror a placement release to the row immediately, since a release is a fencing event."""
     if rows is not None:
         rows.release_assignment(name, generation)
-
-
-def _sync_rows(rows, convs) -> None:
-    """Converge the row's phase and placement columns on the listed CRs before the per-conversation loop, so the sweep never overwrites phases decided this pass."""
-    if rows is None:
-        return
-    # A CR without a phase is skipped because c.phase is only _state's default there.
-    rows.sync_phases([(c.name, c.phase) for c in convs if c.phase_present])
-    # Appends fence on the row's generation, so every assignment must reach the row each pass.
-    rows.sync_assignments([(c.name, c.host_pod, c.generation) for c in convs])
 
 
 def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
@@ -111,8 +146,18 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
             "list_sandboxes failed", extra={**_C, "skipped": "drift-repair"}, exc_info=True
         )
         sandbox_modes = {}
-    convs = [_state(cr, sandbox_modes) for cr in k8s.list_conversations()]
-    _sync_rows(rows, convs)
+    crs: dict | None = None
+    if rows is not None:
+        running = {ref for ref, mode in sandbox_modes.items() if mode != "Suspended"}
+        states = rows.list_states(running, set(_zombie_progress))
+        if states is None:
+            logger.warning("skipping reconcile: conversations rows unreadable", extra=_C)
+            return []
+        ip_of = {p.name: p.ip for p in pods}
+        convs = [_row_state(r, sandbox_modes, ip_of) for r in states]
+        crs = {cr["metadata"]["name"]: (cr.get("status") or {}) for cr in k8s.list_conversations()}
+    else:
+        convs = [_state(cr, sandbox_modes) for cr in k8s.list_conversations()]
 
     # Seed load from conversations currently assigned to a still-ready pod.
     load: dict[str, int] = {}
@@ -131,6 +176,7 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
     for c in convs:
         action = reconcile(c, pods, load, cap, hosts)
         if isinstance(action, NoOp):
+            _mirror_noop(k8s, crs, c)
             results.append((c.name, "noop"))
             continue
         if isinstance(action, SuspendSandbox):
@@ -161,8 +207,8 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
             if prog.suspends >= _ZOMBIE_MAX_SUSPENDS:
                 if c.sandbox_ref:
                     k8s.reclaim_sandbox_pod(c.sandbox_ref)
-                k8s.patch_status(c.name, {"phase": "Failed"})
                 _mirror_phase(rows, c.name, "Failed")
+                _patch_cr(k8s, crs, c.name, {"phase": "Failed"})
                 prog.resolved = True
                 logger.error(
                     "zombie sandbox unresolved — escalating (reclaim the leaked pod + mark conversation Failed)",
@@ -197,10 +243,13 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
         if isinstance(action, Detach):
             # Release stale placement on a suspended conversation, keeping the invariant that
             # hostIP is empty whenever hostPod is empty.
-            k8s.patch_status(c.name, {"hostPod": None, "hostIP": None})
             _mirror_release(rows, c.name, c.generation)
+            _patch_cr(k8s, crs, c.name, {"hostPod": None, "hostIP": None})
             hosts[c.name] = None
             results.append((c.name, "detach"))
+            continue
+        if isinstance(action, MarkSuspended) and crs is not None and _prev_gen.get(c.name) != c.generation:
+            results.append((c.name, "drift-grace"))
             continue
         if isinstance(action, MarkSuspended):
             # The Sandbox is Suspended but the phase is not: fix the phase and release placement
@@ -212,9 +261,9 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
                 "phase drift repaired",
                 {**_C, "conversation_id": c.name, "reason": action.reason},
             )
-            k8s.patch_status(c.name, {"phase": "Suspended", "hostPod": None, "hostIP": None})
             _mirror_phase(rows, c.name, "Suspended")
             _mirror_release(rows, c.name, c.generation)
+            _patch_cr(k8s, crs, c.name, {"phase": "Suspended", "hostPod": None, "hostIP": None})
             hosts[c.name] = None
             results.append((c.name, "mark-suspended"))
             continue
@@ -222,24 +271,25 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
             # Patch unless the CR already says {phase: Pending, hostPod: null}; a status-less CR
             # is patched so its phase materializes.
             if c.host_pod is not None or not c.phase_present or c.phase != "Pending":
-                k8s.patch_status(c.name, {"phase": "Pending", "hostPod": None})
                 _mirror_phase(rows, c.name, "Pending")
                 _mirror_release(rows, c.name, c.generation)
+                _patch_cr(k8s, crs, c.name, {"phase": "Pending", "hostPod": None})
             hosts[c.name] = None
             results.append((c.name, "pending"))
             continue
         # Assign / Reassign.
         assert isinstance(action, Assign)
-        k8s.patch_status(c.name, {
+        # The row claim decides; losing to the router is fine.
+        if rows is not None and not rows.set_assignment(c.name, action.host_pod, action.generation):
+            results.append((c.name, "assign-lost"))
+            continue
+        _mirror_phase(rows, c.name, action.phase)
+        _patch_cr(k8s, crs, c.name, {
             "phase": action.phase,
             "hostPod": action.host_pod,
             "hostIP": action.host_ip,
             "generation": action.generation,
         })
-        _mirror_phase(rows, c.name, action.phase)
-        # The row claim is conditional on the generation, and a losing claim is not an error.
-        if rows is not None:
-            rows.set_assignment(c.name, action.host_pod, action.generation)
         hosts[c.name] = action.host_pod
         # A subagent shares its parent's pod, so it does not count toward pod capacity.
         if c.parent_id is None:
@@ -288,6 +338,10 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
         prog.quiescent += 1
         if prog.quiescent >= _ZOMBIE_FORGET_TICKS:
             del _zombie_progress[name]
+
+    if crs is not None:
+        _prev_gen.clear()
+        _prev_gen.update({c.name: c.generation for c in convs})
 
     # Forget conversations that did not drift this pass, so a future drift is logged again.
     forget_warned({f"phase-drift:{n}" for n in drift_flagged})

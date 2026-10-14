@@ -238,6 +238,8 @@ _fingerprint:
       attr="${pair%%=*}"
       printf '%s=%s\n' "$attr" "$(nix eval --raw ".#${attr}.drvPath" 2>/dev/null | xargs basename)"
     done
+    # The migrator, so a schema change reruns the migrate Job.
+    printf 'db-migrator-image=%s\n' "$(nix eval --raw ".#db-migrator-image.drvPath" 2>/dev/null | xargs basename)"
     # The manifests too, since a CRD schema change is invisible to the image
     # fingerprints and the apiserver prunes fields the live CRD does not know.
     printf 'platform-manifests=%s\n' "$(nix eval --raw ".#platform-manifests.drvPath" 2>/dev/null | xargs basename)"
@@ -278,6 +280,15 @@ cluster-redeploy:
     done
     # A manifests-only drift rebuilds no images; k3d fatals on zero args.
     [ ${#names[@]} -gt 0 ] && k3d image import "${names[@]}" -c {{_K3D_CLUSTER}}
+    # Schema before services: rerun migrations on a new migrator.
+    if printf '%s\n' "${changed[@]}" | grep -qx db-migrator-image; then
+      echo "==> migrations changed — rerunning the migrate Job"
+      nix run ".#db-migrator-image.copyTo" -- "docker-daemon:agent-db-migrator:latest"
+      k3d image import agent-db-migrator:latest -c {{_K3D_CLUSTER}}
+      kubectl -n agent-sandbox delete job -l app.kubernetes.io/name=agent-db-migrate --ignore-not-found >/dev/null
+      kubectl apply -f "$(nix build .#platform-manifests --no-link --print-out-paths)" >/dev/null
+      kubectl -n agent-sandbox wait --for=condition=complete job -l app.kubernetes.io/name=agent-db-migrate --timeout=300s
+    fi
     # imagePullPolicy is IfNotPresent on side-loaded images, so a restart is what
     # actually picks up the new layers — `set image` would be a no-op at :latest.
     for pair in {{_PLATFORM_IMAGES}}; do

@@ -324,21 +324,18 @@ func TestDialFailureRetriesViaFallbackAtWarn(t *testing.T) {
 func TestResolveTargetForReturnsConvID(t *testing.T) {
 	cfg := config{namespace: "agent-sandbox", upstreamPort: 8080, clusterIPService: "agent-host"}
 	fallback := FallbackURL(cfg.clusterIPService, cfg.namespace, cfg.upstreamPort)
-	cache := NewOwnershipCache()
-	cache.set("conv-assigned", "10.42.0.2")
+	res := liveAssigner(newMemStore("conv-assigned"), pods("pod-a", "10.42.0.2"))
 
-	// scoped + assigned -> id and owner IP
-	id, u := resolveTargetFor(cfg, cache, httptest.NewRequest("GET", "/conversations/conv-assigned/cancel", nil), fallback)
+	id, u, _ := resolveTargetFor(cfg, res, httptest.NewRequest("GET", "/conversations/conv-assigned/cancel", nil), fallback)
 	if id != "conv-assigned" || u.String() != "http://10.42.0.2:8080" {
 		t.Errorf("got (%q,%q)", id, u.String())
 	}
-	// scoped but unassigned -> the id is still known, with the fallback
-	id, u = resolveTargetFor(cfg, cache, httptest.NewRequest("GET", "/conversations/conv-new/cancel", nil), fallback)
-	if id != "conv-new" || u.String() != fallback.String() {
-		t.Errorf("unassigned: got (%q,%q)", id, u.String())
+	// No such row: the id is still logged.
+	id, u, _ = resolveTargetFor(cfg, res, httptest.NewRequest("GET", "/conversations/conv-gone/cancel", nil), fallback)
+	if id != "conv-gone" || u.String() != fallback.String() {
+		t.Errorf("unknown: got (%q,%q)", id, u.String())
 	}
-	// non-scoped -> no id at all
-	if id, _ := resolveTargetFor(cfg, cache, httptest.NewRequest("GET", "/healthz", nil), fallback); id != "" {
+	if id, _, _ := resolveTargetFor(cfg, res, httptest.NewRequest("GET", "/healthz", nil), fallback); id != "" {
 		t.Errorf("healthz id = %q, want empty", id)
 	}
 }

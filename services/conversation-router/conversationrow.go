@@ -4,10 +4,15 @@
 package main
 
 // insertConversationSQL is that one definition: thread_id == id by construction, ON CONFLICT DO NOTHING keeps a retry idempotent, the INSERT fires the conversations_changed trigger that pushes the row to the sidebar, and sandbox_ref is set only for a subagent.
+// A subagent starts on its parent's pod, which appends immediately.
 const insertConversationSQL = `
 	INSERT INTO conversations
-	  (id, thread_id, title, created_at, last_activity_at, model, owner, parent_id, sandbox_ref)
-	VALUES ($1, $1, $2, $3, $3, $4, $5, $6, $7)
+	  (id, thread_id, title, created_at, last_activity_at, model, owner, parent_id, sandbox_ref,
+	   host_pod, host_generation)
+	SELECT $1, $1, $2, $3, $3, $4, $5, $6, $7,
+	       p.host_pod, CASE WHEN p.host_pod IS NULL THEN 0 ELSE 1 END
+	  FROM (SELECT 1) one
+	  LEFT JOIN conversations p ON p.id = $6
 	ON CONFLICT (id) DO NOTHING`
 
 // conversationRow is the row projection; args() alone fixes order.

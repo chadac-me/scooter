@@ -317,6 +317,7 @@ jobs:
               # with test/e2e/full-specs.json.
               - 'test/e2e/full-specs.json'
               - 'test/e2e/cluster-stories.spec.ts'
+              - 'test/e2e/first-message.spec.ts'
               - 'test/e2e/chat-search-filter.spec.ts'
               - 'test/e2e/linked-resources.spec.ts'
               - 'test/e2e/target.ts'
@@ -350,6 +351,7 @@ jobs:
               - 'test/e2e/full-specs.json'
               - 'test/e2e/client-server-identity.spec.ts'
               - 'test/e2e/cluster-stories.spec.ts'
+              - 'test/e2e/first-message.spec.ts'
               - 'test/e2e/component-coverage.spec.ts'
               - 'test/e2e/refresh-history.spec.ts'
               - 'test/e2e/stop-run.spec.ts'

@@ -159,7 +159,7 @@ func (s *Store) Close() {
 	}
 }
 
-// WriteStore is the router's narrow write path to agent_host.conversations for idle conversations, nil when no DSN is configured.
+// WriteStore writes conversations: idle metadata, creates, assignment claims.
 type WriteStore struct {
 	pool *pgxpool.Pool
 }
@@ -175,7 +175,7 @@ func buildWritePoolConfig(dsn string) (*pgxpool.Config, error) {
 	}
 	cfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "off"
 	cfg.MinConns = 0
-	cfg.MaxConns = 2
+	cfg.MaxConns = 8
 	return cfg, nil
 }
 

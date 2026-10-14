@@ -1,4 +1,4 @@
-{ lib, buildGoModule, ... }:
+{ lib, buildGoModule, postgresql_16, ... }:
 
 # The conversation router (Go): fronts the agent-host Service and reverse-proxies
 # each request to the agent-host pod that owns the conversation, with one
@@ -13,6 +13,9 @@ buildGoModule {
 
   # No cgo needed.
   env.CGO_ENABLED = "0";
+  # The claim and trigger tests run against a real Postgres.
+  nativeCheckInputs = [ postgresql_16 ];
+  env.AGENT_HOST_MIGRATIONS = "${../../lib/sql/agent_host/migrations}";
 
   meta.description = "Scooter conversation router (hostPod reverse-proxy)";
 }
