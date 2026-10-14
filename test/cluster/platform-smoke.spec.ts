@@ -156,24 +156,10 @@ maybe("multi-replica platform smoke", () => {
 
     // The front door must list all of them on every call, whichever pod answers.
     for (let attempt = 0; attempt < 5; attempt++) {
-      // A read that returns no JSON at all is a transport failure, so retry it a few times before giving up.
-      let listed: Array<{ id: string }> | undefined;
-      let lastErr: unknown;
-      for (let read = 0; read < 5 && !listed; read++) {
-        try {
-          listed = await cluster.curlJson<Array<{ id: string }>>(
-            `${AGENT_HOST}/conversations`, { timeoutMs: 30_000 },
-          );
-        } catch (e) {
-          lastErr = e;
-          await new Promise((r) => setTimeout(r, 2_000));
-        }
-      }
-      if (!listed) {
-        throw new Error(
-          `attempt ${attempt + 1}: GET /conversations never returned JSON after 5 reads: ${String(lastErr)}`,
-        );
-      }
+      // A read that comes back with no body at all is retried inside curlInCluster.
+      const listed = await cluster.curlJson<Array<{ id: string }>>(
+        `${AGENT_HOST}/conversations`, { timeoutMs: 30_000 },
+      );
       const got = new Set(listed.map((c) => c.id));
       for (const id of ids) {
         expect(got.has(id), `attempt ${attempt + 1}: /conversations omitted ${id} (single-pod view?)`).toBe(true);

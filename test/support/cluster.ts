@@ -49,18 +49,20 @@ export interface Cluster {
     expectStateValue: string,
     setLabels: Record<string, string>,
   ): Promise<void>;
-  /** Run a curl from a throwaway in-cluster pod and return the response body. */
-  curlInCluster(
-    url: string,
-    opts?: { method?: string; body?: string; headers?: string[]; timeoutMs?: number },
-  ): Promise<string>;
+  /** Run a curl from a throwaway in-cluster pod and return the response body.
+   *  No body at all is a lost attach rather than an answer, so it is retried (curlPodWithRetry). */
+  curlInCluster(url: string, opts?: CurlOptions): Promise<string>;
 
   /** curlInCluster plus a parse of the leading JSON value, since `kubectl run -i` can append stray lines after the payload. */
-  curlJson<T = unknown>(
-    url: string,
-    opts?: { method?: string; body?: string; headers?: string[]; timeoutMs?: number },
-  ): Promise<T>;
+  curlJson<T = unknown>(url: string, opts?: CurlOptions): Promise<T>;
 }
+
+export type CurlOptions = {
+  method?: string;
+  body?: string;
+  headers?: string[];
+  timeoutMs?: number;
+};
 
 /** Parse the leading JSON value of `raw`, trying progressively shorter line prefixes and rethrowing the original error when none parses. */
 export function parseLeadingJson<T = unknown>(raw: string): T {
@@ -77,6 +79,50 @@ export function parseLeadingJson<T = unknown>(raw: string): T {
     }
     throw err;
   }
+}
+
+/** The response body in a `kubectl run --rm -i` curl's stdout, less the teardown line kubectl appends. */
+export function curlPodBody(stdout: string): string {
+  return stdout.replace(/pod "[^"]+" deleted.*$/s, "").trim();
+}
+
+/** Run `attempt` until it hands back a response body, within a time budget.
+ *
+ *  `kubectl run --rm -i` sometimes returns its teardown line and nothing else: the pod ran
+ *  but the attach never streamed its output (seen when the node authorizer transiently 403s
+ *  the kubelet's status update for a just-created pod). That is a lost transport, not an
+ *  empty answer, and nothing downstream can tell the two apart — `curlJson` only sees
+ *  "Unexpected end of JSON input" — so run a fresh pod instead. A retried request can repeat
+ *  its side effect, which every endpoint the Tier 2 specs curl tolerates.
+ *
+ *  The budget is what keeps that from hiding a real regression: a lost attach comes back in
+ *  seconds, while a front door that genuinely answers nothing burns the curl timeout first.
+ *  Blind retries would turn the latter into a suite timeout, which says far less than the
+ *  caller's own assertion on an empty body. So an attempt that spent the budget is the last. */
+export async function curlPodWithRetry(
+  attempt: (n: number) => Promise<{ stdout: string; stderr: string }>,
+  describe: string,
+  opts: { attempts?: number; delayMs?: number; budgetMs?: number } = {},
+): Promise<string> {
+  const attempts = opts.attempts ?? 3;
+  const delayMs = opts.delayMs ?? 2_000;
+  const budgetMs = opts.budgetMs ?? 30_000;
+  const start = Date.now();
+  let lastStderr = "";
+  let n = 0;
+  while (n < attempts) {
+    n += 1;
+    const { stdout, stderr } = await attempt(n);
+    const body = curlPodBody(stdout);
+    if (body) return body;
+    lastStderr = stderr.trim();
+    if (Date.now() - start >= budgetMs) break;
+    if (n < attempts) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  const tail = lastStderr ? `; last stderr: ${lastStderr}` : "";
+  throw new Error(
+    `${describe}: the curl pod returned no response body in ${n} attempt(s) over ${Math.round((Date.now() - start) / 1000)}s${tail}`,
+  );
 }
 
 export interface ClusterFixtureOptions {
@@ -225,19 +271,23 @@ export async function withCluster(opts: ClusterFixtureOptions = {}): Promise<Clu
       if (opts.body !== undefined) args.push("-d", opts.body);
       args.push(url);
 
-      // A unique pod name per call, so `kubectl run --rm -i` never races a previous pod's teardown.
-      curlSeq += 1;
-      const podName = `curltest-${Date.now().toString(36)}-${curlSeq}`;
-      const out = await kubectl([
-        "run", podName,
-        "-n", namespace,
-        "--rm", "-i", "--restart=Never",
-        "--image=curlimages/curl:latest",
-        "--command", "--",
-        "curl", ...args,
-      ]);
-      // Strip the trailing "pod ... deleted" line kubectl appends.
-      return out.replace(/pod "[^"]+" deleted.*$/s, "").trim();
+      return curlPodWithRetry(
+        () => {
+          // A unique pod name per attempt, so `kubectl run --rm -i` never races a previous
+          // pod's teardown.
+          curlSeq += 1;
+          const podName = `curltest-${Date.now().toString(36)}-${curlSeq}`;
+          return kubectl([
+            "run", podName,
+            "-n", namespace,
+            "--rm", "-i", "--restart=Never",
+            "--image=curlimages/curl:latest",
+            "--command", "--",
+            "curl", ...args,
+          ]);
+        },
+        `curl ${opts.method ?? "GET"} ${url}`,
+      );
     },
 
     async curlJson(url, opts = {}) {
@@ -251,13 +301,11 @@ let curlSeq = 0;
 
 import { execFile } from "node:child_process";
 
-function kubectl(args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
+function kubectl(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
     execFile("kubectl", args, { maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
-      // `kubectl run --rm` exits non-zero on a non-zero container exit, so prefer stdout when present.
-      if (stdout) resolve(stdout);
-      else if (err) reject(new Error(stderr || err.message));
-      else resolve(stdout);
+      // `kubectl run --rm` exits non-zero on a non-zero container exit, so hand both streams back and let the caller decide.
+      resolve({ stdout, stderr: stderr || err?.message || "" });
     });
   });
 }
