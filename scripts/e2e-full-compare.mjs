@@ -221,13 +221,13 @@ export function compare(current, baselines, opts = {}) {
     missingReports: current?.meta?.missingReports ?? [],
     totalSpecs: cur.length,
     // Tallied apart from the browser stories, which are read *through* the platform
-    // the smoke tests: one failure in eighteen is not one failure.
+    // the smoke tests: one failure in eighteen is not one failure. Why: PR #751.
     smoke: {
       total: cur.filter((s) => s.kind === "cluster").length,
       passed: cur.filter((s) => s.kind === "cluster" && s.failed === 0).length,
       failed: cur.filter((s) => s.kind === "cluster" && s.failed > 0).length,
       // Newly red, and the smoke has no night-to-night noise floor to hide behind:
-      // one of these is an ❌ on its own.
+      // one of these is an ❌ on its own. Why: PR #751.
       regressions: rows.filter(
         (r) =>
           r.kind === "cluster" &&

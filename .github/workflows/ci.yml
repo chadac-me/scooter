@@ -623,7 +623,7 @@ jobs:
         id: cluster-smoke
         if: matrix.cluster_grep != ''
         # A red smoke must not skip the browser stories; the `gate on the cluster
-        # smoke` step below is what fails the shard instead.
+        # smoke` step below is what fails the shard instead. Why: PR #751.
         continue-on-error: true
         env:
           RUN_CLUSTER_TESTS: "1"
@@ -717,7 +717,7 @@ jobs:
           findmnt -no SOURCE,FSTYPE,SIZE /nix 2>/dev/null || echo "/nix is not a separate mount (root disk)"
 
       # Last, so the deferred failure lands after every report, artifact and
-      # teardown step above has run.
+      # teardown step above has run. Why: PR #751.
       - name: gate on the cluster smoke
         if: always() && steps.cluster-smoke.outcome == 'failure'
         run: |
