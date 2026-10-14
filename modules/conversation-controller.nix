@@ -48,6 +48,15 @@ in
         creates the Sandbox a beat before the CR), so only genuine orphans are reaped.
       '';
     };
+    overlayRetentionSeconds = mkOption {
+      type = types.int;
+      default = 7 * 86400;
+      description = ''
+        Delete a Sandbox's overlay-store PVC (`scooter-rw-*`, its runtime Nix builds) once
+        it has been suspended this long. Resume recreates it empty, so only a slower first
+        turn is lost. Workspaces are never touched. 0 disables.
+      '';
+    };
     # --- agent-host autoscaling -------------------------------------------
     autoscale = mkOption {
       type = types.bool;
@@ -294,6 +303,8 @@ in
           # and ConfigMap.
           { apiGroups = [ "agents.x-k8s.io" ]; resources = [ "sandboxes" ]; verbs = [ "get" "list" "watch" "delete" "patch" ]; }
           { apiGroups = [ "" ]; resources = [ "serviceaccounts" "configmaps" ]; verbs = [ "get" "list" "delete" ]; }
+          # Overlay-store retention.
+          { apiGroups = [ "" ]; resources = [ "persistentvolumeclaims" ]; verbs = [ "list" "delete" ]; }
           # The autoscaler patches the agent-host Deployment's scale subresource.
           { apiGroups = [ "apps" ]; resources = [ "deployments" ]; verbs = [ "get" "list" "watch" ]; }
           { apiGroups = [ "apps" ]; resources = [ "deployments/scale" ]; verbs = [ "get" "patch" "update" ]; }
@@ -328,6 +339,7 @@ in
                   # Orphaned-Sandbox reaper (leader-only).
                   { name = "REAP_ORPHANED_SANDBOXES"; value = if ccfg.reapOrphans then "1" else "0"; }
                   { name = "ORPHAN_GRACE_SECONDS"; value = toString ccfg.orphanGraceSeconds; }
+                  { name = "OVERLAY_RETENTION_SECONDS"; value = toString ccfg.overlayRetentionSeconds; }
                   # Agent-host autoscaler (leader-only, single writer of agent-host replicas).
                   { name = "AUTOSCALE_AGENT_HOST"; value = if ccfg.autoscale then "1" else "0"; }
                   { name = "AGENT_HOST_MIN_REPLICAS"; value = toString ccfg.minReplicas; }

@@ -201,6 +201,25 @@ class SandboxRef:
     name: str            # metadata.name
     age_seconds: float   # now - metadata.creationTimestamp
     operating_mode: str | None = None  # spec.operatingMode, which the reaper decision ignores
+    suspended_seconds: float | None = None  # time since the Suspended condition became True
+
+
+def find_expired_overlays(
+    sandboxes: list[SandboxRef],
+    pvc_names: set[str],
+    retention_seconds: float,
+) -> list[str]:
+    """Overlay PVCs suspended past retention; never a workspace."""
+    if retention_seconds <= 0:
+        return []
+    return [
+        f"scooter-rw-{sb.name}"
+        for sb in sandboxes
+        if sb.operating_mode == "Suspended"
+        and sb.suspended_seconds is not None
+        and sb.suspended_seconds >= retention_seconds
+        and f"scooter-rw-{sb.name}" in pvc_names
+    ]
 
 
 def find_orphans(

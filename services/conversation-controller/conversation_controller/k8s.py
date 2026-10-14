@@ -208,8 +208,24 @@ class ControllerK8s:
             created = cr["metadata"].get("creationTimestamp")
             age = (now - _parse_ts(created)).total_seconds() if created else 0.0
             mode = (cr.get("spec") or {}).get("operatingMode")
-            out.append(SandboxRef(name=name, age_seconds=age, operating_mode=mode))
+            suspended = None
+            for c in (cr.get("status") or {}).get("conditions") or []:
+                if c.get("type") == "Suspended" and c.get("status") == "True" and c.get("lastTransitionTime"):
+                    suspended = (now - _parse_ts(c["lastTransitionTime"])).total_seconds()
+            out.append(SandboxRef(name=name, age_seconds=age, operating_mode=mode, suspended_seconds=suspended))
         return out
+
+    def list_pvc_names(self) -> set[str]:
+        core, _, _ = _apis()
+        return {p.metadata.name for p in core.list_namespaced_persistent_volume_claim(self.namespace).items}
+
+    def delete_pvc(self, name: str) -> None:
+        """Delete a PVC, tolerating one already gone."""
+        core, _, _ = _apis()
+        try:
+            core.delete_namespaced_persistent_volume_claim(name, self.namespace)
+        except client.ApiException as e:
+            _ignore_404(e)
 
     def delete_sandbox_tree(self, sandbox_name: str) -> None:
         """Delete an orphaned Sandbox plus its ServiceAccount and module ConfigMap (which do not cascade), tolerating a 404 per object."""

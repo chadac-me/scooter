@@ -10,6 +10,7 @@ from conversation_controller.reconcile import (
     pick_host,
     reconcile,
     find_orphans,
+    find_expired_overlays,
     desired_replicas,
     demand_of,
     Detach,
@@ -350,3 +351,38 @@ def test_creator_hint_does_not_churn_an_existing_healthy_assignment():
     a = reconcile(conv(host="b", phase="Assigned", gen=2, creator="a"),
                   [Pod("a", True), Pod("b", True)], {"a": 0, "b": 1}, cap=10)
     assert isinstance(a, NoOp)
+
+
+# --- find_expired_overlays (the overlay retention decision) ------------------
+
+DAY = 86400.0
+
+
+def _sb(name, suspended_for=None, mode="Suspended"):
+    return SandboxRef(name, age_seconds=99 * DAY, operating_mode=mode, suspended_seconds=suspended_for)
+
+
+def test_overlay_of_a_long_suspended_sandbox_expires():
+    sbs = [_sb("conv-old", 8 * DAY), _sb("conv-new", 1 * DAY)]
+    pvcs = {"scooter-rw-conv-old", "scooter-rw-conv-new", "workspace-conv-old"}
+    assert find_expired_overlays(sbs, pvcs, 7 * DAY) == ["scooter-rw-conv-old"]
+
+
+def test_workspace_is_never_an_overlay():
+    sbs = [_sb("conv-old", 30 * DAY)]
+    assert find_expired_overlays(sbs, {"workspace-conv-old"}, 7 * DAY) == []
+
+
+def test_a_running_sandbox_keeps_its_overlay():
+    sbs = [_sb("conv-live", 30 * DAY, mode="Running")]
+    assert find_expired_overlays(sbs, {"scooter-rw-conv-live"}, 7 * DAY) == []
+
+
+def test_unknown_suspend_time_is_not_expired():
+    sbs = [_sb("conv-x", None)]
+    assert find_expired_overlays(sbs, {"scooter-rw-conv-x"}, 7 * DAY) == []
+
+
+def test_zero_retention_disables_the_reaper():
+    sbs = [_sb("conv-old", 365 * DAY)]
+    assert find_expired_overlays(sbs, {"scooter-rw-conv-old"}, 0) == []

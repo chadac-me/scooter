@@ -208,3 +208,29 @@ def test_delete_sandbox_tree_removes_the_sa_and_module_configmap(cluster):
     assert "conv-fv25vg" not in custom.sandboxes
     assert core.deleted_sas == ["sandbox-fv25vg"]
     assert core.deleted_cms == ["conv-fv25vg-module"]
+
+
+# --- overlay retention: suspend time and PVC deletion ----------------------------------
+
+
+def test_suspended_seconds_comes_from_the_suspended_condition(monkeypatch):
+    sb = _sandbox_cr("conv-old", mode="Suspended")
+    sb["status"] = {"conditions": [
+        {"type": "Ready", "status": "False", "lastTransitionTime": "2026-01-01T00:00:00Z"},
+        {"type": "Suspended", "status": "True", "lastTransitionTime": "2026-10-01T00:00:00Z"},
+    ]}
+    running = _sandbox_cr("conv-live")
+    custom = FakeCustomObjects(sandboxes=[sb, running], conversations=[])
+    monkeypatch.setattr(k8s_mod, "_apis", lambda: (FakeCore(), custom, None))
+    got = {s.name: s.suspended_seconds for s in ControllerK8s(namespace=NS).list_sandboxes()}
+    assert got["conv-live"] is None
+    assert got["conv-old"] > 86400  # well over a day before now
+
+
+def test_delete_pvc_tolerates_one_already_gone(monkeypatch):
+    class Core(FakeCore):
+        def delete_namespaced_persistent_volume_claim(self, name, namespace, **_kw):
+            raise _not_found(name)
+
+    monkeypatch.setattr(k8s_mod, "_apis", lambda: (Core(), FakeCustomObjects(sandboxes=[], conversations=[]), None))
+    ControllerK8s(namespace=NS).delete_pvc("scooter-rw-conv-gone")  # must not raise

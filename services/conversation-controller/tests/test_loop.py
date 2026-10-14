@@ -6,7 +6,7 @@ import pytest
 
 import conversation_controller.loop as loop_mod
 from conversation_controller.logging_config import forget_warned
-from conversation_controller.loop import reconcile_once, reap_orphans, autoscale_once, AutoscaleState
+from conversation_controller.loop import reconcile_once, reap_orphans, reap_overlays, autoscale_once, AutoscaleState
 from conversation_controller.reconcile import Pod, SandboxRef
 
 
@@ -40,6 +40,8 @@ class FakeK8s:
         self.cost_calls = []                    # [(pod, cost)] per set_pod_deletion_cost
         self.suspends = []                      # [sandbox_name] per suspend_sandbox
         self.reclaimed = []                     # [sandbox_name] per reclaim_sandbox_pod
+        self.pvcs = set()                       # PVC names
+        self.deleted_pvcs = []                  # [pvc_name] per delete_pvc
 
     def set_pod_deletion_cost(self, name, cost):
         self.cost_calls.append((name, cost))
@@ -69,6 +71,15 @@ class FakeK8s:
 
     def list_sandboxes(self):
         return list(self._sandboxes.values())
+
+    def list_pvc_names(self):
+        return set(self.pvcs)
+
+    def delete_pvc(self, name):
+        if name == "scooter-rw-conv-boom":
+            raise RuntimeError("apiserver hiccup")
+        self.deleted_pvcs.append(name)
+        self.pvcs.discard(name)
 
     def delete_sandbox_tree(self, name):
         self.deleted_trees.append(name)
@@ -624,3 +635,29 @@ def test_a_real_revive_drops_the_record_immediately():
 
     assert "z1" not in loop_mod._zombie_progress
     assert k.suspends == []
+
+
+# --- reap_overlays (overlay-store retention) ---------------------------------
+
+
+def test_reap_overlays_deletes_only_expired_overlays():
+    day = 86400.0
+    sbs = [
+        SandboxRef("conv-old", age_seconds=90 * day, operating_mode="Suspended", suspended_seconds=8 * day),
+        SandboxRef("conv-new", age_seconds=90 * day, operating_mode="Suspended", suspended_seconds=1 * day),
+    ]
+    k = FakeK8s([], [], sandboxes=sbs)
+    k.pvcs = {"scooter-rw-conv-old", "workspace-conv-old", "scooter-rw-conv-new"}
+    assert reap_overlays(k, 7 * day) == ["scooter-rw-conv-old"]
+    assert k.pvcs == {"workspace-conv-old", "scooter-rw-conv-new"}
+
+
+def test_reap_overlays_one_failure_does_not_abort_the_pass():
+    day = 86400.0
+    sbs = [
+        SandboxRef(n, age_seconds=90 * day, operating_mode="Suspended", suspended_seconds=30 * day)
+        for n in ("conv-boom", "conv-ok")
+    ]
+    k = FakeK8s([], [], sandboxes=sbs)
+    k.pvcs = {"scooter-rw-conv-boom", "scooter-rw-conv-ok"}
+    assert reap_overlays(k, 7 * day) == ["scooter-rw-conv-ok"]

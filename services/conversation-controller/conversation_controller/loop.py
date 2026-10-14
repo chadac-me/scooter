@@ -21,6 +21,7 @@ from .reconcile import (
     MarkSuspended,
     reconcile,
     find_orphans,
+    find_expired_overlays,
     desired_replicas,
     deletion_costs,
     demand_of,
@@ -340,6 +341,20 @@ def autoscale_once(k8s, cfg, state: AutoscaleState, now: float) -> dict:
             )
 
     return {"demand": demand, "current": current, "target": target, "ready_pods": ready_pods, "per_pod": per_pod}
+
+
+def reap_overlays(k8s, retention_seconds: float) -> list[str]:
+    """Delete overlay PVCs suspended past retention; resume recreates them."""
+    expired = find_expired_overlays(k8s.list_sandboxes(), k8s.list_pvc_names(), retention_seconds)
+    reaped: list[str] = []
+    for name in expired:
+        try:
+            k8s.delete_pvc(name)
+            reaped.append(name)
+            logger.info("reaped expired overlay store", extra={**_C, "pvc": name})
+        except Exception:  # noqa: BLE001
+            logger.exception("overlay reap failed", extra={**_C, "pvc": name, "will_retry_next_pass": True})
+    return reaped
 
 
 def reap_orphans(k8s, grace_seconds: float) -> list[str]:
