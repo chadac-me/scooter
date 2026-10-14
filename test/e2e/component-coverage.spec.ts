@@ -8,8 +8,7 @@
 import { test, expect, snapshot, assertConsistent, fillStable } from "./fixtures.js";
 import { isFull } from "./target.js";
 
-/** A tool card lands only once its exec returns, which on the full target is a real sandbox
- *  exec behind a possibly-cold pod, so the card's own budget is separate from the turn's. */
+/** Full-target cards wait on a real sandbox exec. */
 const TOOL_CARD_MS = isFull ? 90_000 : 45_000;
 
 const sb = {
@@ -227,19 +226,13 @@ test.describe("thread rendering details", () => {
   });
 
   test("tool cards + transcript SURVIVE a reload with identical counts", async ({ chat, page }) => {
-    // Each turn waits for a sandbox exec on the full target and completeTurn's budget is
-    // per-turn, so two turns plus the reload need more than the project default — the old
-    // 120_000 actually SHRANK the budget below the full project's 180s.
+    // Two full-target execs plus a reload.
     test.setTimeout(isFull ? 300_000 : 120_000);
     await chat.open();
-    // completeTurn, not sendTurn: sendTurn returns on the assistant-message count, which
-    // precedes the run's terminal event, so the next turn can start mid-run.
+    // completeTurn: sendTurn can return before the run ends.
     await chat.completeTurn("!echo persist one");
     await expect(chat.toolCalls()).toHaveCount(1, { timeout: TOOL_CARD_MS });
     await chat.completeTurn("!echo persist two");
-    // Poll for the second card rather than reading an instantaneous snapshot: the tool card
-    // is a separate render from the reply text the turn waits on, so reading the count in the
-    // same tick is a race the fast stack happens to win and a loaded cluster does not.
     await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     const before = await snapshot(page);
     expect(before.toolCards).toBe(2);
