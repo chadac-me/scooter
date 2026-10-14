@@ -126,6 +126,10 @@ export function createRemotePersonalizedProvider(deps: {
         brokerMcpUrlFor: deps.brokerMcpUrlFor,
       }),
     kind: "claude",
+    // The container shares nothing with this pod: no skills directory, no prompt of its own,
+    // so both travel with new_session.
+    needsSkillPayloads: true,
+    needsSystemPrompt: true,
     priority: deps.priority ?? 10,
     async eligible(ctx: RunContext): Promise<boolean> {
       const hasOwner = ctx.owner !== undefined;

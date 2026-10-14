@@ -32,6 +32,14 @@ const MODEL_SWITCH_NUDGE =
   "apply it. Continue where you left off on the new model — do NOT restart the task, " +
   "re-introduce yourself, or repeat anything you already did or posted.]";
 
+/** The title a conversation is created with, before the agent's <title> marker names it. */
+export const PLACEHOLDER_TITLE = "New chat";
+
+/** Whether a title is still the create-time placeholder, i.e. the conversation is unnamed. */
+export function isPlaceholderTitle(title: string | undefined): boolean {
+  return (title ?? "").trim() === "" || title === PLACEHOLDER_TITLE;
+}
+
 /** An event plus the rolling integrity checksum before it (`prevChecksum`) and through it
  *  (`checksum`). */
 export interface ChecksummedEvent {
@@ -248,8 +256,9 @@ export interface SessionManager {
   /** All conversations, newest first. */
   list(): Conversation[];
   /** Set the title from the agent's <title> marker and return the persist promise; a no-op once the
-   *  user has renamed the conversation. */
-  setTitle(id: SessionId, title: string): Promise<void>;
+   *  conversation is named, which `force` (a deliberate rename through set_conversation_title)
+   *  overrides — a user rename locks the title against both. */
+  setTitle(id: SessionId, title: string, opts?: { force?: boolean }): Promise<void>;
   /** Rename from the user: set the title and lock it against the agent's <title> marker. */
   setUserTitle(id: SessionId, title: string): Promise<void>;
   /** Star or unstar a conversation and persist it. */
@@ -566,7 +575,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const entry: Entry = {
         id, threadId, sandbox: { name: `conv-${shortId(threadId)}`, namespace: "" },
         bridge: undefined, status: "running",
-        title: "New chat", createdAt: nowMs(), lastActivityAt: nowMs(), model, owner,
+        title: PLACEHOLDER_TITLE, createdAt: nowMs(), lastActivityAt: nowMs(), model, owner,
       };
       entries.set(id, entry);
       await saveMeta(entry);
@@ -1006,11 +1015,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         .map(toConversation);
     },
 
-    setTitle(id, title) {
+    setTitle(id, title, opts) {
       const entry = entries.get(id);
       if (!entry) return Promise.resolve();
-      // A user-chosen name is locked against the agent's <title> marker.
+      const force = opts?.force === true;
+      // A user-chosen name is locked against the agent, force or not.
       if (entry.userTitled) return Promise.resolve();
+      // A conversation is named only once; `force` is the deliberate rename.
+      if (!force && !isPlaceholderTitle(entry.title)) return Promise.resolve();
       entry.title = title;
       // The durable write drives the live sidebar: the conversations row's trigger fires NOTIFY and
       // the conversation-router pushes the upsert.

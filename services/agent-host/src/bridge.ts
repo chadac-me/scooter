@@ -6,7 +6,7 @@
  * the permission UI.
  */
 
-import { skillPayloads } from "./agent/skills.js";
+import { skillPayloads, sdkPrompt } from "./agent/skills.js";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -1208,10 +1208,13 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         cwd: deps.config.cwd,
         mcpServers,
         model,
-        // A BYO container cannot read this pod's filesystem, so the skills travel as data
-        // and it writes its own .claude/skills, while in-pod providers ignore this.
-        skills: provider.kind === "claude" && provider.id !== "sdk-claude"
-          ? skillPayloads(deps.config.skillsDir)
+        // A provider that cannot read this pod's filesystem takes the skills as data and
+        // writes its own .claude/skills.
+        skills: provider.needsSkillPayloads ? skillPayloads(deps.config.skillsDir) : undefined,
+        // One that builds no identity of its own takes the host's prompt, without which it
+        // runs anonymous and never emits the <title> marker.
+        systemPrompt: provider.needsSystemPrompt
+          ? sdkPrompt({ name: deps.config.agentName ?? "Scooter" })
           : undefined,
       });
       debug("[bridge] readyProvider(%s): newSession -> %s", provider.id, sid);

@@ -32,6 +32,10 @@ export interface AcpProvider {
   mcpServersFor?: (conversationId: string) => Array<{ type: "http"; name: string; url: string; headers: Array<{ name: string; value: string }> }>;
   /** The model namespace this provider serves, matched against each catalog model's `providers` tags; absent offers any catalog model. */
   modelTag?: string;
+  /** True when the agent cannot read this pod's filesystem, so the skills must travel as data in `new_session`; the default suits an in-pod agent, which reads `skillsDir` itself. */
+  readonly needsSkillPayloads?: boolean;
+  /** True when the agent builds no identity of its own, so the host's prompt must travel in `new_session`; the default suits an in-pod agent, which builds its own. */
+  readonly needsSystemPrompt?: boolean;
   /** Stable id for logging/metrics and the BridgeAcpManager cache key, e.g. "bedrock-goose" or "remote-personalized". */
   readonly id: string;
   /** Recording/telemetry label, the bridge's `provider`. */

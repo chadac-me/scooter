@@ -101,6 +101,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       model?: string,
       mcpServers?: Array<{ name?: string }>,
       skills?: ReadonlyArray<{ name: string; content: string }>,
+      systemPrompt?: string,
     ) => {
       const stamp: { sid?: string } = {};
       const stampedSend = (f: WireFrame) => send(stamp.sid ? { ...f, sid: stamp.sid } : f);
@@ -144,6 +145,14 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
           })
         : undefined;
       if (mcp) log(`MCP: ${mcp.servers.map((s) => s.name).join(", ")} proxied over the tunnel`);
+      // The prompt carries the agent's identity AND its titling contract, so falling back to the
+      // backend's stub is a silent feature loss worth one line in the container's log.
+      const prompt = systemPrompt ?? deps.systemPrompt;
+      log(
+        prompt
+          ? `system prompt: ${prompt.length} chars from ${systemPrompt ? "the cloud" : "this container"}`
+          : "system prompt: NONE sent — running the backend's stub identity (no skills, no <title>)",
+      );
       // The backend decides WHICH agent runs; every one returns the same AcpClient.
       const sdk = await selectBackend(deps.backend).create({
         oauthToken: deps.oauthToken,
@@ -151,7 +160,9 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
         // The per-session model sent by the cloud in new_session, then the container's --model flag.
         model: model ?? deps.model,
         exec,
-        systemPrompt: deps.systemPrompt,
+        // The cloud's identity/behaviour prompt for this session (it owns the agent's persona and
+        // its <title> contract), then the container's own override.
+        systemPrompt: prompt,
         claudeCodePath: deps.claudeCodePath,
         // Without settingSources the SDK loads no filesystem settings, and without `skills` the Skill tool is left out of allowedTools.
         ...(skillCwd ? { cwd: skillCwd, settingSources: ["project" as const], skills: "all" as const } : {}),
@@ -228,9 +239,15 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
                 model?: string;
                 mcpServers?: Array<{ name?: string }>;
                 skills?: Array<{ name: string; content: string }>;
+                systemPrompt?: string;
               };
             })?.params;
-            const client = await buildClient(params?.model, params?.mcpServers, params?.skills);
+            const client = await buildClient(
+              params?.model,
+              params?.mcpServers,
+              params?.skills,
+              params?.systemPrompt,
+            );
             const r = await client.sdk.newSession((frame.payload as { params: never }).params);
             const sid = (r as { sessionId?: string }).sessionId;
             if (sid) {
