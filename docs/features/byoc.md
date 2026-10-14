@@ -48,3 +48,6 @@ existing ingress host, and the Settings UI. See the
   subscription.
 - Concurrent conversations on one container are isolated per session: transcripts, tool
   calls, and approvals route only to the conversation they belong to.
+- The container builds no identity of its own: the agent's system prompt and its skills are
+  sent per session by the cloud, so a BYO conversation behaves like any other — same persona,
+  same skills, same conversation naming.

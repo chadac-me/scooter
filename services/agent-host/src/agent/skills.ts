@@ -41,6 +41,9 @@ export function identityCore(id: AgentIdentity = DEFAULT_IDENTITY): string {
     `(3–6 word) title for the task wrapped in a <title> tag, e.g.`,
     `"<title>Fix the login redirect</title>". Put it before anything else and do`,
     `it only once, on the first reply. The tag is hidden from the user.`,
+    // The marker is accepted once, so a deliberate later rename needs the tool.
+    `Later in a conversation the marker is ignored: to rename a conversation whose`,
+    `subject has really changed, call the \`set_conversation_title\` tool.`,
     id.persona ?? "",
   ]
     .filter(Boolean)

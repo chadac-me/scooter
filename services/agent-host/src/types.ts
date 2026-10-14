@@ -24,6 +24,8 @@ export interface SessionConfig {
   sandbox: SandboxRef;
   /** MCP servers offered to the agent on newSession, passed through ACP. */
   mcpServers?: unknown[];
+  /** Display name the agent goes by, needed to build the prompt a BYO container is sent. */
+  agentName?: string;
 }
 
 export interface AgentLaunchConfig {

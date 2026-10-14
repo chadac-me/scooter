@@ -452,6 +452,32 @@ describe("SessionManager", () => {
       expect(sessions.get("t")?.title).toBe("My name for this");
     });
 
+    it("the <title> marker names a conversation ONCE — a second marker is ignored", async () => {
+      const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
+      await sessions.start("t");
+      await sessions.setTitle("t", "First reply's title");
+      // A revive, a model switch or a BYO reconnect all make the agent open a "first" reply
+      // again; none of them may retitle a conversation the user has been reading under its name.
+      await sessions.setTitle("t", "Second reply's title");
+      expect(sessions.get("t")?.title).toBe("First reply's title");
+    });
+
+    it("force (set_conversation_title) overrides the name-once gate", async () => {
+      const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
+      await sessions.start("t");
+      await sessions.setTitle("t", "First reply's title");
+      await sessions.setTitle("t", "The subject really changed", { force: true });
+      expect(sessions.get("t")?.title).toBe("The subject really changed");
+    });
+
+    it("force does NOT override the user's own rename", async () => {
+      const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
+      await sessions.start("t");
+      await sessions.setUserTitle("t", "My name for this");
+      await sessions.setTitle("t", "Agent's idea", { force: true });
+      expect(sessions.get("t")?.title).toBe("My name for this");
+    });
+
     it("setStarred toggles the star flag", async () => {
       const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
       await sessions.start("t");

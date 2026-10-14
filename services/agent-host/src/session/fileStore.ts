@@ -10,6 +10,7 @@ import { join } from "node:path";
 import type { AguiEvent } from "../bridge.js";
 import { trimToBoundary } from "./eventStore.js";
 import type { ConversationStore, ConversationMeta, ChecksummedEvent, ConversationLink } from "./manager.js";
+import { PLACEHOLDER_TITLE } from "./manager.js";
 import type { JobRecord } from "./jobManager.js";
 import type { SessionId } from "../types.js";
 import { logger } from "../log.js";
@@ -305,7 +306,7 @@ export function createFileConversationStore(root: string): ConversationStore {
         out.push({
           id,
           threadId: meta.threadId ?? id,
-          title: meta.title ?? "New chat",
+          title: meta.title ?? PLACEHOLDER_TITLE,
           createdAt: meta.createdAt ?? lastActivityAt,
           lastActivityAt,
           model: meta.model,

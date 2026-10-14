@@ -6,7 +6,7 @@
  * the permission UI.
  */
 
-import { skillPayloads } from "./agent/skills.js";
+import { skillPayloads, sdkPrompt } from "./agent/skills.js";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -1204,15 +1204,19 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       // Remember what this session was created with, so a later run can tell whether the
       // sandbox's set changed.
       const mcpFingerprint = fingerprintOffered((resolved ?? []) as OfferedMcpServer[]);
+      // A BYO container: a claude provider that is not the in-pod SDK one, and so shares
+      // nothing with this pod — neither its filesystem nor its prompt.
+      const byoContainer = provider.kind === "claude" && provider.id !== "sdk-claude";
       const { sessionId: sid } = await client.newSession({
         cwd: deps.config.cwd,
         mcpServers,
         model,
         // A BYO container cannot read this pod's filesystem, so the skills travel as data
         // and it writes its own .claude/skills, while in-pod providers ignore this.
-        skills: provider.kind === "claude" && provider.id !== "sdk-claude"
-          ? skillPayloads(deps.config.skillsDir)
-          : undefined,
+        skills: byoContainer ? skillPayloads(deps.config.skillsDir) : undefined,
+        // Same reason for the identity prompt: the container's SDK has no prompt of its own,
+        // so without this it runs anonymous and never emits the <title> marker.
+        systemPrompt: byoContainer ? sdkPrompt({ name: deps.config.agentName ?? "Scooter" }) : undefined,
       });
       debug("[bridge] readyProvider(%s): newSession -> %s", provider.id, sid);
       // Subscribe once per client and route updates to the current run.

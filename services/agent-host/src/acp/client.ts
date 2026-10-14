@@ -49,6 +49,9 @@ export interface NewSessionParams {
   /** Skills as data for a provider that cannot read this pod's filesystem (the BYO container,
    *  which writes them as .claude/skills); in-pod providers ignore this. */
   skills?: ReadonlyArray<{ name: string; content: string }>;
+  /** The agent identity prompt for a provider that cannot read this pod's filesystem (the BYO
+   *  container, whose SDK has no prompt of its own); in-pod providers build theirs locally. */
+  systemPrompt?: string;
 }
 
 export interface PromptParams {

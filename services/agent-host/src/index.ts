@@ -902,6 +902,14 @@ export async function main(
         }
       : undefined;
 
+  // Renaming (set_conversation_title), the agent's only way past the name-once gate on the
+  // <title> marker; `force` is what distinguishes a deliberate rename from that marker.
+  const titleToolsWiring = {
+    currentTitle: (id: string) => sessions.get(id)?.title,
+    userTitled: (id: string) => sessions.get(id)?.userTitled === true,
+    setTitle: (id: string, title: string) => sessions.setTitle(id, title, { force: true }),
+  };
+
   // Sandbox right-sizing tools, absent only for a fake sandbox; the CR is named for the
   // short id, so map through shortId(), with the full id passed for the cold-create path.
   const resourceToolsWiring = k8sProvisioner
@@ -996,6 +1004,7 @@ export async function main(
           scheduler: schedulerToolsWiring,
           subagents: subagentManager,
           marimo: marimoToolsWiring,
+          titles: titleToolsWiring,
         })
       : undefined;
 
@@ -1670,7 +1679,7 @@ export async function main(
         });
 
     const bridge = createSessionBridge({
-      config: { cwd, skillsDir: config.skillsDir, agent: cfg.agent, sandbox, mcpServers },
+      config: { cwd, skillsDir: config.skillsDir, agentName: config.agentName, agent: cfg.agent, sandbox, mcpServers },
       exec,
         // Stamped onto RUN_STARTED so a later reader can tell a run this pod is still
         // executing from one stranded by a dead host.

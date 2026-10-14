@@ -1,7 +1,7 @@
 /**
  * The agent-facing MCP server: exposes the agent-host's in-process tools to the agent
  * (background jobs, subagents, model self-selection, sandbox sizing, scheduling,
- * marimo) over a stateless Streamable-HTTP endpoint. The conversation a request acts
+ * marimo, renaming itself) over a stateless Streamable-HTTP endpoint. The conversation a request acts
  * for comes only from the signed conversation token in its Authorization header.
  */
 
@@ -26,6 +26,11 @@ import type { ConversationLink } from "../session/manager.js";
 import { registerWebFetch } from "./agentTools.js";
 import { registerSchedulerTools, type SchedulerToolsWiring } from "./schedulerTools.js";
 import { handleListModels, handleSwitchModel, type ModelToolsWiring } from "./modelTools.js";
+import {
+  handleSetConversationTitle,
+  MAX_TITLE_LENGTH,
+  type TitleToolsWiring,
+} from "./titleTools.js";
 import {
   handleShowSandboxResources,
   handleSetSandboxResources,
@@ -135,8 +140,30 @@ export async function buildServer(
   scheduler?: SchedulerToolsWiring,
   subagents?: SubagentManager,
   marimo?: MarimoToolsWiring,
+  titles?: TitleToolsWiring,
 ): Promise<McpServer> {
   const server = new McpServer({ name: "scooter-env", version: "1.0.0" });
+  if (titles) {
+    server.registerTool(
+      "set_conversation_title",
+      {
+        title: "Rename this conversation",
+        description:
+          "Rename THIS conversation in the sidebar. You normally title a conversation by emitting " +
+          "<title>…</title> at the very start of your first reply; that marker is accepted only once, " +
+          "so use this tool when the subject has genuinely changed and the old title is now wrong " +
+          "(the user's own rename always wins and is never overwritten). Do not call this to set the " +
+          "opening title, and do not call it repeatedly as a task progresses.",
+        inputSchema: {
+          title: z
+            .string()
+            .describe(`The new title: concise, 3–6 words, no trailing punctuation (max ${MAX_TITLE_LENGTH} chars).`),
+        },
+      },
+      async (args) =>
+        handleSetConversationTitle(titles, conversationId, args) as Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
+    );
+  }
   if (marimo) {
     // Notebook tools targeting this conversation's in-pod marimo.
     registerMarimoTools(
@@ -407,6 +434,8 @@ export function createMcpEndpoint(deps: {
   subagents?: SubagentManager;
   /** When provided, exposes the marimo notebook tools. */
   marimo?: MarimoToolsWiring;
+  /** When provided, exposes set_conversation_title. */
+  titles?: TitleToolsWiring;
 }): McpEndpoint {
   const path = deps.path ?? "/mcp";
   const secret = deps.convTokenSecret ?? "";
@@ -441,7 +470,7 @@ export function createMcpEndpoint(deps: {
       }
       // Stateless transport with no session id.
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      const server = await buildServer(conv, deps.agentTools, deps.jobs, deps.models, deps.resources, deps.scheduler, deps.subagents, deps.marimo);
+      const server = await buildServer(conv, deps.agentTools, deps.jobs, deps.models, deps.resources, deps.scheduler, deps.subagents, deps.marimo, deps.titles);
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     },
