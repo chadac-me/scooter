@@ -91,6 +91,15 @@ export default defineConfig({
         },
       },
       {
+        // The cluster fixture's own pure helpers, which the Tier 2 specs reach only with a
+        // cluster up — the curl-pod retry among them.
+        test: {
+          name: "cluster-support",
+          include: ["test/support/**/*.spec.ts"],
+          environment: "node",
+        },
+      },
+      {
         test: {
           name: "cluster",
           include: ["test/cluster/**/*.spec.ts"],
