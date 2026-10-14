@@ -32,14 +32,6 @@ routing follows the assignment; phase (live/suspended) is continuously reconcile
 sandbox's real state. Any replica can serve any conversation after a reassignment, and a
 rollout cannot strand one.
 
-## Naming
-
-The agent names a conversation at the start of its first reply, and that name **sticks**: a
-revive, a model switch or a provider failover all make the agent open a reply again, and none
-of them may rename a thread you have been reading under its title. When the subject genuinely
-changes the agent can rename it deliberately (`set_conversation_title`) — but once **you**
-rename a conversation, the title is yours and the agent cannot touch it.
-
 ## Subagents
 
 A conversation can spawn subagents: full conversations that **share the parent's sandbox pod**,
