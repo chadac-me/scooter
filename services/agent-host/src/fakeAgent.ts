@@ -6,6 +6,7 @@
  * runs `node dist/fakeAgent.js` when GOOSE_BIN=fake.
  */
 
+import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -40,7 +41,21 @@ class FakeAgent implements Agent {
   /** Sessions that have already received their first prompt, so the <title> marker is emitted only on the first reply. */
   private titled = new Set<string>();
   // Each tool call gets a fresh id, as real ACP agents mint one per call.
+  //
+  // The counter ALONE is not enough. It lives on this instance, so it restarts at 0 whenever
+  // a new agent process is spawned for a conversation that already has tool calls in its
+  // event log — an agent respawn, a suspend/resume, or a re-route to another agent-host pod.
+  // The next turn then re-mints `call_1`, and every consumer keys tool calls by id
+  // (`emittedCalls` in agent/messagesSnapshot.ts, the transcript folds, the UI's cards), so
+  // the turn does not render its own card: it overwrites the earlier one, leaving the first
+  // card showing its own command with the SECOND turn's output. A per-process nonce makes an
+  // id unique across restarts, not just within one.
+  private readonly toolCallNonce = randomUUID().slice(0, 8);
   private toolCallSeq = 0;
+  /** A conversation-unique tool call id: unique per call AND per agent process. */
+  private nextToolCallId(): string {
+    return `call_${this.toolCallNonce}_${++this.toolCallSeq}`;
+  }
   /** The per-session model from newSession. */
   private sessionModel = new Map<string, string>();
   /** Offered MCP servers per session, by name. */
@@ -114,7 +129,9 @@ class FakeAgent implements Agent {
       const question = userText.slice(1).trim() || "Choose an option";
       const res = (await this.conn.requestPermission({
         sessionId,
-        toolCall: { toolCallId: "choose_1", title: question } as never,
+        // Minted, not a literal: a second `?` prompt in the same conversation would otherwise
+        // reuse this id and collide with the first choice exactly as a duplicate call id does.
+        toolCall: { toolCallId: this.nextToolCallId(), title: question } as never,
         options: [
           { optionId: "red", name: "Red", kind: "allow_once" },
           { optionId: "green", name: "Green", kind: "allow_once" },
@@ -198,7 +215,7 @@ class FakeAgent implements Agent {
     // 2. a real tool call through createTerminal, the bridge ACP client and the ExecBackend
     let cmdOutput = "";
     let exitCode = 0;
-    const toolCallId = `call_${++this.toolCallSeq}`;
+    const toolCallId = this.nextToolCallId();
     // Match real goose's shell shape: the tool_call carries no rawInput, the command runs
     // via terminal/create, and the terminal is handed off as the tool_call_update content.
     await u({
