@@ -620,7 +620,13 @@ jobs:
       # Only the cluster tests this shard was assigned; the `if` guards the empty
       # case because vitest -t with an empty pattern matches everything.
       - name: cluster smoke (shard ${{ matrix.shard }})
+        id: cluster-smoke
         if: matrix.cluster_grep != ''
+        # The smoke and the browser stories are two independent reads on the same
+        # cluster, so a red smoke must not skip the stories: the step records its
+        # verdict in its report and in `outcome`, and the job's own gate (last step)
+        # is what turns it into a failure.
+        continue-on-error: true
         env:
           RUN_CLUSTER_TESTS: "1"
           CLUSTER_PROVIDER: existing
@@ -628,6 +634,7 @@ jobs:
           # The pattern travels as an env var, never interpolated into the shell,
           # because shard selectors contain apostrophes.
           CLUSTER_GREP: ${{ matrix.cluster_grep }}
+          CLUSTER_JSON: "cluster-report-shard-${{ matrix.shard }}.json"
         # platform-smoke: the multi-replica topology comes up and a conversation
         # routes; event-backfill: the mirror→Postgres Job end-to-end against this
         # platform's Postgres and history PVC (see modules/event-backfill.nix).
@@ -635,7 +642,9 @@ jobs:
           # The file filters are required: `-t` selects by name but vitest still loads
           # every file in the project, and they must stay in step with
           # SHARDED_CLUSTER_SPECS in test/e2e/support/test-inventory.mjs.
-          nix develop --command bash -c 'npm install && npx vitest run --project cluster --no-file-parallelism platform-smoke event-backfill -t "$CLUSTER_GREP"'
+          # The JSON report is what carries the smoke into the merged report and so
+          # into the verdict comment; without it a red smoke was invisible there.
+          nix develop --command bash -c 'npm install && npx vitest run --project cluster --no-file-parallelism platform-smoke event-backfill -t "$CLUSTER_GREP" --reporter=default --reporter=json --outputFile="$CLUSTER_JSON"'
 
       # The browser stories against the real cluster, the one seam neither
       # test/cluster (curl-only) nor the fast suite (no real server) covers.
@@ -668,12 +677,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-full-report-shard-${{ matrix.shard }}
-          path: report-full-shard-${{ matrix.shard }}.json
+          # Both reports the shard owes: the browser stories' and the cluster smoke's.
+          # The merge knows from the matrix which of the two to expect, so a shard that
+          # died before writing one is not read as a shard that passed.
+          path: |
+            report-full-shard-${{ matrix.shard }}.json
+            cluster-report-shard-${{ matrix.shard }}.json
           retention-days: 7
           if-no-files-found: ignore
 
       - name: upload cluster browser artifacts
-        if: failure()
+        # The smoke step swallows its own failure (continue-on-error), so the
+        # diagnostics steps have to ask it directly or a smoke-only red night would
+        # upload and dump nothing.
+        if: failure() || steps.cluster-smoke.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: e2e-full-results-shard-${{ matrix.shard }}
@@ -689,7 +706,7 @@ jobs:
         if: always()
         run: .github/scripts/k3d-sandbox-census.sh
       - name: dump platform state on failure
-        if: failure()
+        if: failure() || steps.cluster-smoke.outcome == 'failure'
         run: .github/scripts/k3d-dump-state.sh
 
       - name: tear down k3d
@@ -708,6 +725,15 @@ jobs:
           # Whether /nix is the pooled EBS volume or the instance root disk decides
           # whether a store was reused or built cold.
           findmnt -no SOURCE,FSTYPE,SIZE /nix 2>/dev/null || echo "/nix is not a separate mount (root disk)"
+
+      # Last, so the smoke's deferred failure lands after every report, artifact and
+      # teardown step has run. continue-on-error above keeps a red smoke from skipping
+      # the browser stories; this is what still makes the shard red.
+      - name: gate on the cluster smoke
+        if: always() && steps.cluster-smoke.outcome == 'failure'
+        run: |
+          echo "::error::cluster smoke failed on shard ${{ matrix.shard }} — see the verdict comment for which tests"
+          exit 1
 
   # The gate for e2e full: succeeds only when every shard passed, merges the
   # per-shard reports into `e2e-full-report` for the next run's weights, and skips
@@ -747,25 +773,18 @@ jobs:
           merge-multiple: true
         continue-on-error: true
 
+      # Both kinds of report, in one shape: the browser stories' playwright JSON and the
+      # cluster smoke's vitest JSON, so the verdict below covers the smoke too.
       - name: merge reports → e2e-full-report
         if: always()
         continue-on-error: true
+        env:
+          MATRIX: ${{ needs.e2e-full-distribute.outputs.matrix }}
         run: |
           set -euo pipefail
-          node -e '
-            const fs = require("fs");
-            const dir = "shard-reports";
-            let suites = [];
-            // Record how many shards landed: a shard that dies before writing its JSON
-            // would otherwise read as a pile of passes.
-            let shardReports = 0;
-            for (const f of (fs.existsSync(dir) ? fs.readdirSync(dir) : [])) {
-              if (!f.endsWith(".json")) continue;
-              try { const r = JSON.parse(fs.readFileSync(dir + "/" + f, "utf8")); suites = suites.concat(r.suites || []); shardReports++; } catch {}
-            }
-            fs.writeFileSync("report.json", JSON.stringify({ suites, meta: { shardReports } }));
-            console.log("merged " + suites.length + " top-level suites from " + shardReports + " shard reports");
-          '
+          # The matrix says which reports each shard owed, which is how a shard that
+          # died before writing one is told from a shard with no tests of that kind.
+          node scripts/merge-e2e-full-reports.mjs --dir shard-reports --matrix "$MATRIX" --out report.json
 
       # Kept for the next run's shard weights and as the per-night record of which
       # specs passed; distribute weights from the last successful run only.

@@ -36,8 +36,12 @@ export function summarizeSweep(report, opts = {}) {
   const flaky = executed.filter((s) => s.failed > 0 && s.failed < s.runs).sort(byRate);
   const clean = executed.filter((s) => s.failed === 0);
   // Fewer repetitions than asked for means the shard died mid-sweep, so this test's
-  // rate rests on a smaller sample than the rest.
-  const short = repeat > 0 ? executed.filter((s) => s.runs < repeat) : [];
+  // rate rests on a smaller sample than the rest. The cluster smoke runs once whatever
+  // the sweep asks for, so a short count there is by design, not a lost shard.
+  const short =
+    repeat > 0
+      ? executed.filter((s) => s.kind !== "cluster" && s.runs < repeat)
+      : [];
 
   const shardReports = report?.meta?.shardReports;
   const missingShards =

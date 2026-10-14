@@ -135,3 +135,49 @@ describe("renderMarkdown", () => {
     expect(md).toContain("no tests ran");
   });
 });
+
+describe("the cluster smoke in a sweep", () => {
+  /** A smoke test in the merged report: one run, tagged `kind: "cluster"`. */
+  function withSmoke(report, titleText) {
+    report.suites.push({
+      title: "",
+      file: "test/cluster/platform-smoke.spec.ts",
+      suites: [
+        {
+          title: "group",
+          file: "test/cluster/platform-smoke.spec.ts",
+          specs: [
+            {
+              title: titleText,
+              kind: "cluster",
+              file: "test/cluster/platform-smoke.spec.ts",
+              tests: [{ results: [{ status: "passed", duration: 1 }] }],
+            },
+          ],
+        },
+      ],
+    });
+    return report;
+  }
+
+  // The sweep repeats the browser stories only; the smoke runs once by design, so
+  // flagging its sample as short would cry wolf on every nightly.
+  it("does not read the smoke's single run as a sweep cut short", () => {
+    const sweep = summarizeSweep(
+      withSmoke(sweepReport([["browser", 5, 0]]), "a conversation routes"),
+      { repeat: 5 },
+    );
+
+    expect(sweep.short).toEqual([]);
+    expect(sweep.clean.map((s) => s.title)).toContain("a conversation routes");
+  });
+
+  it("still flags a browser story that ran short", () => {
+    const sweep = summarizeSweep(
+      withSmoke(sweepReport([["browser", 2, 0]]), "a conversation routes"),
+      { repeat: 5 },
+    );
+
+    expect(sweep.short.map((s) => s.title)).toEqual(["browser"]);
+  });
+});
