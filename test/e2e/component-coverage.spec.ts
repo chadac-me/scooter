@@ -6,6 +6,11 @@
  */
 
 import { test, expect, snapshot, assertConsistent, fillStable } from "./fixtures.js";
+import { isFull } from "./target.js";
+
+/** A tool card lands only once its exec returns, which on the full target is a real sandbox
+ *  exec behind a possibly-cold pod, so the card's own budget is separate from the turn's. */
+const TOOL_CARD_MS = isFull ? 90_000 : 45_000;
 
 const sb = {
   list: '[data-testid="session-list"]',
@@ -222,16 +227,27 @@ test.describe("thread rendering details", () => {
   });
 
   test("tool cards + transcript SURVIVE a reload with identical counts", async ({ chat, page }) => {
-    // The first turn waits for the sandbox on the full target, then a reload re-folds the transcript.
-    test.setTimeout(120_000);
+    // Each turn waits for a sandbox exec on the full target and completeTurn's budget is
+    // per-turn, so two turns plus the reload need more than the project default — the old
+    // 120_000 actually SHRANK the budget below the full project's 180s.
+    test.setTimeout(isFull ? 300_000 : 120_000);
     await chat.open();
-    await chat.sendTurn("!echo persist one");
-    await chat.sendTurn("!echo persist two");
+    // completeTurn, not sendTurn: sendTurn returns as soon as the assistant-message count
+    // grows, which precedes the run's terminal event. That was not this test's flake (a
+    // duplicate tool call id was — see fakeAgent.nextToolCallId), but a multi-turn test
+    // should not start a turn while the previous run is still in flight.
+    await chat.completeTurn("!echo persist one");
+    await expect(chat.toolCalls()).toHaveCount(1, { timeout: TOOL_CARD_MS });
+    await chat.completeTurn("!echo persist two");
+    // Poll for the second card rather than reading an instantaneous snapshot: the tool card
+    // is a separate render from the reply text the turn waits on, so reading the count in the
+    // same tick is a race the fast stack happens to win and a loaded cluster does not.
+    await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     const before = await snapshot(page);
     expect(before.toolCards).toBe(2);
 
     await page.reload();
-    await expect(chat.toolCalls()).toHaveCount(2, { timeout: 45_000 });
+    await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     const after = await snapshot(page);
     assertConsistent(after, "after reload with tool cards");
     expect(after.userMessages).toBe(before.userMessages);
