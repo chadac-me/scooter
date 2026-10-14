@@ -254,7 +254,17 @@ baseline runs" is a flake to take to `e2e-full-flake-check`, not a regression.
 Two cases where the comment deliberately refuses to give a verdict: no baseline was
 retained, and a shard died before writing its report (its specs are then absent from
 the merge, which a set difference would happily render as a page of green "newly
-passing" rows nobody verified).
+passing" rows nobody verified). A shard owes **two** reports — playwright's for the
+browser stories, vitest's for the `test/cluster` smoke — and a missing one of either
+is that same refusal, named in the comment (#751).
+
+The comment covers both kinds, with the smoke tallied separately (`smoke 8/8
+passed`): the browser stories are read *through* the platform the smoke is testing,
+so one failure in eighteen means something quite different when it is the smoke. One
+newly-red smoke test is ❌ on its own — it has no night-to-night noise floor to hide
+behind. A red smoke no longer cancels the stories either; the shard runs both and
+then fails (#751, which fixes a run where a dead `platform-smoke` took every other
+test on its shard down and the comment still reported a clean diff).
 
 On `schedule` and `workflow_dispatch` every test runs ×5 across 8 shards, so the
 night reports a per-test rate rather than one red/green;

@@ -175,6 +175,7 @@ export function compare(current, baselines, opts = {}) {
     rows.push({
       file: spec.file,
       title: spec.title,
+      kind: spec.kind ?? "e2e",
       fullTitle: t,
       seq,
       status: statusOf(h, here),
@@ -217,7 +218,22 @@ export function compare(current, baselines, opts = {}) {
     missingShards,
     shardReports,
     expectedShards,
+    missingReports: current?.meta?.missingReports ?? [],
     totalSpecs: cur.length,
+    // Tallied apart from the browser stories, which are read *through* the platform
+    // the smoke tests: one failure in eighteen is not one failure. Why: PR #751.
+    smoke: {
+      total: cur.filter((s) => s.kind === "cluster").length,
+      passed: cur.filter((s) => s.kind === "cluster" && s.failed === 0).length,
+      failed: cur.filter((s) => s.kind === "cluster" && s.failed > 0).length,
+      // Newly red, and the smoke has no night-to-night noise floor to hide behind:
+      // one of these is an ❌ on its own. Why: PR #751.
+      regressions: rows.filter(
+        (r) =>
+          r.kind === "cluster" &&
+          (r.status === "new" || r.status === "new-test"),
+      ).length,
+    },
     tally,
     rows,
     statusCounts,
@@ -290,21 +306,28 @@ export function renderMarkdown(cmp, opts = {}) {
   const { baselineRef, runUrl } = opts;
   const c = cmp.statusCounts;
   const tests = `${cmp.totalSpecs} test${cmp.totalSpecs === 1 ? "" : "s"}`;
-  const tally = `${tests} · ${cmp.totalSpecs - cmp.currentFailures.length} passed · ${cmp.currentFailures.length} failed`;
+  const smoke = cmp.smoke?.total
+    ? ` · smoke ${cmp.smoke.passed}/${cmp.smoke.total} passed`
+    : "";
+  const tally = `${tests} · ${cmp.totalSpecs - cmp.currentFailures.length} passed · ${cmp.currentFailures.length} failed${smoke}`;
   let summary;
   const body = [];
 
   if (cmp.missingShards > 0) {
     summary = `⚠️ <b>e2e full (k3d)</b> — no comparison: ${cmp.shardReports}/${cmp.expectedShards} shards reported`;
     body.push(
-      "A shard that died wrote no specs, which set difference reads as passing. Re-run failed jobs.",
+      [
+        "A report that never arrived leaves its specs out of the merge, which set difference reads as passing. Re-run failed jobs.",
+        ...(cmp.missingReports ?? []).map((m) => `- missing: ${m}`),
+      ].join("\n"),
     );
   } else if (!cmp.hasBaseline) {
     summary = `⚠️ <b>e2e full (k3d)</b> — ${tally} · no baseline`;
   } else {
-    // ❌ only when the attributable count clears the suite's own swing.
+    // ❌ only when the attributable count clears the suite's own swing — or when the
+    // cluster smoke went red, which no amount of browser-story churn excuses.
     const icon =
-      c.new > cmp.noiseFloor
+      cmp.smoke.regressions > 0 || c.new > cmp.noiseFloor
         ? "❌"
         : c.new > 0
           ? "⚠️"
@@ -312,6 +335,7 @@ export function renderMarkdown(cmp, opts = {}) {
             ? "🌗"
             : "✅";
     const badges = [
+      cmp.smoke.failed ? `🧪 <b>${cmp.smoke.failed} smoke</b>` : null,
       c.new ? `🆕 <b>${c.new} new</b>` : "🆕 0 new",
       c.broken ? `🔴 ${c.broken} broken` : null,
       c.flaky ? `🌗 ${c.flaky} flaky` : null,

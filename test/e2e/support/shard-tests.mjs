@@ -40,15 +40,9 @@ function committedWeights() {
   }
 }
 
-/** Per-test durations (seconds) from a prior playwright JSON report, keyed like the weights file. */
-function priorReportWeights(reportPath) {
-  if (!reportPath || !existsSync(reportPath)) return {};
-  let report;
-  try {
-    report = JSON.parse(readFileSync(reportPath, "utf8"));
-  } catch {
-    return {};
-  }
+/** Per-test durations (seconds) from a prior merged report, keyed like the weights file.
+ *  The merge tags the cluster smoke; an untagged spec is a browser story. */
+export function reportWeights(report) {
   const out = {};
   const walk = (node, file) => {
     if (!node || typeof node !== "object") return;
@@ -57,12 +51,23 @@ function priorReportWeights(reportPath) {
       const ms = (spec.tests ?? [])
         .flatMap((t) => t.results ?? [])
         .reduce((a, r) => a + (Number(r.duration) || 0), 0);
-      if (ms > 0) out[`e2e ${basename(spec.file ?? f)} ${spec.title}`] = ms / 1000;
+      if (ms > 0)
+        out[`${spec.kind ?? "e2e"} ${basename(spec.file ?? f)} ${spec.title}`] = ms / 1000;
     }
     for (const child of node.suites ?? []) walk(child, f);
   };
-  for (const suite of report.suites ?? []) walk(suite, suite.file);
+  for (const suite of report?.suites ?? []) walk(suite, suite.file);
   return out;
+}
+
+/** The same, read from the previous run's merged report; missing or unparseable yields {}. */
+function priorReportWeights(reportPath) {
+  if (!reportPath || !existsSync(reportPath)) return {};
+  try {
+    return reportWeights(JSON.parse(readFileSync(reportPath, "utf8")));
+  } catch {
+    return {};
+  }
 }
 
 /**

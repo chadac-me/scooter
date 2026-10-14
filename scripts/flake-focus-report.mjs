@@ -57,6 +57,7 @@ export function collectSpecs(report) {
         file: spec.file || f || "",
         title: spec.title || "",
         fullTitle,
+        kind: spec.kind || "e2e",
         runs: 0,
         passed: 0,
         failed: 0,

@@ -1,9 +1,44 @@
 import { describe, expect, it } from "vitest";
 
-import { packTests, resolveWeights, testKey } from "./shard-tests.mjs";
+import { packTests, reportWeights, resolveWeights, testKey } from "./shard-tests.mjs";
 
 const e2e = (title, file = "a.spec.ts") => ({ kind: "e2e", file: `test/e2e/${file}`, title });
 const cluster = (title) => ({ kind: "cluster", file: "test/cluster/platform-smoke.spec.ts", title });
+
+describe("reportWeights", () => {
+  // The merged report carries both kinds now (scripts/merge-e2e-full-reports.mjs), and
+  // testKey is per kind: keying every spec as `e2e` would file the cluster durations
+  // under names no test has, and the smoke would be packed at the flat default forever.
+  it("keys each spec by the kind the merge tagged it with", () => {
+    const w = reportWeights({
+      suites: [
+        {
+          title: "",
+          file: "test/e2e/a.spec.ts",
+          specs: [{ title: "browser", tests: [{ results: [{ duration: 20_000 }] }] }],
+          suites: [
+            {
+              title: "platform smoke",
+              file: "test/cluster/platform-smoke.spec.ts",
+              specs: [
+                {
+                  title: "provisioning",
+                  kind: "cluster",
+                  tests: [{ results: [{ duration: 60_000 }] }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(w).toEqual({
+      [testKey(e2e("browser"))]: 20,
+      [testKey(cluster("provisioning"))]: 60,
+    });
+  });
+});
 
 describe("resolveWeights", () => {
   it("prefers a measured duration over the committed fallback", () => {

@@ -390,3 +390,130 @@ describe("renderMarkdown", () => {
     expect(body).toContain("✅");
   });
 });
+
+describe("the cluster smoke in the verdict", () => {
+  const opts = { baselineRef: "main@abc1234", runUrl: "https://example/run/1" };
+
+  /** The same report shape, with every spec tagged as the merge tags the smoke. */
+  function smoke(specs, meta) {
+    const r = report(specs, meta);
+    for (const group of r.suites[0].suites)
+      for (const spec of group.specs) spec.kind = "cluster";
+    return r;
+  }
+
+  /** One merged report holding both kinds, as `e2e-full-collect` assembles it. */
+  function merged(browser, cluster, meta) {
+    const r = report(browser, meta);
+    r.suites.push(...smoke(cluster).suites);
+    return r;
+  }
+
+  // The shards run both kinds and the comment is the only place a reader looks, so
+  // a tally that counts browser stories alone can read green on a red smoke.
+  it("tallies the smoke separately from the browser stories", () => {
+    const body = renderMarkdown(
+      compare(
+        merged(
+          [["browser", true]],
+          [
+            ["provisioning", true],
+            ["a conversation routes", false],
+          ],
+        ),
+        merged([["browser", true]], [["provisioning", true], ["a conversation routes", true]]),
+      ),
+      opts,
+    );
+
+    expect(body).toContain("3 tests");
+    expect(body).toContain("smoke 1/2 passed");
+  });
+
+  it("says nothing about the smoke when the run carried none", () => {
+    const body = renderMarkdown(
+      compare(report([["browser", true]]), report([["browser", true]])),
+      opts,
+    );
+
+    expect(body).not.toMatch(/smoke/i);
+  });
+
+  // A red smoke is a regression like any other: it must reach the failure tables,
+  // not just the tally.
+  it("treats a failed smoke test as a new failure against a green baseline", () => {
+    const cmp = compare(
+      merged([["browser", true]], [["a conversation routes", false]]),
+      merged([["browser", true]], [["a conversation routes", true]]),
+    );
+
+    expect(cmp.newFailures.map((s) => s.fullTitle)).toEqual([
+      title("a conversation routes"),
+    ]);
+    expect(cmp.smoke).toEqual({
+      total: 1,
+      passed: 0,
+      failed: 1,
+      regressions: 1,
+    });
+  });
+
+  // The noise floor exists because the browser stories churn night to night. The
+  // smoke does not churn: it either brings the platform up or the rest of the run
+  // was measured against nothing.
+  it("says ❌ for one newly-red smoke test even inside the suite's swing", () => {
+    // A window whose browser failures swing by 1, so a browser regression here
+    // would render ⚠️.
+    const window3 = [
+      merged([["browser", true], ["churn", true]], [["provisioning", true]]),
+      merged([["browser", true], ["churn", false]], [["provisioning", true]]),
+      merged([["browser", true], ["churn", true]], [["provisioning", true]]),
+    ];
+    const cmp = compare(
+      merged([["browser", true], ["churn", true]], [["provisioning", false]]),
+      window3,
+    );
+
+    expect(cmp.noiseFloor).toBe(1);
+    expect(cmp.smoke.regressions).toBe(1);
+    const body = renderMarkdown(cmp, opts);
+    expect(body).toContain("❌ <b>e2e full (k3d)</b>");
+    expect(body).toContain("🧪 <b>1 smoke</b>");
+  });
+
+  // Not every red smoke is this PR's doing; one that is red on main too is still
+  // reported, but it is not this change's ❌.
+  it("does not escalate a smoke test that was already red on main", () => {
+    const cmp = compare(
+      merged([["browser", true]], [["provisioning", false]]),
+      [
+        merged([["browser", true]], [["provisioning", false]]),
+        merged([["browser", true]], [["provisioning", false]]),
+      ],
+    );
+
+    expect(cmp.smoke).toMatchObject({ failed: 1, regressions: 0 });
+    const body = renderMarkdown(cmp, opts);
+    expect(body).not.toContain("❌ <b>e2e full (k3d)</b>");
+    expect(body).toContain("🧪 <b>1 smoke</b>");
+    expect(body).toContain("🔴 1 broken");
+  });
+
+  // A shard writes one report per kind, so "3/4 shards" alone does not say which
+  // half of the run is missing.
+  it("names the report that never arrived when it voids the comparison", () => {
+    const body = renderMarkdown(
+      compare(
+        report([["browser", true]], {
+          shardReports: 1,
+          missingReports: ["shard 2: cluster smoke"],
+        }),
+        report([["browser", true]]),
+        { expectedShards: 2 },
+      ),
+      opts,
+    );
+
+    expect(body).toContain("missing: shard 2: cluster smoke");
+  });
+});
