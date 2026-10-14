@@ -6,6 +6,7 @@
  * runs `node dist/fakeAgent.js` when GOOSE_BIN=fake.
  */
 
+import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -40,7 +41,11 @@ class FakeAgent implements Agent {
   /** Sessions that have already received their first prompt, so the <title> marker is emitted only on the first reply. */
   private titled = new Set<string>();
   // Each tool call gets a fresh id, as real ACP agents mint one per call.
+  private readonly toolCallNonce = randomUUID().slice(0, 8);
   private toolCallSeq = 0;
+  private nextToolCallId(): string {
+    return `call_${this.toolCallNonce}_${++this.toolCallSeq}`;
+  }
   /** The per-session model from newSession. */
   private sessionModel = new Map<string, string>();
   /** Offered MCP servers per session, by name. */
@@ -114,7 +119,7 @@ class FakeAgent implements Agent {
       const question = userText.slice(1).trim() || "Choose an option";
       const res = (await this.conn.requestPermission({
         sessionId,
-        toolCall: { toolCallId: "choose_1", title: question } as never,
+        toolCall: { toolCallId: this.nextToolCallId(), title: question } as never,
         options: [
           { optionId: "red", name: "Red", kind: "allow_once" },
           { optionId: "green", name: "Green", kind: "allow_once" },
@@ -198,7 +203,7 @@ class FakeAgent implements Agent {
     // 2. a real tool call through createTerminal, the bridge ACP client and the ExecBackend
     let cmdOutput = "";
     let exitCode = 0;
-    const toolCallId = `call_${++this.toolCallSeq}`;
+    const toolCallId = this.nextToolCallId();
     // Match real goose's shell shape: the tool_call carries no rawInput, the command runs
     // via terminal/create, and the terminal is handed off as the tool_call_update content.
     await u({

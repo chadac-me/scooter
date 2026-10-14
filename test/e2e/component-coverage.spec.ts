@@ -6,6 +6,10 @@
  */
 
 import { test, expect, snapshot, assertConsistent, fillStable } from "./fixtures.js";
+import { isFull } from "./target.js";
+
+/** Full-target cards wait on a real sandbox exec. */
+const TOOL_CARD_MS = isFull ? 90_000 : 45_000;
 
 const sb = {
   list: '[data-testid="session-list"]',
@@ -222,16 +226,19 @@ test.describe("thread rendering details", () => {
   });
 
   test("tool cards + transcript SURVIVE a reload with identical counts", async ({ chat, page }) => {
-    // The first turn waits for the sandbox on the full target, then a reload re-folds the transcript.
-    test.setTimeout(120_000);
+    // Two full-target execs plus a reload.
+    test.setTimeout(isFull ? 300_000 : 120_000);
     await chat.open();
-    await chat.sendTurn("!echo persist one");
-    await chat.sendTurn("!echo persist two");
+    // completeTurn: sendTurn can return before the run ends.
+    await chat.completeTurn("!echo persist one");
+    await expect(chat.toolCalls()).toHaveCount(1, { timeout: TOOL_CARD_MS });
+    await chat.completeTurn("!echo persist two");
+    await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     const before = await snapshot(page);
     expect(before.toolCards).toBe(2);
 
     await page.reload();
-    await expect(chat.toolCalls()).toHaveCount(2, { timeout: 45_000 });
+    await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     const after = await snapshot(page);
     assertConsistent(after, "after reload with tool cards");
     expect(after.userMessages).toBe(before.userMessages);

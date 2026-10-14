@@ -6,6 +6,10 @@
  */
 
 import { test, expect } from "./fixtures.js";
+import { isFull } from "./target.js";
+
+/** Full-target cards wait on a real sandbox exec. */
+const TOOL_CARD_MS = isFull ? 90_000 : 30_000;
 
 test.describe("history survives a page refresh", () => {
   test("a tool call is still rendered after reload", async ({ chat, page }) => {
@@ -28,20 +32,23 @@ test.describe("history survives a page refresh", () => {
   });
 
   test("a multi-turn conversation with tool calls is intact after reload", async ({ chat, page }) => {
+    // Two full-target execs plus a reload.
+    test.setTimeout(isFull ? 300_000 : 120_000);
     await chat.open();
-    await chat.send("!echo first-marker");
-    await expect(chat.toolCalls().first()).toBeVisible({ timeout: 30_000 });
+    // completeTurn: `send` swallows its idle-Send timeout.
+    await chat.completeTurn("!echo first-marker");
+    await expect(chat.toolCalls()).toHaveCount(1, { timeout: TOOL_CARD_MS });
     await expect(chat.assistantMessages().last()).toContainText(/first-marker/i, { timeout: 30_000 });
 
-    await chat.send("!echo second-marker");
-    await expect(chat.toolCalls()).toHaveCount(2, { timeout: 30_000 });
+    await chat.completeTurn("!echo second-marker");
+    await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     await expect(chat.assistantMessages().last()).toContainText(/second-marker/i, { timeout: 30_000 });
 
     await page.reload();
     await expect(chat.input()).toBeVisible({ timeout: 20_000 });
 
     // Both turns' tool calls replay from the log (not one, not zero).
-    await expect(chat.toolCalls()).toHaveCount(2, { timeout: 30_000 });
+    await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     await expect(chat.userMessages()).toHaveCount(2, { timeout: 30_000 });
   });
 });
