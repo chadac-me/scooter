@@ -57,7 +57,6 @@ export function collectSpecs(report) {
         file: spec.file || f || "",
         title: spec.title || "",
         fullTitle,
-        // The cluster smoke is merged in from vitest and tagged; browser specs are not.
         kind: spec.kind || "e2e",
         runs: 0,
         passed: 0,

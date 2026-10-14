@@ -175,7 +175,6 @@ export function compare(current, baselines, opts = {}) {
     rows.push({
       file: spec.file,
       title: spec.title,
-      // The cluster smoke, which the merge tags; everything else is a browser story.
       kind: spec.kind ?? "e2e",
       fullTitle: t,
       seq,
@@ -219,17 +218,16 @@ export function compare(current, baselines, opts = {}) {
     missingShards,
     shardReports,
     expectedShards,
-    // Which of the two reports a shard owes went missing, as the merge named them.
     missingReports: current?.meta?.missingReports ?? [],
     totalSpecs: cur.length,
     // Tallied apart from the browser stories, which are read *through* the platform
-    // the smoke tests: one failure in eighteen is not one failure. Why: PR #751.
+    // the smoke tests: one failure in eighteen is not one failure.
     smoke: {
       total: cur.filter((s) => s.kind === "cluster").length,
       passed: cur.filter((s) => s.kind === "cluster" && s.failed === 0).length,
       failed: cur.filter((s) => s.kind === "cluster" && s.failed > 0).length,
       // Newly red, and the smoke has no night-to-night noise floor to hide behind:
-      // one of these is an ❌ on its own. Why: PR #751.
+      // one of these is an ❌ on its own.
       regressions: rows.filter(
         (r) =>
           r.kind === "cluster" &&
@@ -308,8 +306,6 @@ export function renderMarkdown(cmp, opts = {}) {
   const { baselineRef, runUrl } = opts;
   const c = cmp.statusCounts;
   const tests = `${cmp.totalSpecs} test${cmp.totalSpecs === 1 ? "" : "s"}`;
-  // "of which N are the cluster smoke": a green suite with a red smoke test is not a
-  // green run, and the smoke is what the browser stories rest on.
   const smoke = cmp.smoke?.total
     ? ` · smoke ${cmp.smoke.passed}/${cmp.smoke.total} passed`
     : "";

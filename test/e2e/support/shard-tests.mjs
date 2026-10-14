@@ -41,8 +41,7 @@ function committedWeights() {
 }
 
 /** Per-test durations (seconds) from a prior merged report, keyed like the weights file.
- *  The merge tags the cluster smoke `kind: "cluster"` (see scripts/merge-e2e-full-reports.mjs);
- *  an untagged spec is a browser story, which is all the report held before. */
+ *  The merge tags the cluster smoke; an untagged spec is a browser story. */
 export function reportWeights(report) {
   const out = {};
   const walk = (node, file) => {

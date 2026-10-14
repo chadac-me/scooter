@@ -61,7 +61,6 @@ export function clusterToSuites(report) {
       node.specs.push({
         title: a.title ?? "",
         file: path,
-        // Read by the weights keying and the verdict's per-kind tally.
         kind: "cluster",
         tests: [
           {

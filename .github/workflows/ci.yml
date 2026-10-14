@@ -623,7 +623,7 @@ jobs:
         id: cluster-smoke
         if: matrix.cluster_grep != ''
         # A red smoke must not skip the browser stories; the `gate on the cluster
-        # smoke` step below is what fails the shard instead. Why: PR #751.
+        # smoke` step below is what fails the shard instead.
         continue-on-error: true
         env:
           RUN_CLUSTER_TESTS: "1"
@@ -640,7 +640,6 @@ jobs:
           # The file filters are required: `-t` selects by name but vitest still loads
           # every file in the project, and they must stay in step with
           # SHARDED_CLUSTER_SPECS in test/e2e/support/test-inventory.mjs.
-          # The json reporter is what carries the smoke into the verdict comment.
           nix develop --command bash -c 'npm install && npx vitest run --project cluster --no-file-parallelism platform-smoke event-backfill -t "$CLUSTER_GREP" --reporter=default --reporter=json --outputFile="$CLUSTER_JSON"'
 
       # The browser stories against the real cluster, the one seam neither
@@ -674,8 +673,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-full-report-shard-${{ matrix.shard }}
-          # Both reports the shard owes; the merge expects whichever kinds the matrix
-          # assigned it and reads a missing one as a lost shard. Why: PR #751.
           path: |
             report-full-shard-${{ matrix.shard }}.json
             cluster-report-shard-${{ matrix.shard }}.json
@@ -683,7 +680,6 @@ jobs:
           if-no-files-found: ignore
 
       - name: upload cluster browser artifacts
-        # `failure()` misses a red smoke: continue-on-error hides it. Why: PR #751.
         if: failure() || steps.cluster-smoke.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
@@ -720,8 +716,8 @@ jobs:
           # whether a store was reused or built cold.
           findmnt -no SOURCE,FSTYPE,SIZE /nix 2>/dev/null || echo "/nix is not a separate mount (root disk)"
 
-      # Last: the deferred failure must land after every report, artifact and
-      # teardown step. Why: PR #751.
+      # Last, so the deferred failure lands after every report, artifact and
+      # teardown step above has run.
       - name: gate on the cluster smoke
         if: always() && steps.cluster-smoke.outcome == 'failure'
         run: |
@@ -766,8 +762,6 @@ jobs:
           merge-multiple: true
         continue-on-error: true
 
-      # Both kinds of report, in one shape: the browser stories' playwright JSON and the
-      # cluster smoke's vitest JSON, so the verdict below covers the smoke too.
       - name: merge reports → e2e-full-report
         if: always()
         continue-on-error: true
@@ -775,8 +769,6 @@ jobs:
           MATRIX: ${{ needs.e2e-full-distribute.outputs.matrix }}
         run: |
           set -euo pipefail
-          # The matrix says which reports each shard owed, which is how a shard that
-          # died before writing one is told from a shard with no tests of that kind.
           node scripts/merge-e2e-full-reports.mjs --dir shard-reports --matrix "$MATRIX" --out report.json
 
       # Kept for the next run's shard weights and as the per-night record of which
