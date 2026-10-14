@@ -7,6 +7,8 @@
  * CLI authenticated with CLAUDE_CODE_OAUTH_TOKEN.
  */
 
+import { randomUUID } from "node:crypto";
+
 import type {
   AcpClient,
   InitializeParams,
@@ -133,7 +135,8 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
   const updateCbs = new Set<(sessionId: string, u: SessionUpdate) => void>();
   const terminalCreatedCbs = new Set<(id: string, command: string, args: string[]) => void>();
   let permissionHandler: ((req: PermissionRequest) => Promise<PermissionAnswer>) | undefined;
-  /** Monotonic suffix so each permission request gets its own id. */
+  /** Suffix so each permission request gets its own id, across client instances too. */
+  const permissionNonce = randomUUID().slice(0, 8);
   let permissionSeq = 0;
 
   let sessionId = "";
@@ -234,7 +237,7 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
       }
       if (!permissionHandler) return { behavior: "allow", updatedInput: input };
       // The bridge keys pendingPermissions by toolCallId, so each request needs a unique id; the SDK does not hand us its tool_use id here.
-      const permissionId = `perm-${toolName}-${++permissionSeq}`;
+      const permissionId = `perm-${toolName}-${permissionNonce}-${++permissionSeq}`;
       const ans = await permissionHandler({
         sessionId,
         toolCallId: permissionId,

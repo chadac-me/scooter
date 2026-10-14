@@ -280,6 +280,19 @@ describe("SDK client permission requests carry a UNIQUE id per call", () => {
     expect(seen[0].toolCallId).not.toBe(seen[1].toolCallId);
   });
 
+  it("THE REGRESSION: a REBUILT client does not re-mint the first one's ids", async () => {
+    // dropCachedSession rebuilds the client mid-conversation, resetting any counter.
+    const first = await clientWithHandler();
+    const second = await clientWithHandler();
+    for (const c of [first, second]) {
+      const canUseTool = c.fq.calls[0].options.canUseTool as (n: string, i: unknown) => Promise<unknown>;
+      await canUseTool("mcp__scooter-env__check_background", { job_id: "a" });
+    }
+    expect(first.seen).toHaveLength(1);
+    expect(second.seen).toHaveLength(1);
+    expect(first.seen[0].toolCallId).not.toBe(second.seen[0].toolCallId);
+  });
+
   it("the TITLE still names the tool, so the prompt stays readable", async () => {
     const { fq, seen } = await clientWithHandler();
     const canUseTool = fq.calls[0].options.canUseTool as (n: string, i: unknown) => Promise<unknown>;
