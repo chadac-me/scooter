@@ -256,46 +256,13 @@ retained, and a shard died before writing its report (its specs are then absent 
 the merge, which a set difference would happily render as a page of green "newly
 passing" rows nobody verified).
 
-### The nightly is a sweep, not a pass
-
-On `schedule` and `workflow_dispatch` every test runs **×5** (`--repeat-each`, across
-8 shards instead of 4), so the night measures a *rate* rather than one red/green.
-`scripts/e2e-full-flake-report.mjs` renders it into the job's **step summary** and the
-**`e2e-full-flake-report`** artifact, splitting what the baseline diff cannot:
-
-- **🔴 always red** (5/5) — broken against the current platform, not a flake. Fix or
-  quarantine it; a 5/5 test does not need a reproduction job.
-- **🌗 flaky** (1/5, 3/5 …) — ranked by rate, with the same test's rate on earlier
-  nights beside it. Take the top one to `e2e-full-flake-check`, which is still where a
-  fix is proven.
-
-A rate also makes the trend readable: a test going 1/5 → 3/5 → 4/5 across three nights
-is degrading, which a per-night pass/fail list cannot show. The PR path is unchanged —
-the `e2e-full` label runs a single pass, because a PR wants a verdict and five passes
-are the fleet for an hour and a half.
-
-Two things the sweep does **not** repeat: the cluster-smoke vitest step (`--repeat-each`
-is Playwright-only, and it is the shard's bring-up precondition) and the k3d bring-up
-itself (paid once per shard, so a sweep costs far less than 5× a nightly). Shard
-weights scale with the repeat budget for the e2e tests only — `resolveWeights` in
-`test/e2e/support/shard-tests.mjs` — or a shard holding cluster tests is packed as
-though those scaled too.
-
-The budget, planned: 134 tests, ~1430s of work per shard at ×1/4 shards (the observed
-25–31 min), ~3480s at ×5/8 shards — so a sweep shard is **~1h** including bring-up, and
-the nightly's `e2e-full` goes from ~30 min to ~1h05 wall clock if the fleet has eight
-runners free, and queues into waves if it does not. `timeout-minutes: 150` bounds a
-wedged cluster rather than the sweep.
-
-Two consequences worth knowing before reading a sweep night:
-
-- **A night is red almost by construction.** Five chances to fail is five times the
-  chance any one test does, so the shard gate and the workflow conclusion say even
-  less than before. The rates are the output; the colour is not.
-- **The baseline window carries rates now.** `scripts/e2e-full-compare.mjs` still scores
-  a baseline night as red when the spec failed *at all* that night, which is a stricter
-  (and better-founded) baseline than one pass gave it — and the `On main recently` row
-  in a `flake-focus-full` comment prints each night as `2/5` rather than `F`.
+On `schedule` and `workflow_dispatch` every test runs ×5 across 8 shards, so the
+night reports a per-test rate rather than one red/green;
+`scripts/e2e-full-flake-report.mjs` renders it into the job's step summary and the
+`e2e-full-flake-report` artifact, separating always-red (5/5) from flaky (n/5). A
+labelled PR still runs a single pass. Because five chances to fail is five times the
+chance any one test takes it, a sweep night is red almost by construction — the rates
+are the output, not the colour.
 
 **Which one you need depends on where the flake was seen.** A flake reported by
 the nightly `e2e-full` usually cannot reproduce on the fast target at all: the
