@@ -1,13 +1,7 @@
 /**
- * Tier 1 — a user Stop that races the owner pod's death must STAY stopped.
- *
- * The cluster shape (e2e-full run 33015148191): Stop clicked, the scale-down kills
- * the owner before RUN_FINISHED lands, the next owner sees a dangling run. Before
- * the persisted CANCEL_REQUESTED marker, its only move was a resume nudge — which
- * resurrects work the user killed and leaves the browser's run bar up through the
- * whole resurrection. Now revive TERMINATES a cancelled dangling run by appending
- * the RUN_FINISHED{cancelled} the dead pod owed, which the reconnected stream
- * replays to the UI.
+ * A user Stop that races the owner pod's death stays stopped: when the next owner
+ * finds a dangling run with a persisted CANCEL_REQUESTED marker, it appends the
+ * RUN_FINISHED{cancelled} the dead pod owed instead of resuming the run.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -82,11 +76,7 @@ describe("a cancelled dangling run is TERMINATED on reassignment, not resumed", 
 });
 
 describe("the LAZY adoption path settles a dangling run (lost revive push)", () => {
-  // The controller's revive push is fire-and-forget; when it dies with the old pod,
-  // ensureReadable (the UI's first read through the router) is where the new owner
-  // first materializes the conversation — and before this fix it adopted the entry
-  // WITHOUT settling the stranded run, which then spun "Working…" forever
-  // (the pod-move story, CI run 33024754713).
+  // When the controller's revive push is lost, ensureReadable is where the new owner first materializes the conversation.
   it("ensureReadable terminates a cancelled dangling run it adopts @proves", async () => {
     const { store, dump } = seededStore("t1", [...DEAD_HOST_RUN, CANCEL]);
     (store as { listConversations?: unknown }).listConversations = async () => [
@@ -99,7 +89,7 @@ describe("the LAZY adoption path settles a dangling run (lost revive push)", () 
     } as never);
 
     expect(await sessions.ensureReadable("t1" as SessionId)).toBe(true);
-    // fire-and-forget settlement — give the microtask a beat
+    // Settlement is fire-and-forget.
     await new Promise((r) => setTimeout(r, 50));
 
     const tail = dump().at(-1) as { type: string; cancelled?: boolean; runId?: string };
@@ -108,15 +98,11 @@ describe("the LAZY adoption path settles a dangling run (lost revive push)", () 
 });
 
 describe("the ownership WATCH settles a stranded run (the production shape)", () => {
-  // The entry ALREADY EXISTS on the new owner, the revive push never arrives, and the
-  // ONLY signal of the reassignment is the ownership watch. Settlement must fire from
-  // that signal alone.
+  // The entry already exists on the new owner and the ownership watch is the only signal of the reassignment.
   it("a watch-delivered gain terminates the cancelled stranded run @proves", async () => {
     const { OwnershipTracker } = await import("../../src/session/ownershipGuard.js");
     const tracker = new OwnershipTracker("new-pod");
-    // FAITHFUL SHAPE: the dead pod's events are already visible to the new owner —
-    // one store, readable from any pod. What must NOT be assumed is that the entry
-    // was hydrated locally; the gain handler has to judge from the store.
+    // The dead pod's events are visible to the new owner through the shared store, but nothing is hydrated locally.
     const { store, dump } = seededStore("t1", [...DEAD_HOST_RUN, CANCEL]);
     (store as { listConversations?: unknown }).listConversations = async () => [
       { id: "t1", threadId: "t1", title: "", createdAt: 0, lastActivityAt: 0 },
@@ -127,15 +113,11 @@ describe("the ownership WATCH settles a stranded run (the production shape)", ()
       selfPod: "new-pod",
       ownershipGuard: tracker,
     } as never);
-    // the same wiring index.ts does
+    // The same wiring index.ts does.
     tracker.onGained = (id, gen) => {
       void sessions.reconcileDanglingRun(id as SessionId, gen);
     };
-    // PRODUCTION ORDER, all the way down: the gain arrives via the watch within
-    // MILLISECONDS of the reassignment — before any UI read has hydrated this
-    // pod's empty local store. Settlement must therefore pull the mirror itself;
-    // reading local events at gain time finds [] and silently no-ops (the
-    // deployed round-3 failure).
+    // The gain arrives before any UI read has hydrated this pod, so settlement must pull the mirror itself.
     tracker.observe("t1", { hostPod: "dead-pod", generation: 1 });
     tracker.observe("t1", { hostPod: "new-pod", generation: 2 });
     await new Promise((r) => setTimeout(r, 80));

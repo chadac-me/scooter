@@ -1,10 +1,9 @@
-# The Conversation CRD + its controller + router (Deployment + SA + RBAC).
+# The Conversation CRD, its controller and the router.
 #
-# The CRD (scooter.chadac.dev/v1alpha1 Conversation) records which agent-host pod owns
-# each conversation (status.hostPod) — the assignment table for multi-replica agent-host.
-# The controller is a leader-elected reconcile loop that assigns/reassigns hostPod; the
-# router reverse-proxies each request to the owning pod. ALWAYS ON — agent-host is a
-# multi-replica StatefulSet fronted by the router (no single-replica path).
+# The CRD (scooter.chadac.dev/v1alpha1 Conversation) records which agent-host pod
+# owns each conversation; the leader-elected controller assigns and reassigns
+# hostPod, and the router reverse-proxies each request to the owning pod. Both
+# are always on.
 
 { config, lib, ... }:
 
@@ -47,6 +46,15 @@ in
         Only reap a Sandbox with no owning Conversation if it's older than this many seconds —
         long enough that a normal create has registered its Conversation CR (the provisioner
         creates the Sandbox a beat before the CR), so only genuine orphans are reaped.
+      '';
+    };
+    overlayRetentionSeconds = mkOption {
+      type = types.int;
+      default = 7 * 86400;
+      description = ''
+        Delete a Sandbox's overlay-store PVC (`scooter-rw-*`, its runtime Nix builds) once
+        it has been suspended this long. Resume recreates it empty, so only a slower first
+        turn is lost. Workspaces are never touched. 0 disables.
       '';
     };
     # --- agent-host autoscaling -------------------------------------------
@@ -99,10 +107,8 @@ in
     };
 
     # --- history mirror (cross-pod conversation revival) --------------------
-    # ONE shared append-only RWX volume every agent-host pod mirrors its events
-    # to (async, off the hot path — see mirroredStore.ts + the CRD design doc).
-    # After a conversation reassigns to a different pod, that pod reads the
-    # conversation's history back from this volume. Multi-writer ⇒ ReadWriteMany.
+    # One shared RWX volume every agent-host pod mirrors its events to, read back
+    # by whichever pod a conversation is reassigned to.
     historyMirror = {
       enable = mkOption {
         type = types.bool;
@@ -246,8 +252,7 @@ in
               properties = {
                 spec = {
                   type = "object";
-                  # No `title` on purpose: this schema is structural, so adding a property
-                  # here starts persisting it. Title is row metadata. Why: PR #556.
+                  # Structural only; title is row metadata and stays out.
                   properties = {
                     model = { type = "string"; };
                     owner = { type = "string"; };
@@ -259,17 +264,11 @@ in
                 status = {
                   type = "object";
                   properties = {
-                    # Pending | Assigned | Suspended | Orphaned. The controller owns the
-                    # ASSIGNMENT phases (Pending → Assigned; Orphaned); agent-host publishes the
-                    # LIVENESS of an assigned conversation (Assigned ⇄ Suspended) so it's visible
-                    # in `kubectl get conversations`. See CONVERSATION_LIFECYCLE_CONTROLLER.md.
+                    # Pending | Assigned | Suspended | Orphaned; the controller owns the
+                    # assignment phases and the agent-host publishes Assigned/Suspended.
                     phase = { type = "string"; };
-                    hostPod = { type = "string"; nullable = true; };  # owner pod NAME (fencing identity + debugging)
-                    # Owner pod IP — the ROUTING ADDRESS. Deployments give random-named pods no
-                    # stable DNS, so the router proxies to http://<hostIP>:<port> instead of a
-                    # headless-Service DNS name. Re-derived by the controller on every (re)assign
-                    # (ephemeral IPs are fine — the CR is the source of truth). Null when Pending.
-                    # See todo/docs/ROLLOUT_DRAIN_AND_POD_IP.md.
+                    hostPod = { type = "string"; nullable = true; };  # owner pod name, the fencing identity
+                    # Owner pod IP, the routing address; null when Pending.
                     hostIP = { type = "string"; nullable = true; };
                     assignedAt = { type = "string"; };
                     generation = { type = "integer"; };  # fence epoch, bumps per (re)assignment
@@ -296,19 +295,17 @@ in
         metadata = { name = "conversation-controller"; namespace = cfg.namespace; };
         rules = [
           { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations" "conversations/status" ]; verbs = [ "get" "list" "watch" "patch" "update" ]; }
-          # patch: pod-deletion-cost annotation (scale-down victim steering).
-          # delete: the zombie escalation reclaims a leaked sandbox POD — never the Sandbox CR,
-          # whose delete cascades the workspace PVC (#709).
+          # patch for the pod-deletion-cost annotation; delete for reclaiming a
+          # leaked sandbox pod, never the Sandbox CR.
           { apiGroups = [ "" ]; resources = [ "pods" ]; verbs = [ "get" "list" "watch" "patch" "delete" ]; }
           { apiGroups = [ "coordination.k8s.io" ]; resources = [ "leases" ]; verbs = [ "get" "list" "watch" "create" "update" ]; }
-          # Orphaned-Sandbox reaper: list Sandboxes + DELETE the whole per-conversation tree
-          # (Sandbox CR cascades pod+PVCs; the SA + module CM are provisioner-created and must
-          # be deleted directly). See todo/docs/ORPHANED_SANDBOX_REAPER.md.
+          # The orphan reaper deletes the Sandbox CR and the provisioner-created SA
+          # and ConfigMap.
           { apiGroups = [ "agents.x-k8s.io" ]; resources = [ "sandboxes" ]; verbs = [ "get" "list" "watch" "delete" "patch" ]; }
           { apiGroups = [ "" ]; resources = [ "serviceaccounts" "configmaps" ]; verbs = [ "get" "list" "delete" ]; }
-          # Autoscaler: read the agent-host Deployment + patch its scale subresource (the
-          # controller IS the autoscaler — desired = ceil(conversations / podCap)). See
-          # todo/docs/AGENT_HOST_FLEET_SCALING.md.
+          # Overlay-store retention.
+          { apiGroups = [ "" ]; resources = [ "persistentvolumeclaims" ]; verbs = [ "list" "delete" ]; }
+          # The autoscaler patches the agent-host Deployment's scale subresource.
           { apiGroups = [ "apps" ]; resources = [ "deployments" ]; verbs = [ "get" "list" "watch" ]; }
           { apiGroups = [ "apps" ]; resources = [ "deployments/scale" ]; verbs = [ "get" "patch" "update" ]; }
         ];
@@ -337,25 +334,20 @@ in
                 env = [
                   { name = "NAMESPACE"; value = cfg.namespace; }
                   { name = "CONVERSATION_POD_CAP"; value = toString ccfg.podCap; }
-                  # Pod name → the leader-election Lease holder identity.
+                  # The leader-election Lease holder identity.
                   { name = "POD_NAME"; valueFrom.fieldRef.fieldPath = "metadata.name"; }
                   # Orphaned-Sandbox reaper (leader-only).
                   { name = "REAP_ORPHANED_SANDBOXES"; value = if ccfg.reapOrphans then "1" else "0"; }
                   { name = "ORPHAN_GRACE_SECONDS"; value = toString ccfg.orphanGraceSeconds; }
+                  { name = "OVERLAY_RETENTION_SECONDS"; value = toString ccfg.overlayRetentionSeconds; }
                   # Agent-host autoscaler (leader-only, single writer of agent-host replicas).
                   { name = "AUTOSCALE_AGENT_HOST"; value = if ccfg.autoscale then "1" else "0"; }
                   { name = "AGENT_HOST_MIN_REPLICAS"; value = toString ccfg.minReplicas; }
                   { name = "AGENT_HOST_MAX_REPLICAS"; value = toString ccfg.maxReplicas; }
                   { name = "SCALE_DOWN_COOLDOWN_SECONDS"; value = toString ccfg.scaleDownCooldownSeconds; }
                   { name = "METRICS_PORT"; value = toString ccfg.metricsPort; }
-                  # Write handle on agent_host.conversations, for mirroring `phase` onto the row.
-                  # The controller writes Failed / Pending / the Suspended drift repair, which
-                  # nothing else does — so until these reach the row, a row-sourced reader cannot
-                  # trust phase (a Failed conversation would render as "running"). Its own
-                  # `conversation_controller` role, granted read-write on exactly `conversations`
-                  # (modules/postgres.nix readers + the scooter.db spec). Unset DSN is
-                  # supported: rows.from_env() returns None and the controller skips the mirror.
-                  # Why: PR #654.
+                  # Write handle on agent_host.conversations for mirroring `phase` onto
+                  # the row, via the controller's own role.
                   { name = "AGENT_HOST_DB_HOST"; value = cfg.postgres.host; }
                   { name = "AGENT_HOST_DB_PORT"; value = toString cfg.postgres.port; }
                   { name = "AGENT_HOST_DB_NAME"; value = "agent_host"; }
@@ -364,9 +356,7 @@ in
                 ]
                 ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; };
                 ports = [{ name = "metrics"; containerPort = ccfg.metricsPort; }];
-                # Import floor is ~83 MiB, ~76 MiB of it the kubernetes client alone, so
-                # 64Mi could never start. Keep requests == limits: the leader must not be
-                # an eviction candidate.
+                # requests == limits so the leader is never an eviction candidate.
                 resources = lib.mkDefault {
                   requests = { cpu = "25m"; memory = "256Mi"; };
                   limits = { cpu = "25m"; memory = "256Mi"; };
@@ -385,14 +375,11 @@ in
       roles.conversation-router = {
         metadata = { name = "conversation-router"; namespace = cfg.namespace; };
         rules = [
-          # READS status.hostPod for routing (the controller writes it), and CREATES the CR:
-          # POST /conversations is served by the ROUTER, not proxied to an agent-host. The
-          # agent-host fleet is capacity-bounded (the controller leaves a conversation Pending
-          # when every pod is at cap), so creating there made conversation replicas*cap+1
-          # uncreatable — its id would be minted by the component that could not host it.
-          # Creating the CR here consults no agent-host; `Pending` is then a normal state.
-          # Still NO update/patch/delete: assignment and lifecycle stay the controller's.
-          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations" ]; verbs = [ "get" "list" "watch" "create" ]; }
+          # Creates CRs, and mirrors its claims onto their status.
+          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations" ]; verbs = [ "create" "delete" ]; }
+          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations/status" ]; verbs = [ "patch" ]; }
+          # Ready agent-host pods, to resolve an assigned pod name.
+          { apiGroups = [ "" ]; resources = [ "pods" ]; verbs = [ "get" "list" "watch" ]; }
         ];
       };
       roleBindings.conversation-router = {
@@ -401,11 +388,8 @@ in
         subjects = [{ kind = "ServiceAccount"; name = "conversation-router"; namespace = cfg.namespace; }];
       };
 
-      # TokenReview is cluster-scoped → ClusterRole + ClusterRoleBinding. The router
-      # verifies the webhooks/scheduler SA token on POST /conversations before honoring a
-      # body `owner`. WITHOUT this grant the review 403s, the router fails closed, and
-      # every webhook-initiated conversation is created unowned — the #527 symptom — so
-      # the grant and the env above must ship together. Mirrors agent-host-tokenreview.
+      # Cluster-scoped TokenReview grant for verifying the webhooks/scheduler SA
+      # token before honoring a body `owner`.
       clusterRoles.conversation-router-tokenreview = {
         metadata.name = "conversation-router-tokenreview";
         rules = [{
@@ -441,20 +425,12 @@ in
                 ports = [{ containerPort = 8080; name = "agui"; }];
                 env = [
                   { name = "NAMESPACE"; value = cfg.namespace; }
-                  # Route by POD IP, not headless-Service DNS: the router reads status.hostIP
-                  # from the CR and proxies http://<ip>:port. AGENT_HOST_SERVICE is the
-                  # ClusterIP Service selecting the agent-host PODS — the router's FALLBACK for
-                  # non-scoped / unassigned / stale-IP requests (any ready pod). It must select
-                  # the pods, NOT `agent-host` (that fronts the router → a loop). See
-                  # todo/docs/ROLLOUT_DRAIN_AND_POD_IP.md.
+                  # The fallback Service for unassigned requests must select the
+                  # agent-host pods, not the `agent-host` Service that fronts the router.
                   { name = "AGENT_HOST_SERVICE"; value = "agent-host-pods"; }
                   { name = "UPSTREAM_PORT"; value = "8080"; }
                   { name = "LISTEN_ADDR"; value = ":8080"; }
-                  # READ-ONLY handle on the agent_host database (conversation metadata). Same
-                  # AGENT_HOST_DB_* names agent-host reads, but the credentials are the router's
-                  # own `conversation_router` role — granted only SELECT and pinned
-                  # default_transaction_read_only (see modules/postgres.nix readers). Lets the
-                  # router serve the durable conversation list without fanning out to every pod.
+                  # Read-only handle on the agent_host database via the router's own role.
                   { name = "AGENT_HOST_DB_HOST"; value = cfg.postgres.host; }
                   { name = "AGENT_HOST_DB_PORT"; value = toString cfg.postgres.port; }
                   { name = "AGENT_HOST_DB_NAME"; value = "agent_host"; }
@@ -462,11 +438,7 @@ in
                   { name = "AGENT_HOST_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-conversation-router"; key = "password"; }; }
                 ]
                 ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; }
-                # READ-ONLY handle on the webhooks database — the linked-resource rows the sidebar
-                # enriches each conversation with (sources/links). Same conversation_router role
-                # and secret as above, different database. Only when webhooks is enabled (that is
-                # what provisions the webhooks db + the grant); otherwise the router skips
-                # enrichment and returns bare rows.
+                # Read-only handle on the webhooks database for link enrichment.
                 ++ lib.optionals cfg.webhooks.enable [
                   { name = "WEBHOOKS_DB_HOST"; value = cfg.postgres.host; }
                   { name = "WEBHOOKS_DB_PORT"; value = toString cfg.postgres.port; }
@@ -475,28 +447,20 @@ in
                   { name = "WEBHOOKS_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-conversation-router"; key = "password"; }; }
                 ]
                 ++ lib.optional (cfg.webhooks.enable && cfg.postgres.sslmode != null) { name = "WEBHOOKS_DB_SSLMODE"; value = cfg.postgres.sslmode; }
-                # IDENTITY. The router stamps spec.owner on create and scopes the
-                # conversation LIST (?scope=mine) — so it must read identity exactly as the
-                # agent-host does. It previously got no auth env at all, which meant a
-                # deployment with a renamed header or alb-oidc had to set AUTH_USER_HEADER
-                # out of band, and under alb-oidc could not work at all: every browser
-                # caller looked anonymous, and an anonymous caller sees EVERY
-                # conversation. See #527.
+                # The router must read identity exactly as the agent-host does.
                 ++ lib.optional (cfg.auth.mode != "header")
                   { name = "AUTH_MODE"; value = cfg.auth.mode; }
                 ++ lib.optional (cfg.auth.userHeader != "x-auth-user")
                   { name = "AUTH_USER_HEADER"; value = cfg.auth.userHeader; }
                 ++ [
-                  # The SA(s) the router trusts as in-cluster callers (PR #726).
+                  # The SA(s) the router trusts as in-cluster callers.
                   { name = "WEBHOOKS_SERVICE_ACCOUNT";
                     value = lib.concatStringsSep "," (
                       [ "system:serviceaccount:${cfg.namespace}:agent-webhooks"
                         "system:serviceaccount:${cfg.namespace}:agent-host" ]
                       ++ lib.optional cfg.scheduler.enable "system:serviceaccount:${cfg.namespace}:agent-scheduler"
                     ); }
-                  # Audience the callers' projected tokens are minted for. They mount an
-                  # "agent-host" audience token and the router fronts that Service, so the
-                  # same audience verifies here.
+                  # The audience the callers' projected tokens are minted for.
                   { name = "WEBHOOKS_TOKEN_AUDIENCE"; value = "agent-host"; }
                 ];
                 readinessProbe.httpGet = { path = "/healthz"; port = "agui"; };

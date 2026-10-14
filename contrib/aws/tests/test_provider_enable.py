@@ -1,11 +1,4 @@
-"""Finding #3 (HIGH): a configured-but-broken aws_accounts_file must FAIL FAST
-when aws_enabled=True, not silently disable the AWS provider.
-
-Returning {} on a read error makes `enabled = aws_enabled and bool(registry)`
-False even when the operator set aws_enabled=True — the broker boots "healthy"
-and every credential request 503s, indistinguishable from a deliberately-off
-provider. So: explicitly-enabled + unreadable file -> raise (fail fast).
-"""
+"""A configured-but-broken aws_accounts_file must fail fast when aws_enabled=True, not silently disable the provider."""
 
 from __future__ import annotations
 
@@ -27,7 +20,7 @@ def test_unset_file_yields_empty_registry(monkeypatch):
 
 
 def test_enabled_but_unreadable_file_raises(monkeypatch, tmp_path):
-    """aws_enabled=True + a path that can't be opened -> raise (don't mask)."""
+    """aws_enabled=True with a path that cannot be opened raises."""
     _set_settings(monkeypatch, enabled=True, path=str(tmp_path / "does-not-exist.json"))
     with pytest.raises(Exception):
         aws_provider._load_registry()
@@ -42,7 +35,7 @@ def test_enabled_but_malformed_json_raises(monkeypatch, tmp_path):
 
 
 def test_disabled_with_broken_file_degrades_quietly(monkeypatch, tmp_path):
-    """aws_enabled=False: a broken file is fine to ignore (provider stays off)."""
+    """With aws_enabled=False a broken file is ignored and the provider stays off."""
     _set_settings(monkeypatch, enabled=False, path=str(tmp_path / "missing.json"))
     assert aws_provider._load_registry() == {}
 

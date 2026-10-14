@@ -1,11 +1,9 @@
 /**
- * Tier 1 (ui) — sidebar search + provider filter + "Show:" label mode.
+ * Sidebar search, provider filter chips and the "Show:" label mode.
  *
- * Covers the store logic behind the three chat-list features: keyword search
- * (matches title AND linked-resource names), the provider filter chips (multi-
- * select by provider), and the "Show:" label mode (title, or a specific provider's
- * linked-resource name with title fallback). filteredSessions() composes scope +
- * provider + query; sessionLabel() picks title vs the provider's link name.
+ * filteredSessions() composes scope, provider chips and the keyword query (which
+ * matches titles and linked-resource names); sessionLabel() picks the title or a
+ * provider's link name with title fallback.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -21,8 +19,7 @@ import {
 
 beforeEach(() => {
   globalThis.localStorage?.clear?.();
-  // The store is a module singleton; reset the transient view state so filters/query
-  // from a prior test don't leak into the next.
+  // The store is a module singleton, so reset the view state between tests.
   sessionStore.setQuery("");
   sessionStore.clearProviders();
   sessionStore.setLabelMode("title");
@@ -46,13 +43,11 @@ const CONVS = [
 ];
 
 function seed() {
-  // The store boots with a pristine "New chat" that IS current (so it isn't dropped).
-  // Merge the real convs, switch onto one, then re-merge so the untouched placeholder
-  // is dropped as a phantom — leaving exactly our three fixtures.
+  // The store boots with a current placeholder, so merge, switch onto a fixture, then re-merge to drop the placeholder as a phantom.
   sessionStore.mergeFromServer(CONVS);
   sessionStore.switchTo("gh");
   sessionStore.mergeFromServer(CONVS);
-  // 'all' scope so ownership filtering doesn't interfere with these assertions.
+  // 'all' scope so ownership filtering doesn't interfere.
   sessionStore.setScope("all");
 }
 
@@ -143,7 +138,7 @@ describe("Show: label mode (title | provider)", () => {
   it("a provider mode falls back to the title when the row has no such link", () => {
     seed();
     const gh = sessionStore.get().sessions.find((s) => s.id === "gh")!;
-    // gh is a GitHub chat -> under the Slack mode it falls back to its title.
+    // gh has no Slack link, so the Slack mode falls back to its title.
     expect(sessionLabel(gh, "slack")).toBe("Fix flaky broker test");
     const plain = sessionStore.get().sessions.find((s) => s.id === "plain")!;
     expect(sessionLabel(plain, "github")).toBe("Scratch notes");

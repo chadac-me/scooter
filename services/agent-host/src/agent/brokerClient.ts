@@ -1,22 +1,13 @@
 /**
- * The agent-host's server-side broker client — the HTTP plumbing behind the
- * agent-tools (agentTools.ts). A `BrokerClient.call` issues one authenticated
- * request to the broker and returns the RAW upstream outcome ({status, data,
- * raw}) so the tools can echo errors verbatim (the "never hide an error" rule).
- *
- * AUTH: same anchor the approval relay uses (index.ts resolveApprovalForBroker) —
- * `BROKER_URL` + a Bearer token read from `BROKER_TOKEN_PATH` (the agent-host's
- * ServiceAccount token). The token is read per-call (it's rotated on disk), and a
- * MISSING token (ENOENT) is the genuine local/dev case (no auth header, broker
- * may 401 — surfaced verbatim). An unreadable-but-present token is a real error
- * and is thrown, rather than silently downgrading to an unauthenticated call.
+ * The agent-host's server-side broker client. A `BrokerClient.call` issues one
+ * authenticated request to the broker and returns the raw upstream outcome so
+ * callers can echo errors verbatim. Auth is a Bearer token read per call from
+ * `BROKER_TOKEN_PATH` (the agent-host's ServiceAccount token); a missing token is
+ * the local/dev case, while an unreadable one is thrown rather than silently
+ * downgraded to an unauthenticated call.
  */
 
-/** A broker HTTP call bound to a conversation's identity. Returns the raw upstream
- *  outcome so the caller can echo errors faithfully (never hide them).
- *
- *  Declared here rather than in agentTools.ts since #700 moved the provider reply
- *  tools — its only other consumer — into the contribs. */
+/** A broker HTTP call that returns the raw upstream outcome so the caller can echo errors faithfully. */
 export interface BrokerClient {
   call(
     conversationId: string,
@@ -31,17 +22,16 @@ export interface BrokerResponse {
   status: number;
   /** Parsed JSON body when the response was JSON; else undefined. */
   data?: unknown;
-  /** Raw text body (always present) — the verbatim upstream error on failure. */
+  /** Raw text body, always present, carrying the verbatim upstream error on failure. */
   raw: string;
 }
 
 export interface HttpBrokerClientDeps {
-  /** The broker base URL (no trailing slash needed — normalized here). */
+  /** The broker base URL, normalized here. */
   baseUrl: string;
-  /** Path to the agent-host's SA token; a Bearer token is read from it per call.
-   *  Optional — when unset/absent the client sends no auth (local/dev). */
+  /** Path to the agent-host's SA token, read per call; unset means no auth header. */
   tokenPath?: string;
-  /** Injectable for tests. Defaults to global fetch. */
+  /** Injectable fetch for tests. */
   fetchImpl?: typeof fetch;
 }
 
@@ -57,9 +47,8 @@ export function createBrokerClient(deps: HttpBrokerClientDeps): BrokerClient {
       const { readFileSync } = await import("node:fs");
       return { Authorization: `Bearer ${readFileSync(tokenPath, "utf8").trim()}` };
     } catch (e) {
-      // Mirror resolveApprovalForBroker (index.ts): only a not-found token is
-      // the dev case. An unreadable token that SHOULD be there must not silently
-      // downgrade to an unauthenticated call (broker 401 -> silent tool failure).
+      // Only a not-found token is the dev case; an unreadable one must not silently
+      // downgrade to an unauthenticated call.
       if ((e as { code?: string })?.code !== "ENOENT") {
         throw new Error(
           `failed to read broker token at ${tokenPath} (would send an ` +
@@ -67,16 +56,13 @@ export function createBrokerClient(deps: HttpBrokerClientDeps): BrokerClient {
           { cause: e },
         );
       }
-      return {}; /* ENOENT -> no token (local/dev) */
+      return {}; /* no token (local/dev) */
     }
   }
 
   return {
     async call(_conversationId, method, path, body): Promise<BrokerResponse> {
-      // The agent-host calls the broker server-side under its OWN SA identity; the
-      // conversationId is passed through for symmetry/future per-conv scoping but
-      // is not currently sent (the broker trusts the SA token). The URL path is
-      // built by the tool handlers (agentTools.ts).
+      // The broker trusts the SA token, so the conversationId is not sent.
       const headers: Record<string, string> = { ...(await authHeader()) };
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const res = await doFetch(`${base}${path}`, {
@@ -86,8 +72,7 @@ export function createBrokerClient(deps: HttpBrokerClientDeps): BrokerClient {
       });
       const raw = await res.text().catch(() => "");
       let data: unknown;
-      // Parse JSON when the body looks like JSON; else leave undefined (raw still
-      // carries the verbatim body for the error-echo path).
+      // Parse JSON when possible; `raw` still carries the verbatim body either way.
       try {
         data = raw ? JSON.parse(raw) : undefined;
       } catch {

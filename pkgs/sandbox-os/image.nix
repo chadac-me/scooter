@@ -1,77 +1,39 @@
-# NixOS dev-environment sandbox image: a NixOS toplevel -> OCI, booting systemd
-# as PID 1. There is no maintained nixpkgs helper for "NixOS-as-OCI-with-systemd",
-# so this is the hand-rolled recipe (see docs/DEV_ENVIRONMENT_DESIGN.md +
-# the research in memory dev-environment-nixos-config):
-#
-#   - evaluate the shared sandbox-os NixOS config WITH `boot.isContainer = true`
-#     (trims kernel/udev/hardware/boot units, keeps systemd userspace; the init
-#     then lives at ${toplevel}/init);
-#   - build an OCI image whose entrypoint is that init (systemd PID 1):
-#       /sbin/init -> ${toplevel}/init, Cmd = ["/init"];
-#   - set `container=docker` EXPLICITLY (Docker doesn't auto-set it, and systemd
-#     needs it to run the slimmed container boot);
-#   - ship an empty, writable /etc/machine-id so first boot initializes it.
-#
-# `boot.isContainer` lives HERE (not in modules/sandbox-os) on purpose: it removes
-# the kernel/initrd that a nixosTest VM needs, so it's a packaging concern, not a
-# capability. The nixosTests import the shared config without it.
-#
-# Output: { image; toplevel; nixos; }. `image` is a nix2container image (like
-# every other image in this repo), so it pushes to a registry via `.copyTo` and
-# k3s pulls it — no docker-archive tarball special-case.
+# NixOS dev-environment sandbox image: the shared modules/sandbox-os config
+# evaluated with `boot.isContainer = true` and packaged as a nix2container OCI
+# image whose entrypoint boots systemd as PID 1. Container-only packaging concerns
+# (isContainer, the overlay store, the unmanaged /etc/hosts) live here rather than
+# in modules/sandbox-os, which the nixosTests import bare. Output: { image;
+# toplevel; nixos; }.
 
 { pkgs, lib, n2c
 , name ? "agent-sandbox-os"
 , tag ? "latest"
   # Which contribs to ship. Passed in: this tree is vended.
 , deploymentModules ? [ ]
-, extraModules ? [ ]   # extra NixOS config, BOOT ONLY: a self-modify drops it (see below)
-  # Extra NixOS modules as REPO-RELATIVE files ("contrib/aws/sandbox.nix"). Imported
-  # into the booted system AND baked into the re-converge list, so they survive a
-  # self-modify — which `extraModules` cannot, since the pod rebuilds from the
-  # vendored tree and never sees a value threaded in here. Prefer this. Why: PR #717.
+, extraModules ? [ ]   # extra NixOS config for boot only, dropped by a self-modify
+  # Extra NixOS modules as repo-relative files ("contrib/aws/sandbox.nix"), imported
+  # into the booted system and baked into the re-converge list so they survive a
+  # self-modify.
 , extraModuleFiles ? [ ]
-  # The uv-nix uv (patched for Nix): exposed to modules as the `uvNix` module arg so
-  # web-services/marimo.nix can launch marimo under it (science deps import). Optional
-  # so nixosTests importing modules/sandbox-os directly can pass null (marimo falls
-  # back to a plain `marimo` there — see marimo.nix).
+  # The uv-nix uv, exposed as the `uvNix` module arg for web-services/marimo.nix
+  # (null in nixosTests).
 , uvNix ? null
-  # { src; package; } — nix-stubs' source and its built binary. Vendored into the
-  # re-converge modules tree so a self-modify can rebuild the stub overlay in-pod
-  # instead of re-fattening every stubbed tool. Optional: nixosTests that import
-  # modules/sandbox-os bare pass null and simply get real packages.
+  # { src; package; } of nix-stubs, vendored so a self-modify can rebuild the stub
+  # overlay in-pod (null in nixosTests).
 , nixStubs ? null
 }:
 
 let
-  # The nixpkgs SOURCE the in-pod re-converge imports, captured as ONE store
-  # object used on BOTH sides — critical, or the apply fails "path does not
-  # exist" in-pod. `pkgs.path` is subtle: `toString pkgs.path` yields the flake
-  # input's bare `…-source` path (a plain string, NO Nix context), while coercing
-  # `pkgs.path` into a derivation (what `system.extraDependencies = [ pkgs.path ]`
-  # does) re-imports it via builtins.path under a DIFFERENT, content-addressed
-  # `…-source` name. So baking `toString pkgs.path` into the apply script while
-  # shipping the coerced copy ships one path and references another. Pin a single
-  # `builtins.path` derivation and use ITS path verbatim for both the script
-  # (scooterModule.nixpkgs) and the closure (extraDependencies).
+  # The nixpkgs source the in-pod re-converge imports, pinned as one `builtins.path`
+  # derivation used for both the apply script and the closure, since `toString
+  # pkgs.path` and the coerced `pkgs.path` name different store paths.
   nixpkgsSource = builtins.path { path = pkgs.path; name = "source"; };
-  # The bare store-path STRING of that source, CONTEXT-FREE. The refs below are
-  # embedded verbatim into the baked lazy-tool shims + the scooter-apply-module
-  # script. base-config.nix (the runtime re-converge) discards context on the same
-  # value, so these MUST match: if the image kept the store CONTEXT here, its baked
-  # lazy tools would carry `nixpkgsSource` as a build INPUT while a re-converge's
-  # (context-free) would not → different derivations → the first re-converge rebuilds
-  # every lazy tool + system-path from source (the ~10min toolchain refetch this
-  # comment block warns about). The source object is still shipped offline via
-  # `system.extraDependencies` below (where it keeps its context), so the path exists.
+  # The context-free store-path string of that source, matching what base-config.nix
+  # uses at re-converge so the derivations hash identically on both sides.
   nixpkgsSourceStr = builtins.unsafeDiscardStringContext (toString nixpkgsSource);
 
-  # The enabled contribs' sandbox halves, evaluated HERE — the image build — and
-  # nowhere else. modules/sandbox-os used to import a contrib-specific module that
-  # re-derived this list in the pod on every self-modify; now the halves ride the
-  # generic re-converge list below, like any other module layered into the image.
-  # Why: PR #717.
-  # deploymentModules is passed in: this tree is vended.
+  # The enabled contribs' sandbox halves, evaluated only here at image build and
+  # carried by the generic re-converge list below.
   contribSandbox = import ../../contrib/sandbox-modules.nix {
     inherit lib;
     extraModules = deploymentModules;
@@ -83,72 +45,44 @@ let
       ++ map (f: ../../. + "/${f}") extraModuleFiles
       ++ extraModules;
 
-    # …and the same files, repo-relative, so the re-converge replays them from the
-    # vendored tree instead of evaluating the contrib registry with no flake and no
-    # network. A module imported above but missing from this list is dropped by the
-    # first self-modify — that is what this option exists to prevent, and why
-    # `extraModuleFiles` is the arg to reach for over `extraModules`.
+    # The same files repo-relative, so the re-converge replays them from the vendored
+    # tree (a module imported above but missing here is dropped by the first self-modify).
     programs.scooterModule.extraReconvergeModuleFiles =
       contribSandbox.treeRelative ++ extraModuleFiles;
 
-    # The uv-nix uv, for web-services/marimo.nix. Null in nixosTests (marimo.nix
-    # guards on it and falls back to a plain marimo).
+    # The uv-nix uv for web-services/marimo.nix (null in nixosTests).
     _module.args.uvNix = uvNix;
-    # The nix-stubs source+binary, for runtime-converge.nix to vendor (see
-    # runtime-converge/reconverge-inputs.nix).
+    # The nix-stubs source and binary for runtime-converge.nix to vendor.
     _module.args.nixStubs = nixStubs;
 
     # Packaging-only: systemd PID 1 in a container, kernel/boot trimmed.
     boot.isContainer = true;
 
-    # kubelet bind-mounts /etc/hosts and /etc/hostname into the pod, so activation's
-    # setup-etc CANNOT replace them with store symlinks — it errors "could not create
-    # symlink /etc/hosts", which fails switch-to-configuration and makes the FIRST
-    # scooter-rebuild switch report failure (scooter-apply-module infers success from a
-    # failed-unit diff, and the failing switch unit poisons it). kubelet already writes
-    # correct pod entries in both, so stop NixOS managing them. Container-only: lives
-    # HERE, not modules/sandbox-os, because a nixosTest VM has a writable /etc and needs
-    # the managed versions. Why: PR #489.
+    # kubelet bind-mounts /etc/hosts and /etc/hostname, so NixOS must not manage them
+    # or activation fails trying to replace them with store symlinks.
     environment.etc.hosts.enable = false;
     environment.etc.hostname.enable = false;
 
-    # Overlay Nix store ALWAYS ON (the writable-store overlay is the ONE sandbox image now —
-    # the plain read-only-store variant was retired). Without it /nix/store is the read-only
-    # baked image layer, and the sandbox's core operations — the agent's `nix profile install`,
-    # lazy-tool builds, and `scooter-rebuild` re-converge — silently can't write the store. This
-    # lives HERE (the image), NOT in modules/sandbox-os, because nixosTests import that bare
-    # (no baked store to overlay). The upper is a deployer-mounted volume at upperPath (the
-    # provisioner's per-conversation `.scooter-rw` PVC, or a pooled warm volume).
-    # See modules/sandbox-os/overlay-store.nix + todo/docs/WARM_STORE_PVC_MANAGER.md.
+    # The writable overlay Nix store, without which `nix profile install`, lazy-tool
+    # builds and the re-converge cannot write the store (see
+    # modules/sandbox-os/overlay-store.nix).
     programs.overlayStore.enable = true;
 
-    # The pinned nixpkgs the dev-env registry resolves against. MUST be the `path:`
-    # ref of the SAME source the re-converge uses (`pkgs.path`), or the first
-    # re-converge rebuilds system-path and re-fetches the toolchain (~10min)
-    # instead of being a near-noop diff against the baked store.
-    #
-    # The lazy tools no longer read this. They used to resolve `<pin>#uv` at RUNTIME,
-    # which is why the pin string had to be byte-identical on both sides; a nix-stubs
-    # shim carries its recipe in the store and never consults a pin.
+    # The pinned nixpkgs the dev-env registry resolves against, the `path:` ref of the
+    # same source the re-converge uses.
     devEnvNix.nixpkgs = lib.mkForce "path:${nixpkgsSourceStr}";
 
-    # Runtime re-converge: the pod applies a mounted .scooter/module.nix (a NixOS
-    # module that declares its own tools/services, e.g. example-review) via
-    # switch-to-configuration. base-config.nix `import`s this path, so it must be a
-    # BARE store path (no `path:` prefix — that's a flake ref, not importable).
+    # Runtime re-converge; base-config.nix `import`s this path, so it must be a bare
+    # store path rather than a `path:` flake ref.
     programs.scooterModule = {
       enable = lib.mkDefault true;
       nixpkgs = lib.mkForce nixpkgsSourceStr;
     };
-    # Ship the SAME source object the script references (see nixpkgsSource above).
-    # The in-pod re-converge `nix build` imports it — offline, no fetch.
+    # Ship the same source object the script references, so the in-pod build is offline.
     system.extraDependencies = [ nixpkgsSource ];
 
-    # Built-in web services ON by DEFAULT (marimo notebook, ttyd terminal, web
-    # VS Code) — so they're DECLARED + listed in the manifest and startable from the
-    # UI Sandbox tab / `scooter-service` out of the box. Explicit-start is unchanged:
-    # they are NOT wantedBy multi-user.target, so they don't auto-run — the user/agent
-    # starts them on demand. mkDefault so a deployment can still turn one off.
+    # The built-in web services are declared by default so they are startable on
+    # demand, with mkDefault so a deployment can turn one off.
     webServices.marimo.enable = lib.mkDefault true;
     webServices.terminal.enable = lib.mkDefault true;
     webServices.vscode.enable = lib.mkDefault true;
@@ -156,137 +90,45 @@ let
 
   toplevel = nixos.config.system.build.toplevel;
 
-  # The Nix path-registration for the WHOLE system closure. n2c ships the store
-  # *paths* but we need a REAL, registered, read-only Nix store baked in.
+  # The Nix path registration for the whole system closure, for the baked store DB.
   closure = pkgs.closureInfo { rootPaths = [ toplevel ]; };
 
-  # Files baked at the image root (outside the Nix store): the init symlink,
-  # writable machine-id, and the dirs systemd expects to exist at first boot.
-  # (Under dockerTools these last three were created in `extraCommands`; n2c has
-  # no such hook, so they live here in copyToRoot instead. They become tmpfs at
-  # runtime — we only need them to exist so the read-only image layer doesn't
-  # block first boot.)
+  # Files baked at the image root: the init symlink, a writable machine-id, and the
+  # dirs systemd expects to exist at first boot.
   rootExtras = pkgs.runCommand "sandbox-os-root" { } ''
     mkdir -p $out/sbin $out/etc
     ln -s ${toplevel}/init $out/sbin/init
-    # Empty + writable: first boot seeds it (systemd machine-id contract).
+    # Empty and writable so first boot seeds it.
     : > $out/etc/machine-id
-    # systemd writes to these at boot; ship them so the read-only layer is fine.
+    # systemd writes to these at boot.
     mkdir -p $out/var/log $out/run $out/tmp
     chmod 1777 $out/tmp
   '';
 
-  # The baked Nix DB + the FULL /nix/var/nix state layout, at the image root. We do
-  # NOT use n2c's `initializeNixDatabase`: that only bakes db/db.sqlite + gcroots/
-  # docker + .links, but the local-overlay store's read-only lower opens the store
-  # with `root=/`, which expects the COMPLETE state dir the real `nix-store
-  # --load-db` produces (db/{schema,reserved,big-lock}, profiles/, temproots/, …).
-  # With those missing, the in-pod converge failed "database does not exist, and
-  # cannot be created in read-only mode". So reproduce the exact hand-rolled recipe
-  # the dockerTools image used (proven against overlay-store.nix + the MWE): load the
-  # closure into a real DB (which lays down the full state layout) and create the
-  # optimiser's .links dir. See overlay-store.nix + NixOS/nix#11840.
+  # The baked Nix DB and the full /nix/var/nix state layout, produced by a real
+  # `nix-store --load-db` because the overlay store's read-only lower expects the
+  # complete state dir.
   nixDb = pkgs.runCommand "sandbox-os-nixdb" { } ''
     export NIX_STATE_DIR=$out/nix/var/nix
     mkdir -p $out/nix/var/nix $out/nix/store/.links
     ${pkgs.buildPackages.nix}/bin/nix-store --load-db < ${closure}/registration
   '';
 
-  # PID-1 wrapper: make /sys/fs/cgroup writable, THEN exec systemd.
-  #
-  # We run the sandbox NON-privileged under a cgroup-delegating runtime (crun) so it
-  # stays in its OWN private cgroup namespace and can't churn the host cgroup tree
-  # (the node-instability / host-logout bug a privileged container caused). But BOTH
-  # runc and crun mount /sys/fs/cgroup READ-ONLY for a non-privileged container, and
-  # systemd PID 1 needs to CREATE its cgroup subtree there — on a read-only cgroupfs it
-  # exits 255 immediately after "starting systemd...". A privileged container avoided
-  # this only because containerd mounts cgroupfs read-write for privileged pods. This
-  # wrapper replicates just that one effect without full privilege: with CAP_SYS_ADMIN
-  # (granted to the systemd sandbox — also needed by NixOS stage-2's specialfs mounts),
-  # `mount -o remount,rw /sys/fs/cgroup` succeeds. Best-effort: if the cgroupfs is
-  # already rw (e.g. a privileged rollback), the remount is a harmless no-op; we never
-  # fail the boot on it. Then exec the real NixOS stage-2 init as PID 1.
   # ── IMAGE LAYERS ─────────────────────────────────────────────────────────────
-  #
-  # TWO EXPLICIT LAYERS, both with `reproducible = false`, replacing what used to
-  # be `copyToRoot = [ rootExtras nixDb ]; maxLayers = 100;`.
-  #
-  # WHY NOT THE DEFAULT. buildImage's popularity algorithm
-  # (nix2container closure/popularity.go, SortedPathsByPopularity) grouped this
-  # image into 100 layers: 99 holding ONE path each, and a 100th overflow bucket
-  # holding 449 paths and 968 MB -- 81% of the image. Two problems with that
-  # bucket:
-  #
-  #   1. IT IS NOT REPRODUCIBLE ACROSS MACHINES. The same deriver produced two
-  #      different outputs. Fetching the Cachix NAR and diffing it against a
-  #      locally built one: same 85374 bytes, differing in exactly ONE layer --
-  #      that bucket -- whose 449 input store paths were IDENTICAL. Same inputs,
-  #      different tar digest. skopeo then streams layers from /nix/store, hashes
-  #      them, and compares against the digest in the FETCHED manifest, so a
-  #      cache-fetched manifest plus locally built layers fails:
-  #        writing blob: ... Digest did not match,
-  #        expected sha256:fccfa6fa..., got sha256:a3bb524c...
-  #      Three identical retries, two separate runners. (Upstream
-  #      nlewo/nix2container#97 is the same symptom, closed without a root cause;
-  #      #37 and #127 are the same error.)
-  #
-  #   2. It welded ~19 MB of scooter-owned content to ~950 MB of base packages.
-  #      24 of the bucket's 449 paths were scooter-owned; the rest were systemd,
-  #      perl, util-linux, fontconfig.
-  #
-  # `reproducible = false` is what fixes (1), and the flag name is misleading: it
-  # is an assertion ABOUT THE INPUTS, not a property it grants. Upstream's comment
-  # is "Store the layer tar in the derivation. This is useful when the layer
-  # dependencies are not bit reproducible." With it set, the tar is written into
-  # the derivation output and the recorded digest names bytes that exist on disk,
-  # so there is nothing to recompute and nothing to disagree about. Both modes run
-  # the same popularity code, so this does not make the GROUPING deterministic --
-  # it makes the grouping irrelevant, which is why the split below is by hand.
-  #
-  # maxLayers = 1 ON EACH LAYER, deliberately: one tar per layer, no popularity
-  # pass inside it. A layer built with maxLayers > 1 would re-run the very
-  # algorithm this is working around.
-  #
-  # WHAT THIS DOES NOT BUY: smaller pushes. The split was shaped by `git log`
-  #   services/ 381 commits   modules/ 189   pkgs/ 58   lib/ 33
-  #   flake.nix 73            flake.lock 15  contrib/ 20  nix/ 6
-  # on the theory that the base layer would hold still while scooter churned. IT
-  # DOES NOT. Measured by appending one line to services/agent-host/src/index.ts
-  # and rebuilding: BOTH layer digests moved.
-  #
-  # The reason is that sandbox-os-src -- the vendored source tree that
-  # reconverge-inputs.nix assembles for the in-pod re-converge -- is INSIDE
-  # toplevel's closure, pulled in by scooter-apply-module. So a services/ change
-  # rewrites part of the "stable" layer and all ~1176 MB is re-pushed, exactly as
-  # before.
-  #
-  # Splitting for push size would mean getting sandbox-os-src out of toplevel,
-  # which is a change to how the re-converge resolves its inputs, not a layering
-  # change. The two layers below are kept because they are what make the image
-  # pushable at all (point 1 above); treating them as a size optimisation would be
-  # wrong.
+  # Two explicit layers with `reproducible = false` and maxLayers = 1 each, so every
+  # layer tar is stored in its derivation and the popularity-grouped layer digests
+  # cannot differ between machines (which makes a cache-fetched manifest unpushable).
 
-  # STABLE: the whole NixOS system closure. toplevel is what rootExtras's
-  # /sbin/init symlink points at, so naming it here is what puts the ~950 MB of
-  # systemd/perl/util-linux/glibc in this layer instead of alongside the volatile
-  # files.
+  # The whole NixOS system closure.
   baseLayer = n2c.buildLayer {
     deps = [ toplevel ];
     maxLayers = 1;
     reproducible = false;
   };
 
-  # VOLATILE: the image-root files and the baked Nix DB, ~19 MB. These are what
-  # a services/ or modules/ change moves.
-  #
-  # `layers = [ baseLayer ]` is not decoration -- it tells buildLayer to SKIP any
-  # path already in baseLayer, so the system closure is not duplicated here.
-  # `deps = [ initWrapper ]` as well as copyToRoot: the entrypoint in `config`
-  # references initWrapper (and through it busybox), and buildImage puts
-  # config-referenced paths in its implicit customizationLayer -- which never gets
-  # `reproducible` and so stays computed-at-push. Naming them here is what empties
-  # that layer. Verified: without this the image built 2 stored layers plus a 1 MB
-  # COMPUTED one holding exactly busybox + sandbox-init-wrapper.
+  # The image-root files and the baked Nix DB; `layers = [ baseLayer ]` skips paths
+  # already in the base layer, and `deps = [ initWrapper ]` keeps the entrypoint out
+  # of buildImage's implicit computed-at-push customization layer.
   volatileLayer = n2c.buildLayer {
     copyToRoot = [ rootExtras nixDb ];
     deps = [ initWrapper ];
@@ -297,14 +139,9 @@ let
 
   initWrapper = pkgs.writeScript "sandbox-init-wrapper" ''
     #!${pkgs.busybox}/bin/sh
-    # REPORT the remount, do not just attempt it. When this mount fails, systemd
-    # exits 255 the instant it is exec'd and prints NOTHING -- the container log ends
-    # at "starting systemd..." and the exit code is the only evidence. That is the
-    # crash this wrapper exists to prevent, so a silent `2>/dev/null || true` makes
-    # the one failure mode it guards against undiagnosable. Why: PR #703.
-    #
-    # Diagnostics only: still never fails the boot. CapEff is included because the
-    # remount needs CAP_SYS_ADMIN, so its absence is the first thing to rule out.
+    # PID-1 wrapper: a non-privileged container gets a read-only /sys/fs/cgroup, which
+    # makes systemd exit 255 silently, so remount it rw (needs CAP_SYS_ADMIN), report
+    # the outcome without ever failing the boot, then exec the NixOS stage-2 init.
     cg_err=$(${pkgs.util-linux}/bin/mount -o remount,rw /sys/fs/cgroup 2>&1)
     cg_rc=$?
     if [ "$cg_rc" -eq 0 ]; then
@@ -322,44 +159,21 @@ let
   image = n2c.buildImage {
     inherit name tag;
 
-    # rootExtras ships /sbin/init, /etc/machine-id and the writable boot dirs; nixDb
-    # ships the baked Nix DB + full /nix/var/nix state layout. rootExtras's /sbin/init
-    # symlink references ${toplevel}, so the WHOLE NixOS system closure is pulled into
-    # the image without unpacking the system root at /. (We bake the DB ourselves via
-    # nixDb rather than n2c's initializeNixDatabase — see the nixDb comment for why.)
-    # EXPLICIT LAYERS, and copyToRoot DELIBERATELY EMPTY. Both are required; see
-    # baseLayer/volatileLayer above for the why.
-    #
-    # Anything left in copyToRoot goes through buildImage's implicit
-    # customizationLayer, which never receives `reproducible` and so keeps the
-    # recompute-at-push behaviour this split exists to remove. Verified on a
-    # throwaway image: an explicit layer PLUS copyToRoot produced 1 stored tar and
-    # 3 computed layers; moving everything into explicit layers produced 2 stored
-    # and 0 computed.
+    # Explicit layers with copyToRoot left empty, since anything put there
+    # goes through the implicit customization layer that is recomputed at push.
     layers = [ baseLayer volatileLayer ];
 
-    # maxLayers applies to the customizationLayer, which is now empty. Left at 1
-    # rather than 100: with nothing to split there is nothing for the popularity
-    # algorithm to do, and a high value here would only re-invite it if something
-    # is ever added back to copyToRoot.
+    # maxLayers applies to the (empty) customization layer.
     maxLayers = 1;
 
     config = {
-      # Boot systemd PID 1 via the init WRAPPER (remounts /sys/fs/cgroup rw so systemd
-      # can build its cgroup subtree under crun/non-privileged, then execs the NixOS
-      # stage-2 init). See initWrapper. (We also ship a /sbin/init -> stage-2 init
-      # symlink for convention; the entrypoint points at explicit store paths so
-      # nothing can be missing.)
+      # Boot systemd PID 1 via the init wrapper.
       Entrypoint = [ "${initWrapper}" ];
-      # systemd's container detection: set explicitly (Docker won't).
+      # systemd's container detection, which Docker does not set itself.
       Env = [
         "container=docker"
-        # PID 1's PATH — inherited by every kubelet `exec` (non-login `bash -c`,
-        # which sources no profile). Prepend the writable per-user nix profile bin
-        # (HOME is pinned to /workspace) + the setuid wrappers, so a tool from
-        # `nix profile install` is immediately runnable without a login shell.
-        # (sandbox-nix-profile-not-in-path bug: exec'd commands only got the minimal
-        # /run/current-system/sw/bin:/usr/bin:/bin.)
+        # PID 1's PATH is inherited by every kubelet exec, so the per-user nix profile
+        # and the setuid wrappers come first.
         "PATH=/workspace/.nix-profile/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin"
       ];
       # systemd's clean-shutdown signal differs from k8s's default SIGTERM.

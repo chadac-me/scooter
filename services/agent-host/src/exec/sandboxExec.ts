@@ -1,18 +1,9 @@
 /**
- * ExecBackend — services ACP terminal/* and fs/* by running commands in the
- * session's sandbox pod via the **Kubernetes exec API** (pods/exec subresource),
- * the same mechanism upstream examples/sandboxed-tools uses. There is no in-pod
- * HTTP server.
- *
- * Maps (all over `kubectl exec`-equivalent):
- *   ExecBackend.run          -> exec the command, collect stdout/stderr/exit
- *   ExecBackend.readTextFile -> exec `cat <path>` (or tar stream)
- *   ExecBackend.writeTextFile-> exec a writer (tar-in / `tee <path>`)
- *   ExecBackend.spawn        -> exec with streamed stdout
- *
- * `connectSandbox` resolves a SandboxRef to a pod-exec client (needs pods/exec
- * RBAC on the agent-host SA); implemented at the cluster-integration stage. The
- * unit tier injects a fake SandboxApiClient directly.
+ * ExecBackend: services ACP terminal/* and fs/* by running commands in the
+ * session's sandbox pod via the Kubernetes exec API, with no in-pod HTTP server.
+ * `run` execs and collects output, `readTextFile`/`writeTextFile` exec `cat`/`tee`,
+ * and `spawn` execs with streamed output. `connectSandbox` resolves a SandboxRef to
+ * a pod-exec client; the unit tier injects a fake SandboxApiClient directly.
  */
 
 import type {
@@ -27,35 +18,23 @@ import { formatError, logger } from "../log.js";
 
 const log = logger("exec");
 
-/**
- * Thin exec client for one sandbox pod. Production impl wraps the Kubernetes
- * pods/exec API; tests inject a fake.
- */
+/** Thin exec client for one sandbox pod; production wraps pods/exec and tests inject a fake. */
 export interface SandboxApiClient {
   execute(req: ExecRequest, signal?: AbortSignal): Promise<ExecResult>;
   download(path: string): Promise<string>;
   upload(path: string, content: string): Promise<void>;
-  /** Write raw bytes (base64-encoded) to `path`, creating parent dirs. Binary-safe:
-   *  the base64 is streamed over stdin to `base64 -d` (not passed as a shell arg),
-   *  so it survives files larger than the single-argv limit. */
+  /** Write raw bytes (base64-encoded) to `path`, creating parent dirs, streaming the base64 over stdin so it survives the single-argv limit. */
   uploadBinary(path: string, base64: string): Promise<void>;
   /** How the exec stream is reached. "k8s-exec" in production. */
   readonly mode: "k8s-exec" | "direct";
 }
 
-/**
- * Resolves a SandboxRef to a pod-exec client (Kubernetes exec API).
- * Implemented in ./k8sExec.ts; re-exported here as the public seam.
- */
+/** Resolves a SandboxRef to a pod-exec client; implemented in ./k8sExec.ts and re-exported here as the public seam. */
 export { connectSandbox } from "./k8sExec.js";
 
 /** Options for the exec backend. */
 export interface SandboxExecOptions {
-  /** Hard per-command deadline (ms). A running command that exceeds it is aborted
-   *  (WS close → SIGTERM) and returns a timeout message + non-zero exit, so a
-   *  runaway command (e.g. `grep -r / …`) can't deadlock the conversation. Default
-   *  5 min; 0 disables the timeout. Goose's developer `timeout` is only advisory —
-   *  THIS is the enforced one. */
+  /** Hard per-command deadline in ms (default 5 min, 0 disables), after which a running command is aborted with a timeout message and non-zero exit. */
   commandTimeoutMs?: number;
 }
 
@@ -82,32 +61,19 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
     },
 
     spawn(req): TerminalHandle {
-      // The agent-sandbox contract is request/response (/execute), not a live
-      // PTY. We model a terminal as a single execution whose output is streamed
-      // once, then an exit. (A future runtime-side streaming endpoint can make
-      // onOutput truly incremental.)
+      // A terminal is modelled as a single execution whose output is streamed once, then an exit.
       const outputCbs = new Set<(chunk: string) => void>();
-      // A UNIQUE id per spawn. It must NOT derive from the command — the ACP
-      // terminal id keys the client's per-terminal handle/output maps, so two
-      // concurrent identical commands sharing one id would clobber each other
-      // (a later spawn overwrites the earlier handle -> its waitForExit never
-      // reaches the right goose call -> the tool call hangs forever).
+      // A unique id per spawn, never derived from the command, since the ACP terminal id
+      // keys the client's per-terminal maps and two concurrent identical commands must not collide.
       const id = `term-${nextTerminalSeq()}`;
       let exit: { exitCode: number } | undefined;
       let buffered = ""; // retain output for subscribers that attach after exec
 
-      // Cancellation: an AbortController closes the exec's pods/exec WebSocket,
-      // which SIGTERMs the command's shell (a foreground command dies with it).
-      // This covers the common "stop a running command" case. A thorough
-      // process-group reap of orphaned background children (setsid/pkill) is a
-      // follow-up (needs util-linux/procps in the sandbox image + a cluster test).
+      // Aborting closes the exec's pods/exec WebSocket, which SIGTERMs the command's shell.
       const controller = new AbortController();
 
-      // P0 hard timeout: a command that outruns the deadline is aborted so a
-      // runaway (`grep -r / …`, an infinite loop) can't hang goose's
-      // terminal/wait_for_exit and deadlock the whole conversation. `timedOut`
-      // distinguishes it from a user kill()/abort so goose gets an actionable
-      // "timed out" result (not a bare "exec failed").
+      // `timedOut` distinguishes the hard timeout from a user kill so goose gets an
+      // actionable "timed out" result.
       let timedOut = false;
       const timer =
         commandTimeoutMs > 0
@@ -132,14 +98,8 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
         })
         .catch((err): { exitCode: number } => {
           clearTimer();
-          // A failed exec (e.g. transient WS error) must NOT reject — goose's
-          // terminal/wait_for_exit would surface "Internal error" and lose the
-          // run. Surface it as terminal output + a non-zero exit instead. A
-          // TIMEOUT gets a specific message so the agent knows to narrow the
-          // command (not retry it verbatim).
-          // formatError, NOT JSON.stringify: a WebSocket / k8s client error keeps its
-          // useful fields non-enumerable, so stringify renders it as `{}` and the failure
-          // becomes unattributable. This line produced exactly that in production.
+          // A failed exec must not reject (goose's terminal/wait_for_exit would lose the
+          // run), so surface it as terminal output plus a non-zero exit.
           const formatted = formatError(err);
           const detail = String(formatted.message ?? JSON.stringify(formatted));
           log.errorWith("spawn execute failed", err);
@@ -157,15 +117,14 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
         id,
         onOutput(cb) {
           outputCbs.add(cb);
-          // Replay output that already arrived before this subscriber attached
-          // (spawn starts executing immediately; callers subscribe afterwards).
+          // Replay output that arrived before this subscriber attached.
           if (buffered) cb(buffered);
         },
         async waitForExit() {
           return exit ?? (await exitPromise);
         },
         async kill() {
-          // Close this exec's WebSocket → SIGTERM to the command's shell. Idempotent.
+          // Close this exec's WebSocket, which SIGTERMs the command's shell; idempotent.
           clearTimer();
           controller.abort();
         },
@@ -178,8 +137,7 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
   };
 }
 
-// Monotonic terminal-id counter, unique per process. (One agent-host process
-// serves many conversations; a shared counter still yields globally-unique ids.)
+// Monotonic terminal-id counter, unique per process.
 let terminalSeq = 0;
 function nextTerminalSeq(): number {
   return ++terminalSeq;

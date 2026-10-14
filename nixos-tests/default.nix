@@ -1,86 +1,71 @@
-# Collects the dev-environment nixosTests into one attrset, so the flake can
-# expose each as a `checks.<system>.<name>` (run by `nix flake check`).
-#
-# Each test is an independent `pkgs.testers.runNixOSTest` that boots the
-# sandbox-os NixOS config in a QEMU VM with REAL systemd and asserts one
-# capability. This is the FAST, deterministic tier for config correctness;
-# the OCI-packaging + k8s-privilege boot stay in the Tier 2 cluster tests.
-#
-# See docs/DEV_ENVIRONMENT_DESIGN.md.
+# Collects the dev-environment nixosTests into one attrset the flake exposes as
+# `checks.<system>.<name>`. Each test boots the sandbox-os NixOS config in a QEMU
+# VM with real systemd and asserts one capability; OCI packaging and the k8s
+# privileged boot stay in the Tier 2 cluster tests.
 
 { pkgs, lib ? pkgs.lib
-  # The stub overlay the image is built with (flake.nix). stub-tools.nix applies it
-  # to its VM so the test asserts against the same shims production ships.
+  # The stub overlay the image is built with, so stub-tools.nix asserts against the shims production ships.
 , stubOverlay ? null
+  # The BYOC controller for byoc-tunnel.nix, which runs the real binary over real
+  # sockets.
+, byocController ? null
+  # agent-host for byoc-mcp-e2e.nix, the cloud side that replies to a tunnel open.
+, agentHost ? null
 , deploymentModules ? [ ] }:
 
 let
-  # The NixOS module under test — imported by each test's node.
+  # The NixOS module under test.
   sandboxModule = ../modules/sandbox-os;
 
   runTest = path: import path { inherit pkgs lib sandboxModule; };
 in
 {
   dev-env-systemd-boot = runTest ./systemd-boot.nix;
-  # The stubbed tools are shims in a booted system, and the closure carries their
-  # recipes but not their packages. Takes the overlay, so not a plain runTest.
+  # Takes the stub overlay, so not a plain runTest.
   dev-env-stub-tools = import ./stub-tools.nix {
     inherit pkgs lib sandboxModule stubOverlay deploymentModules;
   };
   dev-env-service = runTest ./service.nix;
-  # The webServices option: renders a proxyable unit + discovery manifest,
-  # explicit-start, sub-path serving (the reverse-proxy target contract).
+  # The webServices option: a proxyable unit, a discovery manifest, explicit start and sub-path serving.
   dev-env-web-services = runTest ./web-services.nix;
-  # Web-service PERSISTENCE across a pod recreate/reboot: `scooter-service start`
-  # records the enabled set in /workspace/.scooter/services.json (on the PVC), and
-  # a `scooter-service-restore` boot oneshot re-starts each autostart service — so a
-  # service that was running before hibernate is running again after resume.
+  # Web-service persistence across a pod recreate: the enabled set is recorded on the PVC and restored at boot.
   dev-env-service-persist = runTest ./service-persist.nix;
-  # The mcpServers option: unit + discovery manifest + auto-assigned ports + the
-  # per-boot bearer token, bound to loopback with the firewall left closed.
+  # The mcpServers option: unit, discovery manifest, auto-assigned ports and the per-boot bearer token on loopback.
   dev-env-mcp-servers = runTest ./mcp-servers.nix;
-  # The mcpServers port assertions actually FIRE (a broken predicate is a silent
-  # no-op). Fast pure-eval check, not a VM.
+  # The mcpServers port assertions actually fire (pure eval, no VM).
   dev-env-mcp-server-ports = runTest ./mcp-server-ports.nix;
   dev-env-nix-build-skill = runTest ./nix-build-skill.nix;
-  # SPIKE: runtime re-converge (warm-pod-specializes-on-claim primitive).
+  # Runtime re-converge via a specialisation switch.
   dev-env-switch-specialisation = runTest ./switch-specialisation.nix;
-  # Deployment-injected CLI tool via a mounted .scooter flake dir (the generic
-  # mechanism; a deployment ships its own real tool, e.g. example-review).
+  # A deployment-injected CLI tool via a mounted .scooter flake dir.
   dev-env-injected-tool = runTest ./injected-tool.nix;
-  # A deployment's .scooter/module.nix (a NixOS module declaring its own tools)
-  # applied at runtime via switch-to-configuration. The no-rebuild injection path.
-  # HEAVY (nightly / `full-nixos-tests` label only) — see reconverge-eval below.
+  # A deployment's .scooter/module.nix applied at runtime via switch-to-configuration (heavy; nightly or the `full-nixos-tests` label only).
   dev-env-scooter-module = runTest ./scooter-module.nix;
-  # The eval half of dev-env-scooter-module, cheap enough to run on EVERY PR: the
-  # re-converge expression still evaluates in pure mode and instantiates its toplevel.
-  # The heavy VM test is nightly-only, so without this a pure-eval break is invisible
-  # until a red nightly nobody reads (#609). Fast eval-check, no VM.
+  # The eval half of dev-env-scooter-module, cheap enough to run on every PR.
   dev-env-reconverge-eval = runTest ./reconverge-eval.nix;
-  # The SHELL half of the same guard: the re-converge expression reaches Nix intact
-  # through scooter-apply-module's double-quoted `--expr`. Eval cannot see a quote
-  # bash ate, so this is its own check. Fast build, no VM. Why: PR #696.
+  # The shell half of the same guard: the module list reaches Nix intact through scooter-apply-module (build, no VM).
   dev-env-reconverge-quoting = runTest ./reconverge-quoting.nix;
-  # The deployment-DEFAULT module fetch: broker-modules.nix fetches the broker's
-  # default.tar.gz and imports the modules it contains; fail-safe to no imports when
-  # unconfigured. A fast pure-eval check (not a VM); the in-pod switch is Tier-2.
+  # The deployment-default module fetch from the broker's default.tar.gz (pure eval, no VM).
   dev-env-broker-modules = runTest ./broker-modules.nix;
-  # The agent's OWN locally-authored modules: local-modules.nix enumerates
-  # /etc/scooter/modules (a symlink to the workspace PVC) + imports every *.nix.
-  # Fast pure-eval check; the in-pod edit+switch is Tier-2.
+  # The agent's own locally-authored modules under /etc/scooter/modules (pure eval, no VM).
   dev-env-local-modules = runTest ./local-modules.nix;
-  # The scooter-rebuild entrypoint CLI: module new/list/show/edit/rm on /etc/scooter/modules
-  # + dispatch to switch/status. A real VM boot (CLI + file ops); the full rebuild is Tier-2.
+  # The scooter-rebuild CLI's module subcommands and dispatch, in a real VM boot.
   dev-env-scooter-rebuild = runTest ./scooter-rebuild.nix;
-  # The shared-registry module fetch: registry-modules.nix reads the attached-ids file,
-  # fetches those modules from the broker (?ids=), + imports them. Fast eval-check.
+  # The shared-registry module fetch from the attached-ids file (pure eval, no VM).
   dev-env-registry-modules = runTest ./registry-modules.nix;
-  # The read-only-lower + writable-upper local-overlay Nix store (clean immutable
-  # base + a writable upper for runtime builds). Composes on top of whatever
-  # /nix/store is — baked OCI store, bare EC2/VM host store, or the framework's
-  # own VM overlay — so this VM test exercises the real mechanism.
-  # The journal on the workspace PVC: systemd PID 1 logs ONLY to the journal, and by
-  # default that journal dies with the container it was explaining. Why: PR #703.
+  # The journal on the workspace PVC.
   dev-env-journal-persist = runTest ./journal-persist.nix;
+  # The read-only-lower plus writable-upper local-overlay Nix store.
   dev-env-overlay-store = runTest ./overlay-store.nix;
 }
+# BYOC over real networking in a VM pair, merged conditionally so a caller that
+# imports this without the packages still gets the dev-env suite.
+// lib.optionalAttrs (byocController != null) {
+  byoc-tunnel = import ./byoc-tunnel.nix { inherit pkgs lib byocController; };
+}
+# The full container -> controller -> agent-host -> broker round trip, which needs
+# agent-host and three VMs.
+// lib.optionalAttrs (byocController != null && agentHost != null) {
+  byoc-mcp-e2e = import ./byoc-mcp-e2e.nix { inherit pkgs lib byocController agentHost; };
+}
+

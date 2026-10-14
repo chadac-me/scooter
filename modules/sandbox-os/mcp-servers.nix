@@ -1,17 +1,8 @@
-# mcpServers.<name> — declarative in-pod MCP servers registered with the agent.
-#
-# The option is the single source of truth for BOTH:
-#   1. the systemd unit `mcp-<name>` that runs the server, AND
-#   2. the discovery manifest /run/scooter/mcp-servers.json the agent-host reads
-#      (via exec) to learn <name> -> port, so it can offer the server to the
-#      agent's ACP session as an MCP endpoint.
-#
-# Shaped after web-services.nix (same manifest+unit+CLI+PVC-state pattern), with
-# three deliberate differences, each of which will bite someone who "fixes" it:
-#   - servers bind LOOPBACK and the firewall is NOT opened (see listenAddress);
-#   - units are restartIfChanged = true (see the port option);
-#   - ports are auto-assigned (see basePort).
-# See issue #520.
+# mcpServers.<name>: declarative in-pod MCP servers registered with the agent.
+# One option renders both the systemd unit `mcp-<name>` and the discovery
+# manifest /run/scooter/mcp-servers.json the agent-host reads to learn each
+# server's port. Unlike web-services.nix, servers bind loopback with the firewall
+# closed, units are restartIfChanged, and ports are auto-assigned.
 
 { config, lib, pkgs, ... }:
 
@@ -21,20 +12,11 @@ let
 
   unitName = name: "mcp-${name}";
 
-  # Auto-assigned ports start here. Clear of the built-in web services (marimo
-  # 2718, ttyd 7681, code-server 8443) — the assertions below prove it rather
-  # than trusting this comment.
-  #
-  # A rebuild can REUSE a port for a DIFFERENT server (add a name that sorts first
-  # and every later server shifts up one). Nothing here can prevent that, so the
-  # agent-host must rebuild its agent session whenever the offered set changes —
-  # a session still holding the old URL would reach the new server believing it is
-  # the old one, which fails silently rather than loudly. See PR #521.
+  # Auto-assigned ports start here; a rebuild can hand a port to a different server, so the agent-host rebuilds its session whenever the offered set changes.
   basePort = 9700;
   maxAutoPorts = 100;
 
-  # Names wanting an auto port, in a stable order. Sorted so assignment is a pure
-  # function of the enabled set (not attrset iteration order).
+  # Names wanting an auto port, sorted so assignment is a pure function of the enabled set.
   autoNames = lib.sort (a: b: a < b)
     (lib.attrNames (lib.filterAttrs (_: s: s.port == null) enabled));
 
@@ -48,11 +30,7 @@ let
   webServicePorts = lib.mapAttrsToList (_: s: s.port)
     (lib.filterAttrs (_: s: s.enable) (config.webServices or { }));
 
-  # The discovery manifest (contract with the agent-host McpServerRegistry):
-  #   { "servers": [ { name, displayName, description, port, path, unit, autoStart,
-  #                    listenAddress } ] }
-  # No credential here: the access control is the LOOPBACK BIND, not a secret. Why
-  # not a token: PR #521.
+  # The discovery manifest read by the agent-host McpServerRegistry; access control is the loopback bind, not a credential.
   manifestJSON = builtins.toJSON {
     servers = lib.mapAttrsToList (name: s: {
       inherit name;
@@ -77,9 +55,7 @@ let
       MANIFEST=/run/scooter/mcp-servers.json
       STATE=${stateFile}
 
-      # Persisted autostart set, on the WORKSPACE PVC so it survives suspend/resume:
-      # the pod is recreated on resume, dropping every unit, and the boot restore
-      # oneshot reads this to know what to bring back. Atomic writes (tmp + mv).
+      # Persisted autostart set on the workspace PVC, read by the boot restore oneshot after a resume recreates the pod.
       state_write() {  # ARGS... = jq args then the filter, LAST
         mkdir -p "$(dirname "$STATE")"
         cur='{"enabled":{}}'
@@ -133,10 +109,7 @@ let
       case "$cmd" in
         list|"")
           have_manifest
-          # Build the whole table, then emit ONCE — a downstream `| grep -q` that closes
-          # the pipe early would otherwise SIGPIPE a mid-loop printf, which under
-          # `set -e -o pipefail` fails the command. Here-string, not a pipe, so the loop
-          # runs in THIS shell.
+          # Build the whole table and emit it once, so a downstream reader closing the pipe early cannot SIGPIPE a mid-loop printf.
           out=$(printf '%-16s %-9s %s\n' NAME STATE PORT)
           while IFS=$'\t' read -r n u p; do
             [ -n "$n" ] || continue
@@ -153,8 +126,7 @@ let
           [ -n "$name" ] || { usage; exit 2; }
           u=$(resolve "$name")
           systemctl "$cmd" "$u"
-          # Persist the autostart intent BEFORE reporting; best-effort, since a
-          # state-write failure must not fail the action the caller asked for.
+          # Persist the autostart intent best-effort, so a state-write failure cannot fail the requested action.
           case "$cmd" in
             start|restart) state_enable "$name" || true ;;
             stop)          state_disable "$name" || true ;;
@@ -329,8 +301,7 @@ in
   config = lib.mkIf (enabled != { }) {
     environment.systemPackages = [ scooterMcp ];
 
-    # Only open the firewall for servers deliberately bound off-loopback. A
-    # loopback-bound server needs no rule, and opening one for it would be a lie.
+    # Only servers deliberately bound off-loopback get a firewall rule.
     networking.firewall.allowedTCPPorts =
       lib.mapAttrsToList (name: _: portOf name)
         (lib.filterAttrs (_: s: s.listenAddress != "127.0.0.1") enabled);
@@ -338,9 +309,7 @@ in
     systemd.services = lib.mapAttrs' (name: s:
       let
         port = portOf name;
-        # CONVERSATION_ID/URL reach the pod as CONTAINER env — on PID 1's environ but
-        # NOT in systemd's manager env, so a unit never sees them. Same recovery the
-        # web services do; an MCP server often wants to know its conversation.
+        # CONVERSATION_ID/URL are container env on PID 1's environ, not systemd's manager env, so recover them per unit.
         convEnvScript = pkgs.writeShellScript "mcp-${name}-conv-env" ''
           set -eu
           out="''${RUNTIME_DIRECTORY%%:*}/conv.env"
@@ -350,8 +319,7 @@ in
             if [ -n "$v" ]; then printf '%s=%s\n' "$k" "$v" >> "$out"; fi
           done
         '';
-        # A stdio server is bridged to streamable HTTP by `stdioWrapper`; an http one
-        # runs as given.
+        # A stdio server is bridged to streamable HTTP by `stdioWrapper`; an http one runs as given.
         execStart =
           if s.stdioCommand != null then
             "${pkgs.bash}/bin/bash -c ${lib.escapeShellArg (s.stdioWrapper { inherit (s) listenAddress stdioCommand; inherit port; })}"
@@ -359,14 +327,13 @@ in
             s.command;
         base = {
           description = "MCP server: ${s.displayName}";
-          # TRUE, unlike webServices: a renumbered port must rebind or the manifest
-          # points at a dead port. Why this differs: PR #521.
+          # A renumbered port must rebind or the manifest points at a dead port.
           restartIfChanged = true;
           wantedBy = lib.optionals s.autoStart [ "multi-user.target" ];
           path = [ "/run/current-system/sw" "/run/wrappers" ];
           serviceConfig = {
             RuntimeDirectory = unitName name;
-            # `+` = run as root: /proc/1/environ is 0400 root, unreadable by a DynamicUser.
+            # `+` runs as root because /proc/1/environ is unreadable by a DynamicUser.
             ExecStartPre = "+${convEnvScript}";
             EnvironmentFile = "-/run/${unitName name}/conv.env";
             ExecStart = execStart;
@@ -380,9 +347,7 @@ in
       lib.nameValuePair (unitName name) (lib.recursiveUpdate base s.extraConfig)
     ) enabled
     // {
-      # Restore the servers that were running before the pod was recreated
-      # (suspend/resume). autoStart servers come up via wantedBy; this covers ones
-      # the agent started by hand. Best-effort so one bad server cannot wedge boot.
+      # Restores servers the agent started by hand before a suspend, best-effort so one bad server cannot wedge boot.
       scooter-mcp-restore = {
         description = "restore MCP servers enabled before suspend (from ${stateFile})";
         wantedBy = [ "multi-user.target" ];
@@ -402,8 +367,7 @@ in
 
     assertions = [
       {
-        # The one the review asked for: two EXPLICIT ports can collide with each
-        # other, which the auto-vs-explicit check below would never see.
+        # Two explicit ports can collide with each other, which the web-service check below would not see.
         assertion = lib.length resolvedPorts == lib.length (lib.unique resolvedPorts);
         message =
           "mcpServers: enabled servers must have unique ports (resolved: "

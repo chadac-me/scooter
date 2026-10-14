@@ -1,9 +1,7 @@
 /**
- * Tier 1 contract — the list_models / switch_model MCP tool handlers (model-switch
- * stage 3). The agent lists offered models (with hints + current/default) and
- * switches its own model; validation lives here (an unoffered model is refused with
- * the valid list, never switched blind), the manager does the mechanism. See
- * docs/AGENT_MODEL_SWITCH.md.
+ * The list_models and switch_model MCP tool handlers: the agent lists offered models
+ * with hints and current/default tags and switches its own model, with validation here
+ * (an unoffered model is refused with the valid list) and the mechanism in the manager.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -25,7 +23,7 @@ function wiring(over: Partial<ModelToolsWiring> = {}): { deps: ModelToolsWiring;
     currentModel: () => "sonnet",
     switchModel: vi.fn(async (id: string, model: string) => {
       switched.push([id, model]);
-      return model !== "sonnet"; // "already on sonnet" -> false
+      return model !== "sonnet";
     }),
     ...over,
   };
@@ -40,7 +38,7 @@ describe("list_models", () => {
     expect(text).toContain("fast/cheap — simple edits");
     expect(text).toContain("opus");
     expect(text).toContain("slow/powerful — architecture");
-    // sonnet is both current (fake currentModel) and default.
+    // sonnet is both current and default.
     expect(text).toMatch(/sonnet.*current/);
     expect(text).toMatch(/sonnet.*default/);
   });
@@ -74,7 +72,7 @@ describe("switch_model", () => {
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain("sonnet");
     expect(res.content[0].text).toContain("opus");
-    expect(switched).toEqual([]); // manager never called
+    expect(switched).toEqual([]);
   });
 
   it("errors on an empty model with the available list", async () => {

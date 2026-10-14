@@ -1,9 +1,4 @@
-"""Owner resolution for GitLab: a username -> the email Scooter matches on.
-
-Registered into `scooter_webhooks_lib.identity`, which owns the orchestration
-(#575). This is the provider-specific half that used to sit in the webhooks app's
-`identity_resolve` behind an `if provider == "gitlab"`. Why: PR #580.
-"""
+"""Owner resolution for GitLab: a username to the email Scooter matches on, registered into `scooter_webhooks_lib.identity`."""
 
 from __future__ import annotations
 
@@ -24,8 +19,7 @@ _GITLAB_API = "https://gitlab.com/api/v4"
 
 @register_email_resolver("gitlab")
 async def gitlab_email(username: str) -> str | None:
-    """The email for a GitLab username (GET /users?username=). Needs a token with
-    scope to see the email (admin, or the user's own); often null otherwise."""
+    """The email for a GitLab username (GET /users?username=), which needs a token scoped to see it."""
     token = settings.gitlab_token
     if not token or not username:
         return None

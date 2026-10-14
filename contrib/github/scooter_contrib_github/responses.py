@@ -1,10 +1,4 @@
-"""Post/update comments on GitHub issues and PRs.
-
-Supports two auth modes:
-1. GitHub App (preferred): generates JWT from App ID + private key,
-   then exchanges for an installation access token.
-2. PAT fallback: uses a static github_token.
-"""
+"""Post and update comments on GitHub issues and PRs, authenticating as a GitHub App (preferred) or with a static PAT."""
 
 import logging
 import time
@@ -20,12 +14,11 @@ _C = {"component": "responses.github"}
 
 GITHUB_API = "https://api.github.com"
 
-# Cache installation tokens (they last 1 hour, we refresh at 50 min)
+# Installation tokens last an hour and are refreshed at 50 minutes.
 _token_cache: dict[int, tuple[str, float]] = {}
-_TOKEN_TTL = 50 * 60  # refresh 10 min before expiry
+_TOKEN_TTL = 50 * 60
 
-# Our own App's "<slug>[bot]" login (see get_app_login). "" = looked up but the
-# App has no slug; None = not looked up yet.
+# Our own App's "<slug>[bot]" login: "" when looked up but slugless, None when not looked up yet.
 _app_login: str | None = None
 
 
@@ -34,7 +27,6 @@ def _load_private_key() -> str | None:
     key = settings.github_app_private_key
     if not key:
         return None
-    # If it looks like a file path, read it
     if not key.startswith("-----") and "/" in key:
         try:
             with open(key) as f:
@@ -55,9 +47,9 @@ def _generate_jwt() -> str | None:
         return None
     now = int(time.time())
     payload = {
-        "iat": now - 60,  # issued at (60s in past for clock drift)
-        "exp": now + (10 * 60),  # expires in 10 minutes
-        "iss": settings.github_app_id,  # GitHub App ID (can be client_id)
+        "iat": now - 60,  # 60s in the past for clock drift
+        "exp": now + (9 * 60),  # GitHub caps exp at 10 minutes
+        "iss": settings.github_app_id,
     }
     return jwt.encode(payload, private_key, algorithm="RS256")
 
@@ -95,12 +87,7 @@ async def _get_installation_token(installation_id: int) -> str | None:
 
 
 async def get_app_login() -> str | None:
-    """The `<slug>[bot]` login this platform's comments are authored as.
-
-    One GitHub App backs both the broker (which the agent comments through) and
-    this service, so `GET /app` under our own App JWT names the author to filter.
-    Cached for the process: an App's slug does not change.
-    """
+    """The `<slug>[bot]` login this platform's comments are authored as, cached for the process."""
     global _app_login
     if _app_login is not None:
         return _app_login or None
@@ -121,8 +108,7 @@ async def get_app_login() -> str | None:
             resp.raise_for_status()
             slug = resp.json().get("slug", "")
     except (httpx.HTTPError, ValueError) as e:
-        # Leave the cache unset so a transient failure is retried; the caller
-        # falls back to the bot-author heuristic meanwhile.
+        # The cache stays unset so a transient failure is retried.
         logger.error("get app slug failed", extra={**_C, "error": format_error(e)})
         return None
 
@@ -156,7 +142,6 @@ async def _get_installation_id_for_repo(owner: str, repo: str) -> int | None:
         return None
 
 
-# Cache installation IDs per repo
 _installation_cache: dict[str, int] = {}
 
 
@@ -167,7 +152,6 @@ async def _headers_for_repo(owner: str, repo: str) -> dict[str, str]:
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
-    # Try GitHub App auth first
     if settings.github_app_id and settings.github_app_private_key:
         cache_key = f"{owner}/{repo}"
         installation_id = _installation_cache.get(cache_key)
@@ -182,7 +166,6 @@ async def _headers_for_repo(owner: str, repo: str) -> dict[str, str]:
                 base_headers["Authorization"] = f"Bearer {token}"
                 return base_headers
 
-    # Fallback to PAT
     if settings.github_token:
         base_headers["Authorization"] = f"Bearer {settings.github_token}"
 
@@ -192,7 +175,7 @@ async def _headers_for_repo(owner: str, repo: str) -> dict[str, str]:
 async def post_github_comment(
     owner: str, repo: str, issue_number: int, body: str,
 ) -> int | None:
-    """Post a comment on a GitHub issue or PR. Returns comment ID or None."""
+    """Post a comment on a GitHub issue or PR, returning the comment id or None."""
     try:
         headers = await _headers_for_repo(owner, repo)
         async with httpx.AsyncClient(timeout=15) as client:

@@ -1,12 +1,8 @@
 /**
- * @scooter/marimo-mcp — MCP tools for driving a running marimo notebook from the
- * agent. Registers the notebook tools (execute + list + code-mode cell ops) onto an
- * McpServer; the agent-host mounts them into its MCP endpoint so BOTH providers
- * (goose over HTTP, the claude-code SDK) can call them.
- *
- * The tools target ONE marimo server — the conversation's in-pod marimo at
- * podIP:2718. The agent-host resolves that target per request and builds a client;
- * this module is transport-agnostic (it just needs a MarimoClient).
+ * @scooter/marimo-mcp: MCP tools for driving a running marimo notebook from the agent,
+ * registered onto an McpServer that the agent-host mounts into its MCP endpoint. The
+ * tools target one marimo server, the conversation's in-pod marimo, which the agent-host
+ * resolves per request; this module only needs a MarimoClient.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -16,16 +12,10 @@ import { createMarimoClient, type MarimoClient } from "./client.js";
 import { createMarimoTools, type MarimoToolsOptions } from "./tools.js";
 import type { MarimoTarget } from "./types.js";
 
-/** The one method we call on the MCP server — structural, so a DIFFERENT copy of
- *  @modelcontextprotocol/sdk (the agent-host's, when this package is nix-built with
- *  its own bundled node_modules) still satisfies it. Nominal McpServer identity
- *  wouldn't unify across the two copies; the runtime shape is identical. */
+/** The one method called on the MCP server, structural so a different copy of @modelcontextprotocol/sdk still satisfies it. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface McpServerLike {
-  // Loosely typed on purpose: the concrete SDK's registerTool has stricter generic
-  // config typing that won't assign to a narrower structural signature (config is
-  // contravariant). `any` args let EITHER SDK copy's McpServer satisfy this — we rely
-  // on the per-call Zod schemas + tests for correctness, not this boundary type.
+  // `any` args let either SDK copy's McpServer satisfy this; the per-call Zod schemas and tests carry correctness.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registerTool(...args: any[]): unknown;
 }
@@ -34,33 +24,23 @@ export { createMarimoClient, type MarimoClient } from "./client.js";
 export { createMarimoTools, type MarimoTools, type MarimoToolsOptions, type ToolResult } from "./tools.js";
 export * from "./types.js";
 
-/** Common notebook-selector args (target one of several open notebooks). Both are
- *  optional — with a single open notebook neither is needed. */
+/** Common notebook-selector args, both optional, for targeting one of several open notebooks. */
 const selectorShape = {
   file: z.string().optional().describe("Target a specific notebook by its file path, when several are open."),
   session: z.string().optional().describe("Target a specific marimo session id (advanced; goes stale on browser reconnect — prefer `file`)."),
 };
 
-/**
- * Register the marimo notebook tools on an McpServer. `clientFor` yields the client
- * for the CURRENT conversation's marimo (the agent-host resolves the pod IP fresh
- * each call — the IP changes across suspend/resume). Kept as a thunk so a per-request
- * server can bind the right pod without this module knowing about pods.
- */
+/** Register the marimo notebook tools on an McpServer; `clientFor` is a thunk yielding the current conversation's client, since the pod IP changes across suspend/resume. */
 export function registerMarimoTools(
   server: McpServerLike,
   clientFor: () => MarimoClient | Promise<MarimoClient>,
   optionsFor?: () => MarimoToolsOptions | Promise<MarimoToolsOptions>,
 ): void {
   const tools = async () => createMarimoTools(await clientFor(), optionsFor ? await optionsFor() : {});
-  // The SDK's CallToolResult carries an `[x: string]: unknown` index signature our
-  // ToolResult interface doesn't; the shape is otherwise identical. Cast at the seam
-  // (same as agent-host's mcpServer.ts) rather than polluting ToolResult.
+  // The SDK's CallToolResult carries an index signature ToolResult does not, so cast at the seam.
   type McpResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean; [x: string]: unknown };
   const asMcp = <T>(p: Promise<T>) => p as unknown as Promise<McpResult>;
-  // Register against the structural surface; the zod schemas + handlers are the same
-  // shape either SDK copy expects. Cast the call to sidestep the concrete SDK's
-  // stricter generic inference (which the structural type intentionally loosens).
+  // Cast the call to sidestep the concrete SDK's stricter generic inference.
   const reg = server.registerTool.bind(server) as (n: string, c: unknown, h: unknown) => unknown;
 
   reg(
@@ -142,9 +122,7 @@ export function registerMarimoTools(
   );
 }
 
-/** Convenience: build a standalone McpServer wired to a fixed marimo target. Used
- *  when the target is known up front (tests / a single-notebook context). The
- *  agent-host uses registerMarimoTools with a per-conversation clientFor instead. */
+/** Build a standalone McpServer wired to a fixed marimo target, for when the target is known up front. */
 export function createMarimoMcpServer(target: MarimoTarget): McpServer {
   const server = new McpServer({ name: "marimo", version: "0.0.0" });
   registerMarimoTools(server, () => createMarimoClient(target));

@@ -1,12 +1,8 @@
 /**
- * UI-LAYER REPLAY harness (Tier-1). Replays a REAL recorded AG-UI event log through
- * the ACTUAL UI render path (IntegrityAgent fold + RuntimeProvider's
- * spliceSystemMessages) and asserts the RENDER ORDER — so render-layer bugs are
- * caught even when the server's event log is correct.
- *
- * A transcript replay that stops at the AG-UI log would NOT catch this class of bug:
- * the log is right; the UI splices the chip wrong. Fixtures are the real AG-UI logs
- * recorded from live agents (see todo/docs/AGENT_TRANSCRIPT_HARNESS.md).
+ * UI-layer replay harness: replays a real recorded AG-UI event log through the actual
+ * UI render path (IntegrityAgent fold + RuntimeProvider's spliceSystemMessages) and
+ * asserts the render order, so render-layer bugs are caught even when the server's
+ * event log is correct. Fixtures are real AG-UI logs recorded from live agents.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -24,9 +20,7 @@ function loadAguiLog(name: string): Array<Record<string, unknown>> {
   return JSON.parse(readFileSync(join(HERE, "__fixtures__", name), "utf8"));
 }
 
-/** A fetchImpl that serves a recorded AG-UI log on the integrity stream (each event
- *  wrapped as an integrity frame) + an empty /tail. This drives the REAL
- *  IntegrityAgent fold with real server output. */
+/** A fetchImpl that serves a recorded AG-UI log on the integrity stream plus an empty /tail. */
 function replayFetch(events: Array<Record<string, unknown>>): typeof fetch {
   const frames = [...events.map((event) => ({ kind: "event", event })), { kind: "synced" }];
   const body = frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join("");
@@ -41,9 +35,7 @@ function replayFetch(events: Array<Record<string, unknown>>): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
-/** Fold a recorded AG-UI log through the real IntegrityAgent, then produce the
- *  EXACT render list RuntimeProvider builds (folded messages + spliced system
- *  chips). Returns the render order as a list of {kind, id, ...}. */
+/** Fold a recorded log through the real IntegrityAgent and return the render order RuntimeProvider builds. */
 async function renderFrom(events: Array<Record<string, unknown>>) {
   const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: replayFetch(events), idleReconnectMs: 0 });
   const stop = agent.renderPump();
@@ -56,8 +48,7 @@ async function renderFrom(events: Array<Record<string, unknown>>) {
   const folded = (agent as unknown as { messages: Array<{ id?: string; role?: string; content?: unknown; toolCalls?: unknown[] }> }).messages;
   const spliced = spliceSystemMessages(folded, agent.getSystemMessages()) as Array<{ id?: string; role?: string; content?: unknown; toolCalls?: unknown[] }>;
   agent.dispose();
-  // Flatten to a render-order list: each real message contributes its text and its
-  // tool cards (in that order, as assistant-ui renders); a sys chip is one entry.
+  // Each real message contributes its text then its tool cards; a sys chip is one entry.
   const order: Array<{ kind: "text" | "tool" | "sys"; label: string }> = [];
   for (const m of spliced) {
     const content = m.content;
@@ -81,18 +72,13 @@ describe("UI-layer replay: real AG-UI log render order", () => {
     expect(order.some((o) => o.kind === "sys" && o.label === "subagent")).toBe(true);
   });
 
-  // Was a bug (todo/docs/AGENT_TRANSCRIPT_HARNESS.md): the subagent-result chip
-  // rendered ABOVE the check_subagent tool cards. The base applier folds each tool
-  // call as its OWN top-level message, so a SYSTEM_MESSAGE anchored to the last
-  // TEXT_MESSAGE_START spliced BEFORE the tool cards. Fixed by advancing the anchor
-  // on TOOL_CALL_START too — the chip now anchors to the last tool call. This
-  // render-layer replay (real recording) caught it and now guards the fix.
+  // A SYSTEM_MESSAGE anchors to the last tool call, not the last text message, so the chip follows the cards.
   it("renders the subagent-result chip AFTER the check_subagent tool cards, not above them", async () => {
     const order = await renderFrom(loadAguiLog("claude-subagent-chip-order.json"));
     const lastCheck = order.map((o) => o.kind === "tool" && o.label === "check_subagent").lastIndexOf(true);
     const sysIdx = order.findIndex((o) => o.kind === "sys" && o.label === "subagent");
     expect(lastCheck).toBeGreaterThanOrEqual(0);
-    expect(sysIdx).toBeGreaterThan(lastCheck); // the chip must come AFTER the polls
+    expect(sysIdx).toBeGreaterThan(lastCheck); // the chip must come after the polls
   });
 });
 

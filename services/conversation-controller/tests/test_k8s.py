@@ -1,14 +1,9 @@
-"""Tier 1 — ControllerK8s against a fake apiserver that serves the SAME API versions a real
-cluster does. No cluster.
+"""Tier 1: ControllerK8s against a fake apiserver that serves the same API versions a real
+cluster does, no cluster.
 
-test_loop.py fakes ControllerK8s wholesale, so the one thing it cannot check is what a call
-actually ADDRESSES. That gap is issue #709: the zombie repair's suspend patch went to
-agents.x-k8s.io/v1alpha1, which 404s, and a 404 here reads as "already gone" — so the suspend
-never landed and the repair escalated to deleting the Sandbox CR, cascading the conversation's
-workspace PVC.
-
-The fake apiserver below is version-aware for exactly that reason: an unserved version 404s here
-the way it does on a cluster.
+test_loop.py fakes ControllerK8s wholesale, so it cannot check what a call addresses; the
+version-aware fake here 404s an unserved version the way a cluster does, and a 404 reads as
+"already gone" to ControllerK8s.
 """
 
 import pytest
@@ -21,8 +16,7 @@ from conversation_controller.loop import reconcile_once
 
 NS = "agent-sandbox"
 
-# What a real cluster serves. A request to anything else is a 404 — the same answer the
-# apiserver gives for an unknown apiVersion, and the whole point of this fake.
+# What a real cluster serves; a request to anything else is a 404.
 SERVED = {
     ("agents.x-k8s.io", "v1beta1", "sandboxes"),
     ("scooter.chadac.dev", "v1alpha1", "conversations"),
@@ -34,7 +28,7 @@ def _not_found(what: str) -> client.ApiException:
 
 
 def _merge(dst: dict, patch: dict) -> None:
-    """Strategic-merge-ish: recurse into dicts, overwrite leaves (enough for these specs)."""
+    """Recurse into dicts and overwrite leaves."""
     for k, v in patch.items():
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
             _merge(dst[k], v)
@@ -83,7 +77,7 @@ class FakeCustomObjects:
 class FakeCore:
     def __init__(self, host_pods=None, sandbox_pods=None):
         self._host_pods = host_pods or []
-        self.sandbox_pods = set(sandbox_pods or [])   # pod names backing Sandboxes
+        self.sandbox_pods = set(sandbox_pods or [])
         self.deleted_pods: list[str] = []
         self.deleted_sas: list[str] = []
         self.deleted_cms: list[str] = []
@@ -91,7 +85,6 @@ class FakeCore:
     def list_namespaced_pod(self, namespace, label_selector=None, **_kw):
         if label_selector == k8s_mod.AGENT_HOST_LABEL:
             return client.V1PodList(items=list(self._host_pods))
-        # The sandbox-name selector the pod reclaim uses.
         items = [
             client.V1Pod(metadata=client.V1ObjectMeta(name=n), status=client.V1PodStatus())
             for n in sorted(self.sandbox_pods)
@@ -153,12 +146,9 @@ def cluster(monkeypatch):
     return ControllerK8s(namespace=NS), core, custom
 
 
-# --- the cause: the suspend patch went to a version nothing serves ---------------------
+# --- the suspend patch addresses a served version --------------------------------------
 
 def test_suspend_sandbox_patches_the_api_version_the_cluster_serves(cluster):
-    # The direct reproduction. Pre-fix this patch went to agents.x-k8s.io/v1alpha1, the fake
-    # 404s it exactly as a real apiserver does, ControllerK8s swallows the 404 as "already
-    # gone" — and the Sandbox is still Running afterwards.
     k8s, _core, custom = cluster
     k8s.suspend_sandbox("conv-fv25vg")
     assert custom.sandboxes["conv-fv25vg"]["spec"]["operatingMode"] == "Suspended", (
@@ -167,8 +157,7 @@ def test_suspend_sandbox_patches_the_api_version_the_cluster_serves(cluster):
 
 
 def test_every_sandbox_call_uses_one_api_version(cluster):
-    # The drift that caused #709 was ONE call site left behind by the v1beta1 migration. Pin
-    # the whole surface, not just the one that broke.
+    # Pin the whole Sandbox surface to one version.
     k8s, _core, custom = cluster
     k8s.suspend_sandbox("conv-fv25vg")
     k8s.list_sandboxes()
@@ -178,13 +167,10 @@ def test_every_sandbox_call_uses_one_api_version(cluster):
     assert versions == {k8s_mod.SANDBOX_VERSION}, f"mixed Sandbox API versions: {versions}"
 
 
-# --- the blast radius: the escalation must never destroy the workspace -----------------
+# --- the escalation must never destroy the workspace -----------------------------------
 
 def test_a_zombie_is_repaired_by_the_suspend_and_never_escalates(cluster):
-    # The whole loop over the fake apiserver. Against a cluster that serves v1beta1 the repair
-    # does what it was designed to do: ONE suspend lands, the zombie is gone, and the terminal
-    # escalation — the destructive path — is never reached. Pre-fix this ended with the Sandbox
-    # CR deleted and the workspace with it (#709).
+    # One suspend lands and the destructive escalation is never reached.
     k8s, core, custom = cluster
     for _ in range(50):
         reconcile_once(k8s, cap=10)
@@ -193,15 +179,12 @@ def test_a_zombie_is_repaired_by_the_suspend_and_never_escalates(cluster):
 
 
 def test_zombie_escalation_reclaims_the_pod_but_keeps_the_workspace_pvc(cluster):
-    # The escalation still has to happen for a sandbox that genuinely will not stay down (an
-    # upstream resume race flips it back Running every tick). It must reclaim the leaked POD and
-    # leave the Sandbox CR alone: deleting the CR cascades its volumeClaimTemplate PVCs, which is
-    # how a live conversation's /workspace came back empty (#709).
+    # A sandbox that will not stay down gets its pod reclaimed while the Sandbox CR, and so the
+    # workspace PVC, survives.
     k8s, core, custom = cluster
     for _ in range(50):
         reconcile_once(k8s, cap=10)
-        # The resume race, re-armed each tick. Only if the Sandbox still EXISTS — resurrecting a
-        # deleted one here would hide the very thing this test asserts.
+        # The resume race, re-armed each tick only while the Sandbox still exists.
         if "conv-fv25vg" in custom.sandboxes:
             custom.sandboxes["conv-fv25vg"]["spec"] = {"operatingMode": "Running"}
 
@@ -213,8 +196,6 @@ def test_zombie_escalation_reclaims_the_pod_but_keeps_the_workspace_pvc(cluster)
 
 
 def test_reclaim_sandbox_pod_is_tolerant_of_an_already_gone_pod(cluster):
-    # The pod may have exited between the list and the delete; that is the reclaim's goal, not
-    # an error. (A non-404 still propagates so the loop retries — see _ignore_404.)
     k8s, core, _custom = cluster
     core.sandbox_pods.clear()
     k8s.reclaim_sandbox_pod("conv-fv25vg")
@@ -222,10 +203,34 @@ def test_reclaim_sandbox_pod_is_tolerant_of_an_already_gone_pod(cluster):
 
 
 def test_delete_sandbox_tree_removes_the_sa_and_module_configmap(cluster):
-    # The reaper path (an orphan with no owning Conversation) still deletes everything: the
-    # Sandbox CR cascades pod + PVCs, the SA and module CM do not and are deleted directly.
     k8s, core, custom = cluster
     k8s.delete_sandbox_tree("conv-fv25vg")
     assert "conv-fv25vg" not in custom.sandboxes
     assert core.deleted_sas == ["sandbox-fv25vg"]
     assert core.deleted_cms == ["conv-fv25vg-module"]
+
+
+# --- overlay retention: suspend time and PVC deletion ----------------------------------
+
+
+def test_suspended_seconds_comes_from_the_suspended_condition(monkeypatch):
+    sb = _sandbox_cr("conv-old", mode="Suspended")
+    sb["status"] = {"conditions": [
+        {"type": "Ready", "status": "False", "lastTransitionTime": "2026-01-01T00:00:00Z"},
+        {"type": "Suspended", "status": "True", "lastTransitionTime": "2026-10-01T00:00:00Z"},
+    ]}
+    running = _sandbox_cr("conv-live")
+    custom = FakeCustomObjects(sandboxes=[sb, running], conversations=[])
+    monkeypatch.setattr(k8s_mod, "_apis", lambda: (FakeCore(), custom, None))
+    got = {s.name: s.suspended_seconds for s in ControllerK8s(namespace=NS).list_sandboxes()}
+    assert got["conv-live"] is None
+    assert got["conv-old"] > 86400  # well over a day before now
+
+
+def test_delete_pvc_tolerates_one_already_gone(monkeypatch):
+    class Core(FakeCore):
+        def delete_namespaced_persistent_volume_claim(self, name, namespace, **_kw):
+            raise _not_found(name)
+
+    monkeypatch.setattr(k8s_mod, "_apis", lambda: (Core(), FakeCustomObjects(sandboxes=[], conversations=[]), None))
+    ControllerK8s(namespace=NS).delete_pvc("scooter-rw-conv-gone")  # must not raise

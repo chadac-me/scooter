@@ -1,10 +1,7 @@
 /**
- * Tier 3 E2E — session selector + titles (left sidebar).
- *
- * The UI shows a list of conversations on the left; each has a title (the agent
- * assigns one). You can start a new conversation and switch between them.
- *
- * Uses the dummy-agent stack + the automatic no-error assertion.
+ * Tier 3 E2E for the session selector and titles in the left sidebar: conversations are
+ * listed with agent-assigned titles, and the user can start a new one and switch between
+ * them. Uses the dummy-agent stack and the automatic no-error assertion.
  */
 
 import { test, expect } from "./fixtures.js";
@@ -21,12 +18,11 @@ const sidebar = {
   renameInput: '[data-testid="session-rename-input"]',
 };
 
+/** The open conversation's title in the top header, which mirrors the tab title. */
+const headerTitle = '[data-testid="header-conversation-title"]';
+
 test.describe("session selector & titles", () => {
-  // CLUSTER-HONEST BUDGET (see stop-run.spec.ts:75). Most tests here run TWO
-  // conversations — on the full target that is two sandbox boots (5-25s cold each;
-  // every fake-agent turn execs in the sandbox). Worst case (send → swap → send):
-  // open ~5s + boot A ≤25s + turn + boot B ≤25s + turn + a second turn in A + three
-  // swaps ≈ 100s of expected work against the 60s suite default. 180s with margin.
+  // Most tests here run two conversations, which on the full target is two sandbox boots.
   test.setTimeout(180_000);
 
   test("a started conversation appears in the session list", async ({ chat, page }) => {
@@ -34,9 +30,8 @@ test.describe("session selector & titles", () => {
     await chat.send("hello there");
     await chat.waitForReply(/dummy agent/i);
 
-    // THIS conversation's row is listed. Not an absolute list length: on the full target
-    // the backend is a shared multi-replica fleet, so a row another spec is still settling
-    // inflates the count and the assertion measures fleet hygiene rather than the feature.
+    // This conversation's row is listed; not an absolute length, since the full target's
+    // fleet is shared.
     await expect(
       page.locator(sidebar.item).filter({ hasText: /hello there/i }),
     ).toHaveCount(1, { timeout: 30_000 });
@@ -47,8 +42,8 @@ test.describe("session selector & titles", () => {
     await chat.send("help me refactor the parser");
     await chat.waitForReply(/dummy agent/i);
 
-    // The agent titles the conversation (via a <title> marker it emits first,
-    // extracted server-side). The sidebar reflects it (within the merge poll).
+    // The agent titles the conversation via a <title> marker extracted server-side, and the
+    // sidebar reflects it within the merge poll.
     const title = page.locator(sidebar.title).first();
     await expect(title).not.toHaveText(/new chat/i, { timeout: 30_000 });
     await expect(title).toHaveText(/refactor the parser/i, { timeout: 30_000 });
@@ -57,46 +52,20 @@ test.describe("session selector & titles", () => {
     await expect(chat.assistantMessages().filter({ hasText: /<title>/i })).toHaveCount(0);
   });
 
-  // QUARANTINED — starved-runner timing artifact, NOT a UI logic bug.
-  //
-  // Investigation (this branch) established the root cause: on GitHub's free 2-core
-  // `ubuntu-latest`, the e2e job runs npm install + Vite + agent-host + a headless
-  // Chromium at once, and while the agent turn is still streaming (peak render churn)
-  // the React commit for the rename-open click is delayed past Playwright's action
-  // window — so the input intermittently "never appears" / detaches mid-interaction.
-  // It ONLY reproduces under that CPU starvation (locally it needs ~22 pinned cores;
-  // a normal machine never hits it). The component's state machine is CORRECT: the
-  // deterministic jsdom test `ui/src/Sidebar.rename.test.tsx` exercises the exact
-  // interaction (open + same-tick merge storm) and passes WITH AND WITHOUT the
-  // flushSync hardening — proving there's no logic bug to fix here, only a timing
-  // artifact of the undersized runner.
-  //
-  // Larger GitHub-hosted runners aren't available on this personal-account public
-  // repo (they need an org on Team/Enterprise), so we can't just add cores. The
-  // sidebar robustness fixes on this branch (store-owned editing state, whole-sidebar
-  // merge freeze during rename, memo'd <Sidebar>, flushSync open) shrink the
-  // starvation window but can't guarantee zero on an arbitrarily-starved 2-core box.
-  //
-  // TODO(rename-e2e): re-enable (`test(` not `test.skip(`) once this runs on a
-  // non-CPU-starved runner (a larger hosted runner if the repo moves to an org, or a
-  // self-hosted runner). The jsdom component test is the regression guard until then.
-  // See todo/RENAME_E2E_FLAKE.md.
+  // TODO(rename-e2e): re-enable once this runs on a non-CPU-starved runner; the rename-open
+  // click intermittently misses Playwright's action window on the 2-core hosted runner, and
+  // ui/src/Sidebar.rename.test.tsx guards the interaction until then.
   test.skip("the user can rename a conversation, and the agent can't override it", async ({ chat, page }) => {
     await chat.open();
     await chat.send("help me refactor the parser");
     await chat.waitForReply(/dummy agent/i);
-    // Only one conversation here, so .first() is unambiguous. (Don't filter by title
-    // text: opening the rename swaps the title span for an <input>, so a hasText filter
-    // would stop matching the row the moment editing starts.)
+    // Only one conversation here, so .first() is unambiguous; a hasText filter would stop
+    // matching once the rename swaps the title span for an input.
     const row = page.locator(sidebar.item).first();
     const title = row.locator(sidebar.title);
     await expect(title).toHaveText(/refactor the parser/i, { timeout: 30_000 });
 
-    // Open the rename input, type a name, Enter to commit. This is robust now that the
-    // sidebar no longer re-renders unchanged rows on the merge poll (SessionRow is
-    // memo'd + mergeFromServer reuses the object reference when nothing changed) AND
-    // the input no longer closes on a spurious re-render blur (#230) — so a background
-    // poll can't detach the input or swallow the open-rename click mid-interaction.
+    // Open the rename input, type a name, Enter to commit.
     await row.locator(sidebar.renameButton).click();
     const input = row.locator(sidebar.renameInput);
     await expect(input).toBeVisible();
@@ -104,12 +73,48 @@ test.describe("session selector & titles", () => {
     await input.press("Enter");
     await expect(title).toHaveText(/my pinned project/i, { timeout: 10_000 });
 
-    // The agent titling again on a follow-up turn must NOT override the user's name.
+    // The agent titling again on a follow-up turn must not override the user's name.
     await chat.send("now do the other thing");
     await chat.waitForReply(/dummy agent/i);
     // Give the merge poll a chance to (wrongly) clobber it, then assert it held.
     await expect(title).toHaveText(/my pinned project/i, { timeout: 30_000 });
     await expect(title).not.toHaveText(/refactor/i);
+  });
+
+  test("the tab title and the header carry the conversation's title", async ({ chat, page }) => {
+    await chat.open();
+    // An unnamed conversation is the bare wordmark, with no header title beside it.
+    await expect(page).toHaveTitle("scooter");
+    await expect(page.locator(headerTitle)).toHaveCount(0);
+
+    await chat.send("help me refactor the parser");
+    await chat.waitForReply(/dummy agent/i);
+
+    await expect(page.locator(headerTitle)).toHaveText(/refactor the parser/i, { timeout: 30_000 });
+    await expect(page).toHaveTitle(/^scooter - .*refactor the parser/i, { timeout: 30_000 });
+  });
+
+  test("a bare URL opens a NEW conversation, while ?thread= still restores one", async ({ chat, page }) => {
+    await chat.open();
+    await chat.send("earlier conversation marker");
+    await chat.waitForReply(/dummy agent/i);
+
+    // A reload keeps ?thread=, so it restores the conversation it was showing.
+    await page.reload();
+    await expect(chat.input()).toBeVisible({ timeout: 20_000 });
+    await expect(chat.userMessages().filter({ hasText: /earlier conversation marker/i })).toHaveCount(
+      1,
+      { timeout: 30_000 },
+    );
+
+    // The bare root opens an empty conversation, not the last one.
+    await page.goto("/");
+    await expect(chat.input()).toBeVisible({ timeout: 20_000 });
+    await expect(
+      page.locator(sidebar.item).filter({ hasText: /earlier conversation marker/i }),
+    ).toHaveCount(1, { timeout: 30_000 });
+    await expect(chat.userMessages()).toHaveCount(0);
+    await expect(page).toHaveTitle("scooter");
   });
 
   test("the user can star and unstar a conversation", async ({ chat, page }) => {
@@ -135,9 +140,8 @@ test.describe("session selector & titles", () => {
     await chat.send("second conversation");
     await chat.waitForReply(/dummy agent/i);
 
-    // BOTH of this test's conversations are listed as separate rows — which is what
-    // "new-session starts a FRESH conversation" means. Pinned by their own text rather
-    // than an absolute count, which a settling row from another spec inflates.
+    // Both of this test's conversations are listed as separate rows, pinned by their own
+    // text rather than an absolute count.
     await expect(
       page.locator(sidebar.item).filter({ hasText: /first conversation/i }),
     ).toHaveCount(1, { timeout: 30_000 });
@@ -154,33 +158,26 @@ test.describe("session selector & titles", () => {
     await chat.send("delete this one");
     await chat.waitForReply(/dummy agent/i);
 
-    // Assert on THIS test's own rows, not an absolute list length. On the full target the
-    // backend is a shared multi-replica fleet, so a conversation another spec is still
-    // settling can inflate the count — "Expected 2, Received 3" for the
-    // full 15s with both of this test's rows present and correct. The property under test
-    // is "the deleted conversation's row goes away, the other one stays", which the
-    // relative assertions below prove without asserting fleet hygiene.
+    // Assert on this test's own rows, not an absolute list length, since the full target's
+    // fleet is shared.
     const keepRow = page.locator(sidebar.item).filter({ hasText: /keep this one/i });
     const deleteRow = page.locator(sidebar.item).filter({ hasText: /delete this one/i });
     await expect(keepRow).toHaveCount(1, { timeout: 30_000 });
     await expect(deleteRow).toHaveCount(1, { timeout: 30_000 });
 
-    // The row's disappearance is OPTIMISTIC — it clears whether or not the server was
-    // reached — so capture the server id first and check the deletion actually landed.
-    // Without this the test passes on a DELETE that 404s, leaving the sandbox running.
-    // Why: PR #501.
+    // The row's disappearance is optimistic, so capture the server id first and check the
+    // deletion actually landed.
     const deletedId = await deleteRow.first().getAttribute("data-conversation-id");
     expect(deletedId, "the row must carry the server id before we delete it").toBeTruthy();
 
-    // Delete now shows a confirm dialog (universal) — accept it.
+    // Delete shows a confirm dialog; accept it.
     page.on("dialog", (d) => d.accept());
     await deleteRow.first().locator(sidebar.deleteButton).click();
-    // 30s, not 10: on the full target the DELETE also tears down the conversation's
-    // sandbox pod before the server acks and the row clears.
+    // On the full target the DELETE also tears down the sandbox pod before the row clears.
     await expect(deleteRow).toHaveCount(0, { timeout: 30_000 });
-    // The OTHER conversation is untouched — a delete that took the wrong row would fail here.
+    // The other conversation is untouched.
     await expect(keepRow).toHaveCount(1);
-    // …and the SERVER agrees it is gone (the sandbox was actually torn down).
+    // The server agrees it is gone.
     await expect
       .poll(
         async () =>
@@ -200,8 +197,7 @@ test.describe("session selector & titles", () => {
     await chat.send("beta conversation");
     await chat.waitForReply(/dummy agent/i);
 
-    // While on beta, beta is shown and alpha is NOT (a broken swap leaves the
-    // old thread's messages on screen).
+    // While on beta, beta is shown and alpha is not.
     await expect(chat.userMessages().filter({ hasText: /beta conversation/i })).toHaveCount(1, {
       timeout: 30_000,
     });
@@ -236,10 +232,8 @@ test.describe("session selector & titles", () => {
     // The current (doomed) conversation's message is on screen.
     await expect(chat.userMessages().filter({ hasText: /doomed conversation/i })).toHaveCount(1);
 
-    // Delete the CURRENT conversation. deleteSession selects a remaining one,
-    // so the view must swap to the survivor — the doomed message must vanish
-    // and the survivor's message must appear (the "close is a no-op" bug).
-    page.on("dialog", (d) => d.accept()); // accept the universal delete confirm
+    // Deleting the current conversation selects a survivor, so the view must swap to it.
+    page.on("dialog", (d) => d.accept()); // accept the delete confirm
     await page
       .locator(sidebar.item)
       .filter({ hasText: /doomed/i })
@@ -247,10 +241,8 @@ test.describe("session selector & titles", () => {
       .locator(sidebar.deleteButton)
       .click();
 
-    // 30s, not 10: on the full target the DELETE also tears down the conversation's
-    // sandbox pod before the server acks and the row clears. Assert the DOOMED row went
-    // away and the survivor stayed — the property under test — rather than a fleet-wide
-    // count.
+    // On the full target the DELETE also tears down the sandbox pod; assert the doomed row
+    // went away and the survivor stayed, not a fleet-wide count.
     await expect(page.locator(sidebar.item).filter({ hasText: /doomed/i })).toHaveCount(0, {
       timeout: 30_000,
     });
@@ -269,8 +261,7 @@ test.describe("session selector & titles", () => {
     chat,
     page,
   }) => {
-    // Distinct, non-overlapping message texts so substring (`hasText`) matchers
-    // are unambiguous (e.g. "alpha-one" is not a substring of "alpha-two").
+    // Distinct, non-overlapping message texts so `hasText` matchers are unambiguous.
     await chat.open();
     // Conversation A.
     await chat.send("alpha-one");
@@ -287,15 +278,14 @@ test.describe("session selector & titles", () => {
       timeout: 30_000,
     });
 
-    // Back to A: its message must still be there (the reported resume bug —
-    // sending in B must not lose A's messages).
+    // Back to A: its message must still be there.
     await page.locator(sidebar.item).filter({ hasText: /alpha-one/i }).first().click();
     await expect(chat.userMessages().filter({ hasText: /alpha-one/i })).toHaveCount(1, {
       timeout: 30_000,
     });
     await expect(chat.userMessages().filter({ hasText: /bravo-/i })).toHaveCount(0);
 
-    // Send a SECOND message in A; both A messages present, B's still absent.
+    // Send a second message in A; both A messages present, B's still absent.
     await chat.send("alpha-two");
     await chat.waitForReply(/dummy agent/i);
     await expect(chat.userMessages().filter({ hasText: /alpha-one/i })).toHaveCount(1);
@@ -323,8 +313,7 @@ test.describe("session selector & titles", () => {
     await expect(one).toHaveCount(1, { timeout: 30_000 });
     await expect(two).toHaveCount(1, { timeout: 30_000 });
 
-    // Refresh: the sidebar must repopulate from the server (not reset to one
-    // fresh in-memory session), so all conversations remain available.
+    // After a refresh the sidebar must repopulate from the server.
     await page.reload();
     await expect(chat.input()).toBeVisible({ timeout: 20_000 });
     await expect(one).toHaveCount(1, { timeout: 30_000 });
@@ -335,16 +324,8 @@ test.describe("session selector & titles", () => {
 
 });
 
-// FAST ONLY. This test seeds conversations through POST /conversations and never sends a
-// prompt to them, then asserts a fresh browser lists them. On the full target that does not
-// hold: the sidebar reads the router's AGGREGATE over the READY agent-host pods, and a
-// conversation created by the API alone has no run and no assignment yet, so it is not
-// reliably served by any pod the aggregate polls. Verified on CI — a `?scope=all` read (which
-// bypasses the mine/all owner filter entirely) still returned the seeds' absence for a full
-// 60s while every other spec in this file passed, so it is the propagation of an unprompted
-// conversation, not a scope or timing budget. Asserting it on the cluster would make the spec
-// a proxy for that gap rather than for "a fresh visit is populated from the server", which is
-// what it exists to prove and which the fast stack proves deterministically.
+// Fast only: an API-seeded conversation with no run has no assignment yet, so the full
+// target's multi-pod aggregate does not reliably serve it.
 fastOnly("an API-seeded conversation with no run is not served by the multi-pod aggregate")(
   "session selector & titles — fresh first visit",
   () => {
@@ -354,9 +335,7 @@ fastOnly("an API-seeded conversation with no run is not served by the multi-pod 
     request,
     baseURL,
   }) => {
-    // Seed conversations on the SERVER directly (no UI), as if a previous
-    // user/session had created them. The server assigns the ids — the caller does not
-    // pick them — and is the source of truth; a brand-new browser visit must show them.
+    // Seed conversations on the server directly, as if a previous session had created them.
     const base = baseURL ?? "http://localhost:5173";
     const r1 = await request.post(`${base}/conversations`, {
       data: { title: "Seeded session one" },
@@ -366,8 +345,8 @@ fastOnly("an API-seeded conversation with no run is not served by the multi-pod 
     });
     expect(r1.ok() && r2.ok(), "seeding /conversations failed").toBeTruthy();
 
-    // Confirm the server actually retained both seeds before loading the page, so a
-    // failure below is about the SIDEBAR rather than about the seeding.
+    // Confirm the server retained both seeds before loading the page, so a failure below is
+    // about the sidebar.
     await expect
       .poll(
         async () => {
@@ -380,7 +359,7 @@ fastOnly("an API-seeded conversation with no run is not served by the multi-pod 
       )
       .toBe(2);
 
-    // First visit with NO carried-over local state — a fresh page load.
+    // First visit with no carried-over local state.
     await chat.open();
 
     // The sidebar must be populated from the server on first visit.

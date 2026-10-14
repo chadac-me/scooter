@@ -1,10 +1,7 @@
 /**
- * Local exec backend — runs commands in the agent-host process (no cluster).
- *
- * Used in FAKE mode only, so the dummy agent's real tool calls (ACP
- * createTerminal -> bridge -> ExecBackend) exercise the full chain end to end
- * without a sandbox pod. Implements the SandboxApiClient seam the same way the
- * K8s exec backend does; commands run as local subprocesses.
+ * Local exec backend for fake mode: implements the SandboxApiClient seam with local
+ * subprocesses so the fake agent's real tool calls exercise the full chain without
+ * a sandbox pod.
  */
 
 import { spawn } from "node:child_process";
@@ -19,10 +16,7 @@ export function createLocalSandboxApiClient(): SandboxApiClient {
 
   const run = (req: ExecRequest, signal?: AbortSignal): Promise<ExecResult> =>
     new Promise((resolve) => {
-      // The ACP client maps the agent's cwd to the sandbox's /workspace, which
-      // does NOT exist on the local agent-host filesystem in fake mode — spawn
-      // would fail with ENOENT on the cwd. Fall back to a real, writable dir so
-      // the fake exec chain still runs the command.
+      // The sandbox's /workspace does not exist locally, so fall back to a real writable dir.
       const cwd = req.cwd && existsSync(req.cwd) ? req.cwd : tmpdir();
       if (signal?.aborted) {
         resolve({ stdout: "", stderr: "aborted", exitCode: 130 });
@@ -33,8 +27,7 @@ export function createLocalSandboxApiClient(): SandboxApiClient {
         env: { ...process.env, ...req.env },
         shell: false,
       });
-      // Cancel kills the child (SIGTERM, then SIGKILL if it lingers) — the
-      // fake-mode equivalent of closing the k8s exec WebSocket.
+      // Cancel kills the child with SIGTERM, then SIGKILL if it lingers.
       const onAbort = () => {
         child.kill("SIGTERM");
         setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 500);
@@ -63,7 +56,7 @@ export function createLocalSandboxApiClient(): SandboxApiClient {
       files.set(path, content);
     },
     async uploadBinary(path, base64) {
-      // Fake mode: decode + store so a later download round-trips the bytes.
+      // Decode and store so a later download round-trips the bytes.
       files.set(path, Buffer.from(base64, "base64").toString("binary"));
     },
   };

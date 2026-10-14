@@ -1,15 +1,9 @@
 /**
- * One-shot backfill: conversation event logs from the NFS mirror into Postgres.
- *
- * Runs ONCE before the cutover, from a Job that mounts the mirror read-only.
- * The mirror is the only copy of any history Postgres does not have yet, so
- * `historyMirror.retainForMigration` must be true until this has reported every
- * conversation loaded — see modules/conversation-controller.nix.
- *
- * VERIFIES rather than assumes. A backfill that loads 127 of 128 conversations
- * and exits 0 is the failure this is written to prevent (see the agent_host
- * empty-database incident: a migrator that skipped a database and still printed
- * "all migrations applied").
+ * One-shot backfill of conversation event logs from the NFS mirror into Postgres, run
+ * from a Job that mounts the mirror read-only. The mirror is the only copy of any history
+ * Postgres does not have yet, so `historyMirror.retainForMigration` must stay true until
+ * this has reported every conversation loaded. It verifies rather than assumes: a backfill
+ * that loads 127 of 128 conversations must not exit 0.
  */
 
 import { readdir, readFile } from "node:fs/promises";
@@ -29,16 +23,15 @@ export interface ConversationReport {
   conversationId: string;
   /** Lines in the file (non-empty). */
   lines: number;
-  /** Rows the backfill wrote. Must equal `lines`. */
+  /** Rows the backfill wrote; must equal `lines`. */
   rows: number;
-  /** Chain recomputed from the FILE, independently of the writer. */
+  /** Chain recomputed from the file, independently of the writer. */
   expectedChecksum: string;
-  /** Chain the backfill reported. Must equal `expectedChecksum`. */
+  /** Chain the backfill reported; must equal `expectedChecksum`. */
   actualChecksum: string;
   /**
-   * Events whose `ts` precedes their predecessor's — a restart seam. The file
-   * store rendered these in ts order; Postgres renders them in append order.
-   * Reported rather than silently reordered, so the cost is visible.
+   * Events whose `ts` precedes their predecessor's (a restart seam), reported rather than
+   * silently reordered.
    */
   seams: number;
   ok: boolean;
@@ -47,12 +40,12 @@ export interface ConversationReport {
 
 export interface BackfillReport {
   conversations: ConversationReport[];
-  /** True only if EVERY conversation verified. The Job's exit code. */
+  /** True only if every conversation verified; the Job's exit code. */
   ok: boolean;
 }
 
-/** Parse a log, skipping blank lines. Throws on a malformed line — a log we
- *  cannot parse must fail loudly, not load partially. */
+/** Parse a log, skipping blank lines; throws on a malformed line so a log we cannot parse fails
+ *  loudly. */
 export function parseLog(data: string): AguiEvent[] {
   return data
     .split("\n")
@@ -117,9 +110,8 @@ export async function backfillAll(db: NodePgDatabase, mirrorRoot: string): Promi
         ok,
       });
     } catch (e) {
-      // ENOENT (a conversation dir with no log) is NOT ok — it means the
-      // mirror has a conversation whose history we cannot migrate, and the
-      // operator must see it before the volume is reclaimed.
+      // ENOENT (a conversation dir with no log) is not ok: the operator must see a history that
+      // cannot be migrated before the volume is reclaimed.
       conversations.push({
         conversationId: id,
         lines: 0,
@@ -139,8 +131,8 @@ export async function backfillAll(db: NodePgDatabase, mirrorRoot: string): Promi
     conversations: conversations.length,
     events: conversations.reduce((n, c) => n + c.rows, 0),
     failed: conversations.filter((c) => !c.ok).length,
-    // Loud on purpose: these render in append order after the cutover, where
-    // the file store rendered them in ts order.
+    // These render in append order after the cutover, where the file store rendered them in ts
+    // order.
     conversations_with_restart_seams: seamed.length,
     ok: report.ok,
   });

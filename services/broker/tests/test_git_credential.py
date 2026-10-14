@@ -1,11 +1,4 @@
-"""Unit test for the git-credential transport, via the test provider.
-
-Proves: an authenticated caller hitting /test/git-credentials gets back the
-git credential blob (protocol/host/username/password) the in-pod
-`git-credential-broker` helper turns into git creds. Auth is mocked here (a fake
-identity); the real SA-token/TokenReview path + a live `git clone` are exercised
-in the cluster e2e.
-"""
+"""The git-credential transport via the test provider, with auth mocked."""
 
 from __future__ import annotations
 
@@ -51,17 +44,14 @@ def test_git_credentials_returns_the_credential_blob():
 
 
 def test_git_credentials_requires_auth():
-    # No dependency override -> the real authenticate runs and rejects a request
-    # with no/invalid SA token.
+    # Without the dependency override the real authenticate runs.
     app = create_app()
     resp = TestClient(app).get("/test/git-credentials")
     assert resp.status_code in (401, 403)
 
 
 def test_test_provider_mounts_git_credentials():
-    # Assert the route is MOUNTED by hitting it (not by introspecting app.routes —
-    # newer Starlette's `_IncludedRouter` wrapper exposes no readable path). Anything
-    # but a 404 means the route is registered.
+    # Asserted by hitting the route, since app.routes keeps an included router opaque.
     app = create_app()
     resp = TestClient(app).get("/test/git-credentials")
     assert resp.status_code != 404

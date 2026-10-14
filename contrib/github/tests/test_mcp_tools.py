@@ -1,9 +1,4 @@
-"""GitHub's agent tool (issue #700).
-
-Ported from services/agent-host/test/contract/agentTools.spec.ts with the code. A
-handler is a plain async function over a ToolContext, so these need no broker, no HTTP
-and no Kubernetes — fakes for `upstream` and `links` are enough.
-"""
+"""GitHub's agent tool, tested as a plain async function over a ToolContext with fakes for `upstream` and `links`."""
 
 from __future__ import annotations
 
@@ -71,8 +66,7 @@ async def test_the_gate_OPENS_on_a_structured_ref():
 
 
 async def test_the_gate_OPENS_on_a_URL_ONLY_link():
-    """Not an edge case: a link posted through the agent-host API (the broker's
-    auto-link injector, `link add`) carries only url+title, which is most real rows."""
+    """A link posted through the agent-host API carries only url+title."""
     ctx = _ctx(links=[_link(url="https://github.com/o/r/pull/7")])
     assert await gate_for("github_comment")(ctx) is True
 
@@ -80,9 +74,7 @@ async def test_the_gate_OPENS_on_a_URL_ONLY_link():
 # --- target resolution ------------------------------------------------------------
 
 async def test_an_INCOMPLETE_ref_falls_back_to_the_url_of_the_SAME_link():
-    """Completeness is per link: a ref missing `number` is abandoned WHOLE, and the
-    URL of that link is parsed whole. Mixing them produced an owner from one repo and a
-    number from another — a comment on an unrelated PR."""
+    """A ref missing `number` is abandoned whole and the same link's URL is parsed whole."""
     ctx = _ctx(links=[_link(ref={"owner": "wrong", "repo": "wrong"}, url="https://github.com/right/repo/pull/9")])
     t = await tools.github_target(ctx)
     assert (t.owner, t.repo, t.number) == ("right", "repo", 9)
@@ -128,14 +120,12 @@ def _graphql(resolved: bool, comment_id: int = 55):
 
 
 async def test_a_reply_to_a_RESOLVED_thread_is_refused():
-    """GitHub sends NO webhook when a human resolves a thread, so a reply requested
-    minutes ago can land on a closed one — which reads as noise on the PR."""
+    """GitHub sends no webhook when a human resolves a thread, so a late reply could land on a closed one."""
     ctx = _ctx(links=[_link(ref={"owner": "o", "repo": "r", "number": 7})],
                responses=[_graphql(True), httpx.Response(201, json={})])
     res = await tools.github_comment(body="hi", in_reply_to=55, ctx=ctx)
     assert res.is_error is True
     assert "RESOLVED" in res.text
-    # and it must NOT have posted
     assert all("replies" not in c["path"] for c in ctx.upstream.calls)
 
 
@@ -148,7 +138,7 @@ async def test_a_reply_to_an_UNRESOLVED_thread_posts_to_the_replies_endpoint():
 
 
 async def test_the_guard_FAILS_OPEN_on_a_non_2xx_graphql_response():
-    """A missed reply is worse than a stale one: the human asked for it."""
+    """A missed reply is worse than a stale one."""
     ctx = _ctx(links=[_link(ref={"owner": "o", "repo": "r", "number": 7})],
                responses=[httpx.Response(500, text="boom"), httpx.Response(201, json={})])
     res = await tools.github_comment(body="hi", in_reply_to=55, ctx=ctx)
@@ -163,7 +153,7 @@ async def test_the_guard_FAILS_OPEN_when_the_thread_is_not_found():
 
 
 async def test_no_graphql_check_when_not_replying_in_a_thread():
-    """A PR-level comment needs no resolution check — one fewer API call per comment."""
+    """A PR-level comment needs no resolution check."""
     ctx = _ctx(links=[_link(ref={"owner": "o", "repo": "r", "number": 7})])
     await tools.github_comment(body="hi", ctx=ctx)
     assert all(c["path"] != "graphql" for c in ctx.upstream.calls)
@@ -174,11 +164,10 @@ async def test_ctx_is_not_exposed_to_the_model():
         assert "ctx" not in tool.parameters.get("properties", {}), tool.name
 
 
-# --- the conversation_map fallback (issue #700) ------------------------------------
+# --- the conversation_map fallback ------------------------------------
 
 async def test_a_SHORT_FORM_mapping_row_resolves():
-    """The broker appends conversation_map rows as links carrying the raw resource_id
-    (`o/r#7`) in `url`. One parser call covers that and an html_url."""
+    """The broker appends conversation_map rows as links carrying the raw resource_id in `url`."""
     ctx = _ctx(links=[_link(url="o/r#7")])
     t = await tools.github_target(ctx)
     assert (t.owner, t.repo, t.number) == ("o", "r", 7)

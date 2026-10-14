@@ -1,6 +1,4 @@
-"""Tier 1 — Config.from_env, esp. the pool version-key derivation. The controller must
-key the pool by the SAME tag the provisioner claims by, derived from SANDBOX_IMAGE — so a
-deploy that rewrites …:latest → …:git-<sha> can't split them (the tag-mismatch bug)."""
+"""Tier 1: Config.from_env, where the pool version key is derived from the same SANDBOX_IMAGE ref the provisioner keys on."""
 
 import os
 from contextlib import contextmanager
@@ -26,7 +24,7 @@ def env(**kv):
 
 
 def test_tag_derived_from_sandbox_image_ref():
-    # The realistic deploy case: SANDBOX_IMAGE carries a registry :port AND a git-sha tag.
+    # SANDBOX_IMAGE carries a registry port and a git-sha tag.
     with env(SANDBOX_IMAGE="localhost:5000/agent-sandbox-os:scooter-git-abc123", SANDBOX_IMAGE_TAG=None):
         cfg = Config.from_env()
     assert cfg.current_image_tag == "scooter-git-abc123"

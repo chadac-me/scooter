@@ -92,12 +92,11 @@ import { formatError, logger, type Logger } from "./log.js";
 
 const hostLog = logger("agent-host");
 
-/** Default per-file cap (~25MB) for materialized (non-image) uploads. Override with
- *  FILE_MAX_BYTES. Larger than the 5MB image cap: files are docs/datasets/archives. */
+/** Default per-file cap (~25MB) for materialized (non-image) uploads, overridable with FILE_MAX_BYTES. */
 const DEFAULT_FILE_MAX_BYTES = 25 * 1024 * 1024;
 
-/** Decoded byte length of a base64 string (0.75 ratio, minus '=' padding) — computed
- *  without allocating a Buffer, so an oversize upload is rejected before we decode it. */
+/** Decoded byte length of a base64 string, computed without allocating a Buffer so an
+ *  oversize upload is rejected before decoding. */
 function base64ByteLength(b64: string): number {
   const len = b64.length;
   if (len === 0) return 0;
@@ -105,74 +104,54 @@ function base64ByteLength(b64: string): number {
   return Math.floor((len * 3) / 4) - pad;
 }
 
-/** TRANSCRIPT RECORDER (test-harness): one shared instance, OFF unless
- *  TRANSCRIPT_RECORD_DIR is set. It writes one NDJSON per run capturing the RAW
- *  agent input + emitted AG-UI, so tests can REPLAY real behavior instead of
- *  hand-authored fakes. See todo/docs/AGENT_TRANSCRIPT_HARNESS.md. */
+/** The shared transcript recorder for the test harness, off unless TRANSCRIPT_RECORD_DIR is set. */
 const transcriptRecorder = createRecorder(process.env.TRANSCRIPT_RECORD_DIR);
 
 export interface AgentHostConfig {
   port: number;
   namespace: string;
   sandboxImage: string;
-  /** EPHEMERAL per-pod volume: uploaded ASSETS and goose state. Backed by an emptyDir in
-   *  cluster, so it does NOT survive a restart. The event log used to live here too (and
-   *  its durable copy on an NFS mirror) — both are now Postgres. Assets have not moved
-   *  yet; they are blobs, not rows. The source of truth for a conversation's
-   *  existence/ownership/liveness is the Conversation CR. Nothing answering "which
-   *  conversations exist?" may depend on this path. See
-   *  docs/CONVERSATION_STATE_MODEL.md. */
+  /** Ephemeral per-pod volume (an emptyDir) for uploaded assets and goose state; nothing
+   *  answering "which conversations exist?" may depend on it. */
   localStatePath: string;
-  /** Ephemeral scratch for the agent process: goose's per-conversation cwd
-   *  (sessions DB + .goosehints). The real work execs into the sandbox, so this
-   *  is throwaway — an emptyDir, NOT the durable PVC. */
+  /** Ephemeral scratch for the agent process (goose's per-conversation cwd), an emptyDir
+   *  rather than the durable PVC. */
   scratchPath: string;
   /** ACP agent launch (goose). */
   agent: { command: string; args: string[]; env: Record<string, string> };
-  /** Default model (GOOSE_MODEL) and the models offered for per-conversation
-   *  selection. A conversation may override the model; unset = default only.
-   *  `model` (the default) + `availableModels` (the ids) are derived from
-   *  `modelCatalog` (the rich source of truth with per-model hints). */
+  /** The default model and the ids offered for per-conversation selection, both derived
+   *  from `modelCatalog`. */
   model?: string;
   availableModels: string[];
-  /** The full model catalog (ids + deployment hints + which is default), powering
-   *  the list_models / switch_model MCP tools + GET /models hints. */
+  /** The full model catalog (ids, hints, default), powering the model MCP tools and GET /models. */
   modelCatalog: ModelCatalog;
   /** Agent display name (the assistant introduces itself as this). */
   agentName: string;
-  /** Directory of markdown skills injected into the agent (a ConfigMap mount in
-   *  cluster). Read per conversation -> .goosehints; add a .md, no image rebuild. */
+  /** Directory of markdown skills injected into the agent, read per conversation into .goosehints. */
   skillsDir: string;
-  /** Idle-suspend: suspend conversations idle longer than this (ms). 0 = off. */
+  /** Suspend conversations idle longer than this many ms, 0 for off. */
   idleSuspendMs: number;
   /** How often the idle sweep runs (ms). */
   idleSweepIntervalMs: number;
-  /** Retention reap: DESTROY (end) unstarred conversations inactive longer than this
-   *  (ms). 0 = off (default — opt-in). Starred conversations are exempt. */
+  /** Retention reap: destroy unstarred conversations inactive longer than this (ms); 0 = off. */
   retentionMaxAgeMs: number;
-  /** How often the retention reap runs (ms). Default 6h. */
+  /** How often the retention reap runs (ms), defaulting to 6h. */
   retentionSweepIntervalMs: number;
-  /** Hard per-command exec timeout (ms). A runaway shell command is aborted after
-   *  this so it can't deadlock the conversation. 0 = off. Default 5 min. */
+  /** Hard per-command exec timeout (ms) after which a runaway shell command is aborted; 0 = off. */
   commandTimeoutMs: number;
-  /** Dead-on-arrival run watchdog (ms): if a run emits no ACP activity within this
-   *  window, surface a RUN_ERROR so the conversation unfreezes (the goose-Bedrock-
-   *  credential hang produced zero events and never returned). 0 = off. Default 60s. */
+  /** Dead-on-arrival run watchdog (ms): a run with no ACP activity within this window ends
+   *  with a RUN_ERROR; 0 = off. */
   firstActivityTimeoutMs: number;
-  /** Mid-stream liveness watchdog (ms): the cadence at which an active run probes
-   *  acpClient.isAlive(). If the agent PROCESS has died without a terminal event the
-   *  run is force-terminated (RUN_ERROR) so a dead agent can't block the queue. It
-   *  does NOT kill on silence — a long tool call is healthy. 0 = off. Default 30s. */
+  /** Liveness probe cadence (ms) at which an active run checks the agent process is alive,
+   *  force-terminating only when it has died; 0 = off. */
   livenessProbeMs: number;
-  /** OpenTelemetry metrics (cost + usage + operational), exported over OTLP.
-   *  OFF by default. Endpoint/headers come from the standard OTEL_* env. */
+  /** OpenTelemetry metrics exported over OTLP, off by default. */
   observability: {
     enabled: boolean;
     /** deployment.environment resource attribute (e.g. "dev", "prod"). */
     environment?: string;
-    /** Raw JSON of the per-model price table (USD per 1M tokens). Usually a
-     *  ConfigMap-mounted file's contents, passed via AGENT_PRICING_JSON or read
-     *  from AGENT_PRICING_FILE. Empty -> tokens counted, cost omitted. */
+    /** Raw JSON of the per-model price table (USD per 1M tokens); empty means tokens are
+     *  counted and cost omitted. */
     pricingJson: string;
   };
 }
@@ -187,24 +166,12 @@ export function configFromEnv(): AgentHostConfig & AgentHostConfigExtra {
   // GOOSE_BIN=fake runs the bundled dummy ACP agent (no model, no AWS).
   const useFakeAgent = process.env.GOOSE_BIN === "fake";
   const fakeAgentPath = new URL("./fakeAgent.js", import.meta.url).pathname;
-    // The AGENT and the SANDBOX are separate choices. GOOSE_BIN=fake picks a
-    // deterministic agent (no model key); it must NOT also disable the provisioner.
-    // Coupling them meant the k3d platform — which sets GOOSE_BIN=fake on purpose —
-    // silently got createNoopProvisioner(): no Sandbox CR, no sandbox pod, nothing
-    // logged, and every turn hung until the 60s timeout. "A tool call runs in a real
-    // sandbox" could not pass there by construction.
-    //
-    // Still defaults to a fake sandbox OUT of a cluster, so the local Tier-3 stack (no
-    // k8s at all) keeps working unchanged: KUBERNETES_SERVICE_HOST is set only by the
-    // kubelet. In-cluster, the fake agent now runs against a REAL sandbox — the
-    // combination the cluster tier exists to exercise. FAKE_SANDBOX=1 forces the old
-    // behaviour anywhere.
+    // The agent and the sandbox are separate choices: GOOSE_BIN=fake picks a deterministic
+    // agent, while the sandbox is faked only out of a cluster (or with FAKE_SANDBOX=1).
     const inCluster = process.env.KUBERNETES_SERVICE_HOST !== undefined;
     const fakeSandbox =
       process.env.FAKE_SANDBOX === "1" || (useFakeAgent && !inCluster);
-  // In prod the k8s manifest mounts /var/lib/... (a writable emptyDir/PVC). In
-  // fake/local mode those paths aren't writable, so default to an OS temp dir so
-  // the local e2e stack is self-contained (env still overrides either way).
+  // Outside a cluster the /var/lib paths are not writable, so default to an OS temp dir.
   const defaultStatePath = fakeSandbox
     ? join(tmpdir(), "agent-host", "conversations")
     : "/var/lib/agent-host/conversations";
@@ -213,50 +180,38 @@ export function configFromEnv(): AgentHostConfig & AgentHostConfigExtra {
     port: Number(process.env.PORT ?? 8080),
     namespace: process.env.NAMESPACE ?? "agent-sandbox",
     sandboxImage: process.env.SANDBOX_IMAGE ?? "agent-sandbox-os:latest",
-    // LOCAL_STATE_PATH is an EPHEMERAL CACHE of the conversations this pod is serving —
-    // an emptyDir in cluster, wiped on every restart. It is NOT the durable record, and
-    // nothing that answers "which conversations exist?" may depend on it (see
-    // docs/CONVERSATION_STATE_MODEL.md: the Conversation CR is the source of truth).
-    // STATE_PATH is the old name, still honored so a pod whose manifest predates the
-    // rename keeps working across a rollout; drop it once no deployed manifest sets it.
+    // An ephemeral per-pod cache of the conversations this pod serves, never the durable
+    // record; STATE_PATH is the older name, still honored.
     localStatePath: process.env.LOCAL_STATE_PATH ?? process.env.STATE_PATH ?? defaultStatePath,
-    // The DURABLE conversation record (RWX PVC): history, transcripts, queue. Survives the
-    // pod. "MIRROR" is a legacy name — it is the persistent store, not a backup.
     scratchPath: process.env.SCRATCH_PATH ?? defaultScratchPath,
-    // Default: suspend after 30 min idle, sweep every minute. 0 disables.
+    // Defaults to suspending after 30 min idle with a sweep every minute, and 0 disables.
     idleSuspendMs: Number(process.env.IDLE_SUSPEND_MS ?? 30 * 60 * 1000),
     idleSweepIntervalMs: Number(process.env.IDLE_SWEEP_INTERVAL_MS ?? 60 * 1000),
-    // Retention reap: DESTROY unstarred conversations inactive this long. OFF by
-    // default (0) — opt-in via RETENTION_MAX_AGE_MS (e.g. 30d = 2592000000). Sweep
-    // every 6h. Starred conversations are exempt.
+    // Retention reap: destroy unstarred conversations inactive this long; off by default.
     retentionMaxAgeMs: Number(process.env.RETENTION_MAX_AGE_MS ?? 0),
     retentionSweepIntervalMs: Number(process.env.RETENTION_SWEEP_INTERVAL_MS ?? 6 * 60 * 60 * 1000),
-    // Hard per-command exec timeout. Default 5 min; COMMAND_TIMEOUT_MS=0 disables.
+    // Hard per-command exec timeout, defaulting to 5 min, with COMMAND_TIMEOUT_MS=0 disabling it.
     commandTimeoutMs: Number(process.env.COMMAND_TIMEOUT_MS ?? 5 * 60 * 1000),
-    // Dead-on-arrival run watchdog: if a run emits no ACP activity within this many
-    // ms, surface a RUN_ERROR so the conversation unfreezes (the goose-Bedrock-
-    // credential hang). Default 60s; FIRST_ACTIVITY_TIMEOUT_MS=0 disables.
+    // Dead-on-arrival run watchdog; FIRST_ACTIVITY_TIMEOUT_MS=0 disables.
     firstActivityTimeoutMs: Number(process.env.FIRST_ACTIVITY_TIMEOUT_MS ?? 60 * 1000),
     livenessProbeMs: Number(process.env.AGENT_LIVENESS_PROBE_MS ?? 30 * 1000),
     fakeSandbox,
-    // The model catalog (rich: ids + hints + default) is the source of truth;
-    // `model` (the default) + `availableModels` (the ids) are derived so
-    // resolveModel / GET /models / metrics keep working unchanged.
+    // The default model and the offered ids are derived from the catalog.
     modelCatalog: catalog,
     model: catalog.defaultId,
     availableModels: availableIds(catalog),
     agentName: process.env.AGENT_NAME ?? "Scooter",
     skillsDir: process.env.SKILLS_DIR ?? "/etc/agent-sandbox/skills",
     observability: {
-      // OFF unless OTEL_METRICS_ENABLED=1. (The OTLP endpoint/headers still come
-      // from the standard OTEL_EXPORTER_OTLP_* env, which the SDK reads.)
+      // Off unless OTEL_METRICS_ENABLED=1; the OTLP endpoint comes from the standard
+      // OTEL_EXPORTER_OTLP_* env.
       enabled: process.env.OTEL_METRICS_ENABLED === "1",
       environment: process.env.OTEL_DEPLOYMENT_ENVIRONMENT || undefined,
       pricingJson: readPricing(),
     },
     agent: useFakeAgent
       ? { command: process.execPath, args: [fakeAgentPath], env: {} }
-      : // Without --with-builtin the agent gets NO shell/file tools at all. PR #524.
+      : // Without --with-builtin the agent gets no shell/file tools at all.
         {
           command: process.env.GOOSE_BIN ?? "goose",
           args: ["acp", "--with-builtin", "developer"],
@@ -265,9 +220,8 @@ export function configFromEnv(): AgentHostConfig & AgentHostConfigExtra {
   };
 }
 
-/** The per-model price table JSON: inline (AGENT_PRICING_JSON) or from a mounted
- *  file (AGENT_PRICING_FILE — a ConfigMap). Empty string if neither is set or the
- *  file can't be read (cost is then omitted; tokens still counted). */
+/** The per-model price table JSON, inline (AGENT_PRICING_JSON) or from a mounted file
+ *  (AGENT_PRICING_FILE); empty when neither is set or the file is unreadable. */
 function readPricing(): string {
   if (process.env.AGENT_PRICING_JSON) return process.env.AGENT_PRICING_JSON;
   const file = process.env.AGENT_PRICING_FILE;
@@ -275,10 +229,8 @@ function readPricing(): string {
     try {
       return readFileSync(file, "utf8");
     } catch (e) {
-      // Findings #22/#23: cost metrics are best-effort, so we DON'T crash — but
-      // the operator EXPLICITLY set AGENT_PRICING_FILE, so a failure to honor it
-      // is a misconfiguration, not a default-off. Log it as an error (with cause)
-      // so it's not mistaken for "cost simply isn't configured".
+      // Cost metrics are best-effort, but an explicitly set AGENT_PRICING_FILE that cannot be
+      // read is a misconfiguration, so log it as an error.
       // eslint-disable-next-line no-console
       hostLog.errorWith("AGENT_PRICING_FILE unreadable; cost metrics DISABLED (misconfig?)", e, { file });
     }
@@ -292,17 +244,15 @@ function safeParsePrices(json: string) {
   try {
     return parsePriceTable(json);
   } catch (e) {
-    // Finding #22: pricing JSON was provided but is malformed -> cost metrics
-    // disabled. Best-effort (no crash), but an explicit-config failure, so log
-    // it as an error rather than a quiet warn.
+    // Malformed pricing JSON is an explicit-config failure, so log it as an error.
     // eslint-disable-next-line no-console
     hostLog.errorWith("invalid pricing JSON; cost metrics DISABLED (misconfig?)", e);
     return {};
   }
 }
 
-/** Resolve the model for a conversation: an explicit pick (if it's an offered
- *  model) else the configured default. Guards against arbitrary model strings. */
+/** Resolve the model for a conversation: an explicit pick if it is an offered model, else
+ *  the configured default. */
 export function resolveModel(
   requested: string | undefined,
   config: Pick<AgentHostConfig, "model" | "availableModels">,
@@ -327,15 +277,8 @@ function createNoopProvisioner(): SandboxProvisioner {
   };
 }
 
-/** Pass AWS/Bedrock config through to goose if present. Includes the IRSA
- *  web-identity vars (AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE) that the EKS
- *  pod-identity webhook injects — goose's AWS SDK chain uses them to assume the
- *  pod's role for Bedrock, so no static keys are needed in-cluster. */
-/** DSN for the shared Postgres holding the webhooks conversation_map (the agent-
- *  tools' target-discovery fallback). Prefer an explicit WEBHOOKS_DB_DSN; else
- *  assemble it from WEBHOOKS_DB_* components (host/name/user/password/port) the
- *  same way the webhooks service does. Empty when no DB is configured (then the
- *  tools rely on the link `ref` alone). Read-only use. */
+/** DSN for the shared Postgres holding the webhooks conversation_map, from WEBHOOKS_DB_DSN
+ *  or the WEBHOOKS_DB_* components; empty when no DB is configured. */
 function webhooksResourceDsn(): string {
   const explicit = process.env.WEBHOOKS_DB_DSN;
   if (explicit) return explicit;
@@ -348,10 +291,8 @@ function webhooksResourceDsn(): string {
   return `postgresql://${user}:${encodeURIComponent(pw)}@${host}:${port}/${name}`;
 }
 
-/** DSN for the BYOC database. agent-host writes byoc.remote_agents (the liveness badge)
- *  alongside byoc-controller (which owns session_id) — one table, two writers, rather than
- *  the two unsynchronised copies this replaced. Deliberately NOT derived from the webhooks
- *  DSN: this must not disappear when webhooks is disabled. PR #423. */
+/** DSN for the BYOC database, where agent-host writes the byoc.remote_agents liveness badge
+ *  alongside byoc-controller; not derived from the webhooks DSN. */
 function byocResourceDsn(): string {
   const explicit = process.env.BYOC_DB_DSN;
   if (explicit) return explicit;
@@ -364,18 +305,14 @@ function byocResourceDsn(): string {
   return `postgresql://${user}:${encodeURIComponent(pw)}@${host}:${port}/${name}`;
 }
 
-/** DSN for the agent_host database — the tables agent-host owns and writes
- *  (conversation_jobs today). Deliberately NOT derived from webhooksResourceDsn(): that
- *  gates on cfg.webhooks.enable, and agent-host's own state must not disappear because an
- *  unrelated service is disabled. See todo/draft/SHARED_DB_TABLE_OWNERSHIP.md. */
+/** DSN for the agent_host database (the tables agent-host owns), independent of the
+ *  webhooks DSN so agent-host's own state does not disappear when webhooks is disabled. */
 function agentHostResourceDsn(): string {
   return agentHostDsnFromEnv();
 }
 
-/** Parse an optional static id->email map from AUTH_SUB_EMAIL_MAP ("sub=email"
- *  pairs, comma or semicolon separated). Undefined when unset/empty. Used to seed
- *  identity email resolution for a known set of users (e.g. before the learned
- *  store has seen them). */
+/** Parse an optional static id->email map from AUTH_SUB_EMAIL_MAP ("sub=email" pairs,
+ *  comma or semicolon separated). */
 function parseIdentityMap(raw: string | undefined): Record<string, string> | undefined {
   if (!raw) return undefined;
   const out: Record<string, string> = {};
@@ -389,18 +326,19 @@ function parseIdentityMap(raw: string | undefined): Record<string, string> | und
   return Object.keys(out).length ? out : undefined;
 }
 
-/** Drain a conversation's event stream into an array, tolerating a read error
- *  (returns what was read; the subagent watcher must never throw). */
+/** Drain a conversation's event stream into an array, returning what was read on a read error. */
 async function collectEventsSafe(it: AsyncIterable<AguiEvent>): Promise<AguiEvent[]> {
   const out: AguiEvent[] = [];
   try {
     for await (const e of it) out.push(e);
   } catch {
-    /* partial read is fine — the last message is near the end anyway */
+    /* a partial read is fine */
   }
   return out;
 }
 
+/** Pass AWS/Bedrock config through to goose, including the IRSA web-identity vars the EKS
+ *  pod-identity webhook injects. */
 function bedrockEnv(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const k of [
@@ -410,17 +348,13 @@ function bedrockEnv(): Record<string, string> {
     // IRSA (EKS pod identity) — the credential source in-cluster.
     "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_STS_REGIONAL_ENDPOINTS",
     "AWS_ROLE_SESSION_NAME",
-    // Ollama (local/cheap provider — used for recording goose transcripts, and any
-    // ollama-backed deploy). GOOSE_PROVIDER=ollama + OLLAMA_HOST points goose at it.
+    // Ollama: GOOSE_PROVIDER=ollama + OLLAMA_HOST points goose at it.
     "OLLAMA_HOST",
   ]) {
     if (process.env[k]) out[k] = process.env[k]!;
   }
-  // Auto-compaction: goose summarizes the conversation when the context reaches this
-  // FRACTION of the window (GOOSE_AUTO_COMPACT_THRESHOLD, 0.0-1.0; 0.0 disables).
-  // goose's own default is 0.8, but we set it EXPLICITLY so it's visible/tunable per
-  // deploy and can't drift with goose versions (goose can also misdetect the window
-  // for some models — block/goose#7839). Deployer override, else 0.8.
+  // Auto-compaction threshold (fraction of the context window, 0.0 disables), set
+  // explicitly so it is visible per deploy and cannot drift with goose versions.
   out.GOOSE_AUTO_COMPACT_THRESHOLD = process.env.GOOSE_AUTO_COMPACT_THRESHOLD ?? "0.8";
   return out;
 }
@@ -428,13 +362,8 @@ function bedrockEnv(): Record<string, string> {
 /** Wall-clock budget for the startup hydrate (see hydrateWithRetry). */
 export const HYDRATE_BUDGET_MS = 60_000;
 
-/**
- * Hydrate at startup, retrying until a WALL-CLOCK budget expires.
- *
- * A COLD dependency must not be read as a broken one. The budget is wall-clock rather than
- * an attempt count because what it has to outlast is how long Postgres takes to accept
- * connections, which is unrelated to the shape of the backoff curve. Why: PR #722.
- */
+/** Hydrate at startup, retrying until a wall-clock budget expires, since a cold Postgres
+ *  must not be read as a broken one. */
 export async function hydrateWithRetry(
   hydrate: () => Promise<void>,
   log: Pick<Logger, "warn" | "errorWith">,
@@ -454,9 +383,7 @@ export async function hydrateWithRetry(
       return;
     } catch (err) {
       const elapsed = now() - started;
-      // Cap the backoff: an uncapped curve spends the tail of the budget asleep, so the
-      // LAST attempt lands long before the deadline and the budget buys fewer tries than
-      // its wall-clock suggests.
+      // Cap the backoff so the tail of the budget is not spent asleep.
       const delay = Math.min(250 * 2 ** (attempt - 1), 5_000);
       if (elapsed + delay >= budgetMs) {
         log.errorWith(
@@ -481,106 +408,78 @@ export async function hydrateWithRetry(
 export async function main(
   config: AgentHostConfig & Partial<AgentHostConfigExtra> = configFromEnv(),
 ): Promise<() => Promise<void>> {
-  // Provisioner: fake (local UI) -> noop; otherwise the agent-host's own k8s
-  // provisioner. Nothing else writes the Sandbox CR — why: PR #584.
-  //
-  // Keep a typed handle: the provisioner ALSO exposes the size ops (getSize/setSize/
-  // getSizes) used by the resize tools and the UI picker. null only for a fake
-  // sandbox, which has no CR to size.
+  // The provisioner: noop for a fake sandbox (which has no CR to size), else the k8s
+  // provisioner, kept typed because it also exposes the size ops.
   const k8sProvisioner: K8sProvisioner | null = config.fakeSandbox
     ? null
     : createK8sProvisioner({
         namespace: config.namespace,
         sandboxImage: config.sandboxImage,
-        // imagePullPolicy for the per-conversation sandbox pod. Default "Always"
-        // (registry-backed); set SANDBOX_PULL_POLICY=IfNotPresent on a side-loaded
-        // local cluster (kind/k3s) where "Always" fails with ImagePullBackOff.
+        // imagePullPolicy for the sandbox pod; SANDBOX_PULL_POLICY=IfNotPresent on a
+        // side-loaded local cluster.
         sandboxPullPolicy:
           (process.env.SANDBOX_PULL_POLICY as "Always" | "IfNotPresent" | "Never") || undefined,
-        // The sandbox is ALWAYS the NixOS systemd-PID-1 image now (the legacy
-        // generic image was retired): always provision privileged + tmpfs /run,/tmp
-        // so systemd PID 1 boots.
+        // The sandbox is the NixOS systemd-PID-1 image, so provision privileged + tmpfs
+        // /run,/tmp.
         systemdImage: true,
-        // RuntimeClass for the sandbox pod (SANDBOX_RUNTIME_CLASS, e.g. "crun"). A
-        // cgroup-delegating runtime gives systemd PID 1 a writable cgroup subtree in
-        // the pod's OWN private cgroup namespace, so the sandbox runs NON-privileged
-        // (privileged forces the host cgroup ns → the sandbox churns the host
-        // /kubepods.slice tree → node instability / host session logout). Unset = the
-        // cluster default runtime.
+        // RuntimeClass for the sandbox pod (SANDBOX_RUNTIME_CLASS, e.g. "crun"); a
+        // cgroup-delegating runtime lets systemd PID 1 run non-privileged in a private
+        // cgroup namespace.
         sandboxRuntimeClass: process.env.SANDBOX_RUNTIME_CLASS || undefined,
-        // The sandbox image ALWAYS has the local-overlay Nix store on, so ALWAYS mount a
-        // disk-backed PVC upper at /nix/.scooter-rw — the overlay's writable layer, holding
-        // runtime nix builds (tool installs, re-converge) + persisting them across
-        // suspend/resume. Default ON; SANDBOX_OVERLAY_STORE=0 opts out (ephemeral emptyDir
-        // upper — the overlay still works, writes just don't persist).
-        // Sandbox pod sizing. Default (unset) = the provisioner's Guaranteed 2cpu/4Gi.
-        // SANDBOX_RESOURCES is a JSON {requests:{cpu,memory},limits:{cpu,memory}} —
-        // set by the TEST platform to small values: on a 4-vCPU CI runner the 2cpu
-        // Guaranteed default makes a SECOND concurrent sandbox unschedulable
-        // (Insufficient cpu -> Pending forever), which failed exactly the one e2e
-        // test that holds two live conversations at once.
+        // SANDBOX_RESOURCES is a JSON {requests,limits} override of the provisioner's
+        // Guaranteed 2cpu/4Gi default.
         sandboxResources: process.env.SANDBOX_RESOURCES
           ? (JSON.parse(process.env.SANDBOX_RESOURCES) as {
               requests?: { cpu?: string; memory?: string };
               limits?: { cpu?: string; memory?: string };
             })
           : undefined,
+        // A disk-backed PVC upper for the overlay Nix store at /nix/.scooter-rw, persisting
+        // runtime nix builds across suspend/resume; SANDBOX_OVERLAY_STORE=0 opts out.
         overlayStore: (process.env.SANDBOX_OVERLAY_STORE || "1") !== "0",
         overlayStorage: process.env.SANDBOX_OVERLAY_STORAGE || undefined,
-        // Deployment-supplied tool injection (generic — the platform doesn't know
-        // what's in these; a deployment sets them to its .scooter
-        // ConfigMap, the token audiences its tools need, and their env vars).
-        // SCOOTER_CONFIGMAP, SCOOTER_TOKEN_AUDIENCES (CSV), SCOOTER_ENV (JSON —
-        // lossless for multi-line values like NIX_CONFIG; legacy k=v;k=v accepted).
+        // Deployment-supplied tool injection: SCOOTER_CONFIGMAP, SCOOTER_TOKEN_AUDIENCES
+        // (CSV) and SCOOTER_ENV (JSON, or k=v;k=v).
         scooterConfigMap: process.env.SCOOTER_CONFIGMAP || undefined,
-        // A consumer patch deep-merged onto each generated Sandbox (nodeSelector,
-        // tolerations, extra env/volumes). Read fresh at create time, so editing the
-        // ConfigMap takes effect on the next conversation without a restart.
+        // A consumer patch deep-merged onto each generated Sandbox, read fresh at create time.
         manifestOverlayConfigMap: process.env.SANDBOX_MANIFEST_OVERLAY_CONFIGMAP || undefined,
-        // A ConfigMap of deployment config FILES (filename -> contents) mounted as a
-        // flat dir at /etc/agent-sandbox/config. File-based (not SCOOTER_ENV) so
-        // multi-line config survives the sandbox CRD controller's newline mangling.
+        // A ConfigMap of deployment config files mounted as a flat dir at
+        // /etc/agent-sandbox/config, so multi-line config survives the controller's
+        // newline mangling.
         configFilesConfigMap: process.env.SCOOTER_CONFIG_FILES_CONFIGMAP || undefined,
         extraTokenAudiences: (process.env.SCOOTER_TOKEN_AUDIENCES || "")
           .split(",").map((s) => s.trim()).filter(Boolean),
         extraEnv: parseScooterEnv(process.env.SCOOTER_ENV),
-        // Public chat UI base URL → each sandbox gets CONVERSATION_URL for its own
-        // conversation (so the agent can share a link, e.g. to approve an AWS req).
+        // Public chat UI base URL, from which each sandbox gets its own CONVERSATION_URL.
         publicUrl: process.env.PUBLIC_URL || undefined,
-        // The deployment's named size catalog + which preset is the default, for the
-        // agent's resize tools and the UI picker.
+        // The deployment's named size catalog and default preset, for the resize tools and
+        // the UI picker.
         sizePresetsJson: process.env.SANDBOX_SIZES_JSON || undefined,
         defaultSizeName: process.env.SANDBOX_DEFAULT_SIZE_NAME || undefined,
       });
   const provisioner = k8sProvisioner ?? createNoopProvisioner();
-  // WHICH provisioner did we get? A noop provisioner silently creates no sandbox, so
-  // every turn hangs with nothing logged — that cost a long investigation on k3d.
-  // Say it once at boot so the answer is in the first page of any log.
+  // A noop provisioner creates no sandbox and every turn hangs, so say which one was
+  // selected at boot.
   hostLog.info("sandbox provisioner selected", {
     provisioner: config.fakeSandbox ? "noop" : "k8s",
     fake_sandbox: config.fakeSandbox,
     in_cluster: process.env.KUBERNETES_SERVICE_HOST !== undefined,
   });
-  // Ensure goose's developer extension is enabled in its config, so goose
-  // redirects shell/file tool calls to the ACP client (-> the sandbox) instead
-  // of running them locally in this pod. On a REAL deployment a failure here is
-  // FATAL (else goose silently runs tools in the agent-host pod — finding #1);
-  // on a fake/dev sandbox there's no real goose, so it's best-effort.
+  // Ensure goose's developer extension is enabled so shell/file tool calls go to the ACP
+  // client (the sandbox) rather than running locally; fatal on a real deployment.
   ensureGooseConfig(process.env.HOME, { fatal: !config.fakeSandbox });
-  // The event log lives in Postgres; the file store keeps what is still on the state
-  // volume (assets, goose state). NO FILE FALLBACK: without a DSN the event log is
-  // unavailable rather than silently written to an emptyDir every rollout wipes.
+  // The event log lives in Postgres and the file store keeps what is still on the state
+  // volume (assets, goose state); without a DSN the event log is unavailable rather than
+  // silently written to an emptyDir.
   const localStore = createFileConversationStore(config.localStatePath);
-  // The APPEND FENCE's claim source. Late-bound because the ownership tracker that answers
-  // it is built further down (same reason onGained is assigned there, not at construction);
-  // nothing appends before boot finishes, so the hole is never observed.
+  // The append fence's claim source, late-bound because the ownership tracker is built
+  // further down and nothing appends before boot finishes.
   let observedGeneration: ((id: SessionId) => number | undefined) | undefined;
   const podName = process.env.POD_NAME;
   const eventStore = agentHostResourceDsn()
     ? createPgEventStore({
         dsn: agentHostResourceDsn(),
-        // Single-replica (no POD_NAME) has no second writer to fence against, and nothing
-        // assigns a host there — a fence would refuse nothing and cost a subquery per token.
+        // Single-replica (no POD_NAME) has no second writer to fence against.
         fence: podName ? { pod: podName, generation: (id) => observedGeneration?.(id) } : undefined,
       })
     : undefined;
@@ -589,12 +488,8 @@ export async function main(
     ? withPgEvents(localStore, eventStore)
     : localStore;
 
-  // Linked resources (the GitHub PR / Slack thread panel) come from Postgres when a DSN
-  // is configured. They cannot live in the file store: listLinks read LOCAL_STATE_PATH, an
-  // emptyDir every rollout wipes, so a conversation's PR links became permanently
-  // invisible. The file store is passed as the read-through source, so links still only on
-  // disk keep showing and get backfilled. Without a DSN we stay on files — the pg-less mode
-  // must keep working.
+  // Linked resources come from Postgres when a DSN is configured, with the file store as
+  // the read-through source so links still only on disk keep showing.
   const sharedDsn = webhooksResourceDsn();
   const agentHostDsn = agentHostResourceDsn();
   const linkStore = sharedDsn
@@ -607,14 +502,8 @@ export async function main(
     : undefined;
   hostLog.info("link store selected", { backend: linkStore ? "postgres" : "file" });
 
-  // Conversation metadata (the sidebar list, and what hydrate rebuilds each conversation
-  // from). Postgres makes listing a QUERY instead of a per-conversation meta.json read,
-  // and takes the list off the emptyDir that every rollout wipes. Seeded once from the
-  // file store when the table is empty, so an existing deployment's history is there on
-  // the first boot after cutting over.
-  // The agent_host database, NOT the webhooks one: agent-host is the only writer, and
-  // webhooksResourceDsn() is gated on cfg.webhooks.enable — borrowing it would make the
-  // conversation list vanish whenever an unrelated service is turned off.
+  // Conversation metadata (the sidebar list and what hydrate rebuilds from) lives in the
+  // agent_host database, seeded from the file store when the table is empty.
   const metaStore = agentHostDsn
     ? createPgMetaStore({
         dsn: agentHostDsn,
@@ -625,15 +514,9 @@ export async function main(
     : undefined;
   hostLog.info("conversation metadata store selected", { backend: metaStore ? "postgres" : "file" });
 
-  // Decorate rather than replace, so every existing caller (the panel, the list
-  // enrichment, hydrate, the agent tools) moves without change. Delegate through the
-  // ORIGINAL for everything else: several file-store methods call their siblings via
-  // `this`, so they must keep resolving against the object they were defined on rather
-  // than this wrapper.
-  //
-  // The event log stays on the file store — it is the one artifact that belongs there.
-  // saveMeta writes BOTH: Postgres is authoritative for the list, and the file copy keeps
-  // the mirror's per-conversation directory self-describing for recovery.
+  // Decorate rather than replace the file store, delegating everything else through the
+  // original since several of its methods call siblings via `this`; saveMeta writes both
+  // Postgres (authoritative) and the file copy.
   const overrides: Partial<ConversationStore> = {
     ...(linkStore
       ? {
@@ -651,9 +534,8 @@ export async function main(
           removeConversation: async (id: SessionId) => {
             await metaStore.removeConversation(id);
             await fileStore.removeConversation?.(id);
-            // Drop the conversation's links too — the file store cleared them with its directory,
-            // but the shared PG resource_links table needs an explicit delete or an orphaned row
-            // survives the conversation and collides (global unique) with a later re-link.
+            // The shared PG resource_links table needs an explicit delete, or an orphaned row
+            // collides with a later re-link.
             await linkStore?.deleteByConversation(id);
           },
         }
@@ -670,10 +552,8 @@ export async function main(
           },
         })
       : fileStore;
-  // Image/media assets: METADATA in Postgres (queryable, transactional), BYTES on the
-  // dedicated assets PVC (efficient blob storage). When no Postgres DSN, falls back to
-  // PVC-only (both metadata + bytes on disk, like before). ASSETS_PATH is the dedicated
-  // mount (/var/lib/agent-assets); if unset, uses LOCAL_STATE_PATH (emptyDir, ephemeral).
+  // Image/media assets: metadata in Postgres and bytes on the assets PVC (ASSETS_PATH, else
+  // LOCAL_STATE_PATH), or PVC-only without a DSN.
   const assetsPath = process.env.ASSETS_PATH ?? config.localStatePath;
   const assets = agentHostResourceDsn()
     ? createHybridAssetStore({
@@ -689,15 +569,12 @@ export async function main(
     backend: agentHostResourceDsn() ? "hybrid (pg+pvc)" : "pvc-only",
     path: assetsPath,
   });
-  // Per-file cap for materialized (non-image) uploads. Files are decoded straight
-  // into the sandbox (not the AssetStore), so this is a separate knob from
-  // ASSET_MAX_BYTES. Default 25MB; deployment-tunable via FILE_MAX_BYTES.
+  // Per-file cap for materialized (non-image) uploads, separate from ASSET_MAX_BYTES since
+  // files go straight into the sandbox.
   const fileMaxBytes = Number(process.env.FILE_MAX_BYTES) || DEFAULT_FILE_MAX_BYTES;
-  // conversation-state volume. Configurable cap via ASSET_MAX_BYTES.
   const server = createAguiServer();
-  // The privileged /agui `owner` field (a webhook-resolved Scooter user) is honored
-  // ONLY for the TRUSTED webhooks caller — its SA token verified via k8s TokenReview.
-  // WEBHOOKS_SERVICE_ACCOUNT unset => owner is never honored (safe default).
+  // The privileged /agui `owner` field is honored only for the trusted webhooks caller,
+  // whose SA token is verified via k8s TokenReview.
   server.useOwnerVerifier(
     createWebhooksCallerVerifier({
       expectedServiceAccount: process.env.WEBHOOKS_SERVICE_ACCOUNT,
@@ -705,19 +582,14 @@ export async function main(
     }),
   );
 
-  // BRING-YOUR-OWN-CLAUDE (Increment 2): a registry of connected remote agents (keyed by owner) +
-  // the /remote-agent/connect WS endpoint the user's container dials in on. Gated on
-  // REMOTE_AGENT_JOIN_SECRET being set (the HS256 secret join tokens are signed with) — absent =
-  // feature OFF (no route, no remote provider), so nothing changes for a deploy that hasn't opted
-  // in. See todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+  // Bring-your-own-Claude is gated on REMOTE_AGENT_JOIN_SECRET; absent means no route and no
+  // remote provider.
   const remoteAgentJoinSecret = process.env.REMOTE_AGENT_JOIN_SECRET;
-  // The BYOC controller's IN-CLUSTER base URL. Ownership resolution, every ACP frame, and the
-  // setup one-liner's session mint all go through it, so this pod holds no container socket and any
-  // replica can serve any conversation. Empty => no BYO path; every run takes the cloud floor.
+  // The BYOC controller's in-cluster base URL, through which ownership resolution, every ACP
+  // frame and the one-liner's session mint go; empty means no BYO path.
   const byocControllerUrl = (process.env.BYOC_CONTROLLER_URL ?? "").trim();
-  // DURABLE binding on the shared Postgres (same DSN as the identity store): persist an owner's
-  // online/offline so the "Connected" badge is correct across replicas + survives a restart (the
-  // in-memory registry lives on one replica). Absent DSN → in-memory only (badge = local live conn).
+  // Durable online/offline binding on the shared Postgres so the "Connected" badge is correct
+  // across replicas; absent DSN means in-memory only.
   const remoteAgentDsn = byocResourceDsn();
   const remoteAgentStore =
     remoteAgentJoinSecret && remoteAgentDsn ? createPgRemoteAgentStore({ dsn: remoteAgentDsn }) : undefined;
@@ -728,25 +600,18 @@ export async function main(
         onOffline: remoteAgentStore ? (owner) => void remoteAgentStore.markOffline(owner) : undefined,
       })
     : undefined;
-  // (The /remote-agent/connect WS upgrade was the PER-POD socket endpoint: a container's socket
-  // terminated on whichever replica it happened to reach, so only that pod could drive it — BYO
-  // worked at replicas=1 and silently fell to the cloud floor otherwise. Containers now connect to
-  // the BYOC CONTROLLER, which owns every socket, so any replica can serve any conversation.)
-  // The Settings "Connect your Claude agent" backing (mint one-liner + connected badge). Only when
-  // BYO is enabled; the management route 404s otherwise so the UI hides the section. The badge reads
-  // the DURABLE store (cross-replica) when available, else the local live registry.
+  // The Settings "Connect your Claude agent" backing (mint one-liner + connected badge), only
+  // when BYO is enabled.
   const remoteAgentUi =
     remoteAgentRegistry && remoteAgentJoinSecret
       ? createRemoteAgentUi({
           joinSecret: remoteAgentJoinSecret,
-          // The container dials the BYOC CONTROLLER (§L). The session is minted in-cluster
-          // (controllerUrl) and the container connects to the PUBLIC ingress (publicByocUrl).
+          // The session is minted in-cluster (controllerUrl) and the container connects to the
+          // public ingress (publicByocUrl).
           controllerUrl: byocControllerUrl,
           publicByocUrl: process.env.BYOC_PUBLIC_URL || undefined,
-          // The badge must read the CONTROLLER, which is the only component that knows whether a
-          // container is attached. It used to read a per-pod registry / a Postgres row that the
-          // old bridge wrote — neither is populated now, so the badge said "not connected" while
-          // the controller reported `"status":"connected"` and runs worked fine.
+          // The badge reads the controller, the only component that knows whether a container
+          // is attached.
           statusAsync: async (owner: string) => {
             const offline = { connected: false, lastAuthFailure: null };
             if (!byocControllerUrl) return offline;
@@ -761,27 +626,22 @@ export async function main(
                 lastAuthFailure?: { reason: string; at: string } | null;
               };
               return {
-                // Only "connected" — "minted" means the session exists but no container has
-                // dialled in, and showing that as connected would promise a BYO run that
-                // cannot happen.
+                // Only "connected" counts; "minted" means no container has dialled in yet.
                 connected: body.status === "connected",
-                // The controller's record of the owner's most recent REJECTED attempt — what
-                // lets the Settings page say "your container failed to authenticate: <why>"
-                // instead of a silent disconnected.
+                // The controller's record of the owner's most recent rejected attempt, for the
+                // Settings page.
                 lastAuthFailure: body.lastAuthFailure ?? null,
               };
             } catch {
-              return offline; // a controller blip degrades the BADGE, never a run
+              return offline; // a controller blip degrades the badge, never a run
             }
           },
           image: process.env.REMOTE_AGENT_IMAGE || undefined,
         })
       : undefined;
 
-  // Metrics (OFF unless OTEL_METRICS_ENABLED=1). Cost needs goose's per-session
-  // token usage, which it persists under its $HOME; the reader degrades to "no
-  // cost" if that DB isn't present. Tokens/cost are attributed to the resolved
-  // model per run.
+  // Metrics, off unless OTEL_METRICS_ENABLED=1; cost needs goose's per-session token usage
+  // under its $HOME.
   const metrics: MetricsSink = createMetrics({
     enabled: config.observability.enabled,
     serviceName: "agent-host",
@@ -793,32 +653,23 @@ export async function main(
         : undefined,
   });
 
-  // Finding #4: a failed durable append (the conversation's only persistence)
-  // must leave a trace. The store now surfaces append failures; record them as a
-  // metric so an operator can alert (the store already logs each one loudly).
+  // A failed durable append must leave a trace, so record it as a metric an operator can
+  // alert on.
   store.onAppendError?.((conversationId) => {
     metrics.persistenceError?.({ conversationId });
   });
 
-  // Build a bridge per conversation: connect exec to the sandbox pod, spawn
-  // goose, and wire its AG-UI events out through the server.
-  // Multi-replica FENCING: when POD_NAME is set (the StatefulSet gives each pod its
-  // ordinal name), watch the Conversation CRD so this pod stops appending to a
-  // conversation reassigned away from it. Unset (single-replica) => allowAllGuard: a no-op
-  // guard, no watch, no k8s dependency. See ownershipGuard.ts.
+  // Multi-replica fencing: with POD_NAME set, watch the Conversation CRD so this pod stops
+  // appending to a conversation reassigned away from it.
   const ownership = podName
     ? createK8sOwnershipGuard(podName, config.namespace)
     : undefined;
-  // Hand the tracker's cached epoch to the append fence. The fence presents it; the ROW
-  // decides. Undefined (nothing observed yet) narrows the fence to pod identity — see
-  // AppendFence.
+  // Hand the tracker's cached epoch to the append fence; undefined narrows the fence to pod
+  // identity.
   observedGeneration = (id) => ownership?.guard.observedGeneration?.(id);
-  // The WRITE side of the same CRD: when multi-replica (POD_NAME set), register each new
-  // conversation as a Conversation CR so the controller assigns it a hostPod and the
-  // router forwards to it. Unset => noopRegistry (no CR). See conversationRegistry.ts.
-  // ...and its ROW half: the same writes also land on agent_host.conversations, so the row can
-  // become the source of truth for existence. Assignment reads stay on the CR (the controller
-  // still writes it) — see pgConversationRegistry.ts. No DSN => CR only, unchanged.
+  // The write side of the same CRD: register each new conversation as a Conversation CR
+  // (and, with a DSN, an agent_host.conversations row) so the controller assigns it a
+  // hostPod.
   const crRegistry = podName ? createK8sConversationRegistry(config.namespace) : undefined;
   const conversationRegistry =
     crRegistry && agentHostDsn ? withConversationRows(crRegistry, { dsn: agentHostDsn }) : crRegistry;
@@ -828,35 +679,27 @@ export async function main(
     store,
     ownershipGuard: ownership?.guard,
     conversationRegistry,
-    // CR-DRIVEN HYDRATION (multi-replica): with selfPod set, hydrate() adopts every Conversation
-    // the controller assigned to THIS pod instead of replaying the ephemeral local store. Unset
-    // single-replica, where there are no CRs. See docs/CONVERSATION_STATE_MODEL.md.
+    // With selfPod set, hydrate() adopts every Conversation the controller assigned to this
+    // pod instead of replaying the local store.
     selfPod: podName,
-    bridgeFactory: ({ conversationId, sandbox, model, owner }) => {
+    bridgeFactory: ({ conversationId, sandbox, model, pickedProvider, owner }) => {
       // Exec + ACP client are connected lazily/asynchronously; the bridge is
       // created synchronously and starts the connection in start().
-      const bridge = makeBridge(conversationId, sandbox, config, model, metrics, owner);
+      const bridge = makeBridge(conversationId, sandbox, config, model, metrics, owner, pickedProvider);
       // The agent titles the conversation by emitting <title>…</title> as its
       // first action; the bridge extracts it -> set it on the conversation.
       bridge.onTitle((title) => sessions.setTitle(conversationId, title));
       return bridge;
     },
-    // After a revive rebuilds the bridge, re-raise any AWS approval interrupts a pod
-    // rollout dropped. The interrupt's in-memory answer-routing dies with the old
-    // pod, but the request still sits PENDING in the broker (source of truth) — so
-    // we re-query it and re-raise, restoring the Approve/Deny button + routing.
-    // Without this the agent deadlocks: it polls the pending request forever and the
-    // UI shows no button (the reported approval-interrupt-lost-on-rollout bug).
+    // After a revive rebuilds the bridge, re-raise any approval interrupts a rollout dropped,
+    // since the request still sits pending in the broker.
     onRevived: (id) => {
       void reRaisePendingApprovals(id).catch((err) =>
         hostLog.errorWith("re-raise pending AWS interrupts failed", err, { conversation_id: id }),
       );
     },
-    // Keep the pod up while a background job is still running — else the idle sweep would
-    // SIGTERM a long-running run_background job (see sweepIdle). Consults the jobManager
-    // (defined below; this closure runs only at sweep time). Only probes jobs NOT yet
-    // announced as complete (notifiedAt unset) — an announced job already exited. Returns
-    // true on the FIRST job still "running"; a null jobManager (jobs disabled) → false.
+    // Keep the pod up while a background job not yet announced as complete is still running,
+    // so the idle sweep does not kill it.
     hasRunningBackgroundJob: async (id) => {
       if (!jobManager) return false;
       const jobs = await jobManager.list(id as SessionId);
@@ -869,11 +712,8 @@ export async function main(
     },
   });
 
-  // Settlement on OWNERSHIP GAIN: the CR watch is the one signal that always fires
-  // when a conversation moves to this pod (the revive push can die with the old pod;
-  // the hydrate cascade makes adoption a no-op when the entry already exists). A
-  // gained conversation with a stranded run gets it terminated (persisted cancel
-  // intent) or resume-nudged. Fire-and-forget; owner-fenced + deduped inside.
+  // Settlement on ownership gain: the CR watch always fires when a conversation moves to
+  // this pod, so a stranded run gets terminated or resume-nudged there.
   if (ownership) {
     ownership.guard.onGained = (id, generation) => {
       void sessions
@@ -882,15 +722,11 @@ export async function main(
     };
   }
 
-  /** Broker auth headers (the agent-host SA token), shared by the AWS calls. Mirrors
-   *  resolveApprovalForBroker's token read: a MISSING token (ENOENT) is the dev case; any
-   *  OTHER read error is surfaced (don't send an unauthenticated request). */
+  /** Broker auth headers (the agent-host SA token), shared by the approval calls. */
   const brokerAuthHeaders = sharedBrokerAuthHeaders;
 
-  /** The contribs that raise approvals: name -> where its verbs live on the broker.
-   *  Rendered by modules/platform.nix from each contrib's own declaration, so this
-   *  file names no integration. Unset/malformed -> none (approvals simply aren't
-   *  relayed), which is the same as a deployment that enables no such contrib. */
+  /** The contribs that raise approvals (name -> where its verbs live on the broker), rendered
+   *  by modules/platform.nix; unset or malformed means no approvals are relayed. */
   const approvalContribs: Record<string, ApprovalContrib> = (() => {
     const raw = process.env.APPROVAL_CONTRIBS_JSON;
     if (!raw || !raw.trim()) return {};
@@ -903,13 +739,8 @@ export async function main(
     }
   })();
 
-  /** On revive, ask each approval contrib for this conversation's PENDING requests and
-   *  re-raise an interrupt for each — reconstructing the exact interrupt the rollout
-   *  lost (same builder as the live route). raiseInterrupt keys on the request id, so
-   *  a re-raise of a still-open interrupt is idempotent.
-   *
-   *  A contrib with no `pendingPath` is skipped: it has told us its requests do not
-   *  survive a rollout. */
+  /** On revive, ask each approval contrib with a `pendingPath` for this conversation's
+   *  pending requests and re-raise an interrupt for each (idempotent by request id). */
   const reRaisePendingApprovals = async (id: string): Promise<void> => {
     const brokerUrl = (process.env.BROKER_URL ?? "").replace(/\/$/, "");
     if (!brokerUrl) return; // no broker (local/dev) — nothing to re-raise
@@ -918,11 +749,8 @@ export async function main(
     const headers = await brokerAuthHeaders();
     for (const [contrib, cfg] of Object.entries(approvalContribs)) {
       if (!cfg.pendingPath) continue;
-      // The broker keys requests by the sandbox SHORT-id (`sandbox-{shortId}`), NOT the full thread
-      // UUID the session map uses — the same id-space mismatch the request-time route resolves.
-      // Querying by the UUID returns [], so a still-pending request would never be re-raised after a
-      // rollout/resume/revive and the Approve window would never reappear. Keep RAISING the interrupt
-      // on the real conversation `id`/bridge.
+      // The broker keys requests by the sandbox short id, not the full thread UUID, while the
+      // interrupt is raised on the real conversation id.
       const pending = await fetchPendingApprovals(
         brokerUrl, cfg.pendingPath, shortId(id), headers,
         (status) => hostLog.warn("broker pending-approvals returned a non-2xx", { conversation_id: id, contrib, status }),
@@ -937,12 +765,9 @@ export async function main(
     }
   };
 
-  /** Relay the user's answer to the contrib's broker half
-   *  (POST <brokerPrefix>/{requestId}/{optionId}). Shared by the request-time route's
-   *  onAnswer AND the revive re-raise. Sends the answering user's identity; the broker
-   *  authorizes the configured claim. Throws on a dropped/failed relay (never silently
-   *  lost); a failure is ALSO fed back into the conversation so the blocked agent can
-   *  act on it instead of waiting forever. */
+  /** Relay the user's answer to the contrib's broker half (POST
+   *  <brokerPrefix>/{requestId}/{optionId}) with the approver's identity, throwing on a
+   *  failed relay and feeding the failure back into the conversation. */
   const resolveApprovalForBroker = async (
     sessionId: string,
     contrib: string,
@@ -957,13 +782,11 @@ export async function main(
     }
     const cfg = approvalContribs[contrib];
     if (!cfg) {
-      // The interrupt was raised (the route accepts any name) but this deployment has
-      // no route to relay it to. Loud, because a user's security decision just went
-      // nowhere and nothing else in the system will say so.
+      // Loud, because a user's security decision just went nowhere and nothing else will say
+      // so.
       throw new Error(`no approval routing configured for contrib '${contrib}' (APPROVAL_CONTRIBS_JSON)`);
     }
-    // The optionId IS the verb. The platform doesn't interpret the choice — a contrib
-    // offering options beyond approve/deny needs no change here.
+    // The optionId is the verb; the platform does not interpret the choice.
     const prefix = cfg.brokerPrefix.replace(/\/$/, "");
     const res = await fetch(
       `${brokerUrl}${prefix}/${encodeURIComponent(requestId)}/${encodeURIComponent(optionId)}`,
@@ -971,8 +794,7 @@ export async function main(
     );
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      // Extract the broker's error reasons for a readable, actionable message. `errors`
-      // under `detail` is the shape scooter_broker_lib raises RequestError as.
+      // `errors` under `detail` is the shape scooter_broker_lib raises RequestError as.
       let detail = body.slice(0, 1500);
       try {
         const j = JSON.parse(body);
@@ -981,8 +803,7 @@ export async function main(
       } catch {
         /* not JSON — use the raw body */
       }
-      // Tell the AGENT, not just the log: it is blocked on this answer, and a failure
-      // it never hears about is indistinguishable from a human who never answered.
+      // Tell the agent, not just the log, since it is blocked on this answer.
       void sessions
         .prompt(
           sessionId as SessionId,
@@ -996,16 +817,9 @@ export async function main(
     }
   };
 
-  // Background jobs (run_background): the agent starts a long command detached in its
-  // sandbox and keeps working. The job's OUTPUT stays in-pod on the workspace PVC; only
-  // this small registry — which jobs a conversation has — is stored here.
-  //
-  // Postgres when a DSN is configured. The file store cannot hold it: LOCAL_STATE_PATH is
-  // an emptyDir every rollout wipes, and nothing hydrates jobs back from the mirror, so a
-  // conversation's jobs vanish whenever its pod moves. The file registry is passed as the
-  // read-through source, so a conversation whose jobs are still only on disk lists them
-  // and gets backfilled. Without a DSN we stay on the file store — an agent-host with no
-  // database must keep working.
+  // Background jobs (run_background): the job's output stays on the workspace PVC, and the
+  // registry of which jobs a conversation has lives in Postgres with the file registry as
+  // the read-through source.
   const fileJobRegistry: JobRegistry | undefined = store.saveJob
     ? {
         saveJob: (id, job) => store.saveJob!(id, job),
@@ -1014,11 +828,8 @@ export async function main(
       }
     : undefined;
   const jobsDsn = agentHostDsn;
-  // NO DATABASE => NO REGISTRY. Falling back to the file registry would silently resume
-  // using the emptyDir-backed jobs.json this store exists to escape — a conversation's
-  // jobs vanish on the next rollout and nothing says so. Losing the ability to START a
-  // background job is honest; losing the record of one already running is not. With no
-  // registry, jobsEnabled is false and run_background is simply unavailable.
+  // No database means no registry, since falling back to the emptyDir-backed file registry
+  // would lose jobs on the next rollout.
   const jobRegistry = jobsDsn ? createPgJobStore({ dsn: jobsDsn, legacy: fileJobRegistry }) : undefined;
   hostLog.info("background-job registry", {
     backend: jobRegistry ? "postgres" : "none",
@@ -1037,31 +848,21 @@ export async function main(
       })
     : undefined;
 
-  // The typed agent-tools (slack/gitlab/github/web) call the broker server-side
-  // under the agent-host's OWN identity (BROKER_URL + SA token, same anchor as
-  // resolveApprovalForBroker below). When BROKER_URL is unset (local/fake) the tools
-  // still register, but calls fail with a clear error the handlers echo verbatim.
+  // The broker base URL for the agent-tools; unset, calls fail with a clear error.
   const brokerUrl = (process.env.BROKER_URL ?? "").replace(/\/$/, "");
-  // Optional FALLBACK target discovery: read the webhooks conversation_map from
-  // the shared Postgres when a conversation's link has no structured `ref` (e.g.
-  // a conversation created before ref existed). Wired iff a DSN is available
-  // (WEBHOOKS_DB_DSN, or assembled from WEBHOOKS_DB_* like the webhooks service).
-  // Absent -> the tools rely on `ref` alone (unchanged behavior).
+  // Fallback target discovery from the webhooks conversation_map when a conversation's link
+  // has no structured `ref`, wired only when a DSN is available.
   const webhooksDsn = webhooksResourceDsn();
   const resourceLookup = webhooksDsn ? createResourceLookup({ dsn: webhooksDsn }) : undefined;
 
-  // Identity resolution (provider-agnostic), composed as layers over the base
-  // resolver (header by default; alb-oidc when AUTH_MODE=alb-oidc):
-  //   base -> [ALB signature verify] -> [sub->email store + static map]
-  // Verification runs BEFORE the store so an UNVERIFIED email is never learned.
-  // All layers optional — with none configured this is the plain header behavior.
+  // Identity resolution, composed as layers over the base resolver (base -> [ALB signature
+  // verify] -> [sub->email store + static map]), with verification before the store so an
+  // unverified email is never learned.
   const identityStore = webhooksDsn ? createPgIdentityStore({ dsn: webhooksDsn }) : undefined;
   const staticIdentityMap = parseIdentityMap(process.env.AUTH_SUB_EMAIL_MAP);
 
-  /** Resolve an owner id → email for per-user cost metrics: the static map first
-   *  (cheap, offline), then the identity store (learned at ingress login). Returns
-   *  null when unknown — the metric then labels user_email "". Best-effort: a store
-   *  error must never break metric emission. Used by the run-complete metrics hook. */
+  /** Resolve an owner id to an email for per-user cost metrics (static map first, then the
+   *  identity store), null when unknown. */
   const resolveOwnerEmail = async (id: string | undefined): Promise<string | null> => {
     if (!id) return null;
     const mapped = staticIdentityMap?.[id];
@@ -1083,22 +884,15 @@ export async function main(
     identityStore || staticIdentityMap
       ? withIdentityStore(identityResolver, { store: identityStore, staticMap: staticIdentityMap }).resolve
       : (req: IncomingMessage) => identityResolver.resolve(req);
-  // Own a UI-created conversation (POST /agui) to its ingress-authenticated creator,
-  // the same resolver /whoami + POST /conversations use — otherwise a browser-made
-  // conversation had no owner and never showed under the Mine filter.
+  // Own a UI-created conversation to its ingress-authenticated creator, the same resolver
+  // /whoami uses.
   server.useIdentityResolver(resolveUser);
-  // The provider reply tools used to need a broker client, the conversation's links
-  // and the webhooks resource-map lookup here. #700 moved them into the contribs, and
-  // the broker resolves its own targets, so only the web tools' injectable fetch is
-  // left — which nothing overrides in production.
+  // Only the web tools' injectable fetch remains here, and nothing overrides it in
+  // production.
   const agentToolsWiring: { fetchImpl?: typeof fetch } | undefined = undefined;
 
-  // Serve the MCP endpoint if ANY capability is available: the agent-tools (broker
-  // wired), the background-job tools, or the model self-selection tools. buildServer
-  // registers whichever deps are present.
-  // Model self-selection tools (list_models / switch_model) — offered when the
-  // deployment has >1 model to choose from. Sourced from the catalog + the manager's
-  // immediate-switch primitive.
+  // Model self-selection tools (list_models / switch_model), offered when the deployment has
+  // more than one model.
   const modelToolsWiring =
     config.modelCatalog.models.length > 1
       ? {
@@ -1108,13 +902,8 @@ export async function main(
         }
       : undefined;
 
-  // Sandbox right-sizing tools (show_sandbox_resources / set_sandbox_resources).
-  // Present on every real deployment; absent only for a fake sandbox, which has no
-  // Sandbox CR to size. The MCP `conv` param is the FULL conversationId (= threadId),
-  // while the CR is named for the SHORT id (the same one create/resume use), so map
-  // through shortId() — otherwise the tool would size a Sandbox that doesn't exist.
-  // threadId is passed through for the cold-create path (a size set before the first
-  // turn, where the CR has to be created to hold it).
+  // Sandbox right-sizing tools, absent only for a fake sandbox; the CR is named for the
+  // short id, so map through shortId(), with the full id passed for the cold-create path.
   const resourceToolsWiring = k8sProvisioner
     ? {
         currentResources: async (id: string): Promise<SandboxResources> =>
@@ -1127,13 +916,8 @@ export async function main(
       }
     : undefined;
 
-  // Scheduled-task tools (list/search/view/create/edit/delete) — wired when a
-  // scheduler service URL is configured. Every call is scoped to the conversation's
-  // OWNER (sessions.get(id).owner), which the HTTP client forwards as x-auth-user so
-  // the scheduler attributes/scopes tasks to that user. No owner → the tools refuse.
-  // One HTTP client to the scheduler service, shared by the agent MCP tools AND the
-  // UI settings-page proxy (createManagementApi). Both scope every call to an owner
-  // (the conversation owner for MCP; the caller for the UI).
+  // One HTTP client to the scheduler service, shared by the agent MCP tools and the UI
+  // settings proxy, with every call scoped to an owner.
   const schedulerClient = process.env.SCHEDULER_URL
     ? createHttpSchedulerClient({
         baseUrl: process.env.SCHEDULER_URL,
@@ -1147,11 +931,8 @@ export async function main(
       }
     : undefined;
 
-  // Subagent tools: delegate work to a child conversation that SHARES this
-  // conversation's sandbox (see todo/docs/SUBAGENTS.md +
-  // todo/docs/SUBAGENT_INTERACTION.md). Extracted to session/subagentManager.ts so
-  // the spawn/list/check/cancel/send/monitor/search logic is unit-testable.
-  // The router creates the child conversation (PR #726).
+  // Subagent tools delegate work to a child conversation that shares this conversation's
+  // sandbox, with the router creating the child conversation.
   const subagentCreator = process.env.CONVERSATION_ROUTER_URL
     ? createRouterSubagentCreator({
         url: process.env.CONVERSATION_ROUTER_URL,
@@ -1164,16 +945,9 @@ export async function main(
   }
   const subagentManager: SubagentManager = createSubagentManager(sessions, store, subagentCreator);
 
-  // marimo notebook tools: target THIS conversation's in-pod marimo at podIP:2718.
-  // Real sandboxes only (a fake/local sandbox has no pod IP). The pod IP is resolved
-  // FRESH per call — it changes across suspend/resume, so we must not cache it.
-  //
-  // marimo runs with `--base-url /c/<CONVERSATION_ID>/marimo` (so it serves correctly
-  // behind the web-service proxy), which prefixes ALL its routes — INCLUDING the
-  // /api/* endpoints the client hits. So the client baseUrl must carry that same
-  // prefix, else GET /api/sessions 404s (the live bug the fake-server tests missed).
-  // CONVERSATION_ID is the full threadId the provisioner injects (see web-services/
-  // marimo.nix). Overridable via MARIMO_BASE_PATH ("" to disable) for a bare server.
+  // marimo notebook tools target this conversation's in-pod marimo at podIP:2718, with the
+  // pod IP resolved fresh per call and the client baseUrl carrying marimo's
+  // `--base-url /c/<CONVERSATION_ID>/marimo` prefix (MARIMO_BASE_PATH overrides, "" disables).
   const MARIMO_PORT = Number(process.env.MARIMO_PORT ?? 2718);
   const marimoBasePath = (threadId: string) =>
     process.env.MARIMO_BASE_PATH ?? `/c/${threadId}/marimo`;
@@ -1188,8 +962,7 @@ export async function main(
           const base = marimoBasePath(conv.threadId).replace(/\/$/, "");
           return createMarimoClient({ baseUrl: `http://${target.podIP}:${MARIMO_PORT}${base}` });
         },
-        // The user-facing notebook URL: <PUBLIC_URL>/c/<threadId>/marimo/ (the same
-        // path the web-service proxy serves). Undefined when PUBLIC_URL isn't set.
+        // The user-facing notebook URL, undefined when PUBLIC_URL is unset.
         notebookUrlFor: (conversationId: string) => {
           const conv = sessions.get(conversationId as SessionId);
           if (!conv || !publicBase) return undefined;
@@ -1208,14 +981,10 @@ export async function main(
     subagentManager !== undefined ||
     marimoToolsWiring !== undefined
       ? createMcpEndpoint({
-          // The URL goose connects to. The agent-host serves it on its own port;
-          // goose runs in THIS pod, so localhost reaches it.
+          // The URL goose connects to; goose runs in this pod, so localhost reaches it.
           baseUrl: process.env.AGENT_SELF_MODIFY_MCP_URL ?? `http://127.0.0.1:${config.port}`,
-          // The conversation scope travels as a signed bearer token rather than in the
-          // URL. Unset = the endpoint stays on the old unauthenticated `?conv=`
-          // behaviour, with a loud startup warning, so an upgrade that has not yet
-          // provisioned the Secret keeps working instead of losing every tool at
-          // once. See issue #700.
+          // The conversation scope travels as a signed bearer token; unset keeps the
+          // unauthenticated `?conv=` behaviour with a loud startup warning.
           convTokenSecret,
           convTokenTtlSeconds: process.env.CONV_TOKEN_TTL_SECONDS
             ? Number(process.env.CONV_TOKEN_TTL_SECONDS)
@@ -1230,15 +999,9 @@ export async function main(
         })
       : undefined;
 
-  // The broker-MCP proxy: how the agent reaches the contrib-contributed tools
-  // (github_comment, slack_respond, …) that #700 moved out of this process.
-  //
-  // A PROXY rather than handing the agent the broker's URL, because the broker's /mcp
-  // needs BOTH an allowlisted control-plane SA token and a conversation token — and an
-  // MCP server's headers are fixed at session creation while a projected SA token
-  // rotates roughly hourly. Embedding one would work for an hour and then 401 every
-  // provider tool mid-conversation. Here the SA token is attached FRESH per request and
-  // the agent never holds it, which also keeps it off a BYOC user's machine.
+  // The broker-MCP proxy, through which the agent reaches the contrib-contributed tools: the
+  // SA token is attached fresh per request (a projected token rotates hourly, while an MCP
+  // server's headers are fixed at session creation) and never reaches the agent.
   const brokerMcpUrl = (process.env.BROKER_MCP_URL ?? (brokerUrl ? `${brokerUrl.replace(/\/$/, "")}/mcp` : "")).trim();
   const brokerMcpProxy =
     brokerMcpUrl && convTokenSecret
@@ -1248,14 +1011,13 @@ export async function main(
           resolveConversation: (req) => resolveConversation(req, convTokenSecret),
           mintConvToken: (conversationId) => mintConvToken(conversationId, convTokenSecret),
           saToken: async () => {
-            // Re-read per request: kubelet rotates the projected token on disk, so a
-            // value cached at startup goes stale inside the hour.
+            // Re-read per request, since kubelet rotates the projected token on disk.
             try {
               const { readFile } = await import("node:fs/promises");
               return (await readFile(brokerTokenPath, "utf8")).trim();
             } catch (err) {
-              // ENOENT is the genuine local/dev case. Anything else is a real problem
-              // and must not silently downgrade to an unauthenticated broker call.
+              // ENOENT is the local/dev case; anything else must not silently downgrade to an
+              // unauthenticated call.
               if ((err as { code?: string })?.code !== "ENOENT") {
                 hostLog.warn("could not read the broker SA token; the broker will reject MCP calls", {
                   path: brokerTokenPath,
@@ -1273,34 +1035,21 @@ export async function main(
     });
   }
 
-  // Restore conversations so the session list survives a restart. Multi-replica hydrates from
-  // the Conversation CRs (the source of truth); single-replica from the local store.
-  //
-  // A CR-list failure THROWS, and startup does not proceed past it: a pod that cannot read the
-  // source of truth must not serve on a stale view (decision Q4). Retry with backoff first, so a
-  // transient apiserver blip does not turn into a crashloop — this mirrors what hydrate()'s own
-  // reconcile() already does internally. If it still fails we rethrow: the process exits, the pod
-  // never becomes ready, and k8s restarts it, which is the correct outcome for a pod that cannot
-  // learn what it owns. NOTE this gates STARTUP only — once hydrated, a later list failure must
-  // never yank an already-serving pod out of rotation.
+  // Restore conversations at startup, from the Conversation CRs when multi-replica; a pod
+  // that cannot read the source of truth retries with backoff and then exits rather than
+  // serving a stale view.
   await hydrateWithRetry(() => sessions.hydrate(), hostLog);
 
-  // Forward every conversation's AG-UI events to subscribed UI connections.
-  // (SessionManager already persists them to the store via its own wiring.)
-
   server.onPrompt(async (sessionId, input) => {
-    // sessionId here is the AG-UI threadId; find-or-start the conversation.
-    // A requested model is honored only if it's the default or an offered model
-    // (an unknown one is ignored -> the conversation keeps its current model).
+    // sessionId is the AG-UI threadId; a requested model is honored only if it is the
+    // default or an offered model.
     const requested = input.model;
     const model =
       requested && (requested === config.model || config.availableModels.includes(requested))
         ? requested
         : undefined;
-    // Store any attached images in the AssetStore -> pass small refs to the bridge
-    // (which resolves them to base64 ACP image blocks). Oversize/unsupported images
-    // are dropped best-effort (a bad image must not fail the whole turn); the
-    // AssetStore enforces the cap + MIME allow-list.
+    // Store attached images in the AssetStore and pass refs to the bridge, dropping an
+    // oversize or unsupported image rather than failing the turn.
     const promptImages: Array<{ assetId: string; mimeType: string }> = [];
     for (const img of input.images ?? []) {
       try {
@@ -1310,11 +1059,8 @@ export async function main(
         hostLog.warn("dropped an attached image", { conversation_id: sessionId, error: formatError(e) });
       }
     }
-    // Binary file attachments (UI uploads, Slack pdf/zip/…) ride through to the bridge,
-    // which materializes each into the sandbox at /workspace/uploads/<name> via the exec
-    // client and appends a note listing the saved paths (best-effort — a failed write
-    // must not kill the turn). Oversize files are dropped HERE (best-effort, like images)
-    // so a huge attachment can't blow up the run; FILE_MAX_BYTES is deployment-tunable.
+    // Binary file attachments ride through to the bridge, which materializes them into the
+    // sandbox; oversize files are dropped here.
     const promptFiles: Array<{ name: string; data: string; mimeType: string }> = [];
     for (const f of input.files ?? []) {
       if (base64ByteLength(f.data) > fileMaxBytes) {
@@ -1328,13 +1074,10 @@ export async function main(
       promptFiles.push({ name: f.name, data: f.data, mimeType: f.mimeType });
     }
     try {
-      await sessions.promptByThread(sessionId, input.text, model, input.priority, input.owner, promptImages, promptFiles, input.source);
+      await sessions.promptByThread(sessionId, input.text, model, input.priority, input.owner, promptImages, promptFiles, input.source, input.provider);
     } catch (err) {
-      // The run couldn't even START (provision/revive failed — e.g. 409 on a wrong
-      // hydrate map, goose/ACP error). PERSIST a RUN_ERROR to the durable log so a
-      // reattaching/refreshing UI sees the failure (not just the live client — the
-      // server also emits a live RUN_ERROR when we rethrow). Without this, the run
-      // left no trace and the conversation looked silently dead.
+      // The run could not start, so persist a RUN_ERROR to the durable log so a reattaching
+      // UI sees the failure.
       const message = err instanceof Error ? err.message : String(err);
       const runId = `err-${Date.now()}`;
       try {
@@ -1346,7 +1089,7 @@ export async function main(
       } catch (persistErr) {
         hostLog.errorWith("failed to persist RUN_ERROR", persistErr, { conversation_id: sessionId });
       }
-      throw err; // rethrow so the /agui handler also emits a LIVE RUN_ERROR + closes
+      throw err; // rethrow so the /agui handler also emits a live RUN_ERROR
     }
   });
 
@@ -1355,42 +1098,28 @@ export async function main(
     sessions.get(sessionId)?.bridge?.answerPermission(toolCallId, optionId);
   });
 
-  // assistant-ui resumes a paused run by POSTing /agui with resume[] — route the
-  // answer to the conversation's bridge (interruptId == the request's toolCallId).
-  //
-  // REVIVE-BEFORE-ANSWER: after a rollout or idle-suspend the paused run is gone from
-  // memory — no live bridge, or a bridge that no longer has this interrupt registered
-  // (answerPermission returns false). Answering only the already-live bridge silently
-  // no-ops there, the SSE is left open with no data, and the approval hangs → 502
-  // forever (docs/scooter-bug-resume-hangs-when-run-not-live.md). So if the direct
-  // answer doesn't land, REVIVE the conversation (rebuilds the bridge; onRevived →
-  // reRaisePendingApprovals re-raises the still-pending broker request, restoring
-  // answer-routing) and also re-raise directly (covers a live bridge that merely lost
-  // the interrupt), then retry. Returns whether it was ultimately answered so the /agui
-  // resume branch can close with RUN_ERROR instead of hanging when it genuinely can't.
+  // assistant-ui resumes a paused run by POSTing /agui with resume[]; if the direct answer
+  // does not land (the run is gone after a rollout or idle-suspend), revive and re-raise
+  // the pending interrupt, then retry, returning whether it was answered so the caller can
+  // close with RUN_ERROR instead of hanging.
   server.onResume(async (sessionId, entry, approver) => {
-    // cancelled -> empty optionId (the bridge treats an unknown/empty id as a
-    // cancel); resolved -> the chosen optionId from the payload.
+    // cancelled -> empty optionId (which the bridge treats as a cancel); resolved -> the
+    // chosen optionId.
     const optionId =
       entry.status === "cancelled"
         ? ""
         : ((entry.payload as { optionId?: string } | undefined)?.optionId ?? "");
 
-    // `approver` is the human who answered, resolved from the ingress identity on the
-    // resume request. It MUST reach answerPermission: an approval interrupt's onAnswer
-    // relays it to the broker, which authorizes that person. Dropping it falls back to
-    // `{ id: conversationId }` — the broker then checks a principal that is not a user,
-    // and (with FGA on) no approver tuple matches. Why: PR #649.
+    // `approver` is the human who answered, which an approval interrupt's onAnswer relays to
+    // the broker for authorization.
     const answer = () =>
       sessions.get(sessionId)?.bridge?.answerPermission(entry.interruptId, optionId, approver) ?? false;
 
     // 1) Fast path — the run is still live and holding this interrupt.
     if (answer()) return { ok: true };
 
-    // 2) Dormant / lost-interrupt path — revive + re-raise, then retry. Both are
-    //    best-effort and idempotent (revive is a no-op if already live; re-raise keys
-    //    on the request id). A revive failure (e.g. conversation genuinely gone) is not
-    //    fatal — we still attempt the answer and, failing that, report ok:false.
+    // 2) Dormant / lost-interrupt path: revive and re-raise (both idempotent and
+    //    best-effort), then retry.
     await sessions.revive(sessionId as SessionId).catch((err) => {
       hostLog.warn("resume: revive failed; answering best-effort", {
         conversation_id: sessionId,
@@ -1405,8 +1134,7 @@ export async function main(
     });
     if (answer()) return { ok: true };
 
-    // 3) Genuinely unanswerable (interrupt expired / already answered / unknown). The
-    //    caller turns this into a RUN_ERROR on the stream rather than a silent hang.
+    // 3) Genuinely unanswerable; the caller turns this into a RUN_ERROR on the stream.
     return { ok: false, reason: "this approval is no longer awaiting an answer (it may have expired or already been answered)" };
   });
 
@@ -1414,10 +1142,8 @@ export async function main(
     for await (const event of store.readEvents(sessionId)) conn.send(event);
   });
 
-  // Shared broker call setup: base URL + the agent-host SA token (the trust
-  // anchor that vouches for the real user). Returns null when BROKER_URL is unset
-  // (local/fake) so callers can no-op cleanly. Mirrors the token-read rules used
-  // by resolveApprovalForBroker (ENOENT => dev/no-token; any other read error throws).
+  // Shared broker call setup (base URL + the agent-host SA token), null when BROKER_URL is
+  // unset; ENOENT means no token, any other read error throws.
   const brokerAuth = async (): Promise<{ url: string; headers: Record<string, string> } | null> => {
     const url = (process.env.BROKER_URL ?? "").replace(/\/$/, "");
     if (!url) return null;
@@ -1438,9 +1164,8 @@ export async function main(
     return { url, headers };
   };
 
-  // In-pod web-service registry (list/start via exec) — shared by the management
-  // API (UI Services panel) and the reverse proxy. Real k8s only; fake/local
-  // sandboxes have no pod, so it's left undefined and the routes report none.
+  // In-pod web-service registry shared by the management API and the reverse proxy;
+  // undefined for a fake sandbox, which has no pod.
   const webServices = config.fakeSandbox
     ? undefined
     : createWebServiceRegistry({
@@ -1448,8 +1173,8 @@ export async function main(
         connect: (ref) => connectSandbox(ref),
       });
 
-  // Module registry: search the broker catalog + install (attach) modules into a
-  // conversation's sandbox, via the in-pod agent-broker / scooter-rebuild CLIs.
+  // Module registry: search the broker catalog and install modules into a conversation's
+  // sandbox via the in-pod CLIs.
   const moduleRegistry = config.fakeSandbox
     ? undefined
     : createModuleRegistry({
@@ -1457,12 +1182,12 @@ export async function main(
         connect: (ref) => connectSandbox(ref),
       });
 
-  // Management REST API (conversation CRUD + lifecycle + history), mounted on
-  // the same server. /agui stays the AG-UI streaming transport.
+  // Management REST API (conversation CRUD, lifecycle, history), mounted on the same server
+  // as /agui.
   server.use(
     createManagementApi({
-    // The integrity stream must not sit silent on a non-owner pod: live appends only
-    // reach the OWNER's local store. Absent registry/podName => single-replica ("mine").
+    // Live appends only reach the owner's local store, so the integrity stream reports
+    // whether this pod owns the conversation.
     streamOwnership: conversationRegistry && podName
       ? async (id: string) => {
           const rec = await conversationRegistry.get(id).catch(() => undefined);
@@ -1478,14 +1203,12 @@ export async function main(
       identityStore,
       assets,
       scheduler: schedulerClient,
-      // The current sandbox size (cpu/memory/gpu) for the Sandbox tab, read off the
-      // Sandbox CR; keyed by shortId like the show/set resource tools.
+      // The current sandbox size for the Sandbox tab, read off the CR by shortId.
       sandboxResources: k8sProvisioner
         ? (id: string) => k8sProvisioner.getSize(shortId(id))
         : undefined,
-      // The conversation's published static shares for the right-panel Shares tab.
-      // Broker path only (needs the agent-host SA to relay the query); keyed by
-      // shortId like the resource tools — the broker owns shares by the short-id.
+      // The conversation's published static shares, keyed by shortId since the broker owns
+      // shares by the short id.
       listShares: (process.env.BROKER_URL ?? "").trim()
         ? async (id: string) =>
             fetchConversationShares(
@@ -1495,18 +1218,18 @@ export async function main(
               (status) => hostLog.warn("broker /shares list failed", { conversation_id: id, status }),
             )
         : undefined,
-      // The available named sandbox size presets and the default preset name, for the
-      // UI dropdown and the agent's size discovery.
+      // The named sandbox size presets and the default, for the UI dropdown and the agent's
+      // size discovery.
       sandboxSizes: k8sProvisioner ? () => Promise.resolve(k8sProvisioner.getSizes()) : undefined,
-      // The Sandbox tab's size dropdown. Keyed by shortId (the CR name); the full id
-      // is passed as threadId for the cold-create path.
+      // The Sandbox tab's size dropdown, keyed by shortId with the full id passed for the
+      // cold-create path.
       setSandboxSize: k8sProvisioner
         ? (id: string, size: string) => k8sProvisioner.setSize(shortId(id), { size }, id)
         : undefined,
-      // BYO-Claude Settings section (mint one-liner + connected badge). Undefined = BYO off.
+      // BYO-Claude Settings section (mint one-liner + connected badge), undefined when BYO is off.
       remoteAgent: remoteAgentUi,
-      // Manual compaction — summarize older turns via a one-off SDK query with the
-      // SAME token/model the conversation runs on. Off (undefined) without a token.
+      // Manual compaction via a one-off SDK query with the same token/model the conversation
+      // runs on; off without a token.
       compact: process.env.CLAUDE_CODE_OAUTH_TOKEN
         ? (id: string) =>
             compactConversation(store, id, {
@@ -1524,33 +1247,27 @@ export async function main(
         providers: Object.fromEntries(
           config.modelCatalog.models.map((m) => [m.id, m.providers]),
         ),
+        defaultFor: Object.fromEntries(
+          config.modelCatalog.models.map((m) => [m.id, m.defaultFor]),
+        ),
       },
       resolveUser,
       mcpHandler: mcpEndpoint ? (req, res, body) => mcpEndpoint.handle(req, res, body) : undefined,
       resourceLookup,
       brokerMcpHandler: brokerMcpProxy ? (req, res, body) => brokerMcpProxy.handle(req, res, body) : undefined,
       answerPermission: async (sessionId, toolCallId, optionId, approver) => {
-        // Route the user's choice to the conversation's bridge, which resolves
-        // the blocked agent run (ACP request_permission).
-        //
-        // `approver` (the route resolves it from ctx.user) must be forwarded: for an
-        // approval interrupt the bridge relays it to the broker as the human being
-        // authorized. This signature took it and dropped it, so no HTTP path ever
-        // delivered an approver. Why: PR #649.
+        // Route the user's choice to the conversation's bridge, forwarding `approver` so an
+        // approval interrupt relays the authorized human to the broker.
         const answered = sessions.get(sessionId)?.bridge?.answerPermission(toolCallId, optionId, approver);
         if (!answered) {
           hostLog.warn("no pending permission", { conversation_id: sessionId, tool_call_id: toolCallId });
         }
       },
-      // Relay the user's answer to the contrib that asked. Shared with the revive
-      // re-raise (onRevived) so both paths route answers identically.
+      // Relay the user's answer to the contrib that asked, shared with the revive re-raise.
       resolveApproval: resolveApprovalForBroker,
       canApproveRequest: async (_sessionId, contrib, requestId, approver) => {
-        // Read-only: may THIS viewer act on THIS request? Per-viewer (the interrupt
-        // is raised once but seen by many users), so the UI asks with the current
-        // user's identity. Fail CLOSED (false) on any hiccup — a greyed button that
-        // should be live is safe; a live button that should be greyed is not. When
-        // BROKER_URL is unset (local/fake), default to true so dev UIs stay usable.
+        // Per-viewer read-only check of whether this viewer may act on this request, failing
+        // closed on any hiccup and defaulting to true when BROKER_URL is unset.
         const cfg = approvalContribs[contrib];
         if (!cfg) return false; // unknown contrib: nothing can authorize it
         const auth = await brokerAuth().catch(() => null);
@@ -1571,9 +1288,8 @@ export async function main(
     }),
   );
 
-  // Web-service reverse proxy (/c/<id>/<service>/... -> the conversation's pod).
-  // Real k8s only — needs pod IPs + in-pod systemd. Fake/local sandboxes have no
-  // pod to proxy to, so it's left unmounted there (the routes just 404).
+  // Web-service reverse proxy (/c/<id>/<service>/... -> the conversation's pod), unmounted
+  // for a fake sandbox.
   if (webServices) {
     server.useProxy(
       createWebServiceProxy({
@@ -1595,10 +1311,8 @@ export async function main(
   // eslint-disable-next-line no-console
   hostLog.info("listening", { port: config.port });
 
-  // Resume conversations interrupted by THIS restart (a run that started but never
-  // finished): revive + nudge them to continue. Fire-and-forget AFTER listen(), so
-  // the server is up to serve the resumed runs' events and boot isn't blocked. Not
-  // in fake mode (no real sandboxes/goose to revive).
+  // Resume conversations interrupted by this restart, fire-and-forget after listen() so the
+  // server is up to serve their events.
   if (!config.fakeSandbox) {
     void sessions
       .resumeInterrupted()
@@ -1608,11 +1322,7 @@ export async function main(
       .catch((err) => hostLog.errorWith("resumeInterrupted failed", err));
   }
 
-  // Idle-suspend sweep — kube-native-friendly: the agent-host owns the activity
-  // signal, so it suspends idle conversations itself (drops the pod, keeps the
-  // PVCs). Activity metadata is exposed via the API + persisted so an external
-  // lifecycle controller could take over. 0 disables.
-  // Report sandbox population to metrics (also each sweep tick below).
+  // Report sandbox population to metrics, also on each sweep tick.
   const reportSandboxCounts = () => {
     let running = 0;
     let suspended = 0;
@@ -1624,6 +1334,8 @@ export async function main(
   };
   reportSandboxCounts();
 
+  // Idle-suspend sweep: the agent-host owns the activity signal, so it suspends idle
+  // conversations itself (drops the pod, keeps the PVCs).
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
   if (config.idleSuspendMs > 0) {
     sweepTimer = setInterval(() => {
@@ -1635,9 +1347,8 @@ export async function main(
     sweepTimer.unref?.();
   }
 
-  // Retention reap — DESTROY (end) unstarred conversations inactive past the
-  // retention window. Opt-in (0 = off); starred conversations are exempt. Runs on its
-  // own slow cadence (default 6h) since deletion is coarse-grained.
+  // Retention reap: destroy unstarred conversations inactive past the window, on its own
+  // slow cadence.
   let retentionTimer: ReturnType<typeof setInterval> | undefined;
   if (config.retentionMaxAgeMs > 0) {
     const reap = () =>
@@ -1654,18 +1365,15 @@ export async function main(
     retentionTimer.unref?.();
   }
 
-  // Background-job cleanup: periodically remove EXITED jobs' on-disk files past the
-  // TTL, per RUNNING conversation (a suspended pod has no fs to sweep). Best-effort.
+  // Background-job cleanup: periodically remove exited jobs' on-disk files past the TTL for
+  // each running conversation this pod owns.
   let jobCleanupTimer: ReturnType<typeof setInterval> | undefined;
   if (jobManager) {
     jobCleanupTimer = setInterval(() => {
       for (const c of sessions.list()) {
         if (c.status !== "running") continue;
-        // OWNER-ONLY, same rule as sweepIdle (#358): a stale local entry for a
-        // conversation that moved away (or was deleted elsewhere) otherwise gets
-        // exec-probed here every sweep — each probe rides the pollForReadyPod
-        // self-heal into a resume of a sandbox that may be GONE (observed: a 404
-        // resume retried every 60s forever after the pod-move story).
+        // Owner-only, like sweepIdle: a stale local entry for a conversation that moved away
+        // would otherwise be exec-probed into a resume of a sandbox that may be gone.
         if (ownership && !ownership.guard.canWrite(c.id)) continue;
         void jobManager.cleanup(c.id).catch(() => {});
       }
@@ -1673,33 +1381,26 @@ export async function main(
     jobCleanupTimer.unref?.();
   }
 
-  // Background-job completion WATCHER: poll running conversations for jobs that
-  // finished since last tick and inject a "job finished" turn so the agent reacts
-  // WITHOUT the user having to ask it to check. The injection uses interrupt:
-  // "thinking" — it preempts idle text generation but NEVER kills an in-flight tool
-  // call (don't cancel a build to announce another job). prompt() revives the
-  // conversation if its bridge went idle, so a completion still lands. Best-effort.
+  // Background-job completion watcher: poll running conversations for jobs that finished
+  // since the last tick and inject a "job finished" turn with the "thinking" interrupt,
+  // which never kills an in-flight tool call.
   const jobWatchEnabled = jobManager && process.env.BACKGROUND_JOB_WATCH !== "0";
   let jobWatchTimer: ReturnType<typeof setInterval> | undefined;
   if (jobWatchEnabled) {
     jobWatchTimer = setInterval(() => {
       for (const c of sessions.list()) {
-        // Poll conversations whose pod is up (running) — a suspended conversation's
-        // completions are announced on its next revive (the watcher sees them then).
+        // A suspended conversation's completions are announced on its next revive.
         if (c.status !== "running") continue;
-        // OWNER-ONLY — see the cleanup sweep above.
+        // Owner-only, like the cleanup sweep above.
         if (ownership && !ownership.guard.canWrite(c.id)) continue;
         void (async () => {
           const done = await jobManager!.pollCompletions(c.id).catch(() => [] as JobStatus[]);
           for (const st of done) {
             const tail = st.output.trim();
             const more = st.truncated ? `\n(output truncated — full log: check_background("${st.jobId}"))` : "";
-            // A SYSTEM message (source "background job") — the standard decoration is
-            // added by the bridge, so no manual [System] prefix here.
-            // A DIED job never wrote an exit code (its process was killed first), so say
-            // that rather than reporting the synthesized 137 as if the command had failed
-            // on its own — the agent should know the work was interrupted, not that it ran
-            // and exited non-zero.
+            // The bridge adds the system-message decoration; a died job never wrote an exit
+            // code, so say it was killed rather than reporting the synthesized 137 as a
+            // failure.
             const headline = st.died
               ? `Background job \`${st.jobId}\` (${st.command}) was KILLED before it finished ` +
                 `(the sandbox restarted or the process was terminated). Its output stops wherever it died, ` +
@@ -1719,29 +1420,17 @@ export async function main(
     jobWatchTimer.unref?.();
   }
 
-  // Subagent completion: when a subagent finishes, inject its RESULT (last
-  // assistant message) into the PARENT — priority-interrupt so it preempts the
-  // parent's idle turn — then CLEAN UP the subagent (end it). The result
-  // convention matches the Claude CLI (final message returns to the parent).
-  //
-  // Two triggers, notify-ONCE across both:
-  //   - EVENT-DRIVEN (primary): onSubagentComplete fires the instant the child's
-  //     run terminates → the parent gets the result immediately (no poll latency).
-  //   - POLL BACKSTOP: a periodic sweep catches a completion whose event was missed
-  //     (e.g. a subagent finished across an agent-host restart, so no live bridge
-  //     fired the event). SUBAGENT_WATCH=0 disables both.
+  // Subagent completion: inject the child's last assistant message into the parent as a
+  // priority interrupt, then end the subagent, notifying once across the event-driven
+  // trigger and the poll backstop (SUBAGENT_WATCH=0 disables both).
   let subagentWatchTimer: ReturnType<typeof setInterval> | undefined;
   if (process.env.SUBAGENT_WATCH !== "0") {
     const notified = new Set<SessionId>(); // subagents already reported + cleaned up
     const reportCompletion = async (subagentId: SessionId, parentId: SessionId): Promise<void> => {
       if (notified.has(subagentId)) return;
       notified.add(subagentId); // notify-once (mark before the async work)
-      // Flush the subagent's pending appends FIRST. The event-driven path fires from
-      // the bridge's RUN_FINISHED onEvent, but the store write is fire-and-forget
-      // (wireEventLog `void store.appendEvent`), so without this the read below can
-      // miss the just-emitted RUN_FINISHED → lastRunCompleted=false → the completion
-      // is silently dropped (the goose subagent "no result" bug; claude's timing
-      // usually won the race, goose's lost it). Flushing closes that window.
+      // Flush the subagent's pending appends first, since the store write is fire-and-forget
+      // and the read below could otherwise miss the just-emitted RUN_FINISHED.
       await store.flush?.(subagentId).catch(() => {});
       const events = await collectEventsSafe(store.readEvents(subagentId));
       if (!lastRunCompleted(events)) {
@@ -1755,8 +1444,8 @@ export async function main(
           .prompt(parentId, text, undefined, PRIORITY_INTERRUPT, "thinking", undefined, undefined, "subagent")
           .catch((e) => hostLog.errorWith("subagent-completion inject failed", e, { parent_id: parentId }));
       }
-      // Clean up the finished subagent (cascade-safe: a child shares the parent's
-      // pod, so end() won't tear the pod down for it).
+      // End the finished subagent (a child shares the parent's pod, so end() does not tear
+      // the pod down).
       await sessions
         .end(subagentId)
         .catch((e) => hostLog.errorWith("subagent cleanup (end) failed", e, { subagent_id: subagentId }));
@@ -1797,11 +1486,10 @@ export async function main(
     model: string | undefined,
     metrics: MetricsSink,
     owner?: string,
+    pickedProvider?: string,
   ) {
-    // In fake mode there is no pod, so the agent's tool calls run as local
-    // subprocesses; in cluster mode they exec into the sandbox pod via the K8s
-    // exec API (resolved on first use). The ACP client (goose) is created by the
-    // factory the bridge calls on first start().
+    // Tool calls run as local subprocesses in fake mode and exec into the sandbox pod via
+    // the K8s exec API otherwise.
     const exec = createSandboxExecBackend(
       config.fakeSandbox
         ? createLocalSandboxApiClient()
@@ -1810,32 +1498,21 @@ export async function main(
     );
     // Per-conversation model override: GOOSE_MODEL in the agent's launch env.
     const resolved = resolveModel(model, cfg);
-    // GOOSE_MODE=approve enables the per-tool permission gate the acp client
-    // auto-answers for back-pressure (allow normally; reject when a priority item
-    // is queued). Off (auto) when SUBAGENT_BACKPRESSURE=0. See the shouldYield dep
-    // on createAcpClient below + todo/docs/SUBAGENT_BACKPRESSURE.md.
+    // GOOSE_MODE=approve enables the per-tool permission gate the ACP client auto-answers
+    // for back-pressure, off when SUBAGENT_BACKPRESSURE=0.
     const backpressureOn = process.env.SUBAGENT_BACKPRESSURE !== "0";
     const agentEnv = {
       ...cfg.agent.env,
       ...(resolved ? { GOOSE_MODEL: resolved } : {}),
       ...(backpressureOn ? { GOOSE_MODE: "approve" } : {}),
     };
-    // goose runs IN the agent-host pod (not the sandbox), so its cwd must be a
-    // real, writable dir HERE — not the sandbox's "/workspace" (which doesn't
-    // exist in this pod; goose's session/new panics on a missing cwd and the
-    // ACP newSession hangs). The agent's *tool calls* still exec into the
-    // sandbox via the ExecBackend. Give goose a per-conversation scratch dir on
-    // the state volume.
-    // goose's per-conversation cwd is EPHEMERAL scratch (sessions DB +
-    // .goosehints) — the agent's real file/terminal work execs into the sandbox
-    // via the ExecBackend, not here. So it lives under scratchPath (an emptyDir),
-    // NOT the local state cache. (The durable event log lives in Postgres.)
+    // goose runs in this pod, so its cwd must be a real writable dir here: ephemeral
+    // per-conversation scratch under scratchPath, while its tool calls exec into the
+    // sandbox.
     const cwd = join(config.scratchPath, conversationId, "agent-cwd");
     mkdirSync(cwd, { recursive: true });
-    // Inject the agent identity (Scooter) + skills as goose's .goosehints in its
-    // cwd. Re-read on every conversation start, so editing the skills ConfigMap
+    // The skills are re-read on every conversation start, so editing the skills ConfigMap
     // takes effect for new conversations with no image rebuild.
-    // Which provider this conversation runs on; decides the skills mechanism.
     const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
     // Provider-specific: goose reads .goosehints with every body inlined; the
     // SDK discovers .claude/skills itself and gets no bodies in its prompt.
@@ -1849,14 +1526,9 @@ export async function main(
         via: usingClaude ? ".claude/skills" : ".goosehints",
       });
     const metricModel = resolved ?? cfg.model ?? "unknown";
-    // Offer the agent the in-process MCP tools (background jobs / model selection /
-    // agent-tools), scoped to THIS conversation via the URL's ?conv=<id>.
-    // The agent is offered TWO servers, split by who owns the tools: scooter-env for
-    // the control-plane tools that need this process's state and sandbox exec, and
-    // scooter-broker for the contrib-contributed provider tools. Both carry the same
-    // conversation token; `headers` is `HttpHeader[]` ({name,value}) per the ACP schema
-    // — the local type said `string[]`, wrong but harmless while every entry was empty.
-    // Why: issue #700.
+    // The agent is offered two MCP servers split by who owns the tools: scooter-env for the
+    // control-plane tools and scooter-broker for the contrib provider tools, both carrying
+    // the same conversation token.
     const offeredServers = [
       ...(mcpEndpoint
         ? [{
@@ -1871,23 +1543,18 @@ export async function main(
             type: "http",
             name: "scooter-broker",
             url: brokerMcpProxy.url(),
-            // The SAME conversation token: the proxy verifies it and attaches the
-            // rotating SA token itself.
+            // The same conversation token; the proxy verifies it and attaches the rotating SA
+            // token itself.
             headers: mcpEndpoint.headersFor(conversationId, owner),
           }]
         : []),
     ];
     const mcpServers = offeredServers.length ? offeredServers : undefined;
-    // The FLOOR ACP client factory — the cloud brain (SDK-claude on Bedrock, or goose). This is
-    // what a run uses when no personalized remote agent applies (a scheduled trigger, an offline
-    // agent, or BYO not enabled). Extracted so the BYO remote provider can sit ABOVE it in the
-    // per-run resolver.
+    // The floor ACP client factory is the cloud brain (SDK-claude on Bedrock, or goose) a run
+    // uses when no personalized remote agent applies.
     const floorAcpClientFactory = () =>
-        // claude-code: drive the agent via the Claude Agent SDK (isolated package)
-        // so its tools run IN THE SANDBOX (via ExecBackend) instead of the
-        // agent-host pod — the fix for the unreachable-scooter-rebuild bug — while
-        // keeping subscription auth (CLAUDE_CODE_OAUTH_TOKEN). Other providers keep
-        // the goose acp path unchanged.
+        // claude-code drives the agent via the Claude Agent SDK so its tools run in the
+        // sandbox via ExecBackend; other providers take the goose ACP path.
         usingClaude
           ? createSdkAcpClient({
               oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
@@ -1895,15 +1562,14 @@ export async function main(
               exec,
               // No skill bodies: the SDK loads them from .claude/skills on demand.
               systemPrompt: sdkPrompt({ name: config.agentName }),
-              // cwd is where .claude/skills lives; settingSources makes the SDK
-              // read it. Without settingSources NO skill list is ever sent.
+              // settingSources makes the SDK read .claude/skills from cwd, and without it no
+              // skill list is ever sent.
               cwd,
               settingSources: ["project"],
-              // Required: without `skills` the SDK leaves the Skill tool out of
-              // our explicit allowedTools, so the model cannot invoke any.
+              // Without `skills` the SDK leaves the Skill tool out of the explicit allowedTools,
+              // so the model cannot invoke any.
               skills: "all",
-              // One line naming what the session really discovered -- the
-              // diagnostic this whole investigation lacked.
+              // One line naming the skills the session discovered.
               onInit: (info) =>
                 hostLog.info("sdk session init", {
                   conversation_id: conversationId,
@@ -1913,18 +1579,12 @@ export async function main(
                     .filter(Boolean),
                   commands: info.commands,
                 }),
-              // TRANSCRIPT: record the RAW SDK messages under this run (no-op off).
+              // Record the raw SDK messages under this run for the transcript (no-op when off).
               recordRaw: (m) => bridge.recordRawInput(m),
-              // Give the SDK agent the SAME platform MCP tools the goose path gets
-              // (scheduler / slack / github / background jobs / model switch / resize),
-              // scoped to this conversation by the conversation token below. Without
-              // this the agent has only the sandbox tools and can't actually use those
-              // capabilities.
+              // Give the SDK agent the same platform MCP tools the goose path gets, scoped by
+              // the conversation token.
               mcpEndpointUrl: mcpEndpoint?.urlFor(conversationId),
-              // scooter-broker carries the CONTRIB provider tools (github,
-              // gitlab, jira, slack). Only the goose path offered it, so both
-              // the SDK and BYO agents had the github SKILL telling them to
-              // call agent-broker and no github tool to call.
+              // scooter-broker carries the contrib provider tools (github, gitlab, jira, slack).
               mcpServers:
                 brokerMcpProxy && mcpEndpoint
                   ? [
@@ -1939,18 +1599,14 @@ export async function main(
                       },
                     ]
                   : undefined,
-              // The conversation token, as the SDK's per-server `headers`. The URL no
-              // longer carries the scope. Why: issue #700.
+              // The conversation token, as the SDK's per-server `headers`.
               mcpEndpointHeaders: mcpEndpoint
                 ? Object.fromEntries(
                     mcpEndpoint.headersFor(conversationId, owner).map((h) => [h.name, h.value]),
                   )
                 : undefined,
-              // BACK-PRESSURE: yield the next tool call when a priority item (e.g. a
-              // finished subagent's result) is waiting, so it injects promptly
-              // instead of the parent spinning in a check_subagent poll loop.
-              // Late-bound: `bridge` is assigned below and set by the time the SDK
-              // calls this (on the first tool). Gated by SUBAGENT_BACKPRESSURE.
+              // Back-pressure: yield the next tool call when a priority item is waiting;
+              // late-bound since `bridge` is assigned below.
               shouldYield:
                 process.env.SUBAGENT_BACKPRESSURE === "0"
                   ? undefined
@@ -1961,55 +1617,51 @@ export async function main(
               args: cfg.agent.args,
               env: agentEnv,
               exec,
-              // Back-pressure: auto-answer goose's approve-mode permission gate —
-              // allow normally, reject the next tool when a priority item waits.
-              // Late-bound (bridge assigned below). Gated with GOOSE_MODE above.
+              // Back-pressure: auto-answer goose's approve-mode permission gate, rejecting the
+              // next tool when a priority item waits; late-bound since `bridge` is assigned
+              // below.
               shouldYield: backpressureOn ? () => bridge.shouldYieldToQueue() : undefined,
-              // TRANSCRIPT: record the RAW ACP updates under this run (no-op off).
+              // Record the raw ACP updates under this run (no-op when off).
               recordRaw: (u) => bridge.recordRawInput(u),
             });
 
-    // Per-run ACP provider registry. Without BYO (no registry), the bridge gets the single floor
-    // client (behavior-identical to before). WITH BYO, the resolver prefers the owner's remote
-    // agent for HUMAN triggers (remote-personalized, pri 10) and falls to the floor otherwise
-    // (scheduler / offline). The remote provider's tools exec into THIS conversation's cloud
-    // sandbox via `exec` — the body stays cloud-side. See remoteAgentRegistry.ts.
+    // Per-run ACP provider registry: with BYO, the resolver prefers the owner's remote agent
+    // for human triggers and falls to the floor otherwise, with the remote provider's tools
+    // still exec'ing into this conversation's cloud sandbox.
     const floorProvider: AcpProvider = {
       id: usingClaude ? "sdk-claude" : "bedrock-goose",
       kind: usingClaude ? "claude" : "goose",
       priority: 0,
-      // The model-namespace this provider serves (catalog models tag themselves with these):
-      // goose = Bedrock ids; the in-cluster subscription SDK = API ids under "claude-code".
+      // The model namespace this provider serves: goose = Bedrock ids, the in-cluster SDK =
+      // API ids under "claude-code".
       modelTag: usingClaude ? "claude-code" : "goose",
       eligible: () => true,
       createClient: floorAcpClientFactory,
     };
-    // BYO is a candidate only when a CONTROLLER is configured. Ownership is resolved there, not
-    // from a per-pod map: the controller holds every container socket, so any replica can drive any
-    // container. Without BYOC_CONTROLLER_URL there is no BYO path at all and every run takes the
-    // cloud floor.
+    // BYO is a candidate only when a controller is configured, since the controller holds
+    // every container socket and resolves ownership.
     const acpProviders: AcpProvider[] = byocControllerUrl
       ? [
           createRemotePersonalizedProvider({
             controllerUrl: byocControllerUrl,
             exec,
-            // The BYO container reaches scooter-env over the TUNNEL, not this URL directly —
-            // it is the loopback address the agent-host itself serves.
+            // The BYO container reaches scooter-env over the tunnel, not this loopback URL
+            // directly.
             mcpUrlFor: mcpEndpoint ? (conv: string) => mcpEndpoint.urlFor(conv) : undefined,
-            // Injected by the agent-host when it proxies a tunnel frame, so the user's
-            // machine never holds a conversation token. Why: issue #700.
+            // Injected by the agent-host when it proxies a tunnel frame, so the user's machine
+            // never holds a conversation token.
             mcpHeadersFor: mcpEndpoint ? (conv: string) => mcpEndpoint.headersFor(conv) : undefined,
             // Offer a BYO agent the contrib provider tools too, not just scooter-env.
             brokerMcpUrlFor: brokerMcpProxy ? () => brokerMcpProxy.url() : undefined,
+            // So an explicit pick of a cloud-only model declines here rather than
+            // being silently overridden by BYOC's priority.
+            catalog: config.modelCatalog,
           }),
           floorProvider,
         ]
       : [floorProvider];
-    // If the registry is absent the BYO provider is not even a CANDIDATE — every run goes to the
-    // cloud floor and looks completely normal from the outside. Say so once per bridge, with the
-    // owner, so a "why did my container not serve this?" question is answerable from the log.
-    // This line was ALREADY key=value — the drift toward structure the audit noted.
-        // Now the values are real fields instead of a string that looks like fields.
+    // Log the candidates once per bridge, with the owner, so "why did my container not serve
+    // this?" is answerable from the log.
         logger("acp-providers").info("resolved provider candidates", {
           conversation_id: conversationId,
           owner: owner ?? null,
@@ -2020,30 +1672,27 @@ export async function main(
     const bridge = createSessionBridge({
       config: { cwd, skillsDir: config.skillsDir, agent: cfg.agent, sandbox, mcpServers },
       exec,
-        // Stamped onto RUN_STARTED so a later reader can tell a run THIS pod is still
-        // executing from one stranded by a dead host — see hasDanglingRun.
+        // Stamped onto RUN_STARTED so a later reader can tell a run this pod is still
+        // executing from one stranded by a dead host.
         selfPod: podName,
-        // The EPOCH half of that stamp, without which isOwnRun degrades to a pod-NAME
-        // match — and a StatefulSet pod reuses its name, so a run stranded by this pod's
-        // PREVIOUS process reads as "ours, still executing" and is never healed.
+        // The epoch half of that stamp, without which a StatefulSet pod reusing its name
+        // would read a run stranded by its previous process as its own.
         generation: () => ownership?.guard.observedGeneration?.(conversationId as SessionId),
       firstActivityTimeoutMs: config.firstActivityTimeoutMs,
       livenessProbeMs: config.livenessProbeMs,
-      // TRANSCRIPT RECORDER (test-harness, off unless TRANSCRIPT_RECORD_DIR is set):
-      // record the RAW agent input + emitted AG-UI so tests replay real behavior.
+      // Transcript recorder for the test harness, off unless TRANSCRIPT_RECORD_DIR is set.
       recorder: transcriptRecorder,
       provider: usingClaude ? "claude" : "goose",
       owner,
       acpProviders,
-      // Per-provider model resolution (see BridgeDeps): the conversation's choice when the
-      // run's provider offers it, else that provider's own default from the catalog.
+      // Per-provider model resolution: the conversation's choice when the run's provider
+      // offers it, else that provider's default.
       model,
+      pickedProvider,
       modelCatalog: cfg.modelCatalog,
       onRunComplete: ({ acpSessionId, durationMs, outcome }) => {
-        // Attribute cost to the conversation OWNER (id + email). Resolve async
-        // (email may need the identity store) but don't block the run — the metric
-        // read is itself async/best-effort. Unowned → runFinished buckets it as
-        // user_id "anonymous".
+        // Attribute cost to the conversation owner, resolving the email async without
+        // blocking the run.
         const ownerId = sessions.get(conversationId as SessionId)?.owner;
         void resolveOwnerEmail(ownerId).then((ownerEmail) => {
           metrics.runFinished({
@@ -2057,18 +1706,13 @@ export async function main(
           });
         });
       },
-      // Revive history reinjection: a revived conversation spawns a fresh goose
-      // session with no memory, so on this bridge's first prompt the persisted
-      // event log is folded into a transcript and prepended. Read the FULL log
-      // for this conversation (the bridge snapshots it before the current turn).
+      // Revive history reinjection: the full persisted log is folded into a transcript and
+      // prepended on this bridge's first prompt.
       loadHistory: async () => {
         const events: AguiEvent[] = [];
-        // Reading a stale local log here used to reinject an EMPTY transcript, so the
-        // model started from a blank slate (the revive-reinjection bug).
         for await (const e of store.readEvents(conversationId as SessionId)) events.push(e);
-        // If the conversation was COMPACTED, resume from [summary recap + events after
-        // the latest marker] so the revived session's context is the compacted one
-        // (real token reduction). No marker → full log, unchanged.
+        // A compacted conversation resumes from the summary plus the events after the
+        // latest marker.
         return historyAfterCompaction(events);
       },
       // Resolve an attached image's bytes so the run builds the ACP image block.
@@ -2081,24 +1725,15 @@ export async function main(
   }
 }
 
-/**
- * A SandboxApiClient that resolves the real pod-exec client on first use.
- * (connectSandbox is async; the ExecBackend interface is sync-constructed.)
- */
+/** A SandboxApiClient that resolves the real pod-exec client on first use, since
+ *  connectSandbox is async and the ExecBackend is sync-constructed. */
 function deferredSandboxApi(sandbox: SandboxRef, ensureRunning?: () => Promise<void>) {
-  // In-flight dedupe: a burst of concurrent first tool calls shares ONE connect
-  // (one pod-readiness wait), not N. (`real ??= await connect()` would not dedupe
-  // — it caches only the resolved value, so concurrent awaits each connect.)
-  // ensureRunning self-heals a sandbox idle-suspended out from under a live bridge:
-  // if connect finds no pod, it resumes the sandbox (idempotent) + re-polls.
+  // Concurrent first tool calls share one connect, and ensureRunning resumes a sandbox
+  // idle-suspended out from under a live bridge when connect finds no pod.
   const ensure = createDeferredConnector(() => connectSandbox(sandbox, { ensureRunning }));
   return {
     mode: "k8s-exec" as const,
-    // FORWARD THE SIGNAL. This wrapper used to take only `req`, silently discarding the
-    // AbortSignal sandboxExec passes — so kill()'s abort never reached the k8s exec
-    // layer and waitForExit hung until the remote command exited on its own. The type
-    // let it happen because the parameter is optional: a seam narrowing a contract
-    // with nothing to say so — the same silent-drop family this tier keeps catching.
+    // Forward the AbortSignal so kill()'s abort reaches the k8s exec layer.
     async execute(req: Parameters<Awaited<ReturnType<typeof connectSandbox>>["execute"]>[0], signal?: AbortSignal) {
       return (await ensure()).execute(req, signal);
     },
@@ -2115,13 +1750,8 @@ function deferredSandboxApi(sandbox: SandboxRef, ensureRunning?: () => Promise<v
 }
 
 
-/** Wire SIGTERM (the k8s preStop/rollout signal) + SIGINT to a graceful drain.
- *  `shutdown` (main()'s return) stops the timers, flushes metrics, and closes the
- *  server — which flushes in-flight event-log writes + ends SSE connections cleanly
- *  so clients get a proper close and reconnect, rather than a raw 502 from a hard
- *  kill. The drain is bounded by SHUTDOWN_TIMEOUT_MS so a stuck close can never hold
- *  the pod past its terminationGracePeriod. Repeat signals mid-drain are ignored.
- *  Exported (with injectable proc/timers) so it's unit-testable without the process. */
+/** Wire SIGTERM and SIGINT to a graceful drain of `shutdown` (main()'s return), bounded by
+ *  SHUTDOWN_TIMEOUT_MS so a stuck close cannot hold the pod past its terminationGracePeriod. */
 export function installShutdownHandlers(
   shutdown: () => Promise<void>,
   opts: {
@@ -2134,9 +1764,8 @@ export function installShutdownHandlers(
   const proc = opts.proc ?? process;
   const timeoutMs = opts.timeoutMs ?? Number(process.env.SHUTDOWN_TIMEOUT_MS ?? 8000);
   const setTimeoutFn = opts.setTimeoutFn ?? setTimeout;
-  // opts.log stays a plain-string seam (tests inject it); its DEFAULT routes through the
-  // structured logger. Drain lines are exactly what gets grepped during a bad rollout, so
-  // the signal and the timeout belong in fields rather than baked into the message.
+  // opts.log stays a plain-string seam for tests, while the default routes through the
+  // structured logger with the signal and timeout as fields.
   const injected = opts.log;
   const drainLog = (msg: string, fields?: Record<string, unknown>) => {
     if (injected) injected(msg);

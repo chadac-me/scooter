@@ -1,18 +1,14 @@
 /**
- * Subagents panel — the RightPanel tab (on a parent conversation) that lists the
- * subagents spawned in THIS conversation: title, live status, click-to-open, and
- * a cancel button. Subagents are full conversations sharing the parent's pod (see
- * todo/docs/SUBAGENTS.md); their live status comes from the same session store the
- * sidebar uses (server-sourced, live via /conversations/events).
+ * Subagents panel: the RightPanel tab on a parent conversation that lists the
+ * subagents spawned in this conversation with title, live status, click-to-open
+ * and a cancel button. Subagents are full conversations sharing the parent's pod;
+ * their live status comes from the same session store the sidebar uses.
  */
 
 import { sessionStore, useSessions, serverKeyOf, type Session } from "./sessions.js";
 import { Button } from "@/components/ui/button";
 
-/** The subagents (children) of `parentId`, from the session store. `parentId` here is
- *  the store's `currentId` (a local KEY); a subagent's own `parentId` is a SERVER id,
- *  so resolve one to the other before matching — a bare comparison returns [], which
- *  hides the Subagents tab entirely rather than showing it empty. Why: PR #568. */
+/** The subagents of `parentId`, a local store key that is resolved to its server id before matching against each child's server-side `parentId`. */
 export function subagentsOf(sessions: Session[], parentId: string | undefined): Session[] {
   if (!parentId) return [];
   const current = sessions.find((s) => s.id === parentId);
@@ -87,10 +83,7 @@ export function SubagentsPanel() {
     <SubagentsPanelView
       subagents={subagents}
       onOpen={(id) => sessionStore.switchTo(id)}
-      // Cancel routes through the agent's cancel path — for now, switch to the
-      // child + let its Stop button drive the run cancel (the subagent is a full
-      // conversation with its own Stop). A dedicated cancel_subagent call is a
-      // follow-up once the panel has the conversation's baseUrl wired.
+      // Cancel switches to the child so its own Stop button drives the run cancel.
       onCancel={(id) => sessionStore.switchTo(id)}
     />
   );

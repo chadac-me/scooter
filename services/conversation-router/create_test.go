@@ -37,8 +37,7 @@ func postCreate(t *testing.T, c ConversationCreator, body string, headers map[st
 	return postCreateAs(t, c, body, headers, nil)
 }
 
-// postCreateAs is postCreate with an explicit trusted-caller verifier — nil meaning
-// "no in-cluster trust configured", the dev-stack default.
+// postCreateAs is postCreate with an explicit trusted-caller verifier, nil meaning no in-cluster trust.
 func postCreateAs(t *testing.T, c ConversationCreator, body string, headers map[string]string, trusted TrustedCaller) *httptest.ResponseRecorder {
 	t.Helper()
 	var r *http.Request
@@ -80,7 +79,7 @@ func TestCreateMintsIdAndReturns201(t *testing.T) {
 // Creation must not consult agent-host capacity.
 func TestCreateDoesNotConsultAgentHostCapacity(t *testing.T) {
 	c := &fakeCreator{}
-	for i := 0; i < 50; i++ { // far beyond any plausible replicas x cap
+	for i := 0; i < 50; i++ { // beyond any plausible replicas x cap
 		w := postCreate(t, c, `{}`, nil)
 		if w.Code != http.StatusCreated {
 			t.Fatalf("conversation %d failed with %d — creation must not depend on host capacity", i+1, w.Code)
@@ -132,7 +131,7 @@ func TestCreateAnonymousOmitsOwner(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("want 201, got %d", w.Code)
 	}
-	// An empty owner must not be written — the conversation would be owned by "".
+	// An empty owner must not be written.
 	if _, present := c.calls[0].spec["owner"]; present {
 		t.Fatalf("owner must be absent when anonymous, got %+v", c.calls[0].spec)
 	}
@@ -174,8 +173,8 @@ func TestIsConversationCreateMatchesOnlyThePostRoute(t *testing.T) {
 	}{
 		{http.MethodPost, "/conversations", true},
 		{http.MethodPost, "/conversations/", true},
-		{http.MethodGet, "/conversations", false},      // the fleet-aggregate list
-		{http.MethodPost, "/conversations/abc", false}, // a sub-route: proxy it
+		{http.MethodGet, "/conversations", false},      // the list
+		{http.MethodPost, "/conversations/abc", false}, // a sub-route, proxied
 		{http.MethodPost, "/conversations/abc/messages", false},
 		{http.MethodPost, "/agui", false},
 	}
@@ -187,10 +186,6 @@ func TestIsConversationCreateMatchesOnlyThePostRoute(t *testing.T) {
 }
 
 // --- owner: the in-cluster (webhooks/scheduler) path -----------------------------
-// These cover issue #527: webhooks resolved the Slack user correctly and then lost it,
-// because it sent a hard-coded `x-auth-user` while the router read whatever
-// AUTH_USER_HEADER named. The owner now rides the BODY for a verified caller, so the two
-// ends cannot drift apart again.
 
 // alwaysTrusted / neverTrusted stand in for the TokenReview verifier.
 func alwaysTrusted() TrustedCaller {
@@ -212,10 +207,7 @@ func TestCreateHonorsBodyOwnerFromATrustedCaller(t *testing.T) {
 	}
 }
 
-// THE regression test for #527: the body owner must survive a NON-DEFAULT identity
-// header. Before the fix the owner travelled in a hard-coded x-auth-user header, so a
-// deployment that renamed the header created every Slack conversation unowned — and
-// scope=mine then hid it from the person who started the thread.
+// The body owner must survive a non-default identity header.
 func TestCreateBodyOwnerSurvivesANonDefaultIdentityHeader(t *testing.T) {
 	t.Setenv("AUTH_USER_HEADER", "x-amzn-oidc-identity")
 	c := &fakeCreator{}
@@ -229,8 +221,7 @@ func TestCreateBodyOwnerSurvivesANonDefaultIdentityHeader(t *testing.T) {
 	}
 }
 
-// The body owner is PRIVILEGED. An unverified caller (a browser posting straight to
-// /conversations) must not be able to claim someone else's identity.
+// An unverified caller must not be able to claim someone else's identity.
 func TestCreateIgnoresBodyOwnerFromAnUnverifiedCaller(t *testing.T) {
 	c := &fakeCreator{}
 	w := postCreateAs(t, c, `{"owner":"someone-else"}`, nil, neverTrusted())
@@ -242,7 +233,7 @@ func TestCreateIgnoresBodyOwnerFromAnUnverifiedCaller(t *testing.T) {
 	}
 }
 
-// No verifier configured at all (the kube-less dev stack) is the same answer: ignored.
+// No verifier configured at all is the same answer: ignored.
 func TestCreateIgnoresBodyOwnerWhenTrustIsUnconfigured(t *testing.T) {
 	c := &fakeCreator{}
 	postCreateAs(t, c, `{"owner":"someone-else"}`, nil, nil)
@@ -251,7 +242,7 @@ func TestCreateIgnoresBodyOwnerWhenTrustIsUnconfigured(t *testing.T) {
 	}
 }
 
-// An unverified caller must not be able to REPLACE the identity the ingress established.
+// An unverified caller must not be able to replace the identity the ingress established.
 func TestCreateBodyOwnerCannotOverrideTheHeaderIdentityUnverified(t *testing.T) {
 	c := &fakeCreator{}
 	postCreateAs(t, c, `{"owner":"victim"}`, map[string]string{"x-auth-user": "attacker"}, neverTrusted())
@@ -260,13 +251,7 @@ func TestCreateBodyOwnerCannotOverrideTheHeaderIdentityUnverified(t *testing.T) 
 	}
 }
 
-// The title is create-time ROW metadata, never a CR spec key.
-//
-// It used to be written into the spec map and removed again by the apiserver, because the
-// structural CRD schema has no `title` property. That worked, but it made an apiserver
-// pruning rule the load-bearing mechanism: nothing at the call site said the key was
-// dropped, and adding `title: {type: string}` to the CRD would have silently changed
-// production behaviour. The router now decides, and the decision is visible here.
+// The title is create-time row metadata, never a CR spec key.
 func TestCreateKeepsTitleOutOfTheCRSpec(t *testing.T) {
 	c := &fakeCreator{}
 	w := postCreate(t, c, `{"title":"Seeded one"}`, nil)
@@ -282,8 +267,7 @@ func TestCreateKeepsTitleOutOfTheCRSpec(t *testing.T) {
 	}
 }
 
-// The response still echoes the requested title — the caller asked for it, and in dev mode
-// it is what the row was seeded with.
+// The response echoes the requested title.
 func TestCreateEchoesTheRequestedTitle(t *testing.T) {
 	c := &fakeCreator{}
 	w := postCreate(t, c, `{"title":"Seeded one"}`, nil)
@@ -311,8 +295,7 @@ func (f *fakeRowWriter) CreateConversation(_ context.Context, c NewConversation)
 	return nil
 }
 
-// A create must land in BOTH stores, carrying the same id — the row is what makes the conversation
-// list before anything prompts it, and the CR is what gets it assigned.
+// A create must land in both stores carrying the same id.
 func TestDualCreatorWritesBothStores(t *testing.T) {
 	cr, rows := &fakeCreator{}, &fakeRowWriter{}
 	d := &dualCreator{cr: cr, rows: rows}
@@ -327,14 +310,13 @@ func TestDualCreatorWritesBothStores(t *testing.T) {
 	if len(rows.calls) != 1 || rows.calls[0].Name != "conv-1" {
 		t.Fatalf("row not written: %+v", rows.calls)
 	}
-	// The title reaches the row (it has a column) even though the CR deliberately drops it.
+	// The title reaches the row even though the CR drops it.
 	if rows.calls[0].Title != "Seeded" {
 		t.Errorf("title should reach the row: %q", rows.calls[0].Title)
 	}
 }
 
-// The CR is authoritative: its failure fails the create, and the row must NOT be written. Writing
-// the row anyway would invent a conversation that lists but can never be assigned a host.
+// The CR is authoritative: its failure fails the create, and the row must not be written.
 func TestDualCreatorPropagatesCRFailureAndSkipsTheRow(t *testing.T) {
 	boom := errors.New("apiserver down")
 	rows := &fakeRowWriter{}
@@ -362,7 +344,7 @@ func (r *removableCreator) Remove(_ context.Context, name string) error {
 	return nil
 }
 
-// A row failure now fails the create (PR #726).
+// A row failure fails the create and rolls the CR back.
 func TestDualCreatorFailsTheCreateOnARowFailureAndRollsBackTheCR(t *testing.T) {
 	cr := &removableCreator{}
 	d := &dualCreator{cr: cr, rows: &fakeRowWriter{err: errors.New("pg down")}}

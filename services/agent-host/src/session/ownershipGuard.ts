@@ -1,48 +1,29 @@
 /**
- * OwnershipGuard — the CHEAP half of multi-replica fencing. Before this pod appends to a
- * conversation's durable log, it checks that IT is the owner (status.hostPod on the
- * Conversation CR) at the generation it was assigned under, so a pod REASSIGNED away (the
- * controller bumped hostPod + generation) skips the write instead of racing the pod that
- * drives the log now.
- *
- * One of several layers that keep a single writer: the controller (one hostPod at a time),
- * the #248 drain (old owner quiesces on shutdown), the router (forwards only to hostPod),
- * and the row fence below. The others cover normal operation; fencing exists for the
- * briefly-partitioned old owner.
- *
- * CRUCIAL: canWrite() is SYNCHRONOUS and does NO k8s I/O — it reads a CACHED view kept
- * fresh by a watch (see k8sOwnershipGuard). appendEvent fires once per streamed token, so
- * a per-append k8s call would wreck latency.
- *
- * NOT the authority: a cheap PRE-FILTER, plus the generation this pod PRESENTS to the
- * authority. The conversations row decides, evaluated inside the append's own statement
- * (eventStore's AppendFence) — no staleness window, and no way for a call site to skip it.
- * So a stale cache here costs a refused statement, never a corrupted log, and this check is
- * worth keeping only for being synchronous.
+ * OwnershipGuard: the cheap half of multi-replica fencing. Before this pod appends to a
+ * conversation's durable log it checks that it is the owner (status.hostPod on the
+ * Conversation CR) at the generation it was assigned under, so a pod reassigned away
+ * skips the write. canWrite() is synchronous and does no k8s I/O, reading a cached view
+ * kept fresh by a watch (k8sOwnershipGuard), because appendEvent fires once per streamed
+ * token. It is a pre-filter, not the authority: the conversations row decides inside the
+ * append statement (eventStore's AppendFence), so a stale cache costs a refused statement,
+ * never a corrupted log.
  */
 
 import type { SessionId } from "../types.js";
 
 export interface OwnershipGuard {
-  /** May THIS pod append to `id`'s log right now? True unless the cache says another
-   *  pod owns it (or this pod's assignment generation is stale). Fail-OPEN on unknown
-   *  (not yet in cache) so a brand-new conversation isn't blocked before its CR exists. */
+  /** Whether this pod may append to `id`'s log right now; fails open when the conversation is not
+   *  yet in the cache. */
   canWrite(id: SessionId): boolean;
-  /** The generation of the CACHED assignment for `id` (undefined when unobserved).
-   *  Lets a caller holding out-of-band knowledge (the controller's revive push carries
-   *  the generation it JUST wrote) tell a stale CACHE from a stale PUSH. Optional: the
-   *  allow-all guard has no cache. */
+  /** The generation of the cached assignment for `id` (undefined when unobserved), so a caller
+   *  holding a pushed generation can tell a stale cache from a stale push; optional. */
   observedGeneration?(id: SessionId): number | undefined;
-  /** Adopt an assignment announced out-of-band: the controller POSTs /internal/revive
-   *  immediately after writing hostPod=<this pod> at `generation`, and that push
-   *  routinely arrives BEFORE the watch event for the same write. Recording it here
-   *  keeps canWrite() truthful during the lag (the watch then confirms — or, if the
-   *  CR moved on again, corrects — the entry). Optional: only the tracked guard can. */
+  /** Adopt an assignment announced out-of-band by the controller's revive push, which routinely
+   *  arrives before the watch event for the same write; optional. */
   adoptAssignment?(id: SessionId, generation: number): void;
 }
 
-/** A guard that always allows — the single-replica / fencing-disabled default (a no-op,
- *  so append behaves exactly as today). */
+/** A guard that always allows, the single-replica default. */
 export const allowAllGuard: OwnershipGuard = { canWrite: () => true };
 
 /** One conversation's assignment as observed from its Conversation CR. */
@@ -52,24 +33,18 @@ export interface Assignment {
 }
 
 /**
- * The pure decision core, testable without k8s. Holds a cache of conversationId ->
- * Assignment (updated by the watch loop) and the pod's OWN identity + the generation it
- * believes it was assigned under.
+ * The pure decision core, testable without k8s: a cache of conversationId -> Assignment
+ * updated by the watch loop, plus this pod's identity and the generation it believes it
+ * was assigned under.
  */
 export class OwnershipTracker implements OwnershipGuard {
   /** conversationId -> the CR's current {hostPod, generation}. */
   private readonly assignments = new Map<string, Assignment>();
-  /** conversationId -> the generation THIS pod started hosting under (its claim epoch). */
+  /** conversationId -> the generation this pod started hosting under (its claim epoch). */
   private readonly claimedGen = new Map<string, number>();
 
-  /** Fired when the watch shows this pod GAINING a conversation it did not hold —
-   *  a reassignment landing here, or the boot list revealing prior assignments.
-   *  THE settlement hook for stranded runs: every earlier hook (the revive push,
-   *  ensureReadable, hydrateByThread) had a path around it — the push can be lost
-   *  with the dying pod, and the hydrate cascade means adoption often finds the
-   *  entry already present and returns early. The ownership watch is the one
-   *  signal that ALWAYS fires on a reassignment, because it is the same event
-   *  stream the write fence itself trusts. Not fired on same-owner echoes. */
+  /** Fired when the watch shows this pod gaining a conversation it did not hold, the one signal
+   *  that always fires on a reassignment; not fired on same-owner echoes. */
   onGained?: (id: string, generation: number) => void;
 
   constructor(private readonly selfPod: string) {}
@@ -83,12 +58,11 @@ export class OwnershipTracker implements OwnershipGuard {
     }
     const prev = this.assignments.get(id);
     this.assignments.set(id, a);
-    // The FIRST time we see ourselves as the host, record the generation as our claim.
-    // A later generation bump AWAY from us (or to us again) is handled by canWrite.
+    // The first time we see ourselves as the host, record the generation as our claim.
     if (a.hostPod === this.selfPod && !this.claimedGen.has(id)) {
       this.claimedGen.set(id, a.generation);
     }
-    // GAIN = we are the host now and were not before (no prior view, or another pod).
+    // Gain = we are the host now and were not before.
     if (a.hostPod === this.selfPod && prev?.hostPod !== this.selfPod) {
       this.onGained?.(id, a.generation);
     }
@@ -99,23 +73,19 @@ export class OwnershipTracker implements OwnershipGuard {
   }
 
   adoptAssignment(id: SessionId, generation: number): void {
-    // The caller (reviveFromMirror) has verified this push is NEWER than the cached
-    // view; record this pod as owner at that generation. If the CR has since moved on
-    // yet again, the watch delivers the newer assignment and overwrites this entry.
+    // The caller has verified this push is newer than the cached view; a later watch event
+    // overwrites this entry.
     this.observe(id as string, { hostPod: this.selfPod, generation });
   }
 
   canWrite(id: SessionId): boolean {
     const a = this.assignments.get(id as string);
-    // Unknown (no CR yet / not observed): fail-OPEN — a new conversation must be able to
-    // write before its CR is created + assigned. The controller assigns shortly; a
-    // subsequent reassignment away would then flip this false.
+    // Unknown: fail open so a new conversation can write before its CR is created and assigned.
     if (a === undefined) return true;
-    // Owned by ANOTHER pod now -> we must not write.
+    // Owned by another pod now.
     if (a.hostPod !== this.selfPod) return false;
-    // Owned by us, but at a generation NEWER than the one we claimed under -> we were
-    // reassigned away and back (or the CR advanced past our claim); the current owner is
-    // us at `a.generation`, so re-record and allow. (Same-gen = normal, allow.)
+    // Owned by us at a generation newer than our claim means we were reassigned away and back, so
+    // re-record and allow.
     const claimed = this.claimedGen.get(id);
     if (claimed === undefined || a.generation > claimed) {
       this.claimedGen.set(id, a.generation);

@@ -1,17 +1,8 @@
-"""Tier 1 — services must NEVER create tables on Postgres.
+"""Tier 1: services must never create tables on Postgres.
 
-lib/sql is the source of truth: tables are declared in <db>/schema.sql and applied by
-the Atlas migration Job. A service that also runs DDL at boot silently diverges from
-the declared schema — which is exactly how byoc's remote_agent_devices existed in
-production for months with no schema entry and no migration.
-
-Schema creation is a TEST concern (conftest.create_schema, SQLite only), so these
-tests assert the production code has no way to do it.
-
-The aws permission store's half of this moved to contrib/aws/tests with the store
-itself (PR #599). The invariant follows the CODE — otherwise moving a store out of
-the app would quietly move it out of this guard, which is the failure this file is
-here to prevent.
+Tables are declared in lib/sql/<db>/schema.sql and applied by the Atlas migration Job;
+schema creation is a test concern (conftest.create_schema, SQLite only), so these tests
+assert the production code has no way to do it.
 """
 
 import ast
@@ -29,14 +20,11 @@ SERVICE_SRC = pathlib.Path(__file__).resolve().parents[1] / "broker"
     "store_cls", [ModuleRegistryStore], ids=lambda c: c.__name__
 )
 def test_stores_expose_NO_schema_creating_method(store_cls):
-    # init() used to run create_all. It is gone: nothing on a store builds tables, so a
-    # caller cannot reintroduce boot-time DDL by calling one.
     assert not hasattr(store_cls, "init")
 
 
 def test_no_service_module_calls_create_all():
-    # The mechanism-level guard: create_all anywhere under broker/ is DDL at runtime.
-    # Greps the AST rather than the text so a comment mentioning it does not trip it.
+    # The AST is scanned rather than the text, so a comment mentioning create_all does not trip it.
     offenders = []
     for path in SERVICE_SRC.rglob("*.py"):
         tree = ast.parse(path.read_text())
@@ -51,7 +39,6 @@ def test_no_service_module_calls_create_all():
 
 @pytest.mark.asyncio
 async def test_create_schema_REFUSES_a_postgres_engine():
-    # The test helper must not become a back door to the thing this file forbids.
     from conftest import create_schema
     from broker.registry import store as registry_store
 
@@ -62,7 +49,6 @@ async def test_create_schema_REFUSES_a_postgres_engine():
 
 @pytest.mark.asyncio
 async def test_create_schema_DOES_build_tables_on_sqlite():
-    # The guard must not break the test path it protects.
     from conftest import create_schema, sqlite_config
     from broker.registry import store as registry_store
 

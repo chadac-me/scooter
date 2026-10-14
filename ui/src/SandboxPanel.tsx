@@ -1,15 +1,8 @@
 /**
- * Sandbox panel — the single, always-visible tab for everything about the current
- * conversation's sandbox pod:
- *   • pod lifecycle status (Running / Suspended / Ended) with a Start button when down;
- *   • when running, the list of web services with per-service status + start/stop/open.
- *
- * Status is fetched DIRECTLY for the current conversation (loadConversationStatus),
- * not read off the sessions store — so it's correct regardless of how the conversation
- * was selected (deep link, new chat, etc.), including while the pod is suspended (the
- * store's list can lag / omit a suspended conv, which showed "Unknown"). Services live
- * in the pod's in-manifest, so they're only enumerable while the pod is running; when
- * suspended we show the Start prompt and services appear once it's up.
+ * The Sandbox tab: the current conversation's pod lifecycle status with a Start button
+ * when down, its resource allotment and size picker, and, while running, its web services
+ * and modules. Status is fetched directly for the current conversation rather than read
+ * off the sessions store, and services are enumerable only while the pod is running.
  */
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -41,10 +34,7 @@ const BASE_URL = (import.meta.env.VITE_AGENT_HOST_URL ?? "").replace(/\/$/, "");
 
 export type SandboxState = "running" | "suspended" | "ended" | "starting" | "unknown";
 
-/** Everything the Sandbox tab needs: live pod status (fetched for the current
- *  conversation), a resume action with progress, and the service list + controls. */
-/** Whether a services poll returned the same list, field by field. Exported for
- *  the regression test on the 4s poll's identity churn. */
+/** Whether a services poll returned the same list, field by field. */
 export const sameServices = (a: WebService[], b: WebService[]) =>
   a.length === b.length &&
   a.every((x, i) => {
@@ -57,6 +47,7 @@ export const sameServices = (a: WebService[], b: WebService[]) =>
     );
   });
 
+/** Live pod status for the current conversation, a resume action with progress, and the service list with controls. */
 export function useSandboxStatus() {
   const { currentId } = useSessions();
   const [serverStatus, setServerStatus] = useState<string | undefined>(undefined);
@@ -65,12 +56,7 @@ export function useSandboxStatus() {
   const [services, setServices] = useState<WebService[]>([]);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
 
-  // Fetch status + ACTUAL pod readiness DIRECTLY for the current conversation (not via
-  // the store), so it's accurate even when suspended / deep-linked. `ready` is false
-  // while the pod is still ContainerCreating (status is "running" then) — so the UI
-  // shows "Starting…" until it's genuinely up. Poll while mounted.
-  // Reads answer EMPTY for a conversation the server has not created yet, rather than
-  // GETting an id it never issued (a 404 on every poll of a fresh page).
+  // `ready` stays false while the pod is still ContainerCreating even though the status is "running".
   const refreshStatus = useCallback(async () => {
     const res = await currentConversation()?.ifCreated(
       (id) => loadSandboxReady({ baseUrl: BASE_URL }, id),
@@ -86,9 +72,7 @@ export function useSandboxStatus() {
       (id) => loadWebServices({ baseUrl: BASE_URL }, id, { refresh }),
       [] as Awaited<ReturnType<typeof loadWebServices>>,
     );
-    // Keep the previous array when the poll returns the same services. A fresh
-    // reference re-renders every consumer of this hook — including the one that
-    // wraps the whole thread — on each 4s tick.
+    // Keep the previous array when the poll returns the same services, since a fresh reference re-renders every consumer each tick.
     if (svcs) setServices((prev) => (sameServices(prev, svcs) ? prev : svcs));
   }, [currentId]);
 
@@ -104,14 +88,12 @@ export function useSandboxStatus() {
     return () => clearInterval(t);
   }, [refreshStatus, refreshServices]);
 
-  // The resume is "done" only when the pod is actually READY (not merely status
-  // "running", which is true while it's still ContainerCreating).
+  // The resume is done only when the pod is actually ready.
   useEffect(() => {
     if (serverStatus === "running" && ready) setStarting(false);
   }, [serverStatus, ready]);
 
-  // The agent declares services with `scooter-rebuild`; nothing in the pod tells
-  // the host, so the list is re-read on demand as well as on the poll's TTL.
+  // Nothing in the pod tells the host about a newly declared service, so the list is re-read on demand too.
   const [rescanning, setRescanning] = useState(false);
   const rescanServices = useCallback(async () => {
     setRescanning(true);
@@ -126,7 +108,7 @@ export function useSandboxStatus() {
     const conv = currentConversation();
     if (!conv) return;
     setStarting(true);
-    // Starting the sandbox is an ACTION: create the conversation if it does not exist yet.
+    // Starting the sandbox creates the conversation if it does not exist yet.
     const res = await conv
       .withId((id) => resumeConversation({ baseUrl: BASE_URL }, id))
       .catch(() => null);
@@ -147,9 +129,7 @@ export function useSandboxStatus() {
     setBusy((b) => ({ ...b, [name]: false }));
   };
 
-  // "running" ONLY when the pod is actually ready. status="running" but not ready =
-  // the pod is coming up (ContainerCreating) → show "starting". A resume in flight
-  // also shows "starting" until ready.
+  // A pod that is "running" but not ready, or a resume in flight, shows as "starting".
   const state: SandboxState =
     serverStatus === "running"
       ? ready
@@ -190,7 +170,7 @@ export const DOT: Record<SandboxState, string> = {
   unknown: "bg-muted-foreground/40 animate-pulse",
 };
 
-/** Status-banner tint per state — a full-width bar at the top of the Sandbox tab. */
+/** Status-banner tint per state. */
 const BANNER: Record<SandboxState, string> = {
   running: "border-success/30 bg-success/10",
   suspended: "border-warning/30 bg-warning/10",
@@ -207,7 +187,7 @@ const BANNER_TEXT: Record<SandboxState, string> = {
   unknown: "Checking sandbox…",
 };
 
-/** A section heading in the Sandbox tab: small, upper-cased, letter-spaced label. */
+/** A section heading in the Sandbox tab. */
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -216,8 +196,7 @@ function SectionLabel({ children }: { children: ReactNode }) {
   );
 }
 
-/** Search + install Nix MODULES from the broker registry into this sandbox. Runs
- *  in-pod (scooter-rebuild), so it's shown only while the pod is running. */
+/** Search and install Nix modules from the broker registry into this sandbox, shown only while the pod is running. */
 export function ModulesSection({ conversationId }: { conversationId: string }) {
   const [query, setQuery] = useState("");
   const [modules, setModules] = useState<RegistryModule[]>([]);
@@ -225,8 +204,7 @@ export function ModulesSection({ conversationId }: { conversationId: string }) {
   const [loading, setLoading] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  // Collapsed by default (matches the compact panel design); the "+ Add module"
-  // button expands the search + browse list.
+  // Collapsed by default; the "+ Add module" button expands the search and browse list.
   const [expanded, setExpanded] = useState(false);
 
   const runSearch = useCallback(async (q: string) => {
@@ -352,15 +330,14 @@ export function ModulesSection({ conversationId }: { conversationId: string }) {
   );
 }
 
-/** Does a resources object carry any value worth showing? (all-empty -> skip the row) */
+/** Whether a resources object carries any value worth showing. */
 function hasResources(r: SandboxResources | null | undefined): r is SandboxResources {
   if (!r) return false;
   const sides = [r.requests, r.limits];
   return sides.some((q) => q && (q.cpu !== undefined || q.memory !== undefined || q.gpu !== undefined));
 }
 
-/** Format one side (requests | limits) as "cpu · memory · N GPU", omitting absent
- *  fields. Returns "" when the side has nothing. */
+/** Format one side (requests or limits) as "cpu · memory · N GPU", omitting absent fields. */
 function formatQuantity(q: SandboxResources["requests"]): string {
   if (!q) return "";
   const parts: string[] = [];
@@ -370,9 +347,7 @@ function formatQuantity(q: SandboxResources["requests"]): string {
   return parts.join(" · ");
 }
 
-/** Sandbox resource allotment — requests (guaranteed) + limits (ceiling), so the
- *  user can see what the pod is sized for. Rendered only when there's something to
- *  show (the broker-owned size; absent in fake mode). */
+/** The sandbox's resource allotment: requests (guaranteed) and limits (ceiling). */
 export function ResourcesSection({ resources }: { resources: SandboxResources }) {
   const requests = formatQuantity(resources.requests);
   const limits = formatQuantity(resources.limits);
@@ -401,11 +376,7 @@ export function ResourcesSection({ resources }: { resources: SandboxResources })
   );
 }
 
-/** Which preset does the CURRENT allotment correspond to? The broker stores raw
- *  resources, not the preset name that produced them, so the selected option is
- *  derived by matching cpu/memory/gpu against the table. Returns "" when nothing
- *  matches — a size the agent set with raw values, which the dropdown shows as
- *  "Custom" rather than silently mis-highlighting a preset it isn't. */
+/** The preset name whose cpu/memory/gpu match the current allotment, or "" when none does (shown as "Custom"). */
 export function matchPreset(
   sizes: Record<string, SandboxSizePreset>,
   resources: SandboxResources | null | undefined,
@@ -432,23 +403,19 @@ export interface SizeSectionProps {
   /** The currently-applied allotment, used to derive the selected option. */
   resources?: SandboxResources | null;
   onSelect: (size: string) => void;
-  /** A write is in flight — the select is disabled so a double-pick can't race. */
+  /** A write is in flight, so the select is disabled. */
   saving?: boolean;
-  /** The server's rejection message, shown inline. We never silently revert: a
-   *  rejected preset must not look like the click did nothing. */
+  /** The server's rejection message, shown inline rather than silently reverting. */
   error?: string | null;
   /** A size was recorded and is waiting for the next restart to take effect. */
   pendingRestart?: boolean;
 }
 
-/** Sandbox size picker — the deployment's named presets from kubenix. Rendered only
- *  when the deployment configured presets; otherwise the Sandbox tab shows just the
- *  read-only allotment, as before. */
+/** The sandbox size picker over the deployment's named presets. */
 export function SizeSection({ sizes, resources, onSelect, saving, error, pendingRestart }: SizeSectionProps) {
   const names = Object.keys(sizes);
   const selected = matchPreset(sizes, resources);
-  // Absent for "Custom" (no preset is selected) and for presets the deployment gave
-  // no hint, so the line appears only when it can actually say something.
+  // Absent for "Custom" and for presets without a hint.
   const hint = selected ? (sizes[selected]?.hint ?? "") : "";
   return (
     <div data-testid="sandbox-size">
@@ -460,9 +427,7 @@ export function SizeSection({ sizes, resources, onSelect, saving, error, pending
         disabled={saving}
         onChange={(e) => onSelect(e.target.value)}
       >
-        {/* Only present when the applied size matches no preset (agent-set raw
-            values). Not selectable as an action — picking a preset is the only
-            thing this control does. */}
+        {/* Present only when the applied size matches no preset, and not selectable. */}
         {selected === "" ? (
           <option value="" disabled>
             Custom
@@ -474,10 +439,7 @@ export function SizeSection({ sizes, resources, onSelect, saving, error, pending
           </option>
         ))}
       </select>
-      {/* The deployment's guidance for the SELECTED preset. Kept out of the option
-          labels: an <option> can't wrap or dim, so appending it there truncates the
-          numbers at this panel's width (320px). Sits directly under the select and
-          above the transient note so its position never shifts. */}
+      {/* The selected preset's guidance, kept out of the option labels because an <option> cannot wrap. */}
       {hint ? (
         <p className="mt-1 text-xs text-muted-foreground" data-testid="sandbox-size-hint">
           {hint}
@@ -501,12 +463,11 @@ export interface SandboxPanelViewProps {
   services: WebService[];
   busy: Record<string, boolean>;
   conversationId?: string;
-  /** The conversation's owner (the user who created it), or undefined/null when
-   *  unowned (a legacy conversation or a webhook that couldn't resolve a user). */
+  /** The conversation's owner, or undefined/null when unowned. */
   owner?: string | null;
-  /** The sandbox's resource allotment (cpu/memory/gpu). null/empty -> not shown. */
+  /** The sandbox's resource allotment, not shown when null or empty. */
   resources?: SandboxResources | null;
-  /** The deployment's named size presets. Empty -> the size picker is hidden. */
+  /** The deployment's named size presets; empty hides the size picker. */
   sizes?: Record<string, SandboxSizePreset>;
   onSelectSize?: (size: string) => void;
   sizeSaving?: boolean;
@@ -515,14 +476,12 @@ export interface SandboxPanelViewProps {
   onStartSandbox: () => void;
   onStartService: (name: string) => void;
   onStopService: (name: string) => void;
-  /** Re-read the in-pod service manifest. The agent declares services with
-   *  `scooter-rebuild` and nothing in the pod notifies the host, so this is how a
-   *  user picks up a just-declared service without waiting. */
+  /** Re-read the in-pod service manifest to pick up a just-declared service without waiting. */
   onRescanServices?: () => void;
   rescanning?: boolean;
 }
 
-/** Pure view — status line + (when running) the service list, or a Start prompt. */
+/** Pure view: the status banner and, when running, the service list, else a Start prompt. */
 export function SandboxPanelView({
   state,
   services,
@@ -541,14 +500,12 @@ export function SandboxPanelView({
   onRescanServices,
   rescanning,
 }: SandboxPanelViewProps) {
-  // A stopped service's "+ Service" card reveals a short explainer (services are
-  // declared in-sandbox, not created from here), rather than pretending to be a form.
+  // The "+ Service" card reveals an explainer, since services are declared in-sandbox rather than created here.
   const [showAddHint, setShowAddHint] = useState(false);
 
   return (
     <div className="flex flex-col gap-4" data-testid="sandbox-panel">
-      {/* Status banner — a full-width tinted bar mirroring the pod lifecycle. Hosts
-          the contextual action on the right: Start when down, Rescan when running. */}
+      {/* The status banner hosts the contextual action: Start when down, Rescan when running. */}
       <div
         data-testid="sandbox-status-banner"
         className={cn("flex items-center gap-2 rounded-lg border px-3 py-2.5", BANNER[state])}
@@ -585,8 +542,7 @@ export function SandboxPanelView({
         ) : null}
       </div>
 
-      {/* Owner — who created this conversation. Hidden when unowned (nothing to
-          show) so the field never reads a meaningless blank/"anonymous". */}
+      {/* Hidden when unowned. */}
       {owner ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="sandbox-owner">
           <span className="font-medium">Owner</span>
@@ -594,13 +550,10 @@ export function SandboxPanelView({
         </div>
       ) : null}
 
-      {/* Resource allotment — shown regardless of running state (the size is set even
-          while suspended, and it's what the pod will come up with). */}
+      {/* Shown regardless of running state, since the size is set even while suspended. */}
       {hasResources(resources) ? <ResourcesSection resources={resources} /> : null}
 
-      {/* Size picker — only when the deployment configured presets AND a write path
-          is wired (broker mode). Sits under the allotment: the allotment is what the
-          pod HAS, this is what it will come up with next restart. */}
+      {/* Only when the deployment configured presets and a write path is wired. */}
       {sizes && Object.keys(sizes).length > 0 && onSelectSize ? (
         <SizeSection
           sizes={sizes}
@@ -612,7 +565,7 @@ export function SandboxPanelView({
         />
       ) : null}
 
-      {/* Body: services + modules when running; a hint otherwise. */}
+      {/* Services and modules when running, a hint otherwise. */}
       {state === "running" ? (
         <>
           <section className="flex flex-col gap-2">
@@ -662,9 +615,7 @@ export function SandboxPanel() {
   const { sessions, currentId } = useSessions();
   const owner = sessions.find((x) => x.id === currentId)?.owner ?? null;
 
-  // The sandbox size (broker-owned). Fetched per conversation; re-fetched when it
-  // comes up (the broker applies a pending size on restart, so a just-started pod
-  // may report a freshly-applied size). null when unavailable (fake mode) -> hidden.
+  // Re-fetched when the pod comes up, since the broker applies a pending size on restart.
   const [resources, setResources] = useState<SandboxResources | null>(null);
   useEffect(() => {
     if (!currentId) return;
@@ -682,8 +633,7 @@ export function SandboxPanel() {
     };
   }, [currentId, s.state]);
 
-  // The deployment's preset table. Deployment-wide (not per-conversation), so it's
-  // fetched once rather than per conversation change.
+  // The preset table is deployment-wide, so it is fetched once.
   const [sizes, setSizes] = useState<Record<string, SandboxSizePreset>>({});
   useEffect(() => {
     let alive = true;
@@ -701,9 +651,7 @@ export function SandboxPanel() {
 
   const onSelectSize = (size: string) => {
     const preset = sizes[size];
-    // Bail BEFORE setting `saving`: with no conversation yet there is nothing to
-    // PUT to, and an early return after setSizeSaving(true) would leave the select
-    // disabled forever with no request in flight to re-enable it.
+    // Bail before setting `saving`, or the select would stay disabled with no request in flight to re-enable it.
     const conv = currentConversation();
     if (!preset || !conv) return;
     setSizeSaving(true);
@@ -717,10 +665,7 @@ export function SandboxPanel() {
           return;
         }
         setSizePendingRestart(true);
-        // Reflect the pick immediately. The broker applies it on the NEXT restart, so
-        // re-reading /resources here would return the OLD size and the dropdown would
-        // snap back — looking like the change was rejected. The note under the select
-        // is what tells the user it hasn't taken effect yet.
+        // Reflect the pick immediately, because re-reading /resources would return the old size until the next restart.
         setResources({
           requests: { cpu: preset.cpu, memory: preset.memory, gpu: preset.gpu },
           limits: { cpu: preset.cpu, memory: preset.memory, gpu: preset.gpu },

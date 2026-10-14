@@ -13,10 +13,7 @@ dependencies = [
   "fastapi",
   "httpx",
   "sqlalchemy",
-  # The agent-tool surface: a contrib declares tools on a FastMCP server and types
-  # against ToolContext/ToolResult here. Unlike pyjwt (removed in #567 because it
-  # served ONE integration), this is the surface itself — every tool-bearing contrib
-  # needs it. Why: issue #700.
+  # The agent-tool surface every tool-bearing contrib types against.
   "fastmcp",
 ]
 

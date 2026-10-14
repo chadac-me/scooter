@@ -1,35 +1,11 @@
 /**
- * Consumer-supplied Sandbox manifest overlay — a recursive patch applied on top of the
- * generated per-conversation Sandbox, so a deployment can change the pod manifest
- * (nodeSelector, tolerations, extra env/volumes, annotations, resources, …) WITHOUT
- * patching Scooter's code.
- *
- * This is also how a CONTRIB reaches every sandbox pod: modules/platform.nix renders
- * `scooter.sandboxPod.*` into a second key of the same ConfigMap, merged under the
- * consumer's patch. One splice mechanism, not two — the provisioner knows nothing about
- * contribs. Why: PR #640.
- *
- * Flow (mirrors deployTools.configFiles):
- *   kubenix `scooter.deployTools.sandboxManifestOverlay` (an attrset)
- *     -> ConfigMap `sandbox-manifest-overlay` (key `overlay.yaml`, holding the patch;
- *        `contrib.yaml` holds the contribs' parts in the same shape)
- *     -> agent-host env `SANDBOX_MANIFEST_OVERLAY_CONFIGMAP=sandbox-manifest-overlay`
- *     -> read on EVERY create (no caching, so a ConfigMap edit lands on the next
- *        conversation without a restart), parsed, and applied to the dict returned by
- *        `sandboxManifest()` right before the Sandbox is created.
- *
- * Merge semantics:
- *   - DEEP merge: nested objects merge recursively (not replaced).
- *   - SCALARS: an overlay scalar replaces the base scalar.
- *   - ARRAYS: STRATEGIC merge by a merge key — items with a matching `name` are merged
- *     (like kubectl strategic patch on containers/env/volumes/volumeMounts); items with
- *     no `name`, or a `name` not present in the base, are appended. This lets a
- *     deployment override a single env var / volume by name without restating the rest.
- *   - SCOPE: the overlay may touch ANY path in the manifest.
- *   - PRECEDENCE: overlay wins EXCEPT for a PROTECTED set of Scooter-critical fields,
- *     re-asserted from the base AFTER the merge (see PROTECTED_PATHS), so a bad overlay
- *     cannot detach the SA, drop the broker token, break the PVCs, or unset the identity
- *     env the conversation depends on.
+ * Consumer-supplied Sandbox manifest overlay: a recursive patch applied on top of the
+ * generated per-conversation Sandbox, so a deployment (or a contrib, via a second key of
+ * the same ConfigMap) can change the pod manifest without patching Scooter's code. The
+ * ConfigMap is read on every create, parsed, and applied to the dict `sandboxManifest()`
+ * returns. Objects deep-merge, scalars replace, arrays strategic-merge by `name`, and the
+ * overlay wins everywhere except the PROTECTED_PATHS, which are re-asserted from the base
+ * after the merge.
  */
 
 import { loadYaml } from "@kubernetes/client-node";
@@ -37,19 +13,13 @@ import { loadYaml } from "@kubernetes/client-node";
 type Json = unknown;
 type JsonObject = Record<string, unknown>;
 
-/** The merge key for strategic array merges — k8s uses `name` for
- *  containers/env/volumes/volumeMounts. */
+/** The merge key for strategic array merges, as k8s uses for containers/env/volumes/volumeMounts. */
 const LIST_MERGE_KEY = "name";
 
 /**
- * Dotted paths (into the merged manifest) that Scooter OWNS: after the merge these are
- * forced back to the generated value, so a consumer patch cannot break the
- * conversation's identity / auth / storage wiring. A segment `key[name=X]` selects the
- * array item whose `name` === X, so a single env var / volume / mount is protected in
- * place, leaving the consumer's other additions intact.
- *
- * NOTE: env is protected per-VARIABLE, NOT as a whole list — a deployment can still ADD
- * env while the identity/broker vars stay authoritative.
+ * Dotted paths that Scooter owns, forced back to the generated value after the merge; a
+ * `key[name=X]` segment selects one array item, so env is protected per-variable and a
+ * deployment can still add env.
  */
 export const PROTECTED_PATHS: readonly string[] = [
   "apiVersion",
@@ -61,15 +31,14 @@ export const PROTECTED_PATHS: readonly string[] = [
   "spec.podTemplate.spec.containers[name=sandbox].volumeMounts[name=broker-token]",
   "spec.podTemplate.spec.containers[name=sandbox].volumeMounts[name=workspace]",
   "spec.volumeClaimTemplates",
-  // Identity / broker env — protected per-variable (each env[name=…] restored in place).
+  // Identity / broker env, protected per-variable.
   "spec.podTemplate.spec.containers[name=sandbox].env[name=CONVERSATION_ID]",
   "spec.podTemplate.spec.containers[name=sandbox].env[name=BROKER_URL]",
   "spec.podTemplate.spec.containers[name=sandbox].env[name=BROKER_TOKEN_PATH]",
 ];
 
-/** The overlay payload is malformed (unparseable, not a mapping, or a type that cannot
- *  merge onto the base). Thrown so the caller FAILS LOUDLY — a silently-dropped overlay
- *  looks to a deployment like it "didn't take". */
+/** The overlay payload is malformed, thrown so the caller fails loudly rather than silently
+ *  dropping the overlay. */
 export class OverlayError extends Error {
   constructor(message: string) {
     super(message);
@@ -92,11 +61,8 @@ function copy<T>(v: T): T {
 }
 
 /**
- * Parse the ConfigMap's overlay payload into an object. YAML, which is a superset of
- * JSON — kubenix writes JSON, but a human editing the ConfigMap will write YAML.
- *
- * Empty/whitespace -> `{}` (a no-op overlay). A non-mapping top level (array, scalar) or
- * a syntax error -> OverlayError.
+ * Parse the ConfigMap's overlay payload (YAML, a superset of JSON) into an object; empty is
+ * `{}`, and a non-mapping top level or a syntax error is an OverlayError.
  */
 export function parseOverlay(raw: string | undefined | null): JsonObject {
   if (!raw || !raw.trim()) return {};
@@ -116,14 +82,9 @@ export function parseOverlay(raw: string | undefined | null): JsonObject {
 }
 
 /**
- * Recursively merge `overlay` onto `base`, returning a new value (never mutates either).
- *
- * - object + object -> key-wise deep merge
- * - array + array   -> strategic merge by LIST_MERGE_KEY
- * - otherwise       -> overlay replaces base
- *
- * A container-vs-scalar (or array-vs-object) mismatch is an OverlayError rather than a
- * silent replace: that is almost always a consumer mistake.
+ * Recursively merge `overlay` onto `base` without mutating either: objects merge key-wise,
+ * arrays strategic-merge by LIST_MERGE_KEY, anything else is replaced, and a
+ * container-vs-scalar mismatch is an OverlayError.
  */
 export function deepMerge(base: Json, overlay: Json): Json {
   if (isObject(base) && isObject(overlay)) {
@@ -136,8 +97,7 @@ export function deepMerge(base: Json, overlay: Json): Json {
 
   if (Array.isArray(base) && Array.isArray(overlay)) return mergeLists(base, overlay);
 
-  // A scalar replacing a scalar (or either being null) is fine; a shape change between
-  // containers is not.
+  // A scalar replacing a scalar is fine; a shape change between containers is not.
   const baseIsContainer = isObject(base) || Array.isArray(base);
   const sameShape = Array.isArray(base) === Array.isArray(overlay) && isObject(base) === isObject(overlay);
   if (baseIsContainer && !sameShape) {
@@ -151,9 +111,8 @@ export function deepMerge(base: Json, overlay: Json): Json {
 }
 
 /**
- * Strategic-merge two arrays by LIST_MERGE_KEY. Base items keep their order; an overlay
- * item with a matching `name` is deep-merged in place; an overlay item that is unnamed,
- * or names something absent from base, is appended (preserving overlay order).
+ * Strategic-merge two arrays by LIST_MERGE_KEY: base items keep their order, a matching
+ * overlay item is deep-merged in place, and an unnamed or unmatched one is appended.
  */
 function mergeLists(base: unknown[], overlay: unknown[]): unknown[] {
   const out = base.map(copy);
@@ -171,8 +130,8 @@ function mergeLists(base: unknown[], overlay: unknown[]): unknown[] {
 }
 
 // --- protected-path resolution ----------------------------------------------
-// A path is dotted; a segment is `key` (an object key) or `key[name=X]` (the item of the
-// array at `key` whose LIST_MERGE_KEY === X).
+// A path is dotted; a segment is `key` or `key[name=X]` (the item of the array at `key` whose
+// LIST_MERGE_KEY === X).
 
 interface Seg {
   key: string;
@@ -189,8 +148,7 @@ function parsePath(path: string): Seg[] {
   });
 }
 
-/** Resolve `segs` in `root`. `found` is false if any segment is missing (an absent key,
- *  or no array item matching the `name` selector). */
+/** Resolve `segs` in `root`; `found` is false if any segment is missing. */
 function getPath(root: Json, segs: Seg[]): { value: Json; found: boolean } {
   let cur: Json = root;
   for (const seg of segs) {
@@ -206,8 +164,8 @@ function getPath(root: Json, segs: Seg[]): { value: Json; found: boolean } {
   return { value: cur, found: true };
 }
 
-/** Return the array item selected by `seg`, creating + appending it when absent, so a
- *  mid-path `key[name=X]` can be traversed for setting. */
+/** The array item selected by `seg`, created and appended when absent, so a mid-path `key[name=X]`
+ *  can be traversed for setting. */
 function resolveSelector(list: Json, seg: Seg): JsonObject {
   if (Array.isArray(list)) {
     const found = list.find((it) => isObject(it) && it[LIST_MERGE_KEY] === seg.sel);
@@ -218,9 +176,8 @@ function resolveSelector(list: Json, seg: Seg): JsonObject {
   return item;
 }
 
-/** Set `segs` in `root` to a fresh copy of `value`, creating intermediate objects as
- *  needed. For an array-item leaf, replace the matching item — or append it, so a
- *  protected item the overlay DROPPED is restored. */
+/** Set `segs` in `root` to a fresh copy of `value`, creating intermediate objects as needed and
+ *  appending a missing array-item leaf. */
 function setPath(root: JsonObject, segs: Seg[], value: Json): void {
   let cur: JsonObject = root;
   for (const seg of segs.slice(0, -1)) {
@@ -247,9 +204,7 @@ function setPath(root: JsonObject, segs: Seg[], value: Json): void {
   else list.push(copy(value));
 }
 
-/** Force every PROTECTED_PATHS value back to what `base` (the generated manifest) had.
- *  A protected path absent from `base` is skipped — there is nothing authoritative to
- *  restore, so whatever the overlay did stands. */
+/** Force every PROTECTED_PATHS value back to what `base` had, skipping paths absent from `base`. */
 export function reassertProtected(base: JsonObject, merged: JsonObject): JsonObject {
   const out = copy(merged);
   for (const path of PROTECTED_PATHS) {
@@ -261,8 +216,8 @@ export function reassertProtected(base: JsonObject, merged: JsonObject): JsonObj
   return out;
 }
 
-/** The public entry point: `reassertProtected(base, deepMerge(base, overlay))`.
- *  An empty overlay returns `base` unchanged (fast path). Never mutates `base`. */
+/** The public entry point, `reassertProtected(base, deepMerge(base, overlay))`; an empty overlay
+ *  returns `base` unchanged. */
 export function applyOverlay(base: JsonObject, overlay: JsonObject): JsonObject {
   if (!overlay || Object.keys(overlay).length === 0) return base;
   return reassertProtected(base, deepMerge(base, overlay) as JsonObject);

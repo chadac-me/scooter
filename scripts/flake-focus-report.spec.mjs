@@ -9,12 +9,9 @@ import {
 } from "./flake-focus-report.mjs";
 
 /**
- * A minimal Playwright JSON report, shaped like the real thing: --repeat-each=N
- * emits N SIBLING `specs` entries with the same title (verified against a real
- * `playwright test --repeat-each=3 --reporter=json` run), NOT one spec holding N
- * results — so one status per spec entry here.
- *
- *   report([["test/e2e/x.spec.ts", [["a test", ["passed", "failed"]]]]])
+ * A minimal Playwright JSON report shaped like the real thing: --repeat-each=N
+ * emits N sibling `specs` entries with the same title, so one status per spec
+ * entry here, e.g. report([["test/e2e/x.spec.ts", [["a test", ["passed", "failed"]]]]]).
  */
 const report = (files) => ({
   suites: files.map(([file, specs]) => ({
@@ -66,9 +63,7 @@ describe("summarize", () => {
     expect(s.verdict).toBe("reproduced");
   });
 
-  // THE case the exit-code gate exists for: in a contention run (whole spec
-  // FILES, no -g) playwright exits 0 having never executed the flaky test, so
-  // without this the check reads as "flake fixed" on zero evidence.
+  // In a contention run playwright exits 0 having never executed the flaky test.
   it("reports not-run when the pattern matches nothing that executed", () => {
     const s = summarize(
       report([["test/e2e/sessions.spec.ts", [["renames a session", ["passed", "passed"]]]]]),
@@ -133,8 +128,7 @@ describe("patternToRegExp", () => {
     expect(patternToRegExp("/^queue/").test("queue survives")).toBe(true);
   });
 
-  // A regex typo must not masquerade as "the test does not exist" — that sends
-  // someone hunting a missing test instead of fixing their pattern.
+  // A regex typo must not read as "the test does not exist".
   it("falls back to a literal match on an invalid regex", () => {
     expect(patternToRegExp("a (b").test("a (b")).toBe(true);
   });
@@ -144,8 +138,8 @@ describe("renderMarkdown", () => {
   const md = (statuses, opts) =>
     renderMarkdown(summarize(targeted(statuses), "THREE messages sent mid-run"), opts);
 
-  // The body is a SECTION of the shared comment now; comment-sections.mjs owns
-  // the markers, so this must emit none of its own (two would be posted).
+  // The body is a section of the shared comment, and comment-sections.mjs owns the
+  // markers.
   it("names its target in the heading and carries no hidden marker", () => {
     expect(md(["passed"], { target: "full" })).toContain("flake focus (full)");
     expect(md(["passed"], { target: "fast" })).not.toContain("<!--");
@@ -198,8 +192,7 @@ describe("compareToBaseline", () => {
     expect(c.pAllCleanAtBaseRate).toBeLessThan(0.001);
   });
 
-  // The case the control exists for: a clean PR run that could never have
-  // detected the flake anyway, which reads as "fixed" without this.
+  // A clean PR run that could never have detected the flake must not read as "fixed".
   it("calls it inconclusive when the base run is clean too", () => {
     const c = compareToBaseline(pr(Array(20).fill("passed")), base(Array(20).fill("passed")));
     expect(c.kind).toBe("inconclusive");
@@ -234,7 +227,7 @@ describe("renderMarkdown with a control run", () => {
     expect(body).toContain("| this PR | 20 | 0 |");
   });
 
-  // A clean run with a clean control must NOT read as a ✅ fix.
+  // A clean run with a clean control must not read as a ✅ fix.
   it("downgrades a clean run to ⚠️ inconclusive when the control was clean", () => {
     const body = md(Array(20).fill("passed"), Array(20).fill("passed"));
     expect(body).toContain("⚠️");
@@ -243,8 +236,7 @@ describe("renderMarkdown with a control run", () => {
     expect(body).not.toContain("✅");
   });
 
-  // Both "no usable control" branches are asserted in "why there is no control"
-  // below, which distinguishes a dead control run from an unmatched pattern.
+  // Both "no usable control" branches are asserted in "why there is no control" below.
   it("reports the absence of a control rather than omitting it silently", () => {
     expect(md(Array(5).fill("passed"), [])).toContain("Control — none");
   });
@@ -254,8 +246,7 @@ describe("renderMarkdown with a control run", () => {
     expect(body).not.toContain("Control");
   });
 
-  // A powerless run on the FULL target must not be told to add the label it is
-  // already running under — the only remedy left there is the repeat budget.
+  // A powerless full run is already under the label the fast nudge would name.
   it("points a powerless full run at the budget, not at its own label", () => {
     const body = md(Array(5).fill("passed"), Array(5).fill("passed"), { target: "full" });
     expect(body).toContain("no power");
@@ -270,9 +261,7 @@ describe("renderMarkdown with a control run", () => {
   });
 });
 
-// A control is only evidence if the base failed often enough that a clean run
-// here would be unlikely by luck. 2/20 on the base leaves ~12% — that must read
-// as weak, not as "fixed".
+// 2/20 on the base leaves ~12% odds of a clean run by luck, which must read as weak.
 describe("control strength", () => {
   const clean20 = summarize(targeted(Array(20).fill("passed")), "THREE messages sent mid-run");
   const baseWith = (failures) =>
@@ -300,9 +289,7 @@ describe("control strength", () => {
   });
 });
 
-// "No control" has two very different causes, and reporting the wrong one sends
-// the reader after a renamed test when the control's stack actually failed to
-// boot (observed: a Postgres port collision in CI).
+// A dead control run and an unmatched pattern are different problems.
 describe("why there is no control", () => {
   const clean = summarize(targeted(["passed", "passed"]), "THREE messages sent mid-run");
   const emptyReport = summarize({ suites: [] }, "THREE messages sent mid-run");
@@ -351,8 +338,7 @@ describe("the nightly window", () => {
     expect(summarizeHistory([lostShard, lostShard], P)).toMatchObject({ ran: 0, failed: 0 });
   });
 
-  // The verdict that produced this job's false-fixed history: the control saw
-  // nothing, so the run reads clean, while main is still failing the spec.
+  // A clean control while main still fails the spec is not a fix.
   it("refuses to read a clean run as a fix when main is still failing it", () => {
     const body = renderMarkdown(summarize(targeted(Array(5).fill("passed")), P), {
       pattern: P,
@@ -364,6 +350,25 @@ describe("the nightly window", () => {
     expect(body).toContain("2/3 nightly runs");
     expect(body).toContain("the control did not reproduce it");
     expect(body).toContain("not evidence of a fix".slice(0, 10));
+  });
+
+  // The nightly is a sweep, so a night carries a rate and "F" would throw away the
+  // difference between 1-in-5 and always-red.
+  it("shows each sweep night's rate, not just whether it fired", () => {
+    const sweepNight = (failures) =>
+      targeted([...Array(5 - failures).fill("passed"), ...Array(failures).fill("failed")]);
+    const h = summarizeHistory([sweepNight(0), sweepNight(2)], P);
+    expect(h.runs.map((r) => [r.failedRuns, r.totalRuns])).toEqual([
+      [0, 5],
+      [2, 5],
+    ]);
+    const body = renderMarkdown(summarize(targeted(Array(5).fill("passed")), P), {
+      pattern: P,
+      target: "full",
+      history: h,
+    });
+    expect(body).toContain("`0/5` **2/5**");
+    expect(body).not.toContain("**F**");
   });
 
   it("warns when the window shows nothing left to fix", () => {

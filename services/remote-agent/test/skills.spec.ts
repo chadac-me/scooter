@@ -1,17 +1,16 @@
 /**
- * Tier 1 — skill delivery to a BYO container.
- *
- * The container cannot read the agent-host pod's filesystem, so skills arrive as
- * DATA on new_session and are written locally. Names become PATH SEGMENTS and
- * come off a wire, so the escape guard is part of the contract.
+ * Tier 1 test for skill delivery to a BYO container. The container cannot read the
+ * agent-host pod's filesystem, so skills arrive as data on new_session and are written
+ * locally; names become path segments and come off a wire, so the escape guard is part
+ * of the contract.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { writeSkillPayloads } from "../src/skills.js";
+import { pruneSkillDirs, writeSkillPayloads } from "../src/skills.js";
 
 let cwd: string;
 beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "byoc-skills-")); });
@@ -45,7 +44,7 @@ describe("writeSkillPayloads", () => {
   });
 
   it("REFUSES a name that would escape the skills directory", () => {
-    // These arrive over a wire. A traversal name must not write outside cwd.
+    // These arrive over a wire, so a traversal name must not write outside cwd.
     const n = writeSkillPayloads(cwd, [
       { name: "../../../etc/evil", content: "x" },
       { name: "..", content: "x" },
@@ -62,5 +61,13 @@ describe("writeSkillPayloads", () => {
   it("no skills -> 0, and no directory is created", () => {
     expect(writeSkillPayloads(cwd, [])).toBe(0);
     expect(existsSync(join(cwd, ".claude"))).toBe(false);
+  });
+});
+describe("failure is survivable", () => {
+  it("an unwritable parent THROWS, so the caller must catch", () => {
+    // The target is under the test's own tmpdir rather than /proc, so the failure is a normal filesystem error that fails fast.
+    const notADir = join(cwd, "a-file-not-a-dir");
+    writeFileSync(notADir, "x", "utf8");
+    expect(() => writeSkillPayloads(notADir, [{ name: "a", content: "A" }])).toThrow();
   });
 });

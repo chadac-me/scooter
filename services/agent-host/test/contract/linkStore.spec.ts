@@ -1,13 +1,7 @@
 /**
- * Tier 1 contract — linked resources live in Postgres and survive a rollout.
- *
- * THE OUTAGE THIS PREVENTS: the linked GitHub/GitLab/Slack items in the sidebar
- * disappeared and stayed gone. `listLinks` read LOCAL_STATE_PATH — an emptyDir every
- * rollout wipes — so five conversations' PR links became permanently invisible while the
- * durable copy still held them. Writes were already correct; only the read was wrong.
- *
- * Every test here runs in that shape: the file store is EMPTY (wiped) and the data is
- * only in the database.
+ * Contract tests for linked resources living in Postgres. Every test runs with an
+ * empty (wiped) file store so that the data is only in the database, the shape a
+ * rollout leaves behind.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -29,20 +23,14 @@ const pr = (over: Partial<ConversationLink> = {}): ConversationLink => ({
   ...over,
 });
 
-/** The same PR as the store returns it: the `ref` is derived from the url when the
- *  writer supplied none, so a link posted by the broker (url + title only) still names
- *  its target for the reply tools. Why: issue #563. */
+/** The same PR as the store returns it, with the `ref` derived from the url. */
 const storedPr = (over: Partial<ConversationLink> = {}): ConversationLink =>
   pr({ ref: { owner: "example-org", repo: "example-app", number: 203 }, ...over });
 
 /**
- * A tiny in-memory Postgres under a REAL drizzle client, so the store's generated-model
- * queries are exercised rather than a hand-rolled SQL shim. Drizzle builds the SQL; this
- * only executes it.
- *
- * It honours UNIQUE (source, resource_type, resource_id) — the GLOBAL key webhooks
- * declares, not a per-conversation one — because the dedupe and the single-valued
- * reverse lookup both rest on it.
+ * A tiny in-memory Postgres under a real drizzle client, so the store's generated-model
+ * queries are exercised. It honours the global UNIQUE (source, resource_type, resource_id)
+ * key, which the dedupe and the single-valued reverse lookup both rest on.
  */
 function fakeDb(): { db: NodePgDatabase; rows: Array<Record<string, unknown>> } {
   const rows: Array<Record<string, unknown>> = [];
@@ -55,9 +43,7 @@ function fakeDb(): { db: NodePgDatabase; rows: Array<Record<string, unknown>> } 
       const head = text.trim().toUpperCase();
 
       if (head.startsWith("INSERT")) {
-        // The fake dedupes on the GLOBAL key, so it can only be a faithful stand-in if
-        // the statement actually TARGETS that key. Without this, pointing the conflict
-        // target at (conversation_id, ...) still passed every test — verified.
+        // The fake dedupes on the global key, so the statement must target that key too.
         if (/ON CONFLICT/i.test(text) && /CONVERSATION_ID/i.test(text.split(/ON CONFLICT/i)[1].split(/DO /i)[0])) {
           throw new Error(
             `ON CONFLICT must target the GLOBAL unique (source, resource_type, resource_id), ` +
@@ -67,12 +53,12 @@ function fakeDb(): { db: NodePgDatabase; rows: Array<Record<string, unknown>> } 
         const [conv, source, type, resourceId, url, title, ref] = values as [
           string, string, string, string, string | null, string | null, string | null,
         ];
-        // GLOBAL key: conversation_id is deliberately NOT part of the match.
+        // conversation_id is not part of the global key.
         const existing = rows.find(
           (r) => r.source === source && r.resource_type === type && r.resource_id === resourceId,
         );
         if (existing) {
-          if (!/DO UPDATE/i.test(text)) return { rows: [], rowCount: 0 }; // DO NOTHING
+          if (!/DO UPDATE/i.test(text)) return { rows: [], rowCount: 0 };
           // coalesce(excluded.x, existing.x): a sparser write must not blank a column.
           existing.url = url ?? existing.url;
           existing.title = title ?? existing.title;
@@ -92,7 +78,7 @@ function fakeDb(): { db: NodePgDatabase; rows: Array<Record<string, unknown>> } 
         return { rows: [], rowCount: 1 };
       }
 
-      // drizzle asks for rowMode:"array" — positional values in SELECT order.
+      // drizzle asks for rowMode:"array", positional values in SELECT order.
       if (head.startsWith("SELECT")) {
         // The reverse lookup selects conversation_id alone; the panel read selects five.
         const reverse = /SELECT\s+"?RESOURCE_LINKS"?\."?CONVERSATION_ID/i.test(text)
@@ -115,7 +101,6 @@ function fakeDb(): { db: NodePgDatabase; rows: Array<Record<string, unknown>> } 
       }
 
       if (head.startsWith("DELETE")) {
-        // deleteByConversation: drop every row of one conversation.
         const [conv] = values as [string];
         let removed = 0;
         for (let i = rows.length - 1; i >= 0; i--) {
@@ -139,10 +124,9 @@ const legacyWith = (links: Record<string, ConversationLink[]>) => ({
 
 describe("linked resources in Postgres", () => {
   it("THE OUTAGE: links survive when the file store is wiped", async () => {
-    // Exactly the rollout the customer hit — the local emptyDir answers [], and the
-    // panel must still show the PR.
+    // The local emptyDir answers [] and the panel must still show the PR.
     const { db, rows } = fakeDb();
-    const legacy = legacyWith({}); // wiped
+    const legacy = legacyWith({});
     const store = createPgLinkStore({ db, legacy });
 
     await store.addLink(CONV, pr());
@@ -150,8 +134,7 @@ describe("linked resources in Postgres", () => {
   });
 
   it("round-trips the full ConversationLink shape, ref included", async () => {
-    // `ref` carries the structured reply targets the response tools use; losing it
-    // downgrades every tool to "target unknown".
+    // `ref` carries the structured reply targets the response tools use.
     const { db, rows } = fakeDb();
     const store = createPgLinkStore({ db });
     const link = pr({ ref: { owner: "example-org", repo: "example-app", number: 203 } });
@@ -161,8 +144,7 @@ describe("linked resources in Postgres", () => {
   });
 
   it("parses a ref delivered as raw jsonb text", async () => {
-    // A driver returning jsonb as a string must not hand the tools a string where they
-    // expect an object.
+    // A driver may return jsonb as a string.
     const { db, rows } = fakeDb();
     const store = createPgLinkStore({ db });
     await store.addLink(CONV, pr({ ref: { channel: "C123", threadTs: "1.2" } }));
@@ -172,11 +154,7 @@ describe("linked resources in Postgres", () => {
   });
 
   it("deleteByConversation drops the links so the SAME resource can re-link to a fresh conversation", async () => {
-    // The isolation bug this prevents: the resource_links unique is GLOBAL
-    // (source, resource_type, resource_id). A conversation is deleted but its link row is left
-    // behind; a later conversation that links the SAME resource then hits ON CONFLICT and the row
-    // keeps the OLD (deleted) conversation_id, so the new conversation shows no link. Deleting a
-    // conversation must clear its links (as the file store did with its directory).
+    // The unique key is global, so a leftover row from a deleted conversation would keep the stale conversation_id on conflict.
     const { db } = fakeDb();
     const store = createPgLinkStore({ db });
     await store.addLink("conv-old" as SessionId, pr());
@@ -199,9 +177,7 @@ describe("linked resources in Postgres", () => {
   });
 
   it("ENRICHES an existing link when a later post adds a ref", async () => {
-    // The webhooks service posts a bare link first, then fills in structured targets.
-    // A Slack thread, deliberately: nothing about it is derivable from a url, so this
-    // still tests the enrich path rather than the derivation added in #563.
+    // A Slack thread has nothing derivable from a url, so this exercises the enrich path alone.
     const { db, rows } = fakeDb();
     const store = createPgLinkStore({ db });
     const thread = (over: Partial<ConversationLink> = {}): ConversationLink => ({
@@ -216,16 +192,12 @@ describe("linked resources in Postgres", () => {
   });
 
   it("DERIVES the ref from the url when the writer supplied none", async () => {
-    // The broker's auto-link injector posts url + title only. Those rows had no ref at
-    // all, so the reply tools saw no attachment and github_comment never registered —
-    // the whole of issue #563. The store fills the documented contract in.
+    // The broker's auto-link injector posts url + title only.
     const { db, rows } = fakeDb();
     const store = createPgLinkStore({ db });
     await store.addLink(CONV, pr({ ref: undefined }));
 
-    // Asserted on the ROW, not just the read: the ref has to be persisted, so a
-    // reader that doesn't derive (the UI, a future consumer) sees it too. jsonb is
-    // bound as text by the driver, hence the parse.
+    // Asserted on the row so a reader that does not derive sees it too; jsonb is bound as text, hence the parse.
     expect(JSON.parse((rows[0] as { ref: string }).ref)).toEqual({
       owner: "example-org",
       repo: "example-app",
@@ -235,10 +207,7 @@ describe("linked resources in Postgres", () => {
   });
 
   it("CANONICALISES resource_type, so the two spellings are ONE row", async () => {
-    // resource_type is part of the table's unique key, and this table has two writers:
-    // the broker's auto-link says "pr", the webhooks handler says "pull_request". Left
-    // alone, the same PR occupies two rows and the panel shows it twice. The backfill
-    // migration leaves the long form in the table, so writes must aim at it.
+    // The broker's auto-link says "pr" and the webhooks handler says "pull_request"; the table holds the long form.
     const { db, rows } = fakeDb();
     const store = createPgLinkStore({ db });
     await store.addLink(CONV, pr({ resourceType: "pull_request" }));
@@ -249,8 +218,7 @@ describe("linked resources in Postgres", () => {
   });
 
   it("an EXPLICIT ref is never overwritten by the derived one", async () => {
-    // The webhooks handlers know more than a url does (a GitLab issue's project id, a
-    // Slack thread) — derivation only ever fills a gap.
+    // Derivation only ever fills a gap.
     const { db, rows } = fakeDb();
     const store = createPgLinkStore({ db });
     await store.addLink(CONV, pr({ ref: { owner: "example-org", repo: "example-app", number: 7 } }));
@@ -259,11 +227,11 @@ describe("linked resources in Postgres", () => {
   });
 
   it("surfaces a derived ref for a row STORED without one (no migration needed)", async () => {
-    // The 155 live rows predate the write-side derivation; they must resolve on read.
+    // Rows written without a ref must resolve on read.
     const { db, rows } = fakeDb();
     const store = createPgLinkStore({ db });
     await store.addLink(CONV, pr());
-    (rows[0] as { ref: unknown }).ref = null; // as the deployed rows actually are
+    (rows[0] as { ref: unknown }).ref = null;
 
     expect((await store.listLinks(CONV))[0].ref).toEqual({ owner: "example-org", repo: "example-app", number: 203 });
   });
@@ -300,14 +268,7 @@ describe("linked resources in Postgres", () => {
   });
 
   it("ONE resource is ONE row: a second conversation does not get its own copy", async () => {
-    // The table's unique key is GLOBAL — (source, resource_type, resource_id) — because
-    // webhooks routes an incoming event to THE conversation for a resource and reads
-    // with scalar_one_or_none(), which RAISES on a second row. So linking the same PR
-    // from another conversation is a no-op here, not a second row.
-    //
-    // The cost is real and deliberate: two agents working one PR cannot both show it.
-    // Supporting that needs fan-out routing on the webhooks side first — see the
-    // discussion on #381 — so it is NOT silently enabled by widening this key.
+    // The unique key is global because webhooks routes an incoming event to the one conversation for a resource.
     const { db, rows } = fakeDb();
     const store = createPgLinkStore({ db });
     await store.addLink("conv-a" as SessionId, pr());
@@ -354,7 +315,7 @@ describe("read-through to file-backed links", () => {
     const legacy = legacyWith({ [CONV]: [pr()] });
     const store = createPgLinkStore({ db, legacy });
 
-    await store.listLinks(CONV); // reads through + backfills
+    await store.listLinks(CONV);
     legacy.listLinks.mockClear();
 
     expect(await store.listLinks(CONV)).toEqual([storedPr()]);
@@ -362,7 +323,7 @@ describe("read-through to file-backed links", () => {
   });
 
   it("a backfilled link is reachable by the reverse lookup", async () => {
-    // The backfill has to write real rows, not just serve a passthrough.
+    // The backfill has to write real rows.
     const { db, rows } = fakeDb();
     const legacy = legacyWith({ [CONV]: [pr()] });
     const store = createPgLinkStore({ db, legacy });
@@ -414,7 +375,6 @@ describe("database failures degrade, never throw into a request", () => {
   });
 
   it("listLinks returns [] rather than throwing when everything is down", async () => {
-    // An empty panel during an outage beats a permanently wrong one.
     const store = createPgLinkStore({ db: brokenDb() });
     await expect(store.listLinks(CONV)).resolves.toEqual([]);
   });

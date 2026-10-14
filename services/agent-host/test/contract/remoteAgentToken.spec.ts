@@ -1,7 +1,4 @@
-/**
- * Tier 1 contract — the BYO remote-agent join token (HS256, node:crypto). Owner binding + the
- * verify guards the /remote-agent/connect WS relies on. See auth/remoteAgentToken.ts.
- */
+/** The BYO remote-agent join token (HS256): owner binding and the verify guards. */
 
 import { describe, it, expect } from "vitest";
 
@@ -47,7 +44,7 @@ describe("remote-agent join token", () => {
     const t = mintJoinToken("alice", SECRET, { ttlSeconds: 60, now });
     const v = verifyJoinToken(t, SECRET, now + 30);
     expect(v.ok).toBe(true);
-    // Two mints get distinct nonces (single-use marker).
+    // Two mints get distinct nonces.
     const a = mintJoinToken("alice", SECRET);
     const b = mintJoinToken("alice", SECRET);
     const va = verifyJoinToken(a, SECRET);

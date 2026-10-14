@@ -1,42 +1,9 @@
-"""Structured JSON logging for the scheduler service.
+"""Structured JSON logging for the scheduler service, matching services/agent-host/src/log.ts.
 
-WHY. The lines this replaces were prose with values interpolated into them:
-
-    logger.error("spawn failed: HTTP %s for task %r", resp.status_code, title)
-
-Readable to a human tailing logs, useless to a tool. You cannot ask "show me every
-spawn failure" (the rendered msg differs per status code and title), and you cannot
-ask "show me everything that happened to conversation 42bb375c" at all, because the
-id never made it into the line as a queryable value.
-
-THE SHAPE. One JSON object per line:
-
-    {"ts":"…","level":"error","service":"scheduler","component":"spawn",
-     "msg":"create failed","status":500,"task_title":"nightly report"}
-
-`msg` is a SHORT CONSTANT. Every varying value is a field. A constant msg is
-groupable; an interpolated one is a cardinality explosion.
-
-`component` is the module (or the `[bracket]` prefix a line already used), promoted
-to a field.
-
-OUTPUT. stdout/stderr, one line each. NOT the OTel SDK: the cluster's collector
-(Alloy, via the k8s-monitoring chart) already scrapes pod logs into Loki, so stdout
-IS the ingestion path and needs no new dependency or exporter. This mirrors the
-TypeScript side, services/agent-host/src/log.ts — same field names, same defaults,
-so a cross-service query on `conversation_id` joins the two.
-
-DEV. A human tailing logs locally gets the pretty renderer instead
-(LOG_FORMAT=pretty, the default when not in a container). JSON is for the collector,
-not for people.
-
-USAGE.
-
-    from .logging_config import format_error, get_logger
-
-    logger = get_logger("spawn")
-    logger.info("prompt queued", extra={"conversation_id": cid})
-    logger.error("spawn failed", extra={"error": format_error(e)})
+Each line is one JSON object: ts, level, service, component, a short constant msg, and
+every varying value as a field passed through the stdlib `extra=` kwarg, e.g.
+`get_logger("spawn").info("prompt queued", extra={"conversation_id": cid})`. A terminal
+gets the pretty renderer instead (LOG_FORMAT=pretty, the default outside a container).
 """
 
 from __future__ import annotations
@@ -47,10 +14,7 @@ import logging
 import os
 from typing import Any
 
-# Attributes the stdlib puts on every LogRecord. Anything NOT in here arrived via the
-# caller's `extra=` kwarg and is therefore a field we want in the JSON. Enumerating the
-# builtins is the only way to recover the extras: the stdlib merges them straight into
-# the record's __dict__ without recording which ones it added.
+# Attributes the stdlib puts on every LogRecord; anything else came from the caller's `extra=`.
 _RESERVED: frozenset[str] = frozenset(
     {
         "args",
@@ -79,34 +43,18 @@ _RESERVED: frozenset[str] = frozenset(
     }
 )
 
-# The envelope. A caller's extra= must never overwrite these — if it tries, the value is
-# preserved under a suffixed key rather than silently dropped or silently winning.
+# The envelope keys, which a colliding `extra=` field is renamed away from.
 _ENVELOPE: tuple[str, ...] = ("ts", "level", "service", "component", "msg")
 
 
 def format_error(exc: BaseException) -> dict[str, Any]:
-    """Serialize an exception into a dict with actual content.
-
-    Use this instead of interpolating `str(e)`. Two reasons:
-
-    1. `str()` on several httpx transport exceptions returns the EMPTY STRING —
-       httpx.ConnectError, ReadTimeout, ConnectTimeout and friends are routinely
-       raised with no message, so `logger.error("spawn failed: %s", e)` renders
-       "spawn failed: " and the actual failure is unattributable. The fallback here
-       is repr(), then the type name, so a line always says what went wrong.
-    2. Transport and HTTP errors hang the useful bits (status, code) off the
-       exception object rather than the message.
-
-    Returns keys: message, type, and — when present — status and code.
-    """
+    """Serialize an exception into {message, type} plus status and code when present, with a non-empty message even for transport exceptions whose str() is empty."""
     try:
         message = str(exc)
-    except Exception:  # a __str__ that itself raises must not lose the log line
+    except Exception:
         message = ""
 
     if not message:
-        # str() gave us nothing (the httpx transport-exception case). repr() usually
-        # carries the class name and any args; the bare type name is the last resort.
         try:
             message = repr(exc)
         except Exception:
@@ -116,8 +64,7 @@ def format_error(exc: BaseException) -> dict[str, Any]:
 
     out: dict[str, Any] = {"message": message, "type": type(exc).__name__}
 
-    # An httpx.HTTPStatusError carries .response.status_code; other clients hang a
-    # status/status_code/code directly off the exception. Take whichever exists.
+    # An httpx.HTTPStatusError carries .response.status_code; other clients hang it off the exception.
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     if status is None:
@@ -137,11 +84,7 @@ def format_error(exc: BaseException) -> dict[str, Any]:
 
 
 def _safe(value: Any) -> Any:
-    """Coerce a value into something json.dumps will accept.
-
-    An unserializable field must degrade to its repr, never take the whole line down —
-    a log call is not allowed to raise inside the code it is observing.
-    """
+    """Coerce a value into something json.dumps will accept, degrading to its repr."""
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if isinstance(value, dict):
@@ -154,9 +97,7 @@ def _safe(value: Any) -> Any:
         return "<unrepresentable>"
 
 
-# Level VALUES must match across every service, or the natural cross-service query
-# (level="warn") silently misses whole services. Python's levelname is WARNING/CRITICAL;
-# the fleet convention is warn/error, matching agent-host's TypeScript logger.
+# Level names follow the TypeScript convention so a cross-service query on level works.
 _LEVEL_NAMES = {
     logging.DEBUG: "debug",
     logging.INFO: "info",
@@ -167,12 +108,7 @@ _LEVEL_NAMES = {
 
 
 class JsonFormatter(logging.Formatter):
-    """Renders one JSON object per line: ts, level, service, component, msg + extras.
-
-    `component` comes from an explicit extra={"component": …} when given, otherwise
-    from the logger name with the service prefix stripped ("scheduler.spawn" ->
-    "spawn"), which is what get_logger() produces.
-    """
+    """One JSON object per line, where `component` is an explicit extra or the logger name with the service prefix stripped."""
 
     def __init__(self, service: str) -> None:
         super().__init__()
@@ -192,8 +128,6 @@ class JsonFormatter(logging.Formatter):
         return {
             key: value
             for key, value in record.__dict__.items()
-            # A leading underscore marks a private/internal attribute (and "component"
-            # is consumed as part of the envelope, not repeated as a field).
             if key not in _RESERVED and key != "component" and not key.startswith("_")
         }
 
@@ -205,19 +139,13 @@ class JsonFormatter(logging.Formatter):
             "level": _LEVEL_NAMES.get(record.levelno, record.levelname.lower()),
             "service": self.service,
             "component": self._component(record),
-            # record.getMessage() applies %-args. New call sites pass a constant msg and
-            # no args, but this keeps a stray legacy line (or a library's) intact.
             "msg": record.getMessage(),
         }
 
         for key, value in self._extras(record).items():
-            # Never clobber the envelope. Rule 3 of the convention depends on
-            # `service`/`component`/`msg` meaning the same thing on every line.
             line[f"{key}_" if key in _ENVELOPE else key] = _safe(value)
 
-        # logger.exception() / exc_info=True. The traceback is a field, not a set of
-        # bare extra lines appended after the JSON object — which would break the
-        # one-object-per-line contract the collector parses on.
+        # The traceback is a field, keeping the one-object-per-line contract.
         if record.exc_info:
             exc = record.exc_info[1]
             if isinstance(exc, BaseException) and "error" not in line:
@@ -229,9 +157,7 @@ class JsonFormatter(logging.Formatter):
         try:
             return json.dumps(line, default=repr)
         except Exception:
-            # _safe() should have made this unreachable; if a __repr__ raises anyway,
-            # emit the envelope rather than losing the event. Re-spreading the fields
-            # here would re-include whatever just failed.
+            # A field defeated even _safe(), so emit the envelope alone.
             return json.dumps(
                 {
                     "ts": line["ts"],
@@ -245,7 +171,7 @@ class JsonFormatter(logging.Formatter):
 
 
 class PrettyFormatter(logging.Formatter):
-    """`[component] msg key=value` — for a human tailing logs at a terminal."""
+    """The `[component] msg key=value` shape, for a human at a terminal."""
 
     def __init__(self, service: str) -> None:
         super().__init__()
@@ -268,8 +194,7 @@ class PrettyFormatter(logging.Formatter):
 
 
 def _json_output() -> bool:
-    """JSON in a container, human-readable at a terminal. KUBERNETES_SERVICE_HOST is
-    set by k8s in every pod, so this picks the right default without configuration."""
+    """JSON in a container (KUBERNETES_SERVICE_HOST is set in every pod), human-readable at a terminal."""
     fmt = os.environ.get("LOG_FORMAT", "").lower()
     if fmt == "json":
         return True
@@ -280,24 +205,11 @@ def _json_output() -> bool:
 
 def _level(default: str) -> int:
     raw = (os.environ.get("LOG_LEVEL") or default).upper()
-    # getLevelNamesMapping(), not getLevelName(): the str -> int direction of
-    # getLevelName is deprecated (the docs call it a mistake) and returns the string
-    # "Level FOO" for an unknown name rather than failing, so an isinstance guard was
-    # load-bearing. An explicit mapping lookup says what it means. (3.11+, and
-    # pyproject already requires >=3.11.)
     return logging.getLevelNamesMapping().get(raw, logging.INFO)
 
 
 def configure_logging(service_name: str, *, default_level: str = "INFO") -> None:
-    """Install the structured handler on the root logger.
-
-    Replaces logging.basicConfig. Root (not just "scheduler") so uvicorn's and
-    sqlalchemy's lines land in the same format — a collector parsing a stream that is
-    half JSON and half prose gets neither.
-
-    Idempotent: re-running swaps the handler rather than stacking a second one, so a
-    test that calls it repeatedly does not get duplicate lines.
-    """
+    """Install the structured handler on the root logger, idempotently, so third-party lines share the format."""
     formatter: logging.Formatter = (
         JsonFormatter(service_name) if _json_output() else PrettyFormatter(service_name)
     )
@@ -308,8 +220,7 @@ def configure_logging(service_name: str, *, default_level: str = "INFO") -> None
 
     root = logging.getLogger()
     for existing in list(root.handlers):
-        # Drop our own previous handler and anything basicConfig left behind; leave a
-        # pytest/caplog handler alone so test capture keeps working.
+        # A pytest caplog handler is left alone so test capture keeps working.
         if existing.get_name() == "scooter-structured" or type(existing) is logging.StreamHandler:
             root.removeHandler(existing)
     root.addHandler(handler)
@@ -317,6 +228,5 @@ def configure_logging(service_name: str, *, default_level: str = "INFO") -> None
 
 
 def get_logger(component: str, *, service: str = "scheduler") -> logging.Logger:
-    """A logger whose name encodes the component, e.g. get_logger("spawn") ->
-    "scheduler.spawn", which the formatter renders as component="spawn"."""
+    """A logger whose name encodes the component, which the formatter renders as component="<name>"."""
     return logging.getLogger(f"{service}.{component}")

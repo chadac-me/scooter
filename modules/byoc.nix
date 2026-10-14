@@ -1,21 +1,8 @@
-# BYOC controller — Deployment + Service + (optional) UNAUTHENTICATED Ingress.
-#
-# Holds the bring-your-own-Claude container sockets so ANY agent-host replica can drive ANY
-# container (todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §L). The user's container dials
-# wss://<host>/byoc/ws/<session-id>; agent-hosts reach the controller in-cluster over plain HTTP.
-#
-# THE INGRESS IS DELIBERATELY UNAUTHENTICATED (§L Q3), for the same reason webhooks' is: the
-# client cannot carry a browser session. A webhook provider signs with an HMAC; a BYOC container
-# presents a short-lived, owner-bound HS256 join token whose audience is `byoc`. Do NOT attach an
-# auth middleware here — the container would be rejected before the token check ever runs.
-#
-# Note what is NOT exposed on this ingress: the MINT endpoint (POST /byoc/sessions) requires a
-# resolved user and is served from the authed UI surface. Only /byoc/ws/ needs to be public.
-#
-# SINGLE REPLICA (§L decision 3). One process owns every container socket, so there is no
-# cross-replica socket problem. Do not scale this without revisiting §L — multi-replica
-# reintroduces exactly the "which pod holds the socket" bug the design exists to delete. The
-# replica count is therefore NOT an option.
+# BYOC controller: Deployment, Service and an optional unauthenticated Ingress.
+# It holds the bring-your-own-Claude container sockets so any agent-host replica
+# can drive any container; the user's container dials wss://<host>/byoc/ws/<id>
+# and presents an owner-bound HS256 join token, so the ingress carries no auth
+# middleware. It runs a single replica because one process must own every socket.
 
 { config, lib, ... }:
 
@@ -110,13 +97,10 @@ in
     };
   };
 
-  # mkMerge: the table declarations are UNCONDITIONAL (see modules/db-spec.nix) —
-  # the tables exist in lib/sql whether or not this deployment runs the service —
-  # while everything else stays gated on `enable`. The gated body keeps its own
-  # indentation so this wrapper is the whole diff.
+  # The table declarations are unconditional (see modules/db-spec.nix); everything else is gated on `enable`.
   config = lib.mkMerge [
 
-  # The tables the `byoc` database holds (scooter.db, #606).
+  # The tables the `byoc` database holds.
   {
     scooter.db.byoc = {
       owner = "byoc-controller";
@@ -139,11 +123,9 @@ in
             labels."app.kubernetes.io/name" = "byoc-controller";
           };
           spec = {
-            # ONE replica, on purpose — see the header. A rollout drops the sockets and every
-            # container reconnects on its own (`--restart always` + jittered backoff).
+            # A rollout drops the sockets and every container reconnects on its own.
             replicas = 1;
-            # Recreate, not RollingUpdate: two replicas overlapping would each hold a subset of the
-            # container sockets, which is precisely the state §L exists to make impossible.
+            # Overlapping replicas would each hold a subset of the container sockets.
             strategy.type = "Recreate";
             selector.matchLabels."app.kubernetes.io/name" = "byoc-controller";
             template = {
@@ -159,11 +141,7 @@ in
                       name = "BYOC_JOIN_SECRET";
                       valueFrom.secretKeyRef = { name = bcfg.joinSecretName; key = "secret"; };
                     }
-                    # Durable owner->session mapping + the device registry (§L Q4 / §P). The
-                    # platform's postgres-init provisions a `byoc` db + role and writes ONLY a
-                    # `password` key (no assembled DSN) — so the parts come in separately and the
-                    # app builds the DSN, matching webhooks/broker/scheduler. Asking for a `dsn`
-                    # key here is what left the pod in CreateContainerConfigError.
+                    # postgres-init writes only a `password` key, so the app assembles the DSN from these parts.
                     { name = "DB_HOST"; value = cfg.postgres.host; }
                     { name = "DB_PORT"; value = toString cfg.postgres.port; }
                     { name = "DB_NAME"; value = "byoc"; }
@@ -172,10 +150,7 @@ in
                       name = "DB_PASSWORD";
                       valueFrom.secretKeyRef = { name = "agent-pg-byoc"; key = "password"; };
                     }
-                    # index.ts builds `?sslmode=${DB_SSLMODE}` onto the DSN, so without
-                    # this the controller connects CLEARTEXT to an external Postgres the
-                    # deployment asked to reach over TLS — silently, since the parameter
-                    # is simply absent rather than wrong. Why: #621, same bug one service over.
+                    # Without this the controller silently connects cleartext to a Postgres the deployment asked to reach over TLS.
                   ] ++ lib.optional (cfg.postgres.sslmode != null)
                     { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; };
                   readinessProbe.httpGet = { path = "/healthz"; port = "http"; };
@@ -196,8 +171,7 @@ in
       }
 
       (lib.mkIf bcfg.ingress.enable {
-        # UNAUTHENTICATED by design (§L Q3) — see the header. Only the /byoc/ws/ connect path needs
-        # to be public; minting stays on the authed UI surface.
+        # Unauthenticated by design; minting stays on the authed UI surface.
         ingresses.byoc-controller = {
           metadata = {
             name = "byoc-controller";
@@ -225,8 +199,7 @@ in
       })
     ];
 
-    # Register with the shared Postgres: the provisioning Job creates the `byoc` database + role
-    # (secret agent-pg-byoc, referenced above).
+    # The provisioning Job creates the `byoc` database and role (secret agent-pg-byoc).
     scooter.postgres.consumers.byoc = { db = "byoc"; user = "byoc"; };
   })
   ];

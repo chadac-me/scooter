@@ -1,13 +1,4 @@
-"""Datadog credential source — the two-key header auth Datadog requires.
-
-Datadog authenticates each API request with TWO headers, not one bearer token:
-  DD-API-KEY           the org API key
-  DD-APPLICATION-KEY   the application key (scopes what the request may read)
-
-So this source emits a "multi-header" Credential carrying both, and the shared
-Credential.inject() sets both on the outbound request. The agent never sees
-either key — the broker injects them on the proxy hop.
-"""
+"""Datadog credential source: a "multi-header" Credential carrying the DD-API-KEY and DD-APPLICATION-KEY headers Datadog requires on every request."""
 
 from __future__ import annotations
 

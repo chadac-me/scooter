@@ -1,11 +1,8 @@
 /**
- * Tier 1 contract — images reach goose (multimodal, stage 2).
- *
- * Two seams:
- *  - normalizeContent: the /agui message `content` (string | ContentPart[]) splits
- *    into prompt text + inbound images; a plain string stays text-only (back-compat).
- *  - the bridge resolves attached image refs (readAsset -> base64) into ACP `image`
- *    content blocks appended after the text; a text-only prompt is unchanged.
+ * Images and files reach the agent. normalizeContent splits the /agui message
+ * `content` into prompt text, images and files; the bridge resolves attached image
+ * refs into ACP `image` blocks after the text and writes file attachments into
+ * /workspace/uploads.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -49,8 +46,8 @@ describe("normalizeContent", () => {
 
   it("a file part missing name/data is ignored", () => {
     const out = normalizeContent([
-      { type: "file", data: "UERG" } as never, // no name
-      { type: "file", name: "x.bin" } as never, // no data
+      { type: "file", data: "UERG" } as never,
+      { type: "file", name: "x.bin" } as never,
     ]);
     expect(out.files).toEqual([]);
   });
@@ -80,7 +77,7 @@ describe("normalizeContent", () => {
 
 // --- the bridge builds an ACP image block from an attached ref ---------------
 
-/** A minimal AcpClient that captures the prompt blocks + drives a trivial run. */
+/** A minimal AcpClient that captures the prompt blocks and drives a trivial run. */
 function capturingAcp(): { client: AcpClient; lastPrompt: () => PromptParams | undefined } {
   let last: PromptParams | undefined;
   let updateCb: ((sid: string, u: unknown) => void) | undefined;
@@ -89,7 +86,6 @@ function capturingAcp(): { client: AcpClient; lastPrompt: () => PromptParams | u
     newSession: async () => ({ sessionId: "acp-1" }),
     async prompt(params) {
       last = params;
-      // Emit a tiny assistant chunk so the run produces a message, then end.
       updateCb?.("acp-1", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } });
       return { stopReason: "end_turn" };
     },
@@ -119,7 +115,6 @@ describe("bridge: image content blocks", () => {
     await bridge.prompt({ threadId: "t1", text: "what is this?", images: [{ assetId: "img1.png", mimeType: "image/png" }] });
 
     const blocks = lastPrompt()!.prompt as ContentBlock[];
-    // text first, image block after.
     expect(blocks[0]).toMatchObject({ type: "text", text: "what is this?" });
     const img = blocks.find((b) => b.type === "image") as { type: "image"; data: string; mimeType: string };
     expect(img).toBeTruthy();
@@ -142,9 +137,9 @@ describe("bridge: image content blocks", () => {
       | undefined;
     expect(ev).toBeTruthy();
     expect(ev!.images[0]).toMatchObject({ assetId: "img1.png", mimeType: "image/png", url: "/conversations/conv-9/assets/img1.png" });
-    // The ref carries NO base64 bytes (keeps the log compact).
+    // The ref carries no base64 bytes.
     expect(JSON.stringify(ev)).not.toContain("data");
-    // It follows a user TEXT_MESSAGE_END with the same messageId.
+    // It follows the user TEXT_MESSAGE_END with the same messageId.
     const endIdx = persisted.findIndex((e) => e.type === "TEXT_MESSAGE_END" && e.messageId === ev!.messageId);
     const imgIdx = persisted.indexOf(ev as never);
     expect(imgIdx).toBeGreaterThan(endIdx);
@@ -175,7 +170,7 @@ describe("bridge: image content blocks", () => {
     await bridge.start();
     await bridge.prompt({ threadId: "t1", text: "hi", images: [{ assetId: "gone.png", mimeType: "image/png" }] });
     const blocks = lastPrompt()!.prompt as ContentBlock[];
-    expect(blocks.some((b) => b.type === "image")).toBe(false); // dropped, turn still ran
+    expect(blocks.some((b) => b.type === "image")).toBe(false);
     expect(blocks[0]).toMatchObject({ type: "text" });
   });
 });
@@ -198,13 +193,12 @@ describe("bridge: binary file attachments", () => {
       files: [{ name: "report.pdf", data: "UERG", mimeType: "application/pdf" }],
     });
 
-    // The bytes went through the binary-safe path (base64 STREAMED, not a shell arg).
+    // The bytes went through the binary-safe path, streamed as base64 rather than passed as a shell arg.
     expect(api.uploadedBinary).toEqual([{ path: "/workspace/uploads/report.pdf", base64: "UERG" }]);
 
-    // The turn still ran (the ACP prompt was sent).
     expect(lastPrompt()).toBeTruthy();
     const blocks = lastPrompt()!.prompt as ContentBlock[];
-    // No file block is sent to the model (files go to disk, not ACP content).
+    // Files go to disk, not ACP content.
     expect(blocks.some((b) => (b as { type: string }).type === "file")).toBe(false);
     // A note tells the agent where the file landed.
     const noteBlock = blocks.find(
@@ -229,7 +223,6 @@ describe("bridge: binary file attachments", () => {
       text: "hi",
       files: [{ name: "x.bin", data: "QQ==", mimeType: "application/octet-stream" }],
     });
-    // The write failed but the ACP prompt was still sent — the turn ran.
     expect(lastPrompt()).toBeTruthy();
     const blocks = lastPrompt()!.prompt as ContentBlock[];
     // No saved-path note for a file that never landed.
@@ -263,7 +256,6 @@ describe("bridge: binary file attachments", () => {
       text: "hi",
       files: [{ name: "../../etc/passwd", data: "QQ==", mimeType: "application/octet-stream" }],
     });
-    // No path escape: the write target stays inside /workspace/uploads.
     expect(api.uploadedBinary).toEqual([{ path: "/workspace/uploads/passwd", base64: "QQ==" }]);
   });
 });

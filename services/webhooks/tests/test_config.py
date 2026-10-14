@@ -1,4 +1,4 @@
-"""DatabaseSettings DSN assembly — Postgres from components vs SQLite default."""
+"""DatabaseSettings DSN assembly and the shared agent-host fields."""
 
 from webhooks.config import DatabaseSettings
 
@@ -23,13 +23,12 @@ def test_db_password_assembles_postgres_dsn(monkeypatch):
 
 
 def test_explicit_postgres_dsn_wins_over_components(monkeypatch):
-    # An explicit Postgres DSN must not be clobbered by component assembly.
     monkeypatch.setenv("DSN", "postgresql+asyncpg://u:p@h:5432/db")
     monkeypatch.setenv("DB_PASSWORD", "ignored")
     assert DatabaseSettings().dsn == "postgresql+asyncpg://u:p@h:5432/db"
 
 
-# --- the agent-host fields now come from scooter_lib ------------------------
+# --- the agent-host fields come from scooter_lib ----------------------------
 
 
 def test_webhooks_settings_carries_the_shared_agent_host_fields():
@@ -41,8 +40,7 @@ def test_webhooks_settings_carries_the_shared_agent_host_fields():
 
 
 def test_webhooks_keeps_its_in_cluster_agent_host_default(monkeypatch):
-    # Deliberate override: "" means "auto-linking off" to the broker, but a
-    # misconfiguration here. Collapsing the two silently breaks one.
+    # The override exists because "" means "auto-linking off" to the broker but a misconfiguration here.
     monkeypatch.delenv("AGENT_HOST_URL", raising=False)
 
     from webhooks.config import WebhooksSettings

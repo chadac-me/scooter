@@ -1,26 +1,9 @@
 /**
- * Tier 1 contract — the RECOVERED (suspended → revived) conversation seams.
- *
- * The reported user story, which nothing covered end-to-end: a conversation is
- * suspended (idle sweep / rollout drops the pod + bridge), the user opens the tab
- * and sends a message. Three things went wrong in the field:
- *
- *   1. a NEW AWS approval raised AFTER the revive never appeared in the tab,
- *   2. events.integrity "totally fails" and the UI sits with the message hidden,
- *   3. the sent message shows in the queue tab and is never flushed.
- *
- * The existing coverage all stubs the seam it should be exercising:
- *   - integrityRoute.spec.ts *says* "first-hit on a suspended conversation" but its
- *     SessionManager is a `{id}` literal with `ensureReadable: async () => true` —
- *     it never builds a suspended conversation at all.
- *   - management.spec.ts's fakeSessions() hard-codes ensureReadable to "does the map
- *     have it", so the real hydrate-as-suspended-placeholder path never runs.
- *   - session.spec.ts covers suspend/revive on the MANAGER but never against the
- *     integrity route the UI actually reads from.
- *
- * So these tests wire the REAL createSessionManager (fake provisioner + a real
- * file-backed store) to the REAL management router, and drive the actual
- * suspend → connect → send → revive sequence.
+ * Contract tests for recovered (suspended, then revived) conversations: a new
+ * approval raised after the revive must reach the tab, events.integrity must keep
+ * serving the durable log, and a message sent while suspended must revive the
+ * conversation and run. The real createSessionManager (fake provisioner, real
+ * file-backed store) is wired to the real management router.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -47,14 +30,10 @@ const fakeProvisioner = (): SandboxProvisioner => ({
   destroy: vi.fn(async () => {}),
 });
 
-/** A minimal fake bridge that records prompts and can raise interrupts, so a
- *  revive produces a real (new) bridge instance we can assert on — the thing the
- *  approval-after-revive path depends on. */
+/** A minimal fake bridge that records prompts and can raise interrupts, so a revive produces a new instance to assert on. */
 function makeFakeBridge(onEmit: (e: AguiEvent) => void) {
   const listeners: Array<(e: AguiEvent) => void> = [];
-  // The manager logs via onPersist (wireEventLog), NOT onEvent — subscribing to
-  // both would double-log. A fake that omits it silently persists nothing, which
-  // would make these tests pass for the wrong reason.
+  // The manager logs via onPersist, not onEvent; a fake without it persists nothing.
   const persistListeners: Array<(e: AguiEvent) => void> = [];
   const emit = (e: AguiEvent) => {
     onEmit(e);
@@ -166,11 +145,7 @@ const apiFor = (sessions: SessionManager, store: ReturnType<typeof createFileCon
 
 describe("recovered (suspended → revived) conversations", () => {
   it("events.integrity serves 200 + full history for a SUSPENDED conversation (no 404)", async () => {
-    // Bug #2: "events.integrity call totally fails". The route must NOT gate on
-    // liveness — a suspended conversation has no pod and no bridge, but its durable
-    // log is the whole point of suspend-don't-delete. A 404 here makes the UI
-    // silently backoff-poll forever (integrityAgent's "not-found" branch surfaces
-    // NOTHING to the user) while the message sits hidden.
+    // The route must not gate on liveness: a 404 makes the UI backoff-poll forever with the message hidden.
     const root = mkdtempSync(join(tmpdir(), "susp-integrity-"));
     try {
       const { store, sessions } = harness(root);
@@ -178,7 +153,6 @@ describe("recovered (suspended → revived) conversations", () => {
       await sessions.prompt(conv.id, "before the nap");
       await store.flush?.(conv.id);
 
-      // Genuinely suspend: drops the bridge, sets status "suspended".
       await sessions.suspend(conv.id);
       expect(sessions.get(conv.id)?.status).toBe("suspended");
 
@@ -197,10 +171,7 @@ describe("recovered (suspended → revived) conversations", () => {
   });
 
   it("a message sent to a SUSPENDED conversation revives it and lands in the log", async () => {
-    // Bug #3: the message "disappears" / sticks in the queue tab. The UI clears its
-    // optimistic queued entry only once the server confirms the text (queue snapshot
-    // or the message in the log — RuntimeProvider's push pump). So the send MUST
-    // revive and persist, or the bubble is stuck forever.
+    // The UI clears its optimistic queued entry only once the server confirms the text, so the send must revive and persist.
     const root = mkdtempSync(join(tmpdir(), "susp-send-"));
     try {
       const { store, sessions, bridges } = harness(root);
@@ -228,18 +199,13 @@ describe("recovered (suspended → revived) conversations", () => {
   });
 
   it("revive fires onRevived so a NEW approval can be re-raised on the rebuilt bridge", async () => {
-    // Bug #1: "new approvals for AWS don't appear in the tab" after a revive. The
-    // bridge that held the interrupt died with the pod; index.ts hangs
-    // reRaisePendingAwsInterrupts off onRevived. The contract that matters is that
-    // onRevived fires AFTER a LIVE bridge exists — re-raising onto a dead/absent
-    // bridge is a silent no-op (reRaisePendingAwsInterrupts early-returns on
-    // `if (!bridge) return`), which is exactly the invisible-approval bug.
+    // index.ts re-raises pending AWS interrupts from onRevived, which is a silent no-op unless a live bridge exists by then.
     const root = mkdtempSync(join(tmpdir(), "susp-approval-"));
     try {
       const { sessions, bridges, revived } = harness(root);
       const conv = await sessions.start("thread-susp-3");
       await sessions.suspend(conv.id);
-      expect(bridges.get(conv.id)).toBeDefined(); // the pre-suspend bridge object
+      expect(bridges.get(conv.id)).toBeDefined();
 
       await sessions.revive(conv.id);
 
@@ -252,9 +218,7 @@ describe("recovered (suspended → revived) conversations", () => {
   });
 
   it("an approval raised AFTER a revive reaches the integrity stream", async () => {
-    // The full bug-#1 round trip: revive, then raise a NEW AWS approval, and assert
-    // it is DURABLE — an interrupt that only ever exists in bridge memory is invisible
-    // to a tab that connects (or reconnects) afterwards.
+    // An interrupt that only exists in bridge memory is invisible to a tab that connects afterwards.
     const root = mkdtempSync(join(tmpdir(), "susp-approval-e2e-"));
     try {
       const { store, sessions, bridges } = harness(root);
@@ -262,7 +226,6 @@ describe("recovered (suspended → revived) conversations", () => {
       await sessions.suspend(conv.id);
       await sessions.revive(conv.id);
 
-      // The contrib's approvals path raises onto the (revived) bridge.
       bridges.get(conv.id)!.raiseInterrupt("awsreq-after-revive", "approve s3:GetObject");
       await store.flush?.(conv.id);
 
@@ -284,9 +247,7 @@ describe("recovered (suspended → revived) conversations", () => {
 
 describe("post-revive interrupt durability (reload survival)", () => {
   it("an interrupt raised after a revive is in the DURABLE log exactly once", async () => {
-    // The e2e shows the post-revive approval panel vanishing on reload, while the
-    // same reload on a LIVE conversation keeps it. A reload re-derives pendingApprovals
-    // purely from the replayed log, so "panel gone after reload" == "not in the log".
+    // A reload re-derives pendingApprovals purely from the replayed log.
     const root = mkdtempSync(join(tmpdir(), "susp-durable-"));
     try {
       const { store, sessions, bridges } = harness(root);
@@ -310,11 +271,7 @@ describe("post-revive interrupt durability (reload survival)", () => {
 });
 
 describe("broker-shaped AWS request against a recovered conversation", () => {
-  // The BROKER does not know the conversation UUID: its identity comes from the
-  // sandbox SA name `sandbox-{shortId}` (broker/core/auth.py _SA_PATTERN), so
-  // _notify_host POSTs /conversations/{SHORT_ID}/approvals/aws. The host must resolve
-  // that short hash back to the conversation — including after a suspend, when the
-  // entry may have been evicted from memory entirely.
+  // The broker addresses a conversation only by the short id in its sandbox SA name, so the host must resolve it even after a suspend.
   const shortIdOf = (threadId: string): string => {
     let h = 0;
     for (let i = 0; i < threadId.length; i++) h = (h * 31 + threadId.charCodeAt(i)) | 0;
@@ -357,16 +314,12 @@ describe("broker-shaped AWS request against a recovered conversation", () => {
 
 describe("queued messages survive suspend → revive", () => {
   it("a message queued at suspend is PERSISTED and RE-RUN on revive (not destroyed)", async () => {
-    // The reported bug: the run queue lives in the bridge closure, which suspend()
-    // drops, and revive() builds a fresh empty one — so the user's already-sent
-    // message silently never ran and never errored. suspend() now drains the queue
-    // onto the entry (persisted), and revive() re-enqueues it.
+    // suspend() drains the bridge queue onto the persisted entry and revive() re-enqueues it.
     const root = mkdtempSync(join(tmpdir(), "susp-queue-"));
     try {
       const { sessions, bridges } = harness(root);
       const conv = await sessions.start("thread-queue-1");
       const first = bridges.get(conv.id)!;
-      // Simulate a message sitting in the bridge queue when the suspend lands.
       first.queued = [{ text: "queued before the suspend", priority: 0 }];
 
       await sessions.suspend(conv.id);
@@ -393,8 +346,7 @@ describe("queued messages survive suspend → revive", () => {
       await sessions.revive(conv.id);
       expect(bridges.get(conv.id)!.prompts).toContain("run me once");
 
-      // Suspend + revive again with nothing newly queued — the old message must NOT
-      // be replayed (that would re-run work the user already got).
+      // A second suspend/revive with nothing newly queued must not replay the old message.
       await sessions.suspend(conv.id);
       await sessions.revive(conv.id);
       const secondRevive = bridges.get(conv.id)!;
@@ -410,21 +362,16 @@ describe("queued messages survive suspend → revive", () => {
 
 describe("pendingQueue survives a RESTART (not just an in-process revive)", () => {
   it("listConversations carries pendingQueue through, so hydrate can replay it", async () => {
-    // The subtle half of the queue-preservation fix: suspend() persists pendingQueue
-    // into meta.json, but hydrate rebuilds the Entry from listConversations(), which
-    // reconstructs the meta FIELD BY FIELD. A field missing there is silently dropped,
-    // so the queued message survives an in-process suspend→revive (that reads the
-    // in-memory entry) yet is LOST across a restart / cross-replica hydrate — exactly
-    // the rollout case this feature exists for.
+    // hydrate rebuilds the entry from listConversations(), which reconstructs the meta field by field.
     const root = mkdtempSync(join(tmpdir(), "susp-restart-"));
     try {
-      // Process 1: queue a message, then suspend (persists pendingQueue).
+      // Process 1: queue a message, then suspend.
       const first = harness(root);
       const conv = await first.sessions.start("thread-restart-1");
       first.bridges.get(conv.id)!.queued = [{ text: "survive the restart", priority: 0 }];
       await first.sessions.suspend(conv.id);
 
-      // Process 2: a FRESH manager over the same state dir (an agent-host restart).
+      // Process 2: a fresh manager over the same state dir.
       const second = harness(root);
       const metas = (await second.store.listConversations?.()) ?? [];
       const meta = metas.find((m) => m.threadId === "thread-restart-1");
@@ -440,11 +387,7 @@ describe("pendingQueue survives a RESTART (not just an in-process revive)", () =
 });
 
 describe("in-flight replay is DEDUPED against the durable log", () => {
-  // runPrompt persists the user message BEFORE calling the agent, so a message that was
-  // IN FLIGHT when the suspend landed is already in the log. Replaying it blindly would
-  // show it (and answer it) twice and repeat any side effects the interrupted run had
-  // started. Dedupe lives in the agent-host, against the log — the authority that
-  // survives restarts and is the same thing the UI renders — rather than in each caller.
+  // runPrompt persists the user message before calling the agent, so an in-flight message is already in the log and must not be replayed.
 
   it("does NOT replay a message that is ALREADY in the log (no duplicate turn)", async () => {
     const root = mkdtempSync(join(tmpdir(), "susp-dedupe-"));
@@ -452,9 +395,7 @@ describe("in-flight replay is DEDUPED against the durable log", () => {
       const { store, sessions, bridges } = harness(root);
       const conv = await sessions.start("thread-dedupe-1");
 
-      // The interrupted run had already persisted this user message before dying.
-      // Faithful shape: runPrompt writes START(role:"user") then CONTENT then END —
-      // the role rides the START, which is what the dedupe keys on.
+      // The role rides the TEXT_MESSAGE_START, which is what the dedupe keys on.
       await store.appendEvent(conv.id as SessionId, {
         type: "TEXT_MESSAGE_START",
         messageId: "u-inflight",
@@ -481,16 +422,13 @@ describe("in-flight replay is DEDUPED against the durable log", () => {
   });
 
   it("an ASSISTANT message quoting the text does NOT suppress the replay", async () => {
-    // TEXT_MESSAGE_CONTENT carries no role — the assistant's reply is streamed as
-    // TEXT_MESSAGE_CONTENT too, and the fake agent literally echoes the user's words
-    // back. Matching deltas blindly would let that echo look like an already-logged
-    // user turn and silently swallow a message that never ran.
+    // TEXT_MESSAGE_CONTENT carries no role, so matching deltas blindly would let an assistant echo swallow a message that never ran.
     const root = mkdtempSync(join(tmpdir(), "susp-dedupe-3-"));
     try {
       const { store, sessions, bridges } = harness(root);
       const conv = await sessions.start("thread-dedupe-3");
 
-      // An ASSISTANT turn (no role:user START) that contains the same text.
+      // An assistant turn containing the same text.
       await store.appendEvent(conv.id as SessionId, {
         type: "TEXT_MESSAGE_START",
         messageId: "a-1",
@@ -517,8 +455,7 @@ describe("in-flight replay is DEDUPED against the durable log", () => {
   });
 
   it("STILL replays a message that never reached the log (the case that matters)", async () => {
-    // A message that never started has no log entry, so dedupe must not swallow it —
-    // that is precisely the silent-loss bug this whole feature exists to fix.
+    // A message that never started has no log entry, so dedupe must not swallow it.
     const root = mkdtempSync(join(tmpdir(), "susp-dedupe-2-"));
     try {
       const { sessions, bridges } = harness(root);

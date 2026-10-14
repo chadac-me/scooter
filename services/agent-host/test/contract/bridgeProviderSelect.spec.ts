@@ -1,10 +1,7 @@
 /**
- * Tier 1 contract — the bridge resolves its ACP client PER RUN via the provider registry.
- *
- * Proves the Increment-1 seam end-to-end (not just the pure resolver): a bridge configured with
- * TWO providers routes each run to the provider whose eligible() matches that run's `source`. This
- * is exactly the seam the human-trigger guardrail (Increment 2) uses — remote for ui/slack/…,
- * bedrock for scheduler. See todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+ * The bridge resolves its ACP client per run via the provider registry: with two
+ * providers configured, each run goes to the provider whose eligible() matches that
+ * run's `source`.
  */
 
 import { describe, it, expect } from "vitest";
@@ -23,8 +20,7 @@ const BRIDGE_CONFIG = {
   sandbox: { name: "s", namespace: "ns" },
 };
 
-/** A fake ACP agent that records how many prompts it received (so we can assert which provider
- *  served a run). Emits a trivial one-chunk turn. */
+/** A fake ACP agent that counts the prompts it received and emits a one-chunk turn. */
 function makeCountingAgent(exec: ReturnType<typeof createSandboxExecBackend>) {
   const agent = createFakeAcpAgent();
   agent.setScript([
@@ -53,7 +49,7 @@ describe("bridge — per-run provider selection", () => {
     const humanAgent = makeCountingAgent(exec);
     const floorAgent = makeCountingAgent(exec);
 
-    // "personalized" is eligible only for human sources; "floor" is always eligible (lower pri).
+    // "personalized" is eligible only for human sources; "floor" is always eligible at lower priority.
     const HUMAN = new Set(["ui", "slack", "github", "gitlab"]);
     const providers: AcpProvider[] = [
       {
@@ -74,18 +70,17 @@ describe("bridge — per-run provider selection", () => {
 
     const bridge = createSessionBridge({ config: BRIDGE_CONFIG, exec, acpProviders: providers });
 
-    // A human-sourced run (slack @mention) → personalized.
+    // A human-sourced run goes to personalized.
     await bridge.prompt({ threadId: "t1", text: "hi", source: "slack" });
     expect(humanAgent.prompts(), "human source routes to personalized").toBe(1);
     expect(floorAgent.prompts()).toBe(0);
 
-    // A scheduled run on the SAME conversation → falls to the floor (NOT personalized). This is
-    // the human-trigger guardrail: an automated trigger never drives the personalized brain.
+    // A scheduled run on the same conversation falls to the floor.
     await bridge.prompt({ threadId: "t1", text: "cron", source: "scheduler" });
     expect(humanAgent.prompts(), "scheduled run must NOT hit personalized").toBe(1);
     expect(floorAgent.prompts(), "scheduled run routes to the floor").toBe(1);
 
-    // Back to a human source → personalized again (per-run, not sticky).
+    // Back to a human source, personalized again, since selection is per run rather than sticky.
     await bridge.prompt({ threadId: "t1", text: "again", source: "ui" });
     expect(humanAgent.prompts()).toBe(2);
     expect(floorAgent.prompts()).toBe(1);

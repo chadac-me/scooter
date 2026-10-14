@@ -1,11 +1,8 @@
 /**
- * Tier 1 — the revive history transcript builder.
- *
- * Folds a persisted AG-UI log into user/assistant/tool turns and formats the
- * preamble prepended to the first prompt of a revived (memory-less) goose session.
- * TEXT_MESSAGE_* turns AND tool activity (name/args → result) are folded — the tool
- * turns carry the actual work so a model switch continues KNOWING what was done;
- * reasoning/run-control events are still ignored.
+ * The revive history transcript builder: it folds a persisted AG-UI log into
+ * user/assistant/tool turns and formats the preamble prepended to the first prompt of
+ * a revived session. Tool activity is folded so a model switch continues knowing what
+ * was done; reasoning and run-control events are ignored.
  */
 
 import { describe, it, expect } from "vitest";
@@ -110,7 +107,7 @@ describe("transcript: buildHistoryPreamble", () => {
     const big = "x".repeat(20_000);
     const out = buildHistoryPreamble([...userTurn("u1", big), ...userTurn("u2", "recent")], 5_000);
     expect(out).toContain("earlier messages omitted");
-    expect(out).toContain("recent"); // the most recent turn is kept
+    expect(out).toContain("recent");
     expect(out.length).toBeLessThan(6_000);
   });
 
@@ -123,6 +120,6 @@ describe("transcript: buildHistoryPreamble", () => {
       { type: "TOOL_CALL_RESULT", toolCallId: "c1", messageId: "m1", content: "export const x = 1" },
     ]);
     expect(out).toContain('Tool: read_file({"path":"cfg.ts"}) → export const x = 1');
-    expect(out).toMatch(/Tool:` record work already done/); // framing tells the model what Tool: means
+    expect(out).toMatch(/Tool:` record work already done/);
   });
 });

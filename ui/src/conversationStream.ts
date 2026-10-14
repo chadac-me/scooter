@@ -1,15 +1,9 @@
 /**
- * Conversation-list stream client — subscribes to the agent-host's
- * GET /conversations/events so NEW conversations (e.g. a Slack thread) appear in
- * the sidebar INSTANTLY instead of on the next 10s poll.
- *
- * The server emits an initial `snapshot` (the current visible list, same scope /
- * view-filter as GET /conversations) then `upsert` frames as conversations are
- * created or change (e.g. an agent-assigned title). The UI folds each upsert into
- * the sidebar via the SAME sessionStore.mergeFromServer the poll uses; the poll
- * stays as a reconcile/backstop.
- *
- * Reuses the fetch + ReadableStream SSE parser pattern from integrityStream.ts.
+ * Conversation-list stream client: subscribes to the agent-host's GET /conversations/events
+ * so new conversations appear in the sidebar without waiting for the poll. The server emits
+ * an initial `snapshot` (the visible list, same scope as GET /conversations) and then
+ * `upsert` frames as conversations are created or change; the UI folds each upsert in via
+ * the same sessionStore.mergeFromServer the poll uses, and the poll remains the backstop.
  */
 
 import type { AgentHostConfig, ConversationView } from "./client.js";
@@ -32,11 +26,7 @@ export interface ConversationSubscription {
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/**
- * Open the conversation-list stream. `scope` mirrors GET /conversations
- * ("mine" | "all"). Resilient: reconnects on drop (the 10s poll remains the
- * backstop). Returns a handle to close.
- */
+/** Open the conversation-list stream for `scope` ("mine" | "all"); it reconnects on drop and returns a handle to close. */
 export function subscribeConversations(
   config: AgentHostConfig,
   scope: "mine" | "all",
@@ -94,7 +84,7 @@ export function subscribeConversations(
           }
         }
       } catch {
-        /* network drop / abort — reconnect (the poll is the backstop meanwhile) */
+        /* network drop or abort: reconnect */
       }
       if (!closed) await delay(500);
     }

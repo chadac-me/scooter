@@ -8,30 +8,24 @@ version = "0.0.0"
 license = "MIT"
 description = "Example Scooter contrib module — plugs an echo provider into the broker and an echo handler into the webhooks service, via entry points"
 requires-python = ">=3.11"
-# Depends on the extension SURFACE, never on the broker/webhooks apps — they
-# depend on their contribs, so depending back is a cycle. Why: PR #567.
+# Depends on the extension surface, never on the broker or webhooks apps, which depend on their contribs.
 dependencies = [
   "fastapi",
 ]
 
-# One EXTRA per service, not plain deps: a both-services contrib would otherwise
-# put scooter_webhooks_lib on the broker's path. contrib/default.nix enforces the
-# same split for Nix builds.
+# One extra per service, so a both-services contrib does not put scooter_webhooks_lib on the broker's path.
 [project.optional-dependencies]
 broker = ["scooter-broker-lib"]
 webhooks = ["scooter-webhooks-lib"]
 
-# The two extension seams a contrib can plug into. A contrib may declare EITHER
-# or BOTH; whichever service loads its group imports only that module (the other
-# is never touched in that image). Mirrors broker's `agent_broker.providers`.
+# The two extension seams a contrib can plug into; each service imports only its own group's module.
 [project.entry-points."agent_broker.providers"]
 echo = "scooter_contrib_echo.broker_provider:echo_contrib"
 
 [project.entry-points."scooter_webhooks.handlers"]
 echo = "scooter_contrib_echo.webhooks_handler:echo_contrib"
 
-# hatchling auto-detects the `scooter_contrib_echo` package (its name matches the
-# normalized project name); no explicit package list needed.
+# hatchling auto-detects the `scooter_contrib_echo` package.
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

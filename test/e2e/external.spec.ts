@@ -1,21 +1,10 @@
 /**
- * Tier 3 E2E — against a LIVE deployment (external server).
- *
- * Unlike the rest of the e2e suite (which boots a fake-agent stack locally),
- * this drives a REAL deployed agent-host: a real conversation spawns a real
- * sandbox and runs a real shell tool call via the in-cluster pods/exec path.
- * That exercises things the fake stack can't — e.g. the in-cluster exec
- * WebSocket, broker git auth, real Bedrock — so it catches cluster-only
- * failures (like a 403 on pods/exec).
- *
- * Gated: RUN_EXTERNAL_E2E=1 and AGENT_HOST_URL=<base url of the live agent-host>
- * (e.g. https://chat.example.com). Optional EXTERNAL_BASIC_AUTH=user:pass for
- * an endpoint behind basic-auth.
- *
- * It talks to the agent-host's HTTP API directly (no browser): POST /agui spawns
- * a conversation and streams AG-UI events; we accumulate the assistant's reply.
- * The agent is told to run a specific shell command and echo a sentinel, so a
- * working exec produces the sentinel and a broken one (403) does not.
+ * Tier 3 E2E against a live deployment: a real conversation spawns a real sandbox and runs
+ * a real shell tool call via the in-cluster pods/exec path, which catches cluster-only
+ * failures the fake stack cannot. Gated by RUN_EXTERNAL_E2E=1 and AGENT_HOST_URL=<base url
+ * of the live agent-host>, with optional EXTERNAL_BASIC_AUTH=user:pass. It talks to the
+ * agent-host's HTTP API directly (no browser), accumulating the assistant's reply from the
+ * AG-UI stream and asserting on a sentinel the agent is told to echo.
  */
 
 import { test, expect, request as pwRequest } from "@playwright/test";
@@ -23,13 +12,9 @@ import { fastOnly } from "./target.js";
 
 const BASE = (process.env.AGENT_HOST_URL ?? "").replace(/\/$/, "");
 const enabled = process.env.RUN_EXTERNAL_E2E === "1" && BASE !== "";
-// NOT on the full target (and so not in full-specs.json): this spec is the third,
-// EXTERNAL mode — it needs AGENT_HOST_URL pointing at a LIVE deployment running a
-// REAL model. On the k3d full target the fake agent merely echoes the prompt, so
-// "run this command and report its output" would pass VACUOUSLY (the sentinel/repo
-// names are already in the echoed prompt) without exercising exec or git auth at
-// all. The fastOnly wrapper records that reason; the env gate below keeps it a
-// cheap skip on the fast stack too unless RUN_EXTERNAL_E2E=1 opts in.
+// Not on the full target, where the fake agent merely echoes the prompt and the sentinel
+// assertions would pass vacuously; the env gate keeps it a cheap skip on fast unless
+// RUN_EXTERNAL_E2E=1 opts in.
 const maybe = enabled ? fastOnly("external mode — see the note above") : test.describe.skip;
 
 function authHeader(): Record<string, string> {
@@ -42,9 +27,7 @@ function authHeader(): Record<string, string> {
 async function runConversation(task: string, timeoutMs = 180_000): Promise<string> {
   const ctx = await pwRequest.newContext({ extraHTTPHeaders: authHeader() });
   try {
-    // CREATE first: the server assigns the id. A caller-chosen threadId is refused —
-    // conversations come into existence through POST /conversations, never as a side
-    // effect of being prompted.
+    // Create first, since the server assigns the id and refuses a caller-chosen threadId.
     const created = await ctx.post(`${BASE}/conversations`, {
       headers: { "Content-Type": "application/json" },
       data: { title: task.slice(0, 60) },
@@ -90,9 +73,8 @@ maybe("external deployment", () => {
   });
 
   test("a real shell tool call runs in the sandbox (in-cluster exec works)", async () => {
-    // Ask the agent to run a shell command and echo a sentinel. A working
-    // in-cluster pods/exec produces the sentinel; a broken one (e.g. a 403 on
-    // the exec WebSocket) yields a RUN_ERROR / no sentinel.
+    // A working in-cluster pods/exec produces the sentinel; a broken one yields a RUN_ERROR
+    // or no sentinel.
     const sentinel = `EXEC_OK_${Date.now()}`;
     const reply = await runConversation(
       `Run this shell command and report its output verbatim: echo ${sentinel}`,
@@ -102,8 +84,7 @@ maybe("external deployment", () => {
   });
 
   test("git clone over HTTPS works via the broker credential helper", async () => {
-    // The repo skill + broker git auth should let the agent clone a public repo.
-    // Use a tiny public repo so the clone is fast; assert it succeeded.
+    // A tiny public repo so the clone is fast.
     const reply = await runConversation(
       "Clone the public repo https://github.com/githubtraining/hellogitworld " +
         "into /workspace/hello, then run `ls /workspace/hello` and report the output.",

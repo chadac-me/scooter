@@ -1,4 +1,4 @@
-"""GitLab provider module — PAT via PRIVATE-TOKEN header, proxy + git-cred."""
+"""GitLab provider: a PAT via the PRIVATE-TOKEN header, over http-proxy, git-credential and the agent tool."""
 
 from __future__ import annotations
 
@@ -13,12 +13,7 @@ from scooter_broker_lib.transports.http_proxy import HttpProxy
 from scooter_broker_lib.transports.mcp_tools import McpTools
 
 
-# Auto-link the MRs / issues an agent creates via the proxy. GitLab's create
-# responses carry `web_url` (the human link) + `title`. The project id in the path
-# may be numeric or URL-encoded (group%2Fproject), so match a non-slash segment.
-# The upstream is the BARE host (https://gitlab.com), so agents call the full API
-# path — /gitlab/api/v4/projects/... — and the path the proxy sees starts with
-# `api/v4/` (transparent proxy, like GitHub; see the /api/v4 double-prefix fix).
+# Auto-link the MRs and issues an agent creates via the proxy; the project id may be numeric or URL-encoded, and the path starts with `api/v4/` because the upstream is the bare host.
 _GITLAB_LINK_RULES = [
     rule(
         "POST", r"^api/v4/projects/[^/]+/merge_requests/?$",
@@ -36,30 +31,22 @@ UPSTREAM = "https://gitlab.com"
 
 @register_provider
 def gitlab() -> Provider:
-    # Read at BUILD time, like every provider factory — and constructed here rather
-    # than imported as a singleton so the broker half needs no module-level state.
-    # The webhooks half does keep one (it reads per request). Why: PR #580.
+    # Read at build time, like every provider factory.
     settings = GitlabSettings()
     return Provider(
         name="gitlab",
         credential=StaticTokenSource(
             token=settings.gitlab_token, kind="header", header_name="PRIVATE-TOKEN"
         ),
-        # Specific routes before the HttpProxy catch-all (see github.py).
+        # Specific routes before the HttpProxy catch-all.
         transports=[
             GitCredential(host="gitlab.com"),
-            # BARE host upstream (not .../api/v4): a transparent proxy, like GitHub.
-            # Agents call /gitlab/api/v4/projects/... -> https://gitlab.com/api/v4/...
-            # (previously upstream ended in /api/v4, so /gitlab/api/v4/user became
-            # gitlab.com/api/v4/api/v4/user -> 404; the double-prefix bug).
+            # A bare-host upstream, so agents call the full API path through the proxy.
             HttpProxy(
                 upstream=UPSTREAM,
                 link_rules=_GITLAB_LINK_RULES,
                 agent_host_url=settings.agent_host_url,
             ),
-            # The agent tool (gitlab_comment), moved out of the agent-host by #700.
-            # contrib/gitlab already declared ui.tools.gitlab_comment for a tool it did
-            # not own; now it owns it, and it is absent when this contrib is not enabled.
             McpTools(server=gitlab_mcp_server(), upstream=UPSTREAM),
         ],
         enabled=bool(settings.gitlab_token),

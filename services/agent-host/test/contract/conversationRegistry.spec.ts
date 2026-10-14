@@ -9,8 +9,7 @@ import { describe, it, expect, vi } from "vitest";
 import { noopRegistry } from "../../src/session/conversationRegistry.js";
 import { createK8sConversationRegistry, retryAfterMs } from "../../src/session/k8sConversationRegistry.js";
 
-/** A fake KubeConfig whose CustomObjectsApi records create + status-patch calls and can be
- *  told to fail (create failures via opts.code; status-patch failures via opts.patchCode). */
+/** A fake KubeConfig recording create, spec-patch and status-patch calls, each failable via opts. */
 function fakeKc(opts: { code?: number; patchCode?: number; specPatchCode?: number } = {}) {
   const creates: Array<Record<string, unknown>> = [];
   const patches: Array<Record<string, unknown>> = [];
@@ -45,7 +44,7 @@ describe("noopRegistry (single-replica default)", () => {
 });
 
 describe("k8sConversationRegistry.register", () => {
-  // THE COMMON PATH: one merge-patch, no 409 first.
+  // The common path: one merge-patch, no 409 first.
   it("PATCHES the existing CR and does not attempt a create", async () => {
     const { kc, creates, specPatches } = fakeKc();
     await createK8sConversationRegistry("agent-sandbox", kc).register("conv-abc", {
@@ -61,7 +60,7 @@ describe("k8sConversationRegistry.register", () => {
       group: "scooter.chadac.dev", version: "v1alpha1", plural: "conversations",
       namespace: "agent-sandbox", name: "conv-abc",
     });
-    // MERGE, so the creator's own spec fields survive.
+    // A merge, so the creator's own spec fields survive.
     const body = specPatches[0].body as { spec: Record<string, string> };
     expect(body.spec).toEqual({
       model: "claude-opus-4-8",
@@ -125,7 +124,6 @@ describe("k8sConversationRegistry.setPhase (liveness → status.phase)", () => {
       namespace: "agent-sandbox", name: "conv-abc",
       body: { status: { phase: "Suspended" } },
     });
-    // a merge patch of just {status:{phase}} — no hostPod/hostIP/generation keys.
     const body = patches[0].body as { status: Record<string, unknown> };
     expect(Object.keys(body.status)).toEqual(["phase"]);
   });
@@ -147,15 +145,8 @@ describe("k8sConversationRegistry.setPhase (liveness → status.phase)", () => {
   });
 });
 
-/**
- * Tier 1 contract — a 429 is "later", not "no".
- *
- * The apiserver throttles under priority-and-fairness (59 of them in a day on a live
- * cluster). Treated as a plain failure, a 429 is a LOST write: the phase never lands, the
- * CR goes stale, and the ownership fence then reads a view that disagrees with reality.
- * These tests pin the retry, the Retry-After it must honour, and the coalescing that stops
- * the registry generating the burst in the first place.
- */
+// A 429 means "later": the registry retries it, honouring Retry-After, and coalesces
+// bursts of setPhase calls so it does not generate the throttling itself.
 
 /** Records every call and can be told to fail the next N with a given error. */
 function throttlingKc(opts: {
@@ -208,8 +199,7 @@ function throttlingKc(opts: {
   };
 }
 
-/** An instant sleep that RECORDS what it was asked to wait — the delay is the behaviour
- *  under test, so a real timer would only make the suite slow, not more truthful. */
+/** An instant sleep that records the delays it was asked for. */
 function recordingSleep() {
   const waits: number[] = [];
   return { waits, sleep: async (ms: number) => void waits.push(ms) };
@@ -217,7 +207,7 @@ function recordingSleep() {
 
 describe("k8sConversationRegistry throttling (429)", () => {
   it("retries a throttled register instead of dropping the spec write", async () => {
-    // The throttled hot-path call is now the PATCH.
+    // The throttled hot-path call is the PATCH.
     const { kc, specPatches } = throttlingKc({ failSpecPatch: [{ code: 429 }] });
     const { sleep, waits } = recordingSleep();
     await createK8sConversationRegistry("ns", kc, { sleep }).register("conv-1", { model: "m" });
@@ -237,8 +227,6 @@ describe("k8sConversationRegistry throttling (429)", () => {
   });
 
   it("waits exactly as long as Retry-After asks, rather than guessing", async () => {
-    // The apiserver knows when its queue will have room; a client retrying on its own
-    // schedule is what turns a throttle into a storm.
     const { kc } = throttlingKc({ failStatus: [{ code: 429, headers: { "retry-after": "2" } }] });
     const { sleep, waits } = recordingSleep();
     await createK8sConversationRegistry("ns", kc, { sleep }).setPhase("conv-1", "Suspended");
@@ -250,8 +238,7 @@ describe("k8sConversationRegistry throttling (429)", () => {
     const { sleep, waits } = recordingSleep();
     await createK8sConversationRegistry("ns", kc, { sleep }).setPhase("conv-1", "Suspended");
     expect(waits).toHaveLength(3);
-    // Jittered (half the ceiling to the ceiling), so assert the envelope, not a value —
-    // without jitter the whole fleet retries in lockstep and rebuilds the burst.
+    // Jittered between half the ceiling and the ceiling, so assert the envelope.
     expect(waits[0]).toBeGreaterThanOrEqual(125);
     expect(waits[0]).toBeLessThanOrEqual(250);
     expect(waits[2]).toBeGreaterThan(waits[0]);
@@ -289,8 +276,6 @@ describe("k8sConversationRegistry.setPhase coalescing", () => {
   });
 
   it("folds a burst into the write in flight plus ONE write of the final phase", async () => {
-    // Liveness is a level, not an edge: the intermediate values of a burst are not
-    // information, they are just requests the apiserver has to answer.
     const f = throttlingKc();
     const reg = createK8sConversationRegistry("ns", f.kc);
     f.hold();

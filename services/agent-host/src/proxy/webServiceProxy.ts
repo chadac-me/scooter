@@ -1,18 +1,9 @@
 /**
- * Web-service reverse proxy — forwards `/c/<id>/<service>/...` from the browser
- * (via UI nginx) into the conversation's sandbox pod, over HTTP AND WebSocket.
- *
- * Why this lives in the agent-host (not nginx): nginx can't resolve <id> -> pod IP
- * (dynamic IPs, no per-conversation Service, agent-host lacks create-Service RBAC).
- * The agent-host already resolves the pod (exec/k8sExec.ts) and knows the caller.
- *
- * Attaches at two seams in agui/server.ts:
- *   - HTTP:  a fallback in handle(req,res) BEFORE the 404, when the path is /c/*.
- *   - WS:    a `server.on("upgrade", ...)` listener registered in listen().
- *
- * Auth is whatever the ingress already applied (x-auth-user) — NO extra
- * per-conversation check (any authenticated user, matching today's view-filter
- * model). See docs/WEB_SERVICES_PROXY.md.
+ * Web-service reverse proxy: forwards `/c/<id>/<service>/...` from the browser into
+ * the conversation's sandbox pod over HTTP and WebSocket. It lives in the agent-host
+ * because only the agent-host can resolve <id> to a pod IP. It attaches to
+ * agui/server.ts as an HTTP fallback before the 404 and as the `upgrade` listener.
+ * Auth is whatever the ingress already applied; there is no extra per-conversation check.
  */
 
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
@@ -27,7 +18,7 @@ import type { SandboxRef } from "../types.js";
 /** A conversation pod's reachable address for direct in-cluster HTTP/WS. */
 export interface PodTarget {
   name: string;
-  /** status.podIP — re-resolve after suspend/resume (the IP changes). */
+  /** status.podIP, which changes across suspend/resume. */
   podIP: string;
 }
 
@@ -36,8 +27,7 @@ export type ResolvePodTarget = (ref: SandboxRef) => Promise<PodTarget>;
 
 // --- service discovery (id + name -> port) -----------------------------------
 
-/** One proxyable service as declared by the in-pod `webServices` option
- *  (mirrors the discovery manifest entry rendered by web-services.nix). */
+/** One proxyable service as declared by the in-pod `webServices` option (the discovery manifest entry rendered by web-services.nix). */
 export interface WebServiceDescriptor {
   name: string;
   displayName: string;
@@ -47,46 +37,33 @@ export interface WebServiceDescriptor {
   basePath: string;
   /** systemd unit name (webservice-<name>), for start/stop via exec. */
   unit: string;
-  /** Strip the `/c/<id>/<name>` prefix before forwarding, so the service serves at
-   *  ROOT. For a service that can't be told its base path (code-server). Default
-   *  false — most services handle the prefix themselves (marimo --base-url). */
+  /** Strip the `/c/<id>/<name>` prefix before forwarding, for a service that cannot be told its base path (code-server). */
   stripBasePath?: boolean;
-  /** What this service declares it needs (webServices.<name>.resources). Advisory:
-   *  it never sizes the pod and never blocks a start — it only lets us explain a
-   *  throttle or an OOM kill before it happens. Absent when nothing was declared. */
+  /** What this service declares it needs (webServices.<name>.resources), advisory only. */
   resources?: { cpu?: string; memory?: string; gpu?: number };
 }
 
 /**
  * Reads a conversation's declared web services from the in-pod discovery manifest
- * (/run/scooter/web-services.json) via exec/download, and caches per conversation.
- * The cache expires (MANIFEST_TTL_MS) so a `scooter-rebuild` that declares a new
- * service is picked up; a start drops it immediately, and list({force}) re-reads
- * on demand.
+ * (/run/scooter/web-services.json) via exec/download and caches them per conversation.
+ * The cache expires after MANIFEST_TTL_MS, a start drops it immediately, and
+ * list({force}) re-reads on demand.
  */
 export interface WebServiceRegistry {
-  /** Declared services. `force` re-reads the in-pod manifest instead of serving a
-   *  cached read — for the UI's explicit refresh after the agent rebuilds. */
+  /** Declared services; `force` re-reads the in-pod manifest instead of the cache. */
   list(conversationId: string, opts?: { force?: boolean }): Promise<WebServiceDescriptor[]>;
   get(conversationId: string, name: string): Promise<WebServiceDescriptor | null>;
-  /** Liveness: `systemctl is-active webservice-<name>` via exec. */
+  /** Liveness via `systemctl is-active webservice-<name>`. */
   isRunning(conversationId: string, name: string): Promise<boolean>;
-  /** Start the unit: `systemctl start webservice-<name>` via exec. Resolves once
-   *  issued (not once healthy — readiness-gating is a follow-up). */
+  /** Start the unit via `systemctl start webservice-<name>`, resolving once issued rather than once healthy. */
   start(conversationId: string, name: string): Promise<void>;
-  /** Stop the unit: `systemctl stop webservice-<name>` via exec. */
+  /** Stop the unit via `systemctl stop webservice-<name>`. */
   stop(conversationId: string, name: string): Promise<void>;
-  /** The unit's recent journal (`journalctl -u webservice-<name> -n <lines>`) via
-   *  exec — surfaced on the loading page so a service that fails to bind/crashes is
-   *  debuggable. Returns "" if the pod is unreachable or the read fails. */
+  /** The unit's recent journal for the loading page, or "" if the read fails. */
   logs(conversationId: string, name: string, lines?: number): Promise<string>;
-  /** Is the sandbox pod actually READY (exec succeeds)? The conversation status can
-   *  be "running" (Sandbox operatingMode Running) while the pod is still
-   *  ContainerCreating — exec only succeeds once the pod is Ready, so a trivial exec
-   *  probe distinguishes "requested" from "actually up". False when the pod is
-   *  creating / asleep / unreachable. */
+  /** Whether the sandbox pod is actually Ready (a trivial exec succeeds), as opposed to merely requested. */
   ready(conversationId: string): Promise<boolean>;
-  /** Drop cached descriptors for a conversation (call on suspend/resume/start). */
+  /** Drop cached descriptors for a conversation (on suspend/resume/start). */
   invalidate(conversationId: string): void;
 }
 
@@ -96,7 +73,7 @@ export interface WebServiceProxyDeps {
   sessions: SessionManager;
   resolvePodTarget: ResolvePodTarget;
   registry: WebServiceRegistry;
-  /** The external host (marimo `--proxy` / absolute-URL correctness). From PUBLIC_URL. */
+  /** The external host from PUBLIC_URL, for absolute-URL correctness. */
   publicHost: string;
 }
 
@@ -104,15 +81,11 @@ export interface WebServiceProxyDeps {
 export interface ParsedProxyPath {
   conversationId: string;
   service: string;
-  /** The remainder after /c/<id>/<service>, WITH leading slash (or "/"). */
+  /** The remainder after /c/<id>/<service>, with its leading slash (or "/"). */
   rest: string;
 }
 
-/**
- * Split a URL path into its proxy parts, or null if it isn't a /c/<id>/<service>
- * path. `/c/<id>` alone (the UI deep-link space) is NOT a proxy path — a service
- * segment is required.
- */
+/** Split a URL path into its proxy parts, or null when it has no service segment (`/c/<id>` alone is the UI deep-link space). */
 export function parseProxyPath(pathname: string): ParsedProxyPath | null {
   const parts = pathname.split("/").filter(Boolean);
   // ["c", "<id>", "<service>", ...rest]
@@ -131,38 +104,24 @@ export interface WebServiceProxy {
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>;
 }
 
-/** Resolve a proxy request to its concrete pod target + service, or an error the
- *  caller renders as an HTTP/handshake status. `notRunning` is distinct from a plain
- *  502: the service EXISTS but its unit is down (the auto-start + loading-page case),
- *  so it carries the ids needed to start it and render/poll the loading page. */
+/** A proxy request resolved to its pod target, or an error; `notRunning` means the service exists but its unit is down, so it carries what the auto-start and loading page need. */
 type Resolution =
   | { ok: true; conversationId: string; podIP: string; port: number; rest: string; stripBasePath: boolean; threadId: string; service: string }
   | { ok: false; kind: "notRunning"; conversationId: string; service: string; basePath: string; threadId: string }
   | { ok: false; kind: "error"; status: 404 | 503; service: string; threadId: string };
 
-// (The old static "isn't running — go click Start" page is gone: a dead service now
-// auto-starts behind a live loading page — see renderLoadingPage below.)
-
-/** The sub-path (under /c/<id>/<service>/) the loading page polls for readiness +
- *  the unit's journal. A reserved segment — no real web service serves it. */
+/** The reserved sub-path (under /c/<id>/<service>/) the loading page polls for readiness and the unit's journal. */
 export const STATUS_SEGMENT = "__scooter_status";
 
 const htmlEscape = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] ?? c));
 
-/** Is this request a top-level browser NAVIGATION (wants HTML), vs an XHR/asset
- *  fetch (which must get its real bytes / a plain error, never an HTML page)? */
+/** Whether this request is a top-level browser navigation (wants HTML) rather than an XHR/asset fetch. */
 export function wantsHtml(accept: string | undefined): boolean {
   return (accept ?? "").includes("text/html");
 }
 
-/**
- * The loading page shown while a just-started service comes up. Self-refreshing:
- * it polls `<base>/__scooter_status` and, once `running`, reloads into the app —
- * meanwhile it streams the unit's recent journal below a spinner so a service that
- * fails to bind/crashes is debuggable in-place. `basePath` is the service's own
- * external prefix (…/c/<id>/<service>), so the poll + reload stay within it.
- */
+/** The self-refreshing loading page shown while a just-started service comes up: it polls `<basePath>/__scooter_status`, shows the unit's journal, and reloads into the app once running. */
 export function renderLoadingPage(service: string, basePath: string): string {
   const safe = htmlEscape(service);
   const base = basePath.replace(/\/$/, "");
@@ -190,7 +149,7 @@ export function renderLoadingPage(service: string, basePath: string): string {
      const j = await r.json();
      if (j.logs && j.logs.trim()) logEl.textContent = j.logs;
      if (j.running) { location.reload(); return; }
-   } catch (e) { /* transient (pod still coming up) — keep polling */ }
+   } catch (e) { /* transient; keep polling */ }
    setTimeout(tick, 1200);
  }
  tick();
@@ -203,12 +162,9 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
 
   const matches = (pathname: string): boolean => parseProxyPath(pathname) !== null;
 
-  // Keep the conversation alive while a user is USING its web services: a live
-  // vscode/marimo/terminal session is real activity, so the idle-suspend sweep must
-  // not pull the pod out from under them. We mark the conversation active on proxy
-  // traffic — throttled per conversation so a chatty WebSocket (terminal keystrokes,
-  // marimo kernel) doesn't hammer the store; one touch per window is enough since the
-  // idle threshold is minutes. (See SessionManager.touchById + sweepIdle.)
+  // Proxy traffic marks the conversation active so the idle-suspend sweep does not pull
+  // the pod out from under a live session, throttled per conversation so a chatty
+  // WebSocket does not hammer the store.
   const TOUCH_THROTTLE_MS = 15_000;
   const lastTouch = new Map<string, number>();
   const touch = (conversationId: string) => {
@@ -223,7 +179,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     if (!parsed) return null;
     const { conversationId, service, rest } = parsed;
 
-    // The URL id may be the full threadId (UI) or the short hash — try both.
+    // The URL id may be the full threadId or the short hash.
     const conv = sessions.get(conversationId) ?? (await sessions.getByShortId(conversationId));
     const threadId = conv?.threadId ?? conversationId;
     if (!conv) return { ok: false, kind: "error", status: 404, service, threadId };
@@ -239,14 +195,13 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     try {
       target = await resolvePodTarget(conv.sandbox);
     } catch {
-      // Pod suspended / not ready / no IP.
+      // Pod suspended, not ready, or without an IP.
       return { ok: false, kind: "error", status: 503, service, threadId };
     }
     return { ok: true, conversationId: conv.id, podIP: target.podIP, port: desc.port, rest, stripBasePath: desc.stripBasePath ?? false, threadId, service };
   }
 
-  /** The readiness/log endpoint the loading page polls: reports whether the unit is
-   *  active yet + its recent journal. Returns true if it handled the request. */
+  /** The readiness/log endpoint the loading page polls; returns true if it handled the request. */
   async function handleStatus(pathname: string, res: ServerResponse): Promise<boolean> {
     const parsed = parseProxyPath(pathname);
     if (!parsed || parsed.rest !== `/${STATUS_SEGMENT}`) return false;
@@ -267,8 +222,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
   async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
 
-    // The loading page's poll target — answer it before the normal resolve (which
-    // would 502 while the unit is still down and never report readiness).
+    // Answer the loading page's poll before the normal resolve, which would 502 while the unit is down.
     if (await handleStatus(url.pathname, res)) return;
 
     const r = await resolve(url.pathname);
@@ -278,13 +232,10 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     }
     if (!r.ok) {
       if (r.kind === "notRunning") {
-        // The service exists but its unit is down (fresh conversation, or the pod was
-        // recreated on resume). For a top-level NAVIGATION, kick off a start and hand
-        // back a self-refreshing loading page (spinner + live journal) that reloads
-        // into the app once healthy. For an XHR/asset fetch, a plain 502 — an HTML
-        // page would corrupt it, and the navigation that spawned it already owns the UX.
+        // The unit is down: a navigation gets an auto-start plus the loading page, while
+        // an XHR/asset fetch gets a plain 502 since an HTML page would corrupt it.
         if (wantsHtml(req.headers.accept)) {
-          // Best-effort start; the loading page polls readiness regardless of this result.
+          // Best-effort start; the loading page polls readiness regardless.
           await registry.start(r.conversationId, r.service).catch(() => {});
           const page = renderLoadingPage(r.service, r.basePath);
           res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(page);
@@ -300,13 +251,11 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       return;
     }
 
-    // Live web-service traffic counts as activity — keep the pod from idle-suspending.
+    // Live web-service traffic counts as activity.
     touch(r.conversationId);
 
-    // Forward path: by default preserve the FULL external path so a sub-path-aware
-    // service (marimo --base-url) sees the prefix it expects. When stripBasePath is
-    // set (code-server, which can't be told a base path), forward only the REMAINDER
-    // after /c/<id>/<service> so the service serves at root.
+    // Preserve the full external path for a sub-path-aware service, or forward only the
+    // remainder when stripBasePath is set so the service serves at root.
     const upstreamPath = (r.stripBasePath ? r.rest : url.pathname) + (url.search ?? "");
     const headers = { ...req.headers, host: `${r.podIP}:${r.port}` };
     const upstream = httpRequest(
@@ -327,8 +276,8 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     const url = new URL(req.url ?? "/", "http://localhost");
     const r = await resolve(url.pathname);
     if (!r || !r.ok) {
-      // A WebSocket to a dead/unreachable service just fails — no loading-page UX for
-      // an upgrade (the navigation that owns the page handles the auto-start).
+      // A WebSocket to a dead/unreachable service just fails; the navigation that owns
+      // the page handles the auto-start.
       const status = !r ? 404 : r.kind === "notRunning" ? 502 : r.status;
       const text = status === 503 ? "service asleep" : status === 502 ? "service not running" : "not found";
       socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`);
@@ -336,16 +285,13 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       return;
     }
 
-    // A live WebSocket (terminal PTY, marimo kernel, vscode RPC) is active use — mark
-    // it on connect, then again on data (throttled) so ONGOING use keeps the pod alive
-    // even across a run's worth of idle-sweep windows. (An open-but-silent socket only
-    // holds it for one window; real interaction re-touches.)
+    // Touch on connect and again on data (throttled) so ongoing use keeps the pod
+    // alive while an open-but-silent socket holds it for only one window.
     touch(r.conversationId);
     const conversationId = r.conversationId;
 
-    // Splice: open a raw TCP connection to the pod, replay the upgrade handshake
-    // (with the Host rewritten), forward the buffered head, then pipe both ways.
-    // Same base-path handling as HTTP: strip the prefix for code-server (WS at root).
+    // Splice: open a raw TCP connection to the pod, replay the upgrade handshake with
+    // the Host rewritten, forward the buffered head, then pipe both ways.
     const upstreamPath = (r.stripBasePath ? r.rest : url.pathname) + (url.search ?? "");
     const upstream: Socket = connect(r.port, r.podIP, () => {
       const lines = [
@@ -358,7 +304,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       }
       upstream.write(lines.join("\r\n") + "\r\n\r\n");
       if (head?.length) upstream.write(head);
-      // Frames in EITHER direction (client keystrokes, server output) = active use.
+      // Frames in either direction count as active use.
       const onData = () => touch(conversationId);
       socket.on("data", onData);
       upstream.on("data", onData);

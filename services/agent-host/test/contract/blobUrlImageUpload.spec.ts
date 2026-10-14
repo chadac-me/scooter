@@ -1,17 +1,8 @@
 /**
- * Tier 1 contract — blob URLs from SimpleImageAttachmentAdapter reach the agent.
- *
- * Regression test for #438: blob: URLs created by SimpleImageAttachmentAdapter
- * were being silently skipped client-side, so images never reached the server.
- *
- * Flow:
- *  1. User pastes screenshot
- *  2. SimpleImageAttachmentAdapter creates blob: URL
- *  3. Client converts blob: → data: URL (imagesFromContent)
- *  4. POST /agui with { messages: [{ content: [{ type: "image", data, mimeType }] }] }
- *  5. Server normalizes content → stores in AssetStore → passes assetId to bridge
- *  6. Bridge resolves assetId → base64 ACP image block
- *  7. Agent sees the image
+ * Images pasted through SimpleImageAttachmentAdapter reach the agent: the client
+ * converts the blob: URL to base64 data, POSTs it as an image content block, and
+ * normalizeContent on the server turns that into the { data, mimeType } the bridge
+ * sends on as an ACP image block.
  */
 
 import { describe, it, expect } from "vitest";
@@ -19,14 +10,13 @@ import { normalizeContent } from "../../src/agui/server.js";
 
 describe("blob URL flow (client → server → agent)", () => {
   it("server accepts base64 image data from client blob URL conversion", () => {
-    // After client converts blob: → data: URL, it sends this to /agui:
+    // What the client sends to /agui after converting the blob: URL.
     const clientMessage = {
       role: "user",
       content: [
         { type: "text", text: "Here's a screenshot" },
         { 
           type: "image", 
-          // Client already converted blob: to data: (that's the fix in #438)
           data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
           mimeType: "image/png"
         },
@@ -62,25 +52,23 @@ describe("blob URL flow (client → server → agent)", () => {
   });
 
   it("regression: blob URLs were silently skipped before fix", () => {
-    // BEFORE #438: client sent blob: URLs directly (not converted)
-    // Server's normalizeContent didn't handle them → they were ignored
+    // A raw blob: URL is not a data: URL, so the server skips it.
     const preFix = {
       role: "user",
       content: [
         { type: "text", text: "Look at this" },
-        { type: "image", image: "blob:http://localhost/abc-123" }, // raw blob URL
+        { type: "image", image: "blob:http://localhost/abc-123" },
       ],
     };
 
     const { text, images } = normalizeContent(preFix.content);
     
-    // The blob URL is not a data: URL, so it's skipped
     expect(text).toBe("Look at this");
-    expect(images).toEqual([]); // No images extracted (the bug)
+    expect(images).toEqual([]);
   });
 
   it("server still accepts data: URLs from assistant-ui (backward compat)", () => {
-    // assistant-ui can send { type: "image", image: "data:..." }
+    // assistant-ui sends { type: "image", image: "data:..." }.
     const assistantUiMessage = {
       role: "user",
       content: [
@@ -109,13 +97,7 @@ describe("blob URL flow (client → server → agent)", () => {
   });
 
   it("handles the SimpleImageAttachmentAdapter paste scenario", () => {
-    // User pastes a screenshot. In the real flow:
-    // 1. Browser creates a Blob
-    // 2. SimpleImageAttachmentAdapter calls URL.createObjectURL(blob) → "blob:..."
-    // 3. Client's imagesFromContent() converts blob: → data: (via fetch + FileReader)
-    // 4. Client sends { type: "image", data: "<base64>", mimeType: "image/png" }
-    // 5. Server receives this:
-    
+    // The message as the server receives it after the client's imagesFromContent() conversion.
     const afterClientConversion = {
       role: "user",
       content: [
@@ -133,7 +115,6 @@ describe("blob URL flow (client → server → agent)", () => {
     expect(text).toBe("Screenshot of the error");
     expect(images).toHaveLength(1);
     expect(images[0].mimeType).toBe("image/png");
-    // Base64 data is present (not a blob: URL)
     expect(images[0].data).toMatch(/^[A-Za-z0-9+/=]+$/);
   });
 });

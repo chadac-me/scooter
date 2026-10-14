@@ -1,10 +1,9 @@
 /**
- * Tier 1 (ui) — settings routing.
+ * Settings routing.
  *
- * Settings moved from a hidden view toggle to real URLs (/settings/<tab>), so the
- * parse/build logic is what makes a tab bookmarkable, refresh-safe and reachable by
- * Back/Forward. These lock that behaviour, including the fallbacks a stale or
- * hand-edited link hits.
+ * Settings tabs are real URLs (/settings/<tab>), so the parse/build logic is what
+ * makes a tab bookmarkable, refresh-safe and reachable by Back/Forward, including
+ * the fallbacks a stale or hand-edited link hits.
  */
 
 import { describe, it, expect } from "vitest";
@@ -38,8 +37,7 @@ describe("settings path parsing", () => {
   });
 
   it("does NOT treat a path merely containing 'settings' as the settings view", () => {
-    // Only a leading /settings segment routes here — /c/<id>/settings is a sandbox
-    // web-service proxy path, not this page.
+    // Only a leading /settings segment routes here; /c/<id>/settings is a sandbox web-service proxy path.
     expect(parsePath("/c/abc/settings").view).toBe("chat");
   });
 });

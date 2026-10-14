@@ -1,8 +1,4 @@
-/**
- * UI unit test — the "starting" spinner shown while an explicit Sandbox-tab Start
- * is in flight. (The old suspended/ended full-screen takeover was removed: an asleep
- * conversation now renders its thread + history directly, and sending resumes the pod.)
- */
+/** The "starting" spinner shown while an explicit Sandbox-tab Start is in flight. */
 
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";

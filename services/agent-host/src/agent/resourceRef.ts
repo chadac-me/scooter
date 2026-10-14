@@ -1,10 +1,7 @@
 /**
- * A linked resource's URL -> the structured target the reply tools need. One resource
- * is written in two shapes by two writers, and this is where they meet.
- *
- * Parsers are host-agnostic (the link's `source` already names the provider) and return
- * undefined rather than guess: a wrong target comments on someone else's PR, which is
- * worse than no tool at all. Why: PR #571.
+ * A linked resource's URL parsed into the structured target the reply tools need.
+ * Parsers are host-agnostic (the link's `source` names the provider) and return
+ * undefined rather than guess, since a wrong target comments on someone else's PR.
  */
 
 import type { ConversationLink } from "../session/manager.js";
@@ -16,7 +13,7 @@ export interface GithubTarget {
 }
 
 export interface GitlabTarget {
-  /** The project PATH — GitLab accepts it URL-encoded in place of the numeric id. */
+  /** The project path, which GitLab accepts URL-encoded in place of the numeric id. */
   projectId: string;
   iid: string;
   isMr: boolean;
@@ -26,7 +23,7 @@ export interface JiraTarget {
   issueKey: string;
 }
 
-/** Path segments of a URL, or undefined when it isn't a parseable http(s) URL. */
+/** Path segments of a URL, or undefined when it is not a parseable http(s) URL. */
 function segments(url: string | undefined): string[] | undefined {
   if (!url) return undefined;
   let parsed: URL;
@@ -39,8 +36,7 @@ function segments(url: string | undefined): string[] | undefined {
   return parsed.pathname.split("/").filter((s) => s.length > 0).map(decodeURIComponent);
 }
 
-/** `https://github.com/<owner>/<repo>/(pull|issues)/<number>` (+ any suffix, e.g.
- *  `/files` or `#issuecomment-…`). Enterprise hosts differ, so the HOST is not checked. */
+/** `https://github.com/<owner>/<repo>/(pull|issues)/<number>` plus any suffix; the host is not checked since enterprise hosts differ. */
 export function parseGithubUrl(url: string | undefined): GithubTarget | undefined {
   const segs = segments(url);
   if (!segs || segs.length < 4) return undefined;
@@ -50,9 +46,7 @@ export function parseGithubUrl(url: string | undefined): GithubTarget | undefine
   return { owner, repo, number: Number(num) };
 }
 
-/** `https://gitlab.com/<group>/…/<project>/-/(merge_requests|issues)/<iid>`. The `/-/`
- *  separator is optional (older URLs omit it) and the project path may nest subgroups,
- *  so the kind segment — not a fixed position — is what splits project from iid. */
+/** `https://gitlab.com/<group>/…/<project>/-/(merge_requests|issues)/<iid>`, where the kind segment rather than a fixed position splits project from iid since the `/-/` is optional and subgroups nest. */
 export function parseGitlabUrl(url: string | undefined): GitlabTarget | undefined {
   const segs = segments(url);
   if (!segs) return undefined;
@@ -75,14 +69,7 @@ export function parseJiraUrl(url: string | undefined): JiraTarget | undefined {
   return { issueKey: key.toUpperCase() };
 }
 
-/**
- * The structured `ref` a link SHOULD carry, derived from its URL — for links written
- * without one (the broker auto-link injector posts url+title only). Returns undefined
- * when nothing is derivable, so the caller stores null rather than an empty object.
- *
- * A GitLab issue's number goes in `iid`, never `mrIid`: a reader that saw `mrIid` would
- * comment on the merge request of that number instead.
- */
+/** The structured `ref` derived from a link's URL for links written without one, or undefined when nothing is derivable; a GitLab issue's number goes in `iid`, never `mrIid`. */
 export function refFromUrl(source: string, url: string | undefined): ConversationLink["ref"] | undefined {
   if (!url) return undefined;
   switch (source) {
@@ -104,21 +91,14 @@ export function refFromUrl(source: string, url: string | undefined): Conversatio
   }
 }
 
-/** The link with a derived `ref` filled in when it has none. An explicit ref always
- *  wins — the webhooks handlers know more than a URL does. */
+/** The link with a derived `ref` filled in when it has none; an explicit ref always wins. */
 export function withDerivedRef(link: ConversationLink): ConversationLink {
   if (link.ref && Object.keys(link.ref).length > 0) return link;
   const ref = refFromUrl(link.source, link.url);
   return ref ? { ...link, ref } : link;
 }
 
-/**
- * The canonical (long) `resource_type` per source — the spelling webhooks writes, the
- * one the UI renders as "pull request", and the one the backfill migration leaves in
- * the table. MUST mirror webhooks/resources.py `_TYPE_ALIASES`: the two services write
- * the same table, and the unique key includes this column, so disagreeing spellings
- * mean two rows for one resource. Unknown types pass through unchanged.
- */
+/** The canonical `resource_type` per source, mirroring webhooks/resources.py `_TYPE_ALIASES` since both services write the same uniquely keyed table; unknown types pass through unchanged. */
 export function canonicalResourceType(source: string, resourceType: string): string {
   return ALIASES[source]?.[resourceType.toLowerCase()] ?? resourceType;
 }

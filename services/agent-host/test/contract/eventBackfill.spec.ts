@@ -1,9 +1,7 @@
 /**
- * Tier 1 contract — the one-shot mirror→Postgres backfill.
- *
- * The Job runs once and the mirror volume is reclaimed afterwards, so a
- * backfill that loads 127 of 128 conversations and exits 0 destroys history.
- * These tests are mostly about the VERIFY half, not the load half.
+ * The one-shot mirror-to-Postgres backfill. The mirror volume is reclaimed after the
+ * Job runs, so a partial load that exits 0 destroys history; these tests are mostly
+ * about the verify half.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -61,8 +59,6 @@ describe("eventBackfill — verification", () => {
   });
 
   it("THE FAILURE THIS PREVENTS: one bad conversation makes the WHOLE report not-ok", async () => {
-    // 127 of 128 loading must never look like success — the mirror is deleted
-    // after this runs.
     const good = [ev(1)].map((e) => JSON.stringify(e));
     const m = mirror({ "conv-good": good, "conv-bad": ["{not json"] });
     try {
@@ -70,7 +66,7 @@ describe("eventBackfill — verification", () => {
       const report = await backfillAll(db, m.root);
       expect(report.ok, "a single failure must fail the run").toBe(false);
       expect(report.conversations.find((c) => c.conversationId === "conv-bad")?.ok).toBe(false);
-      // ...and the good one is still reported as loaded, so an operator can see scope.
+      // The good one is still reported as loaded, so an operator can see scope.
       expect(report.conversations.find((c) => c.conversationId === "conv-good")?.ok).toBe(true);
     } finally {
       m.cleanup();
@@ -78,8 +74,7 @@ describe("eventBackfill — verification", () => {
   });
 
   it("a conversation directory with NO log is a failure, not a skip", async () => {
-    // The mirror having a conversation we cannot migrate must be visible before
-    // the volume is reclaimed.
+    // A conversation that cannot be migrated must be visible before the volume is reclaimed.
     const m = mirror({ "conv-a": [JSON.stringify(ev(1))] });
     mkdirSync(join(m.root, "conv-empty"), { recursive: true });
     try {
@@ -93,9 +88,7 @@ describe("eventBackfill — verification", () => {
   });
 
   it("A CORRUPTED LOAD is caught: right row count, WRONG chain", async () => {
-    // The row-count check alone would pass this. Only comparing the chain
-    // catches a load that wrote the right NUMBER of rows from the wrong bytes —
-    // and after the mirror is reclaimed there is nothing left to compare against.
+    // Only comparing the chain catches a load that wrote the right number of rows from the wrong bytes.
     const lines = [ev(1), ev(2)].map((e) => JSON.stringify(e));
     const m = mirror({ "conv-a": lines });
     try {
@@ -110,15 +103,15 @@ describe("eventBackfill — verification", () => {
 
       expect(report.ok, "a checksum mismatch must fail the run").toBe(false);
       const c = report.conversations[0];
-      expect(c.rows).toBe(c.lines); // count agreed...
-      expect(c.actualChecksum).not.toBe(c.expectedChecksum); // ...the chain did not
+      expect(c.rows).toBe(c.lines);
+      expect(c.actualChecksum).not.toBe(c.expectedChecksum);
     } finally {
       m.cleanup();
     }
   });
 
   it("the expected chain is computed from the FILE, independently of the writer", async () => {
-    // Otherwise the check is circular: the backfill would be verifying itself.
+    // Otherwise the backfill would be verifying itself.
     const events = [ev(1), ev(2), ev(3)];
     let acc = EMPTY_CHECKSUM;
     for (const e of events) acc = chainNext(acc, e);
@@ -128,8 +121,7 @@ describe("eventBackfill — verification", () => {
 
 describe("eventBackfill — restart seams", () => {
   it("COUNTS seams rather than silently reordering", async () => {
-    // A seam means ts goes backwards: the file store rendered these in ts order,
-    // Postgres renders them in append order. That cost must be visible.
+    // A seam is a ts going backwards: the file store rendered in ts order and Postgres renders in append order.
     const seamed = [ev(1, 100), ev(2, 300), ev(3, 200)].map((e) => JSON.stringify(e));
     const m = mirror({ "conv-seam": seamed });
     try {

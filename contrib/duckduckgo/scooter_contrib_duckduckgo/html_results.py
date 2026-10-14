@@ -1,11 +1,8 @@
 """Read search hits off DuckDuckGo's HTML results page (`html.duckduckgo.com/html/`).
 
-A page meant for browsers, so there is no contract: expect it to change shape, and
-expect to be rate-limited per source address. Both arrive as a 200 carrying no results,
-which is why `classify` makes an unreadable page a failure rather than an empty web.
-
-Parsed with stdlib `html.parser`: lxml or bs4 would be weight in the broker image for a
-page we read two tags out of. Why: PR #707.
+A page meant for browsers, so it changes shape and rate-limits per source address,
+and both arrive as a 200 carrying no results; `classify` therefore makes an
+unreadable page a failure rather than an empty web. Parsed with stdlib `html.parser`.
 """
 
 from __future__ import annotations
@@ -19,20 +16,16 @@ from scooter_broker_lib.search import MAX_RESULTS, SearchHit
 RESULT_CLASS = "result__a"
 SNIPPET_CLASS = "result__snippet"
 
-# Ads carry `result__a` like any other hit, so the href is what tells them apart: a
-# class check would need the markup AROUND the anchor, the part most likely to change.
+# Ads carry `result__a` like any other hit, so the href is what tells them apart.
 AD_PATH = "/y.js"
 
-# "DDG answered with a bot check", lowercased. Keep NARROW: these outrank the
-# no-results markers (see `classify`), so a loose phrase here — "please try again" also
-# appears on the genuine no-results page — turns "nothing found" into a failure.
+# Lowercased markers of a bot check, kept narrow because they outrank the no-results markers in `classify`.
 BLOCKED_MARKERS = (
     "anomaly",
     "bots use duckduckgo",
     "challenge-form",
 )
-# "DDG said the web had nothing" — the only case where no hits is the truth rather
-# than a symptom.
+# Markers that DDG said the web had nothing, the only case where no hits is the truth.
 NO_RESULTS_MARKERS = (
     "no results.",
     "no results found",
@@ -42,11 +35,7 @@ NO_RESULTS_MARKERS = (
 
 
 class _ResultParser(HTMLParser):
-    """Collect (title, href, snippet) triples in document order.
-
-    Flat state machine, not a tree walk: the wrapper divs are restyled, while these two
-    anchor classes are the stable part of the page.
-    """
+    """Collect (title, href, snippet) triples in document order, keyed on the two stable anchor classes."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -67,8 +56,7 @@ class _ResultParser(HTMLParser):
             self._capturing = "snippet"
 
     def handle_endtag(self, tag: str) -> None:
-        # Titles close with their anchor; a snippet may be an <a>, a <div> or a <td>
-        # depending on which variant of the page answered.
+        # A snippet may be an <a>, a <div> or a <td> depending on which variant of the page answered.
         if self._capturing == "title" and tag == "a":
             self._emit()
         elif self._capturing == "snippet" and tag in ("a", "div", "td", "span"):
@@ -78,7 +66,7 @@ class _ResultParser(HTMLParser):
         if self._capturing is not None:
             self._chunks.append(data)
 
-    def close(self) -> None:  # noqa: D102 - flush a page that ends mid-capture
+    def close(self) -> None:  # noqa: D102
         super().close()
         self._emit()
 
@@ -89,7 +77,6 @@ class _ResultParser(HTMLParser):
         if self._capturing == "title":
             self.rows.append({"title": text, "href": self._href, "snippet": ""})
         elif self.rows and not self.rows[-1]["snippet"]:
-            # Snippets follow their title, so the open row is the one this belongs to.
             self.rows[-1]["snippet"] = text
         self._capturing = None
         self._chunks = []
@@ -97,12 +84,7 @@ class _ResultParser(HTMLParser):
 
 
 def target_url(href: str) -> str:
-    """The real destination behind a result link, or "" if there is none.
-
-    DDG wraps most hits in `//duckduckgo.com/l/?uddg=<encoded>`, so the href as written
-    is a DDG url — handing that to the agent sends `web_fetch` through a tracking
-    redirect instead of to the page, and the agent cannot tell the difference.
-    """
+    """The real destination behind a result link (DDG wraps most hits in `//duckduckgo.com/l/?uddg=<encoded>`), or ""."""
     link = (href or "").strip()
     if not link:
         return ""
@@ -118,7 +100,7 @@ def target_url(href: str) -> str:
 
 
 def is_ad(url: str) -> bool:
-    """A sponsored link. Dropped: the agent asked the web a question, not a marketplace."""
+    """A sponsored link, which is dropped."""
     return urlparse(url).path.startswith(AD_PATH)
 
 
@@ -142,15 +124,7 @@ def hits_from_html(page: str) -> list[SearchHit]:
 
 
 def classify(page: str) -> str:
-    """Why a page yielded no hits: "blocked", "empty" (DDG said so), or "unrecognized".
-
-    Only "empty" is a successful search; a page we cannot read is evidence about this
-    scraper, not about the web, so "unrecognized" must stay a failure.
-
-    BLOCKED IS CHECKED FIRST and the order matters: calling a block "empty" tells the
-    agent the web is empty, while calling an empty result set a failure only makes it
-    report a problem it could have ignored. Why: PR #707.
-    """
+    """Why a page yielded no hits: "blocked" (checked first), "empty" (the only successful case), or "unrecognized"."""
     lowered = page.lower()
     if any(marker in lowered for marker in BLOCKED_MARKERS):
         return "blocked"

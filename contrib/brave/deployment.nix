@@ -1,4 +1,4 @@
-# brave's DEPLOYMENT half. Gated on contribs.brave.enable; why: #599, #711.
+# brave's deployment half, gated on contribs.brave.enable.
 { config, lib, ... }:
 
 let

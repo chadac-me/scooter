@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -15,7 +16,7 @@ func TestAguiThreadIDReadsBodyAndRestoresIt(t *testing.T) {
 	if id != "conv-xyz" {
 		t.Fatalf("threadId = %q, want conv-xyz", id)
 	}
-	// CRITICAL: the body must still be fully readable by the upstream proxy afterwards.
+	// The body must still be fully readable by the upstream proxy afterwards.
 	rest, _ := io.ReadAll(r.Body)
 	if string(rest) != body {
 		t.Errorf("body not restored: got %q, want %q", string(rest), body)
@@ -32,40 +33,33 @@ func TestAguiThreadIDMissing(t *testing.T) {
 func TestResolveTarget(t *testing.T) {
 	cfg := config{namespace: "agent-sandbox", upstreamPort: 8080, clusterIPService: "agent-host"}
 	fallback := FallbackURL(cfg.clusterIPService, cfg.namespace, cfg.upstreamPort)
-	fb := fallback.String() // "http://agent-host.agent-sandbox.svc.cluster.local:8080"
-	cache := NewOwnershipCache()
-	cache.set("conv-assigned", "10.42.0.2") // owner pod IP
+	fb := fallback.String()
+	s := newMemStore("conv-assigned", "conv-new")
+	s.set("conv-assigned", "pod-a")
+	res := liveAssigner(s, pods("pod-a", "10.42.0.2"))
+	target := func(r *http.Request) string {
+		_, u, err := resolveTargetFor(cfg, res, r, fallback)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", r.URL.Path, err)
+		}
+		return u.String()
+	}
 
-	// non-scoped -> ClusterIP fallback (any ready pod)
-	if u := resolveTarget(cfg, cache, httptest.NewRequest("GET", "/healthz", nil), fallback); u.String() != fb {
-		t.Errorf("healthz -> %q, want fallback %q", u.String(), fb)
+	if u := target(httptest.NewRequest("GET", "/healthz", nil)); u != fb {
+		t.Errorf("healthz -> %q, want fallback %q", u, fb)
 	}
-	// path-scoped, assigned -> owner pod IP
-	if u := resolveTarget(cfg, cache, httptest.NewRequest("GET", "/conversations/conv-assigned/events.integrity", nil), fallback); u.String() != "http://10.42.0.2:8080" {
-		t.Errorf("assigned conv -> %q, want http://10.42.0.2:8080", u.String())
+	if u := target(httptest.NewRequest("GET", "/conversations/conv-assigned/events.integrity", nil)); u != "http://10.42.0.2:8080" {
+		t.Errorf("assigned conv -> %q", u)
 	}
-	// path-scoped, UNassigned -> fallback (controller will assign shortly)
-	if u := resolveTarget(cfg, cache, httptest.NewRequest("GET", "/conversations/conv-unknown/cancel", nil), fallback); u.String() != fb {
-		t.Errorf("unassigned conv -> %q, want fallback %q", u.String(), fb)
+	// Unassigned: claimed, never the Service.
+	if u := target(httptest.NewRequest("GET", "/conversations/conv-new/cancel", nil)); u != "http://10.42.0.2:8080" {
+		t.Errorf("unassigned conv -> %q, want a claimed pod", u)
 	}
-	// agui POST, assigned (id in body) -> owner pod IP
+	if u := target(httptest.NewRequest("GET", "/conversations/conv-unknown/cancel", nil)); u != fb {
+		t.Errorf("unknown conv -> %q, want fallback", u)
+	}
 	req := httptest.NewRequest("POST", "/agui", strings.NewReader(`{"threadId":"conv-assigned"}`))
-	if u := resolveTarget(cfg, cache, req, fallback); u.String() != "http://10.42.0.2:8080" {
-		t.Errorf("agui assigned -> %q, want http://10.42.0.2:8080", u.String())
-	}
-}
-
-func TestOwnershipCache(t *testing.T) {
-	c := NewOwnershipCache()
-	if _, ok := c.HostIP("x"); ok {
-		t.Error("empty cache should miss")
-	}
-	c.set("x", "10.42.0.1")
-	if ip, ok := c.HostIP("x"); !ok || ip != "10.42.0.1" {
-		t.Errorf("HostIP(x) = (%q,%v)", ip, ok)
-	}
-	c.set("x", "") // empty ip = unassigned -> removed
-	if _, ok := c.HostIP("x"); ok {
-		t.Error("empty ip should be treated as unassigned")
+	if u := target(req); u != "http://10.42.0.2:8080" {
+		t.Errorf("agui assigned -> %q", u)
 	}
 }

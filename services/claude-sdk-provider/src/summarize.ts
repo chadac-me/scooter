@@ -1,16 +1,11 @@
 /**
- * One-off conversation summarizer — for MANUAL compaction. Runs a SINGLE, tool-less
- * Claude Agent SDK query() (a fresh session, no resume, no MCP servers) to condense
- * the OLDER part of a conversation into a compact recap. Uses the SAME subscription
- * auth (CLAUDE_CODE_OAUTH_TOKEN) + model the conversation runs on.
- *
- * This is deliberately NOT part of the AcpClient/session surface: it's a stateless
- * completion, not a conversation. The caller (agent-host compaction) folds the log
- * into user/assistant turns, passes them here, and gets back plain recap text to seed
- * the compacted session's history.
+ * One-off conversation summarizer for manual compaction. It runs a single tool-less
+ * Claude Agent SDK query() in a fresh session to condense the older part of a
+ * conversation into recap text, using the conversation's own auth and model. It is a
+ * stateless completion, not part of the AcpClient surface.
  */
 
-/** A user/assistant turn to summarize (matches the agent-host TranscriptTurn shape). */
+/** A user/assistant turn to summarize, matching the agent-host TranscriptTurn shape. */
 export interface SummaryTurn {
   role: "user" | "assistant";
   text: string;
@@ -21,9 +16,9 @@ export interface SummarizeDeps {
   oauthToken: string;
   /** Model to summarize with (the conversation's model). */
   model: string;
-  /** Absolute path to the glibc `claude` CLI (defaults to CLAUDE_CODE_COMMAND / "claude"). */
+  /** Absolute path to the glibc `claude` CLI; defaults to CLAUDE_CODE_COMMAND, else "claude". */
   claudeCodePath?: string;
-  /** Injectable query() for tests (defaults to the real SDK). */
+  /** Injectable query() for tests; defaults to the real SDK. */
   queryImpl?: (params: { prompt: string; options: Record<string, unknown> }) =>
     AsyncIterable<{ type?: string; message?: { content?: Array<{ type?: string; text?: string }> }; [k: string]: unknown }>;
 }
@@ -41,8 +36,7 @@ function turnsToPrompt(turns: SummaryTurn[]): string {
   return `Summarize the earlier part of this conversation into a recap:\n\n${body}`;
 }
 
-/** Summarize the given turns into recap text. Throws on any failure (no partial /
- *  silent fallback — the caller keeps the conversation unchanged on error). */
+/** Summarize the given turns into recap text, throwing on any failure. */
 export async function summarizeConversation(turns: SummaryTurn[], deps: SummarizeDeps): Promise<string> {
   if (turns.length === 0) return "";
   const query =
@@ -55,7 +49,7 @@ export async function summarizeConversation(turns: SummaryTurn[], deps: Summariz
       model: deps.model,
       systemPrompt: SYSTEM,
       pathToClaudeCodeExecutable: deps.claudeCodePath ?? process.env.CLAUDE_CODE_COMMAND ?? "claude",
-      // A pure completion: NO tools, NO MCP servers, NO resume (a fresh throwaway session).
+      // A pure completion: no tools, no MCP servers, no resume.
       allowedTools: [],
       disallowedTools: ["Bash", "Read", "Edit", "Write"],
       maxTurns: 1,

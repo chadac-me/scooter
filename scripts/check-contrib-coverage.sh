@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
-# check-contrib-coverage.sh — contrib/all-modules.nix must import every contrib, and
-# a contrib's files must be the ones the evals look for.
-#
-# Both failures are silent. A contrib missing from all-modules.nix is never built and
-# never tested (#585). A contrib half under the WRONG FILENAME is worse: a half is
-# found beside the declaration by name (modules/platform.nix looks for
-# <name>/deployment.nix), so a typo like `deploymnet.nix` is simply never imported — the options vanish, and every manifest that sets them fails
-# with "option does not exist", pointing at the manifest rather than at the file.
-# Why: #585, #711.
-#
-# Lives here, not in Nix, because an eval-time check would need the readDir the
-# explicit import list exists to avoid.
+# check-contrib-coverage.sh — contrib/all-modules.nix must import every contrib,
+# and a contrib's files must be the ones the evals look for. A contrib missing
+# from all-modules.nix is never built or tested, and a half under the wrong
+# filename is never imported, so its options vanish. Lives here rather than in
+# Nix because an eval-time check would need the readDir the explicit import list
+# exists to avoid.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit
 
@@ -40,8 +34,8 @@ for c in "${imported[@]}"; do
     || note "all-modules.nix imports ./$c/contrib.nix but that file does not exist"
 done
 
-# A contrib's halves, each named for the eval it lands in. Anything else directly
-# in a contrib directory is a half that nothing imports.
+# A contrib's halves, each named for the eval it lands in; anything else in a
+# contrib directory is a half nothing imports.
 for f in contrib/*/*.nix; do
   case "${f##*/}" in
     contrib.nix | deployment.nix | sandbox.nix) ;;

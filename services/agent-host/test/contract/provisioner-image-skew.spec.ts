@@ -1,13 +1,7 @@
 /**
- * Tier 1 contract — a Sandbox left on a PREVIOUS platform version's image must be
- * reconciled onto the current one, and one cycle must be enough.
- *
- * WHY: a Sandbox CR is rendered once, at conversation-create time. `kubectl apply` of
- * an upgrade rolls every Deployment and touches no Sandbox, so a live conversation
- * kept booting the OLD sandbox image under a NEW agent-host — every run dead on
- * arrival, the queue filling and never draining. suspend/resume recreated the pod
- * from the unchanged spec, so the documented recovery recovered nothing: it took a
- * second, unrelated restart before the sandbox came up current. Issue #560.
+ * A Sandbox left on a previous platform version's image is reconciled onto the current
+ * one in a single cycle. A Sandbox CR is rendered once at conversation-create time and a
+ * platform upgrade touches no Sandbox, so resume and adoption patch the image themselves.
  */
 
 import { describe, it, expect } from "vitest";
@@ -15,10 +9,10 @@ import { describe, it, expect } from "vitest";
 import { createK8sProvisioner } from "../../src/session/k8sProvisioner.js";
 
 interface FakeOpts {
-  /** The image the EXISTING Sandbox carries (undefined = no container at all). */
+  /** The image the existing Sandbox carries (undefined means no container at all). */
   image?: string;
   operatingMode?: string;
-  /** Sandbox creation 409s — i.e. the conversation's Sandbox already exists. */
+  /** Sandbox creation 409s because the conversation's Sandbox already exists. */
   conflict?: boolean;
   /** How many pod polls still report the old pod before it disappears. */
   podsLive?: number;
@@ -79,7 +73,7 @@ describe("k8sProvisioner — sandbox image skew after a platform upgrade", () =>
   it("resume adopts the current image, so ONE suspend/resume is enough", async () => {
     const { kc, patches } = fakeKc({ image: "sandbox-os:old", operatingMode: "Suspended" });
     await provisioner(kc).resume(ref);
-    // The image is reconciled FIRST; the flip to Running then brings the pod up on it.
+    // The image is reconciled first; the flip to Running then brings the pod up on it.
     expect(patchedImages(patches)).toEqual(["sandbox-os:new"]);
     expect(patchedModes(patches)).toEqual(["Running"]);
   });
@@ -89,8 +83,7 @@ describe("k8sProvisioner — sandbox image skew after a platform upgrade", () =>
     await provisioner(kc).resume(ref);
     expect(patchedImages(patches)).toEqual(["sandbox-os:new"]);
     expect(patchedModes(patches)).toEqual(["Suspended", "Running"]);
-    // …and the pod's disappearance is WAITED for in between: flipping straight back
-    // lets the controller coalesce the two patches into no restart at all.
+    // The pod's disappearance is waited for in between, or the controller coalesces the two patches into no restart.
     expect(calls).toContain("pods");
   });
 
@@ -103,8 +96,7 @@ describe("k8sProvisioner — sandbox image skew after a platform upgrade", () =>
   });
 
   it("ADOPTING an existing Sandbox (409) reconciles its image", async () => {
-    // The post-upgrade path: the agent-host rolls, hydrates the conversation, and
-    // takes create() — which finds the Sandbox already there, on the old image.
+    // After an upgrade the agent-host hydrates the conversation and create() finds the Sandbox already there.
     const { kc, patches } = fakeKc({ conflict: true, image: "sandbox-os:old", operatingMode: "Suspended" });
     await provisioner(kc).create("abc", "thread-1");
     expect(patchedImages(patches)).toEqual(["sandbox-os:new"]);

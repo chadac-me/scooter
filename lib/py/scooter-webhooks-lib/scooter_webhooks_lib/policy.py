@@ -1,16 +1,7 @@
-"""Trigger policy — the deployment-wide rules every handler applies identically.
+"""Trigger policy: the deployment-wide rules every handler applies identically.
 
-What spawns a conversation (a mention, a label), whose events to drop (ignored
-users, bots, our own chatter). These are ONE deployment's policy, not a provider's:
-a mention pattern that differed between github and slack would be a bug, so this is
-lib surface rather than something each contrib owns.
-
-Each of these was copy-pasted into all four handlers -- `_is_ignored_user` was
-byte-identical four times, and re-parsed the comma-separated list on every event.
-A contrib handler couldn't reach any of it without importing the app. Why: PR #577.
-
-CONFIG STAYS IN THE APP: like `store.DatabaseConfig` and `agent_host_client`, this
-module is GIVEN its settings at startup.
+What spawns a conversation (a mention, a label) and whose events to drop (ignored
+users, bots, our own chatter). The module is given its settings at startup.
 """
 
 from __future__ import annotations
@@ -31,15 +22,12 @@ class TriggerPolicyConfig(Protocol):
 
 _config: TriggerPolicyConfig | None = None
 
-# Parsed per distinct VALUE, not per event and not once per process: the four copies
-# this replaces re-split the string on every delivery, but snapshotting it at init()
-# would silently ignore a settings change at runtime -- which the self-event tests
-# make (patch.object(settings, "ignore_usernames", ...)) and a live reload could too.
+# Parsed per distinct value, so a settings change at runtime is honored without re-splitting on every event.
 _ignored_cache: tuple[str, frozenset[str]] = ("", frozenset())
 
 
 def init(config: TriggerPolicyConfig) -> None:
-    """Bind the trigger policy. Called once at service startup."""
+    """Bind the trigger policy once at service startup."""
     global _config
     _config = config
 
@@ -51,28 +39,27 @@ def _cfg() -> TriggerPolicyConfig:
 
 
 def mentions_agent(text: str) -> bool:
-    """Does this text mention the agent (case-insensitive)?"""
+    """Whether this text mentions the agent, case-insensitively."""
     return _cfg().mention_pattern.lower() in (text or "").lower()
 
 
 def mention_pattern() -> str:
-    """The raw trigger text, for handlers that rewrite it rather than test it
-    (slack substitutes `<@BOT>` with it before forwarding)."""
+    """The raw trigger text, for handlers that rewrite it rather than test it."""
     return _cfg().mention_pattern
 
 
 def strip_mention(text: str) -> str:
-    """The message with the mention removed — what actually gets forwarded."""
+    """The message with the mention removed."""
     return (text or "").replace(_cfg().mention_pattern, "").strip()
 
 
 def is_trigger_label(label: str) -> bool:
-    """Is this the label whose addition spawns a conversation?"""
+    """Whether this is the label whose addition spawns a conversation."""
     return (label or "").lower() == _cfg().label_trigger.lower()
 
 
 def is_ignored_user(username: str) -> bool:
-    """Is this author on the deployment's drop list? (case-insensitive)"""
+    """Whether this author is on the deployment's drop list, case-insensitively."""
     global _ignored_cache
     raw = _cfg().ignore_usernames or ""
     if _ignored_cache[0] != raw:
@@ -81,12 +68,7 @@ def is_ignored_user(username: str) -> bool:
 
 
 def ignore_bot_authors() -> bool:
-    """Drop Bot-authored events that don't mention the agent.
-
-    The fallback for when the agent's own `<slug>[bot]` login can't be resolved:
-    its own comments otherwise come back as webhooks, at interrupt priority for
-    reviews (PR #530).
-    """
+    """Whether to drop Bot-authored events that do not mention the agent, the fallback when its own `<slug>[bot]` login cannot be resolved."""
     return _cfg().ignore_bot_authors
 
 
@@ -102,11 +84,7 @@ def repo_context(repo: str) -> str:
 
 
 def is_own_ack(body: str) -> bool:
-    """Is this comment one of ours?
-
-    Matches the ack text handlers post. Keeps matching the legacy "OpenHands"
-    markers so threads created before the rename still match.
-    """
+    """Whether this comment is one of our own acks, including the legacy "OpenHands" markers."""
     return (
         body.startswith("Scooter is on it")
         or body.startswith("OpenHands is working on this.")

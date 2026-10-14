@@ -27,7 +27,7 @@
 
   outputs = inputs@{ self, nixpkgs, flake-parts, nix2container, kubenix, nix-stubs, uv-nix }:
     let
-      # The PLATFORM's agent skills
+      # The platform's agent skills.
       scooterSkills =
         let dir = ./skills; l = nixpkgs.lib;
         in l.mapAttrs' (name: _: {
@@ -36,9 +36,9 @@
         }) (l.filterAttrs (n: t: t == "regular" && l.hasSuffix ".md" n)
           (builtins.readDir dir));
 
-      # name -> packages attr. Must be plain data: the tag pin runs in the
-      # top-level scope, and reaching the per-system image tree from here
-      # would route through `self` and recurse.
+      # name -> packages attr, as plain data because the tag pin runs in the
+      # top-level scope and reaching the per-system image tree from here would
+      # route through `self` and recurse.
       imageMeta = {
         agent-host.attr = "agent-host-image";
         agent-sandbox-ui.attr = "ui-image";
@@ -85,12 +85,21 @@
           # The generated @scooter/schema package: Drizzle tables plus guards.
           scooterSchemaJs = pkgs.callPackage ./lib/ts/scooter-schema { };
 
+          # agent-host runs `goose acp` per conversation outside the sandbox; it takes the
+          # same `agent` derivation the image's goose layer bakes so the closure ships goose once.
           agentHost = pkgs.callPackage ./services/agent-host { inherit agent claudeSdkProvider marimoMcp scooterSchemaJs; };
 
           # Bring-your-own-Claude container app
           remoteAgent = pkgs.callPackage ./services/remote-agent {
             inherit claudeSdkProvider;
             claude-code = pkgs.claude-code;
+          };
+          # The same container WITHOUT the unfree claude CLI, for `--backend echo`:
+          # it drives no model, so it needs neither the CLI nor a subscription, and
+          # this variant evaluates in pure mode (CI, nixosTests).
+          remoteAgentEcho = pkgs.callPackage ./services/remote-agent {
+            inherit claudeSdkProvider;
+            claude-code = null;
           };
 
           # agent-host OCI image.
@@ -167,7 +176,7 @@
           # Broker tools (agent-broker / git-credential-broker), prebuilt
           brokerTools = pkgs.callPackage ./pkgs/broker-tools { };
 
-          # Applied HERE, at pkgs construction, not through `nixpkgs.overlays`
+          # The stub overlay, applied at pkgs construction.
           stubOverlay = import ./modules/sandbox-os/stub-overlay.nix {
             lockLib = nix-stubs.lib;
             flakeLock = ./flake.lock;
@@ -180,7 +189,7 @@
           # The uv-nix uv (patched for Nix)
           uvNix = uv-nix.packages.${system}.default;
 
-          # The NixOS dev-environment sandbox image (systemd PID 1
+          # The NixOS dev-environment sandbox image (systemd as PID 1).
           sandboxOsImage = import ./pkgs/sandbox-os/image.nix {
                 inherit deploymentModules;
             inherit lib n2c uvNix;
@@ -197,8 +206,7 @@
 
           # UI OCI image
 
-          # Render the platform manifests (namespace
-          # remote-agent is excluded: it bakes the unfree claude CLI, so its tag
+          # The image modules, excluding remote-agent because its unfree claude CLI
           # would force an allowUnfree check in every pure eval.
           imageModules = map (m: import m imageArgs) [
             ./pkgs/agent-host-image/image.nix
@@ -233,7 +241,7 @@
                 inherit scooter;
               };
             };
-          # THE VENDED ENTRY POINT
+          # The vended entry point.
           evalPlatform = { module }: kubenix.evalModules.${system} {
             module = { kubenix, ... }: {
               imports = [ ./modules/platform.nix module ] ++ imageModules;
@@ -278,8 +286,7 @@
 
           # attr -> k3d ref, for the push script
           k3dImageRefs = platformK3d.config.scooter.images;
-          # Every image's k3d ref. k3d-platform-up.sh picks which to push --
-          # that list is e2e-only and stays in the script.
+          # Every image's k3d ref, from which k3d-platform-up.sh picks what to push.
           k3dPushRefs = lib.mapAttrs' (_: img: lib.nameValuePair img.attr img.ref.fullUrl)
             (lib.filterAttrs (_: img: img.attr != null) k3dImageRefs);
 
@@ -292,7 +299,7 @@
           # Tier-1-style config-correctness tests for the dev-environment sandbox
           devEnvTests =
             if pkgs.stdenv.isLinux
-            then import ./nixos-tests { inherit pkgs lib stubOverlay deploymentModules; }
+            then import ./nixos-tests { inherit pkgs lib stubOverlay deploymentModules byocController agentHost; }
             else { };
 
           # The contrib sandbox surface, without building an image
@@ -318,12 +325,12 @@
                 };
                 extraModuleFiles = echoOnly;
               };
-              # Reached through the CONFIG
+              # The vendored source tree, reached through the config.
               tree = lib.head (lib.filter
                 (d: lib.hasSuffix "-sandbox-os-src" (toString d))
                 sandboxWithEcho.nixos.config.system.extraDependencies);
 
-              # The image as it actually SHIPS
+              # The image as it ships.
               shipped = import ./pkgs/sandbox-os/image.nix {
                 inherit deploymentModules;
                 inherit lib n2c uvNix;
@@ -336,19 +343,14 @@
               # The baked re-converge list, as the image renders it
               listFile = sandboxWithEcho.nixos.config.environment.etc."scooter/reconverge-modules.json".source;
             in
-            # 1
             assert sandboxWithEcho.nixos.config.environment.etc ? "scooter/contrib-echo";
-            # 2
             assert echoOnly == [ "contrib/echo/sandbox.nix" ];
-            # 3
             assert shipped.nixos.config.programs.scooterModule.extraReconvergeModuleFiles
               == (derive [ ]).treeRelative;
-            # 4
             assert shipped.nixos.config.systemd.services ? "scooter-aws-config";
             assert lib.any (p: (p.pname or p.name or "") == "scooter-aws")
               shipped.nixos.config.environment.systemPackages;
             pkgs.runCommand "contrib-sandbox-check" { } ''
-              # 5
               echo "baked re-converge list:"
               ${pkgs.jq}/bin/jq -r '.[]' ${listFile}
               for p in $(${pkgs.jq}/bin/jq -r '.[]' ${listFile}); do
@@ -358,10 +360,10 @@
                 esac
                 test -f "$p" || { echo "FAIL: $p is in the list but is not a file" >&2; exit 1; }
               done
-              # Both halves are actually in there (jq over an empty
+              # Both halves are in the baked list.
               ${pkgs.jq}/bin/jq -e 'map(endswith("/contrib/aws/sandbox.nix")) | any' ${listFile} >/dev/null
               ${pkgs.jq}/bin/jq -e 'map(endswith("/contrib/echo/sandbox.nix")) | any' ${listFile} >/dev/null
-              # aws's sandbox half embeds the CLI source from its OWN
+              # aws's sandbox half embeds the CLI source from its own tree.
               test -f ${tree}/contrib/aws/scooter_contrib_aws/cli.py
               touch $out
             '';
@@ -376,7 +378,7 @@
           legacyPackages.imageModules = imageModules;
 
           packages = {
-            # The sandbox is the NixOS systemd-PID-1 dev image (the legacy
+            # The NixOS systemd-PID-1 sandbox image.
             default = sandboxOsImage.image;
 
             # `nix build .#options-doc` -> the scooter.* option reference as JSON
@@ -399,7 +401,7 @@
                 };
               }).optionsJSON;
 
-            # `nix build .#db-spec` -> the lib/sql artifacts RENDERED from the
+            # `nix build .#db-spec` -> the lib/sql artifacts rendered from the scooter.db spec.
             db-spec =
               let spec = (mkPlatform { contribs = shippedContribs; }).config.scooter.dbSpec; in
               pkgs.runCommand "db-spec" {
@@ -439,10 +441,10 @@
             conversation-router = conversationRouter;
             byoc-controller = byocController;
             warm-store-controller = warmStoreController;
-            inherit agent; # the ACP agent (goose), exposed for the agent-host
-            inherit marimoMcp; # the isolated marimo MCP server (buildable/inspectable)
+            inherit agent; # the ACP agent (goose)
+            inherit marimoMcp; # the isolated marimo MCP server
 
-            # nix build .#sandbox-os-image -> NixOS systemd-PID-1 dev sandbox with the
+            # nix build .#sandbox-os-image -> the NixOS systemd-PID-1 dev sandbox image.
             sandbox-os-image = builtImages.agent-sandbox-os.package;
 
             # The broker tools (agent-broker / git-credential-broker)
@@ -463,7 +465,7 @@
             # nix build .#scooter-schema  ->  generated SQLAlchemy models (runs pytest)
             scooter-schema = scooterSchema;
 
-            # nix build .#scooter-lib / .#scooter-broker-lib / .#scooter-webhooks-lib -> the shared
+            # nix build .#scooter-lib / .#scooter-broker-lib / .#scooter-webhooks-lib -> the shared Python libraries.
             scooter-lib = scooterLib;
             scooter-broker-lib = scooterBrokerLib;
             scooter-webhooks-lib = scooterWebhooksLib;
@@ -473,8 +475,9 @@
 
             # nix build .#remote-agent  ->  the BYO-Claude container app (bin)
             remote-agent = remoteAgent;
-            # nix build .#remote-agent-image -> BYO-Claude remote agent OCI image (ghcr;
-            # Evaluated alone: the unfree claude CLI keeps it out of the shared tree.
+            remote-agent-echo = remoteAgentEcho;
+            # nix build .#remote-agent-image -> the BYO-Claude remote agent OCI image,
+            # evaluated alone because the unfree claude CLI keeps it out of the shared tree.
             remote-agent-image =
               (evalPlatform {
                 module = import ./pkgs/remote-agent-image/image.nix imageArgs;
@@ -502,19 +505,19 @@
             # nix build .#ui-image -> UI (nginx + static build) OCI
             ui-image = builtImages.agent-sandbox-ui.package;
 
-            # nix build .#contrib-ui-manifest -> the contribs' UI metadata as one
+            # nix build .#contrib-ui-manifest -> the contribs' UI metadata as one manifest.
             contrib-ui-manifest = contribs.uiManifest;
 
-            # nix build .#platform-manifests -> multi-doc YAML for kubectl apply (e2e/local
+            # nix build .#platform-manifests -> multi-doc YAML for kubectl apply on the e2e/local cluster.
             platform-manifests = platform.config.kubernetes.resultYAML;
 
-            # The k3d-registry render + the attr->ref push map for the
+            # The k3d-registry render and the attr->ref push map.
             platform-manifests-k3d = platformK3d.config.kubernetes.resultYAML;
             # The k3d test platform + event backfill enabled
             platform-manifests-k3d-backfill = platformK3dBackfill.config.kubernetes.resultYAML;
             k3d-image-refs = pkgs.writeText "k3d-image-refs.json" (builtins.toJSON k3dPushRefs);
 
-            # ONE attr holding everything .github/scripts/k3d-platform-up.sh needs from this flake
+            # One attr holding everything .github/scripts/k3d-platform-up.sh needs from this flake.
             k3d-ci-deps = pkgs.runCommand "scooter-k3d-ci-deps" { } ''
               mkdir -p $out
               ln -s ${pkgs.writeText "k3d-image-refs.json" (builtins.toJSON k3dPushRefs)} $out/image-refs.json
@@ -525,10 +528,10 @@
               '') (builtins.attrNames k3dPushRefs)}
             '';
 
-            # nix build .#platform-manifests-ghcr -> the same manifests with every image
+            # nix build .#platform-manifests-ghcr -> the same manifests with every image on its ghcr ref.
             platform-manifests-ghcr = platformGhcr.config.kubernetes.resultYAML;
 
-            # `nix build .#example-manifests` -> the YAML the EXAMPLE config renders
+            # `nix build .#example-manifests` -> the YAML the example config renders.
             example-manifests =
               (evalPlatform { module = ./examples/kubenix-config.nix; })
                 .config.kubernetes.resultYAML;
@@ -560,7 +563,7 @@
             contrib-kagi = contribs.packages.kagi.broker;
             contrib-slack = contribs.packages.slack.broker;
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
-            # The shared Python libraries (the lib split).
+            # The shared Python libraries.
             inherit scooterLib scooterBrokerLib scooterWebhooksLib;
           } // devEnvTests // contribSandboxChecks;
         };

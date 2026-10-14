@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
-# Bring up a local Kubernetes cluster for Tier 2/3 tests, install the
-# agent-sandbox controller + CRDs, build & import our images, and apply the
-# platform manifests.
-#
-# Cluster-agnostic: PROVIDER in {existing,k3s,kind,minikube,k3d}. Default k3s.
-# `existing` uses the current kubectl context and skips bootstrap.
-#
-# Idempotent: safe to re-run. Each step checks before acting.
+# Bring up a local Kubernetes cluster for the Tier 2/3 tests, install the
+# agent-sandbox controller and CRDs, build and import the images, and apply the
+# platform manifests. PROVIDER is one of existing, k3s (default), kind, minikube
+# or k3d; `existing` uses the current kubectl context and skips bootstrap. Every
+# step checks before acting, so the script is safe to re-run.
 
 set -euo pipefail
 
 PROVIDER="${1:-k3s}"
 CLUSTER_NAME="agent-sandbox"
-# Where the k3d kubeconfig is written, so callers (just cluster-platform / e2e-cluster)
-# can find it without depending on ~/.kube/config being writable or correct.
+# Where the k3d kubeconfig is written, so callers do not depend on ~/.kube/config.
 K3D_KUBECONFIG="${K3D_KUBECONFIG:-/tmp/scooter-k3d.kubeconfig}"
 NAMESPACE="${SANDBOX_NAMESPACE:-agent-sandbox}"
-# Pin the agent-sandbox release used for the controller + CRDs. v0.5.x serves the
-# v1beta1 API (v1alpha1 deprecated in v0.5.0); the provisioners target v1beta1.
+# The agent-sandbox release used for the controller and CRDs; the provisioners target its v1beta1 API.
 AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v0.5.2}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -26,9 +21,7 @@ log() { echo "[cluster-up] $*"; }
 # ---------------------------------------------------------------------------
 # 1. Cluster
 # ---------------------------------------------------------------------------
-# Refuse to mutate a non-local cluster by accident (e.g. a real EKS/GKE context).
-# These tests apply CRDs + RBAC; only allow that on a clearly-local context, or
-# when the operator explicitly sets ALLOW_NONLOCAL_CLUSTER=1.
+# Refuse to apply CRDs and RBAC to anything but a clearly local context unless ALLOW_NONLOCAL_CLUSTER=1.
 guard_local_context() {
   local ctx; ctx="$(kubectl config current-context 2>/dev/null || echo '')"
   if [ "${ALLOW_NONLOCAL_CLUSTER:-0}" = "1" ]; then return; fi
@@ -70,20 +63,13 @@ bring_up_cluster() {
     minikube) ensure_cmd minikube; minikube status -p "$CLUSTER_NAME" >/dev/null 2>&1 || minikube start -p "$CLUSTER_NAME" ;;
     k3d)
       ensure_cmd k3d
-      # New clusters get the scooter registry attached, so image delivery can use
-      # direct skopeo pushes (see k3dImages in flake.nix) instead of tarball imports.
-      # An EXISTING cluster is left as-is — attaching a registry needs a recreate;
-      # the import path keeps working either way.
+      # New clusters get the scooter registry attached for direct skopeo pushes; an existing cluster is left as is.
       if ! k3d cluster list | grep -q "$CLUSTER_NAME"; then
         k3d registry list 2>/dev/null | grep -q "k3d-scooter-reg.localhost" \
           || k3d registry create scooter-reg.localhost --port 5800
         k3d cluster create "$CLUSTER_NAME" --registry-use k3d-scooter-reg.localhost:5800
       fi
-      # POINT KUBECTL AT IT. k3d merges into ~/.kube/config, but that write FAILS
-      # silently when KUBECONFIG names a root-owned path left over from a k3s setup
-      # (/etc/rancher/k3s/k3s.yaml) — the cluster comes up healthy and every kubectl
-      # afterwards talks to the wrong context, surfacing as "failed to download
-      # openapi" rather than anything about kubeconfig. Write our own and export it.
+      # Write and export a kubeconfig of our own, since k3d's merge into ~/.kube/config can fail silently.
       k3d kubeconfig get "$CLUSTER_NAME" > "$K3D_KUBECONFIG"
       export KUBECONFIG="$K3D_KUBECONFIG"
       log "KUBECONFIG=$KUBECONFIG (k3d; export this for kubectl in your shell)"
@@ -107,16 +93,13 @@ ensure_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "[cluster-up] missing: 
 # 2. agent-sandbox controller + CRDs
 # ---------------------------------------------------------------------------
 install_controller() {
-  guard_local_context  # never apply CRDs/RBAC to a remote cluster by accident
+  guard_local_context
   if kubectl get crd sandboxes.agents.x-k8s.io >/dev/null 2>&1; then
     log "agent-sandbox CRDs already present"
     return
   fi
   log "installing agent-sandbox $AGENT_SANDBOX_VERSION (controller + extensions)"
   local base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}"
-  # v0.5.x renamed the core release asset manifest.yaml -> sandbox.yaml (extensions.yaml
-  # is unchanged). The version bump to v0.5.2 landed without updating these URLs, so
-  # install_controller 404'd — breaking `just test-cluster` at controller install.
   kubectl apply -f "${base}/sandbox.yaml"
   kubectl apply -f "${base}/extensions.yaml"
   kubectl wait --for=condition=Available deploy --all -n agent-sandbox-system --timeout=180s || true
@@ -137,10 +120,7 @@ import_tarball() {
   esac
 }
 
-# Build a flake image target and import it; warn+skip if the build fails.
-# The images are nix2container (no docker-archive output of their own), so we
-# materialize one with `<target>.copyTo -- docker-archive:<file>` and feed that
-# to the provider-agnostic importer above — same tarball path as before.
+# Build a nix2container flake image target into a docker-archive tarball and import it, warning and skipping if the build fails.
 build_and_import() {
   local target="$1" label="$2" tarball
   log "building $label image with Nix..."
@@ -155,10 +135,7 @@ build_and_import() {
 }
 
 import_images() {
-  # The NixOS dev-environment sandbox (systemd PID 1). The pkgs/sandbox-image
-  # generic image was retired (#10); the OS image is the only sandbox now — and it
-  # ALWAYS has the local-overlay writable Nix store on (the overlay-store cluster
-  # tests default OVERLAY_IMAGE to this same agent-sandbox-os image).
+  # The NixOS dev-environment sandbox, with the local-overlay writable Nix store on.
   build_and_import ".#sandbox-os-image" "NixOS dev sandbox (overlay store always on)"
 }
 

@@ -68,13 +68,13 @@ func TestLogEnvelope(t *testing.T) {
 	if _, ok := l["ts"]; !ok {
 		t.Error("missing ts")
 	}
-	// msg must be the CONSTANT — values live in fields, so the line stays groupable.
+	// msg is the constant and values live in fields.
 	if !strings.Contains(fmt.Sprint(l["conversations"]), "3") {
 		t.Errorf("conversations field missing: %v", l)
 	}
 }
 
-// An empty id must be OMITTED, not logged as "", or a conversation_id!="" query breaks.
+// An empty id must be omitted, not logged as "".
 func TestConvAttrOmitsEmpty(t *testing.T) {
 	lines := captureJSON(t, func() { logger("proxy").Info("x", convAttr("")) })
 	if _, present := lines[0]["conversation_id"]; present {
@@ -143,7 +143,7 @@ func TestFormatDefaultsToJSONInCluster(t *testing.T) {
 	}
 }
 
-// --- the false-error bug -------------------------------------------------------
+// --- proxy error classification ------------------------------------------------
 
 func TestClassifyProxyError(t *testing.T) {
 	live := context.Background()
@@ -167,7 +167,7 @@ func TestClassifyProxyError(t *testing.T) {
 		{"client reset the connection", syscall.ECONNRESET, live, live, proxyErrClientGone, true},
 		{"broken pipe writing to client", syscall.EPIPE, live, live, proxyErrClientGone, true},
 
-		// The subtlety: shutdown is NOT a client disconnect, even though both contexts are done.
+		// Shutdown is not a client disconnect, even though both contexts are done.
 		{"server shutting down", context.Canceled, cancelled(), cancelled(), proxyErrShutdown, false},
 
 		// Genuine failures keep their error level.
@@ -189,7 +189,7 @@ func TestClassifyProxyError(t *testing.T) {
 	}
 }
 
-// The regression this fixes: a client leaving an SSE stream must NOT log at error.
+// A client leaving an SSE stream must not log at error.
 func TestClientDisconnectIsNotLoggedAsError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done() // hold the stream open until the caller goes away
@@ -234,7 +234,7 @@ func TestClientDisconnectIsNotLoggedAsError(t *testing.T) {
 	if got, _ := stream["reason"].(string); got != "client_disconnected" {
 		t.Errorf("reason = %q, want client_disconnected", got)
 	}
-	// The whole point of the migration: the line is attributable to a conversation.
+	// The line is attributable to a conversation.
 	if got, _ := stream["conversation_id"].(string); got != "conv-42" {
 		t.Errorf("conversation_id = %q, want conv-42", got)
 	}
@@ -324,21 +324,18 @@ func TestDialFailureRetriesViaFallbackAtWarn(t *testing.T) {
 func TestResolveTargetForReturnsConvID(t *testing.T) {
 	cfg := config{namespace: "agent-sandbox", upstreamPort: 8080, clusterIPService: "agent-host"}
 	fallback := FallbackURL(cfg.clusterIPService, cfg.namespace, cfg.upstreamPort)
-	cache := NewOwnershipCache()
-	cache.set("conv-assigned", "10.42.0.2")
+	res := liveAssigner(newMemStore("conv-assigned"), pods("pod-a", "10.42.0.2"))
 
-	// scoped + assigned -> id and owner IP
-	id, u := resolveTargetFor(cfg, cache, httptest.NewRequest("GET", "/conversations/conv-assigned/cancel", nil), fallback)
+	id, u, _ := resolveTargetFor(cfg, res, httptest.NewRequest("GET", "/conversations/conv-assigned/cancel", nil), fallback)
 	if id != "conv-assigned" || u.String() != "http://10.42.0.2:8080" {
 		t.Errorf("got (%q,%q)", id, u.String())
 	}
-	// scoped but UNASSIGNED -> the id is still known (so logs attribute it) with the fallback
-	id, u = resolveTargetFor(cfg, cache, httptest.NewRequest("GET", "/conversations/conv-new/cancel", nil), fallback)
-	if id != "conv-new" || u.String() != fallback.String() {
-		t.Errorf("unassigned: got (%q,%q)", id, u.String())
+	// No such row: the id is still logged.
+	id, u, _ = resolveTargetFor(cfg, res, httptest.NewRequest("GET", "/conversations/conv-gone/cancel", nil), fallback)
+	if id != "conv-gone" || u.String() != fallback.String() {
+		t.Errorf("unknown: got (%q,%q)", id, u.String())
 	}
-	// non-scoped -> no id at all
-	if id, _ := resolveTargetFor(cfg, cache, httptest.NewRequest("GET", "/healthz", nil), fallback); id != "" {
+	if id, _, _ := resolveTargetFor(cfg, res, httptest.NewRequest("GET", "/healthz", nil), fallback); id != "" {
 		t.Errorf("healthz id = %q, want empty", id)
 	}
 }

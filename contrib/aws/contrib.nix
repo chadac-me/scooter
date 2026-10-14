@@ -1,4 +1,4 @@
-# What aws IS. Deployment: ./deployment.nix. Sandbox: ./sandbox.nix.
+# What aws is; its deployment half is ./deployment.nix and its sandbox half ./sandbox.nix.
 { lib, ... }:
 
 let
@@ -96,24 +96,19 @@ in
     config = {
       src = ./.;
 
-      # Both halves live here now (#599). The service half needed two things a
-      # contrib could not do when #617 moved the sandbox half: reach the authorizer
-      # without constructing one (BrokerContext, #624) and read the shared broker DB
-      # without reassembling it (StoreConfig on the surface, #622).
+      # The broker service half.
       services.broker = {
         enable = true;
-        # boto3 came with the provider — it was in the broker app's closure solely
-        # for this integration's IAM/STS calls.
+        # boto3 for the IAM/STS calls.
         pythonDeps = ps: [ ps.boto3 ];
       };
 
       sandbox.module = ./sandbox.nix;
       skills."scooter-aws.md" = ./skills/scooter-aws.md;
 
-      # A grant needs a human to say yes. Only the UI half is here (build-time metadata
-      # for the contrib manifest); the defaults — grey "approve", "an admin must" — are
-      # what aws wants, so the empty set is the declaration. Where its verbs live on the
-      # broker is deployment config: see scooter.approvals in ./deployment.nix.
+      # A grant needs a human to say yes; only the UI half is here, with the defaults
+      # being what aws wants, and the broker verbs are deployment config under
+      # scooter.approvals in ./deployment.nix.
       approvals = { };
     };
   };

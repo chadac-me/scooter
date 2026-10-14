@@ -1,7 +1,7 @@
 /**
- * Header theme toggle: one ghost icon button that cycles light -> dark -> system.
- * The icon shows the CURRENT mode (sun / moon / monitor). Persists via themeStore;
- * "system" follows the OS live (see theme.ts). PR #465.
+ * Header theme toggle: one ghost icon button that cycles light -> dark -> system,
+ * with the icon showing the current mode. Persists via themeStore; "system" follows
+ * the OS live (see theme.ts).
  */
 import { Sun, Moon, Monitor } from "lucide-react";
 

@@ -1,6 +1,4 @@
-/**
- * Subagent creation through the router, the one creator (PR #726).
- */
+/** Subagent creation through the conversation router, the one creator. */
 
 import { formatError, logger } from "../log.js";
 
@@ -14,7 +12,7 @@ export interface CreatedSubagent {
   sandboxRef?: string;
 }
 
-/** REJECTS rather than let a caller mint its own id. */
+/** Rejects rather than let a caller mint its own id. */
 export type SubagentCreator = (
   parentId: string,
   args: { title?: string; model?: string },

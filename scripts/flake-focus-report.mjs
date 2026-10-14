@@ -1,49 +1,29 @@
 #!/usr/bin/env node
 // flake-focus-report.mjs — turn a Playwright JSON report from a `flake focus` CI
-// run into the markdown verdict comment posted on the PR (see the `flake-focus`
-// / `flake-focus-full` jobs in .github/workflows/ci.yml).
-//
-// The job answers ONE question — "is the flake this PR claims to fix actually
-// fixed?" — and the exit status alone cannot answer it:
-//
-//   * In the CONTENTION path (`flake-specs:`) the job runs whole spec FILES, so a
-//     red run may be some OTHER test failing and a green run may never have
-//     executed the flaky test at all (a `flake-test:` pattern matching nothing
-//     still exits 0). Both read as a verdict on the flake; neither is one.
-//   * A green run says "no reproduction in N attempts", which is weaker than
-//     "fixed" and weaker still on the fast target (no sandbox pods -> none of the
-//     cold-boot/contention machinery the nightly full-target flakes live in).
-//
-// So we resolve the `flake-test:` pattern against the report, count the
-// repetitions of THAT test, and state the verdict — including `not-run`, which
-// the caller turns into a job failure so a check that ran nothing cannot pass.
+// run into the markdown verdict section posted on the PR (see the `flake-focus` /
+// `flake-focus-full` jobs in .github/workflows/ci.yml). The exit status alone
+// cannot say whether the targeted test passed, failed or ever ran, so the
+// `flake-test:` pattern is resolved against the report and the verdict names
+// `not-run` explicitly, which the caller turns into a job failure.
 //
 // Usage:
 //   node scripts/flake-focus-report.mjs <report.json> --pattern <p> [options]
-//     --pattern <p>     the PR's `flake-test:` line (a playwright -g pattern)
+//     --pattern <p>      the PR's `flake-test:` line (a playwright -g pattern)
 //     --target fast|full
 //     --mode targeted|contention
-//     --specs "<a> <b>" the `flake-specs:` files, when mode=contention
-//     --run-url <url>   link back to the workflow run (artifacts/traces)
-//     --suggest-full    add the "this was a full-target flake?" nudge on green
-//     --baseline <f>    the CONTROL run's report: the same test, same budget, on
-//                       the PR's base commit (see compareToBaseline)
+//     --specs "<a> <b>"  the `flake-specs:` files, when mode=contention
+//     --run-url <url>    link back to the workflow run
+//     --suggest-full     add the full-target nudge on green
+//     --baseline <f>     the control run's report (same test, same budget, on the base)
 //     --baseline-ref <r> how to name that base in the comment, e.g. `main@abc1234`
+//     --history <f>      a nightly e2e-full report (repeatable); --history-label <l> names it
 //
-// Output: this target's SECTION of the shared flake-focus comment on stdout
-// (scripts/ci-report.mjs places it as one section of the shared CI comment). When
-// $GITHUB_OUTPUT is set it also writes `verdict`/`runs`/`failed`/`matched` and
-// `control`/`base_runs`/`base_failed` there — the job gates on `verdict`.
+// With $GITHUB_OUTPUT set it also writes `verdict`/`runs`/`failed`/`matched` and
+// `control`/`base_runs`/`base_failed` there.
 
 import { readFileSync, appendFileSync } from "node:fs";
 
-/**
- * Playwright's `-g` takes a REGEX, not a literal, and matches it
- * case-insensitively. Mirror that so this report agrees with what the run
- * actually selected. A malformed pattern falls back to a literal substring
- * match: reporting "matched nothing" for a regex typo would send someone
- * hunting a phantom missing test.
- */
+/** Mirror playwright's `-g` (a case-insensitive regex), falling back to a literal substring match for a malformed pattern. */
 export function patternToRegExp(pattern) {
   const delimited = /^\/(.*)\/([a-z]*)$/.exec(pattern);
   try {
@@ -58,12 +38,9 @@ export function patternToRegExp(pattern) {
 const FAILED = new Set(["failed", "timedOut", "interrupted"]);
 
 /**
- * Flatten the report's nested suites into one record per test TITLE.
- *
- * --repeat-each=N does not nest N results under one spec: it emits N sibling
- * `specs` entries with the SAME title (one per repetition). Aggregating by title
- * is what turns that back into "ran 20×, failed 3" — reporting each entry
- * separately would print twenty identical 1-run rows and no verdict.
+ * Flatten the report's nested suites into one record per test title; --repeat-each=N
+ * emits N sibling `specs` entries with the same title, so aggregating by title is
+ * what yields "ran 20×, failed 3".
  */
 export function collectSpecs(report) {
   const byTitle = new Map();
@@ -72,8 +49,7 @@ export function collectSpecs(report) {
     const f = suite.file || file;
     for (const spec of suite.specs || []) {
       const fullTitle = [...path, spec.title || ""].filter(Boolean).join(" › ");
-      // Count RESULTS, not tests: with retries enabled one repetition can carry
-      // several, and each is a run of the test.
+      // Count results, not tests: with retries one repetition can carry several.
       const runs = (spec.tests || [])
         .flatMap((t) => t.results || [])
         .filter((r) => r.status !== "skipped");
@@ -112,15 +88,9 @@ function errorText(result) {
 }
 
 /**
- * Resolve the pattern against the report.
- *
- * verdict:
- *   not-run    — the pattern matched no executed test. The check proves NOTHING;
- *                the caller fails the job on this.
- *   reproduced — the targeted test failed at least one repetition.
- *   fixed      — every repetition of the targeted test passed. (Named for what a
- *                reader wants to know; the prose is careful to say "did not
- *                reproduce in N attempts".)
+ * Resolve the pattern against the report; verdict is `not-run` (the pattern matched
+ * no executed test, which the caller fails the job on), `reproduced` (at least one
+ * repetition failed) or `fixed` (every repetition passed).
  */
 export function summarize(report, pattern) {
   const re = patternToRegExp(pattern);
@@ -132,12 +102,10 @@ export function summarize(report, pattern) {
   return {
     pattern,
     matched: executed,
-    // A pattern can match a test that exists but was entirely skipped — same
-    // outcome for our purposes (nothing was proven), so keep it visible.
+    // A matched test that was entirely skipped proves nothing either, so keep it visible.
     matchedButSkipped: matched.filter((s) => s.runs === 0).length,
     executedSpecs: specs.filter((s) => s.runs > 0).length,
-    // Failures of OTHER tests: in contention mode they fail the job without
-    // saying anything about the flake, so they get their own section.
+    // Failures of other tests get their own section, since they say nothing about the flake.
     others: specs.filter((s) => !matched.includes(s) && s.failed > 0),
     runs,
     failed,
@@ -146,18 +114,10 @@ export function summarize(report, pattern) {
 }
 
 /**
- * The targeted test's record across a WINDOW of recent `e2e-full` runs on the
- * default branch (the same artifacts `e2e-full-collect` diffs against).
- *
- * This is NOT a control and must never be used as one. A nightly runs the whole
- * suite, so its rate carries full-suite contention; the focused run above runs
- * the test alone (or with `flake-specs:`), which is quieter. Scoring a quiet
- * clean run against a contended base rate overstates significance in exactly
- * the direction that manufactures a false "fixed" — so the window is reported
- * as prior evidence, and the matched control stays the thing that decides.
- *
- * `ran` counts only runs that EXECUTED the spec: a lost shard omits its specs
- * from the merge, and counting that as a pass invents a green run.
+ * The targeted test's record across a window of recent `e2e-full` runs on the
+ * default branch. This is prior evidence, not a control, since a nightly's rate
+ * includes full-suite contention; `ran` counts only runs that executed the spec,
+ * since a lost shard omits its specs from the merge.
  */
 export function summarizeHistory(reports, pattern, labels = []) {
   const re = patternToRegExp(pattern);
@@ -169,6 +129,10 @@ export function summarizeHistory(reports, pattern, labels = []) {
       label: labels[i] || `−${reports.length - i}`,
       ran: matched.length > 0,
       failed: matched.some((s) => s.failed > 0),
+      // A nightly is a sweep (every test ×5), so a night carries a rate, not just a
+      // verdict; a one-pass run reports 0/1 or 1/1 and renders as before.
+      failedRuns: matched.reduce((n, s) => n + s.failed, 0),
+      totalRuns: matched.reduce((n, s) => n + s.runs, 0),
     };
   });
   const executed = runs.filter((r) => r.ran);
@@ -182,38 +146,21 @@ export function summarizeHistory(reports, pattern, labels = []) {
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /**
- * The CONTROL: the same test, same repetition budget, on the PR's base commit.
- *
- * Without it "0 failures in 20 runs" is unfalsifiable — a test that fires once
- * in 200 runs produces exactly that result on a branch that fixed nothing. The
- * control tells us whether the experiment could have detected the flake at all:
- *
- *   strong       — it fired on the base and not here. The budget was adequate and
- *                  the behaviour changed.
- *   inconclusive — it fired on NEITHER. The run says nothing about the fix; the
- *                  flake is just rarer than the budget. (Reported loudly, but not
- *                  a failure: the fix may well be right, and demanding a
- *                  reproduction would block correct fixes for rare flakes.)
- *   worse        — it failed MORE here than on the base. Not proof of a
- *                  regression at these sample sizes, but never call that "fixed".
- *   none         — no usable control (the pattern matches nothing on the base —
- *                  a renamed test — or the control run produced no report).
+ * The control: the same test with the same repetition budget on the PR's base
+ * commit, without which "0 failures in 20 runs" is unfalsifiable. kind is `strong`
+ * (fired on the base, not here), `inconclusive` (fired on neither), `worse` (failed
+ * more here), `weak` (fewer failures here) or `none` (no usable control).
  */
 export function compareToBaseline(summary, baseline) {
   if (!baseline || baseline.runs === 0)
     return {
       kind: "none",
-      // WHY there is no control matters: "the test was renamed" and "the control
-      // run's stack never booted" are different problems, and guessing the first
-      // sent me hunting a renamed test when a Postgres port collision had killed
-      // the run. The base's report tells us which — it either executed other
-      // tests (so the pattern is the problem) or executed nothing at all.
+      // The base's report says whether the pattern or the control's stack was the problem.
       noneReason: !baseline ? "not-attempted" : baseline.executedSpecs > 0 ? "no-match" : "no-tests",
     };
   const baseRate = baseline.failed / baseline.runs;
-  // P(zero failures in `summary.runs` draws) if this branch still flaked at the
-  // base's observed rate. Assumes independent runs — repetitions share a worker
-  // and a server, so treat it as an order of magnitude, not a p-value.
+  // P(zero failures in `summary.runs` draws) at the base's observed rate; repetitions
+  // share a worker, so treat it as an order of magnitude.
   const pAllCleanAtBaseRate = (1 - baseRate) ** summary.runs;
   return {
     kind:
@@ -228,10 +175,8 @@ export function compareToBaseline(summary, baseline) {
     baseFailed: baseline.failed,
     baseRate,
     pAllCleanAtBaseRate,
-    // Did the base fire OFTEN enough that a clean run here means something? A base
-    // that failed 2/20 leaves a ~12% chance of 20 clean runs by luck alone — a
-    // control that weak must not be reported as "the behaviour changed", or the
-    // comment overclaims in exactly the way this whole job exists to prevent.
+    // A base that fired rarely (2/20 leaves ~12% odds of 20 clean runs) must not be
+    // reported as a behaviour change.
     strength: pAllCleanAtBaseRate <= 0.05 ? "tight" : "loose",
   };
 }
@@ -254,8 +199,8 @@ export function renderMarkdown(summary, opts = {}) {
   const targetLabel = target === "full" ? "full target — real k3d cluster" : "fast target — fake stack";
   const control = compareToBaseline(summary, baseline);
   const baseRefLabel = baselineRef ? ` (\`${baselineRef}\`)` : "";
-  // No marker here: this body is one SECTION of the shared flake-focus comment,
-  // identified by the tags scripts/comment-sections.mjs wraps around it.
+  // No marker: this body is one section of the shared comment, tagged by
+  // scripts/comment-sections.mjs.
   const L = [];
 
   if (summary.verdict === "not-run") {
@@ -264,7 +209,7 @@ export function renderMarkdown(summary, opts = {}) {
       `\`flake-test: ${summary.pattern}\` matched **no executed test**, so this check proves nothing about the flake — it passed by running ${summary.matchedButSkipped > 0 ? "only skipped tests" : "other tests"}.`,
       "",
     );
-    // "distinct": repetitions are aggregated by title, so 6 tests ×5 is 6 here.
+    // Repetitions are aggregated by title, so 6 tests ×5 is 6 here.
     L.push(
       `- Distinct tests executed in this run: **${summary.executedSpecs}**, none matching the pattern.`,
     );
@@ -285,8 +230,7 @@ export function renderMarkdown(summary, opts = {}) {
       "",
     );
   } else if (control.kind === "inconclusive") {
-    // Green run, but the control proves the run could not have detected the
-    // flake — lead with that rather than a ✅ someone will read as "fixed".
+    // Lead with the control's failure rather than a ✅ a reader would take as "fixed".
     L.push(
       `### ⚠️ flake focus (${target}) — clean, but the control did not reproduce either`,
       "",
@@ -335,9 +279,8 @@ export function renderMarkdown(summary, opts = {}) {
           : `⚠️ **The control is too weak to conclude much.** The base only failed ${control.baseFailed}/${control.baseRuns} (**${pct(control.baseRate)}**), so even if this branch still flaked at exactly that rate, ${plural(summary.runs, "clean run")} in a row would happen about **${pct(control.pAllCleanAtBaseRate)}** of the time — luck explains this result almost as well as a fix does. Raise the repetition budget until the base fails often enough to make a clean run here meaningful.`,
       );
     else if (control.kind === "inconclusive")
-      // The remedy differs by target, and offering the wrong one wastes a cycle:
-      // telling a full run to "add the e2e-full-flake-check label" names the
-      // label it is already running under.
+      // The remedy differs by target: a full run is already under the label the fast
+      // nudge would name.
       L.push(
         target === "full"
           ? `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". This is already the strongest target there is, so the budget is the only knob left: raise \`FULL_REPEAT_TARGETED\` / \`FULL_REPEAT_CONTENTION\` in the \`flake-focus-full\` job, or add \`flake-specs:\` so the test runs under cross-spec contention rather than alone.`
@@ -363,24 +306,25 @@ export function renderMarkdown(summary, opts = {}) {
     );
   }
 
-  // Prior evidence from the nightly window. Cheap (downloaded artifacts, no
-  // cluster) and it answers a question the control cannot: whether the flake is
-  // live on main at all right now.
+  // Prior evidence from the nightly window: whether the flake is live on main at all.
   if (history && history.ran > 0) {
-    const seq = history.runs
-      .map((r) => (!r.ran ? "`–`" : r.failed ? "**F**" : "`·`"))
-      .join(" ");
+    // A night that repeated the spec shows its rate; a single pass stays F / ·.
+    const cell = (r) => {
+      if (!r.ran) return "`–`";
+      if (r.totalRuns > 1)
+        return r.failed ? `**${r.failedRuns}/${r.totalRuns}**` : `\`0/${r.totalRuns}\``;
+      return r.failed ? "**F**" : "`·`";
+    };
+    const seq = history.runs.map(cell).join(" ");
     L.push(
       "",
       `#### On \`${historyRef}\` recently — ${history.failed}/${history.ran} nightly ${history.ran === 1 ? "run" : "runs"}`,
       "",
-      `${seq}  <sub>oldest → newest; \`–\` = the spec did not run (lost shard)</sub>`,
+      `${seq}  <sub>oldest → newest; a cell is that night's failures over repetitions (\`F\` / \`·\` for a night that ran one pass); \`–\` = the spec did not run (lost shard)</sub>`,
       "",
     );
-    // The case that produced the verdicts this job exists to prevent: the
-    // control saw nothing, so the run reads clean, while the nightly is still
-    // failing the same spec. That is a control which did not recreate the
-    // conditions — not evidence of a fix.
+    // A clean control while the nightly still fails the spec is an unrepresentative
+    // control, not a fix.
     if (history.failed > 0 && (control.kind === "inconclusive" || control.kind === "none"))
       L.push(
         `⚠️ **This flake is live on \`${historyRef}\` but the control did not reproduce it.** That makes the control unrepresentative of the conditions the flake needs, not the flake fixed. Treat the clean run above as *no reproduction under these conditions* and raise the budget or add \`flake-specs:\` until the control fires too.`,
@@ -398,8 +342,8 @@ export function renderMarkdown(summary, opts = {}) {
     L.push("", "<details><summary>Failure output</summary>", "");
     for (const s of failing) {
       L.push(`**\`${s.fullTitle}\`** — ${plural(s.errors.length, "failed repetition")}`, "", "```");
-      // One excerpt per distinct error: 20 repetitions of the same timeout add
-      // nothing, and a DIFFERENT error hiding among them is the thing worth seeing.
+      // One excerpt per distinct error, so a different error among identical timeouts
+      // is visible.
       for (const e of [...new Set(s.errors)].slice(0, 3)) L.push(e, "");
       L.push("```", "");
     }
@@ -439,8 +383,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--suggest-full") out.suggestFull = true;
-    // REPEATABLE: the nightly baseline is a window of runs, so these accumulate
-    // instead of overwriting. Every other flag keeps last-wins.
+    // Repeatable: the nightly window is several runs, so these accumulate.
     else if (a === "--history" || a === "--history-label") {
       const k = a === "--history" ? "history" : "historyLabel";
       (out[k] ??= []).push(argv[++i]);
@@ -463,9 +406,8 @@ function main(argv) {
   try {
     summary = summarize(JSON.parse(readFileSync(file, "utf8")), pattern);
   } catch (err) {
-    // No/!readable report = the run died before writing one (crash, cancel, OOM).
-    // Say so plainly rather than rendering a verdict off missing data; the run
-    // step has already failed the job, so this only has to be honest.
+    // No readable report means the run died before writing one; say so rather than
+    // render a verdict off missing data.
     const body = [
       `### ⚠️ flake focus (${args.target || "fast"}) — no report to summarise`,
       "",
@@ -477,9 +419,8 @@ function main(argv) {
     return;
   }
 
-  // The control run is optional and BEST-EFFORT: it is expected to fail tests
-  // (that is the point), it may not have run at all, and its report may be
-  // missing. None of that may take down the verdict for the PR's own run.
+  // The control is best-effort: it is expected to fail tests, may not have run, and
+  // its report may be missing.
   let baseline = null;
   if (args.baseline) {
     try {
@@ -489,8 +430,7 @@ function main(argv) {
     }
   }
 
-  // The nightly window, same best-effort contract as the control: an expired or
-  // half-downloaded artifact must not take down the verdict for the PR's run.
+  // The nightly window is best-effort too.
   let history = null;
   if (args.history?.length) {
     const reports = [];
@@ -500,7 +440,7 @@ function main(argv) {
         reports.push(JSON.parse(readFileSync(f, "utf8")));
         labels.push(args.historyLabel?.[i] ?? "");
       } catch {
-        // Skip this run rather than the window: four good nightlies still inform.
+        // Skip this run rather than the window.
       }
     }
     if (reports.length) history = summarizeHistory(reports, pattern, labels);

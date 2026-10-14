@@ -1,4 +1,4 @@
-"""Post/update messages on Slack."""
+"""Post and update messages on Slack."""
 
 import logging
 
@@ -21,12 +21,9 @@ def _headers() -> dict[str, str]:
 
 
 async def post_slack_message(channel: str, text: str, thread_ts: str | None = None) -> str | None:
-    """Post a message to Slack. Returns message timestamp or None."""
+    """Post a message to Slack, returning its timestamp or None."""
     try:
-        # unfurl_* off: Scooter's messages are status/link notices (e.g. the "on it —
-        # follow along: <chat url|View conversation>" and PR links). Slack's default
-        # link/media unfurl renders a large, useless preview card that eats vertical
-        # space — suppress it for every bot message.
+        # Unfurl is off because Slack's preview card is useless on a status or link notice.
         payload: dict = {
             "channel": channel,
             "text": text,
@@ -82,8 +79,6 @@ async def update_slack_message(channel: str, ts: str, text: str) -> None:
             resp = await client.post(
                 f"{SLACK_API}/chat.update",
                 headers=_headers(),
-                # unfurl off (as in post_slack_message) — this edits the same
-                # status/link messages, so keep the preview suppressed on updates too.
                 json={
                     "channel": channel,
                     "ts": ts,
@@ -224,5 +219,5 @@ async def get_bot_user_id() -> str | None:
 
 
 async def reply_in_thread(channel: str, thread_ts: str, text: str) -> str | None:
-    """Reply in a Slack thread. Returns message timestamp or None."""
+    """Reply in a Slack thread, returning the message timestamp or None."""
     return await post_slack_message(channel, text, thread_ts=thread_ts)

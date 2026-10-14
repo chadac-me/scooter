@@ -1,8 +1,7 @@
 /**
- * Tier 1 contract test — SessionManager lifecycle with fake provisioner + store.
- *
- * Proves: start (cold sandbox), prompt, suspend (keep handle), revive (replay
- * event log), end. RED against Design interfaces.
+ * Contract test for the SessionManager lifecycle against a fake provisioner and
+ * store: start (cold sandbox), prompt, suspend (keep the handle), revive (replay
+ * the event log), end.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -56,23 +55,16 @@ describe("SessionManager", () => {
     const conv = await sessions.start("thread-1");
 
     expect(provisioner.create).toHaveBeenCalledOnce();
-    // create(shortDnsSafeId, FULL threadId): the 1st arg names k8s resources (a
-    // short hash), the 2nd is the full conversation id the shareable
-    // CONVERSATION_URL (?thread=<id>) must use — else the agent's link resolves to
-    // the wrong conversation and permission prompts land in the wrong place.
+    // create(shortDnsSafeId, fullThreadId): the first arg names k8s resources and the second is the conversation id the shareable CONVERSATION_URL must use.
     const [nameId, urlThread] = (provisioner.create as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(urlThread).toBe("thread-1");
-    expect(nameId).not.toBe("thread-1"); // the NAME id is the short hash, not the full id
+    expect(nameId).not.toBe("thread-1"); // the name id is the short hash, not the full id
     expect(conv.status).toBe("running");
     expect(conv.sandbox.name).toMatch(/^conv-/);
   });
 
   it("registers the conversation BEFORE the (slow) sandbox provisioning finishes", async () => {
-    // The 'new chat' 404 race: the UI POSTs /agui then IMMEDIATELY opens
-    // events.integrity, which sessions.get(id)s. If start() only registers the
-    // conversation AFTER awaiting provisioning (seconds), that fetch 404s and the
-    // UI gives up → a new chat looks broken. So the conversation must be
-    // get()-able from the moment start() begins provisioning.
+    // The UI opens events.integrity right after POST /agui, so the conversation must be get()-able from the moment start() begins provisioning.
     let releaseCreate!: () => void;
     const gate = new Promise<void>((r) => { releaseCreate = r; });
     const provisioner: SandboxProvisioner = {
@@ -85,7 +77,7 @@ describe("SessionManager", () => {
 
     const startP = sessions.start("thread-race"); // provisioning is gated (in flight)
     await Promise.resolve(); // let start() run up to the awaited create()
-    // The UI would hit events.integrity now — the conversation MUST already exist.
+    // The UI would hit events.integrity now, so the conversation must already exist.
     expect(sessions.get("thread-race"), "conversation must be registered before provisioning completes").toBeTruthy();
     expect(sessions.get("thread-race")?.status).toBe("running");
 
@@ -109,7 +101,7 @@ describe("SessionManager", () => {
   it("suspend() publishes phase=Suspended to the CR when we OWN the conversation", async () => {
     const setPhase = vi.fn(async () => {});
     const registry = { register: vi.fn(async () => {}), setPhase };
-    // A guard that always allows (owner). suspend → setPhase("Suspended"); revive → "Assigned".
+    // A guard that always allows, as the owner.
     const guard = { observe: () => {}, canWrite: () => true };
     const sessions = createSessionManager({
       provisioner: fakeProvisioner(), store: inMemoryStore(),
@@ -137,9 +129,6 @@ describe("SessionManager", () => {
   });
 
   it("revive() RE-REGISTERS the CR (self-heals a conversation whose CR was lost/never made)", async () => {
-    // Record the ORDER of register vs the (slow) sandbox provisioning. Asserting that
-    // register merely happened is tautological — revive() also registers a sandboxRef,
-    // so it fires either way. What matters is that it happens BEFORE provisioning.
     const order: string[] = [];
     const register = vi.fn(async () => {
       order.push("register");
@@ -152,8 +141,7 @@ describe("SessionManager", () => {
     await sessions.suspend(conv.id);
     register.mockClear();
     await sessions.revive(conv.id);
-    // revive() re-registers (idempotent 409-swallow makes it a no-op when the CR exists) so a
-    // CR lost across a restart/rollout is re-created — visible in kubectl + routable again.
+    // revive() re-registers idempotently so a CR lost across a restart is re-created.
     expect(register).toHaveBeenCalledWith(conv.id, expect.objectContaining({ sandboxRef: expect.any(String) }));
   });
 
@@ -173,32 +161,26 @@ describe("SessionManager", () => {
   });
 
   it("revive() registers activity so the idle sweep does NOT immediately re-suspend it", async () => {
-    // The bug: a suspended conversation's lastActivityAt is stale (from before the
-    // suspend), so a UI "Start sandbox" (prompt-less revive) would be reclaimed by the
-    // very next idle sweep. revive() must touch() the entry so the freshly-started pod
-    // gets the full idle window.
+    // revive() must touch() the entry so the freshly started pod gets the full idle window.
     const provisioner = fakeProvisioner();
     const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
     const conv = await sessions.start("thread-1");
     await sessions.suspend(conv.id);
 
-    // Revive "now"; a sweep with a 60s idle window run right after must NOT suspend it.
+    // A sweep with a 60s idle window run right after the revive must not suspend it.
     const revived = await sessions.revive(conv.id);
     const reviveAt = revived.lastActivityAt;
     const swept = await sessions.sweepIdle(60_000, reviveAt + 1_000); // 1s later
     expect(swept).not.toContain(conv.id);
     expect(sessions.get(conv.id)?.status).toBe("running");
 
-    // But it IS eligible once genuinely idle past the window.
+    // It is eligible once genuinely idle past the window.
     const sweptLater = await sessions.sweepIdle(60_000, reviveAt + 61_000);
     expect(sweptLater).toContain(conv.id);
   });
 
   it("sweepIdle does NOT suspend a conversation with a RUNNING background job", async () => {
-    // A long-running background job (run_background) is a detached in-pod process; suspend
-    // drops the pod → the process is SIGTERM'd mid-run. lastActivityAt isn't bumped while a
-    // job runs, so an idle-but-busy conversation would be swept. sweepIdle must consult the
-    // job state (hasRunningBackgroundJob) and keep the pod up while a job is running.
+    // lastActivityAt is not bumped while a background job runs, so sweepIdle must consult hasRunningBackgroundJob to keep the pod up.
     const provisioner = fakeProvisioner();
     let jobRunning = true;
     const sessions = createSessionManager({
@@ -209,19 +191,17 @@ describe("SessionManager", () => {
     const conv = await sessions.start("thread-1");
     const idleAt = sessions.get(conv.id)!.lastActivityAt + 61_000; // well past a 60s window
 
-    // Job still running → NOT swept, even though it's idle by lastActivityAt.
+    // The job is still running, so it is not swept despite being idle by lastActivityAt.
     expect(await sessions.sweepIdle(60_000, idleAt)).not.toContain(conv.id);
     expect(sessions.get(conv.id)?.status).toBe("running");
 
-    // Job finishes → now eligible for suspend.
+    // Once the job finishes it is eligible for suspend.
     jobRunning = false;
     expect(await sessions.sweepIdle(60_000, idleAt)).toContain(conv.id);
   });
 
   it("sweepIdle suspends normally when the job check is absent or fails (fail-open)", async () => {
-    // The job check is best-effort: without the hook (jobs disabled) OR when it throws
-    // (an exec/probe error), suspend still proceeds — a job check must never PIN a pod up
-    // forever on an error.
+    // The job check is best-effort, so a missing or throwing hook must never pin a pod up.
     const provisioner = fakeProvisioner();
     const sessions = createSessionManager({
       provisioner,
@@ -236,9 +216,7 @@ describe("SessionManager", () => {
   });
 
   it("revive() calls onRevived (with a live bridge) so index.ts can re-raise dropped interrupts", async () => {
-    // A pod rollout loses in-memory approval interrupts; index.ts wires onRevived to
-    // re-query the broker for PENDING requests and re-raise them. Assert the hook
-    // fires on revive with the conversation id, AFTER the bridge is live.
+    // index.ts wires onRevived to re-raise pending broker approvals, so the hook must fire with the conversation id once the bridge is live.
     const revived: string[] = [];
     const bridgeFactory = () =>
       ({
@@ -281,8 +259,7 @@ describe("SessionManager", () => {
     const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore(), bridgeFactory });
     const conv = await sessions.start("thread-1");
 
-    // The watcher injects with PRIORITY_INTERRUPT + "thinking" so it preempts idle
-    // thinking but never kills an in-flight tool call.
+    // The watcher injects with a priority and the "thinking" policy so it preempts idle thinking but never kills an in-flight tool call.
     await sessions.prompt(conv.id, "[System] job x finished", undefined, 10, "thinking");
 
     expect(optsSeen.at(-1)).toEqual({ priority: 10, interrupt: "thinking" });
@@ -305,13 +282,11 @@ describe("SessionManager", () => {
     const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore(), bridgeFactory });
     await sessions.start("thread-1");
 
-    // A priority @mention (webhook -> priority=10) must interrupt the agent's
-    // THINKING but NOT a running tool call — so it rides the "thinking" policy, not
-    // the bridge default "timeout" (which hard-cancels the tool call).
+    // A priority @mention rides the "thinking" policy so it interrupts thinking but not a running tool call.
     await sessions.promptByThread("thread-1", "<@BOT> take a look", undefined, 10);
     expect(optsSeen.at(-1)).toEqual({ priority: 10, interrupt: "thinking" });
 
-    // A NORMAL (non-priority) prompt waits its turn — no priority/interrupt opts.
+    // A normal prompt waits its turn with no priority or interrupt opts.
     await sessions.promptByThread("thread-1", "just a heads up", undefined, undefined);
     expect(optsSeen.at(-1)).toBeUndefined();
   });
@@ -329,10 +304,7 @@ describe("SessionManager", () => {
     const provisioner = fakeProvisioner();
     const sessions = createSessionManager({ provisioner, store: inMemoryStore(), bridgeFactory });
 
-    // The agent-host no longer creates a conversation implicitly. That path let an
-    // unvalidated, caller-chosen threadId become a conversation id, an event-log
-    // key, and a k8s resource name — and gated the id on agent-host capacity.
-    // Conversations are created by the router (POST /conversations).
+    // Conversations are created by the router, never implicitly from a caller-chosen threadId.
     await expect(
       sessions.promptByThread("never-created", "hi from slack", undefined, undefined, "user-alice"),
     ).rejects.toThrow(UnknownConversationError);
@@ -343,10 +315,7 @@ describe("SessionManager", () => {
   });
 
   it("promptByThread() ADOPTS a conversation that exists only as a CR (create-then-prompt race)", async () => {
-    // The router creates the Conversation CR and returns the id IMMEDIATELY, without
-    // waiting for assignment. So a prompt can reach a pod whose local store has never
-    // seen the id. The CR is authoritative for existence: adopt from it rather than
-    // rejecting a conversation the control plane already created.
+    // The router returns the id before assignment, so a prompt can reach a pod whose local store has never seen it and the CR is adopted as the authority for existence.
     const prompt = vi.fn(async () => "run-x");
     const bridgeFactory = () =>
       ({
@@ -357,9 +326,7 @@ describe("SessionManager", () => {
         onPersist: () => () => {},
         onTitle: () => () => {},
       }) as never;
-    // Record the ORDER of register vs the (slow) sandbox provisioning. Asserting that
-    // register merely happened is tautological — revive() also registers a sandboxRef,
-    // so it fires either way. What matters is that it happens BEFORE provisioning.
+    // The order of register against the slow sandbox provisioning is what matters, since register fires either way.
     const order: string[] = [];
     const register = vi.fn(async () => {
       order.push("register");
@@ -369,8 +336,7 @@ describe("SessionManager", () => {
       register,
       get: vi.fn(async (id: string) => ({
         id,
-        // No sandboxRef: the router creates the CR without one, since it does not
-        // provision. This is the state a just-created conversation is actually in.
+        // No sandboxRef, because the router creates the CR without provisioning.
         spec: { owner: "user-alice", model: "sonnet" },
       })),
     } as never;
@@ -394,19 +360,17 @@ describe("SessionManager", () => {
       sessions.promptByThread(threadId, "first message", undefined, undefined, "user-alice"),
     ).resolves.not.toThrow();
 
-    // It was adopted, not invented: the CR's spec is what the entry carries.
+    // The entry carries the CR's spec.
     const [conv] = sessions.list();
     expect(conv.threadId).toBe(threadId);
     expect(conv.owner).toBe("user-alice");
-    // ...and the prompt actually reached the bridge.
+    // The prompt reached the bridge.
     expect(prompt).toHaveBeenCalledWith(
       expect.objectContaining({ threadId, text: "first message" }),
       undefined,
     );
 
-    // sandboxRef must be published on ADOPTION, not after the sandbox finishes booting.
-    // The router derives its routing short-id from spec.sandboxRef, so publishing it late
-    // leaves the conversation unroutable for the whole provision (minutes on a cold node).
+    // The router derives its routing short-id from spec.sandboxRef, so it must be published on adoption rather than after the sandbox boots.
     expect(register).toHaveBeenCalledWith(
       threadId,
       expect.objectContaining({ sandboxRef: expect.stringMatching(/^conv-/) }),
@@ -427,11 +391,10 @@ describe("SessionManager", () => {
       }) as never;
     const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore(), bridgeFactory });
 
-    // Created explicitly (as the router now does), owned by alice.
+    // Created explicitly, owned by alice.
     const conv = await sessions.start("wh-thread", undefined, "user-alice");
 
-    // A follow-up carrying a DIFFERENT owner does not change ownership — owner is
-    // stamped only at creation.
+    // The owner is stamped only at creation, so a follow-up carrying a different owner does not change it.
     await sessions.promptByThread("wh-thread", "follow up", undefined, undefined, "user-bob");
     expect(sessions.get(conv.id)?.owner).toBe("user-alice");
   });
@@ -444,8 +407,7 @@ describe("SessionManager", () => {
     await sessions.end(conv.id);
 
     expect(provisioner.destroy).toHaveBeenCalledOnce();
-    // Delete-don't-tombstone: an ended conversation is GC'd from the list (and
-    // its persisted state removed), so it no longer resolves.
+    // An ended conversation is removed from the list and its persisted state, so it no longer resolves.
     expect(sessions.get(conv.id)).toBeUndefined();
     expect(sessions.list()).toHaveLength(0);
   });
@@ -455,12 +417,12 @@ describe("SessionManager", () => {
     try {
       const store1 = createFileConversationStore(root);
       await store1.addLink!("c1", { source: "github", resourceType: "pull_request", url: "https://gh/pr/1", title: "PR #1" });
-      // Same link again -> deduped.
+      // The same link again is deduped.
       await store1.addLink!("c1", { source: "github", resourceType: "pull_request", url: "https://gh/pr/1", title: "PR #1" });
       await store1.addLink!("c1", { source: "slack", resourceType: "thread", title: "#eng thread" });
       expect(await store1.listLinks!("c1")).toHaveLength(2);
 
-      // A fresh store over the same dir sees the persisted links (survive restart).
+      // A fresh store over the same dir sees the persisted links.
       const store2 = createFileConversationStore(root);
       const links = await store2.listLinks!("c1");
       expect(links.map((l) => l.source).sort()).toEqual(["github", "slack"]);
@@ -485,7 +447,7 @@ describe("SessionManager", () => {
       expect(sessions.get("t")?.title).toBe("My name for this");
       expect(sessions.get("t")?.userTitled).toBe(true);
 
-      // The agent tries again on a later turn — must be ignored (user wins permanently).
+      // A later agent title is ignored because the user's rename wins permanently.
       await sessions.setTitle("t", "Agent's new guess");
       expect(sessions.get("t")?.title).toBe("My name for this");
     });
@@ -508,7 +470,7 @@ describe("SessionManager", () => {
         await m1.setUserTitle("t", "Pinned title");
         await m1.setStarred("t", true);
 
-        // Fresh manager over the same store → hydrate from disk.
+        // A fresh manager over the same store hydrates from disk.
         const m2 = createSessionManager({ provisioner: fakeProvisioner(), store: createFileConversationStore(root) });
         await m2.hydrate();
         const c = m2.get("t");
@@ -536,8 +498,7 @@ describe("SessionManager", () => {
       await m1.setTitle("alpha", "Refactor the parser"); // await durability before the "restart"
       expect(m1.list()).toHaveLength(2);
 
-      // Second "process": a fresh manager over the SAME store. hydrate() must
-      // repopulate the list from disk (the in-memory entries are gone).
+      // Second "process": a fresh manager over the same store must repopulate the list from disk.
       const store2 = createFileConversationStore(root);
       const m2 = createSessionManager({ provisioner: fakeProvisioner(), store: store2 });
       expect(m2.list()).toHaveLength(0); // nothing in memory yet
@@ -555,11 +516,7 @@ describe("SessionManager", () => {
   });
 
   it("hydrate publishes phase=Suspended for a conversation hydrated as suspended (self-heal)", async () => {
-    // phase is otherwise written ONLY at the suspend()/revive() transition events, so a
-    // conversation whose setPhase(Suspended) never landed (historical RBAC 403, or the pod
-    // died before publishing) stays phase=Assigned/Pending forever — suspend() never re-runs.
-    // hydrate() re-publishes Suspended for any conversation it hydrates as suspended, so the
-    // phase self-heals on the next hydrate (the one place a pod re-observes a suspended conv).
+    // phase is otherwise written only at the suspend()/revive() transitions, so hydrate() re-publishes Suspended for any conversation it hydrates as suspended.
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
       const store1 = createFileConversationStore(root);
@@ -575,7 +532,7 @@ describe("SessionManager", () => {
         conversationRegistry: registry, ownershipGuard: guard as never,
       });
       await m2.hydrate();
-      // alpha hydrates as suspended (fakeProvisioner reconcile reports no running pod) → publish.
+      // alpha hydrates as suspended because the fake reconcile reports no running pod.
       expect(setPhase).toHaveBeenCalledWith("alpha", "Suspended");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -583,9 +540,7 @@ describe("SessionManager", () => {
   });
 
   it("hydrate reconciles a still-running Sandbox as running so the idle sweep reclaims it", async () => {
-    // The leak bug: after a restart the pods may NOT have been suspended, but
-    // hydrate() assumed they were -> sweepIdle (running-only) never reclaimed
-    // them. With reconcile(), a Sandbox whose pod is still up is tracked running.
+    // A Sandbox whose pod is still up after a restart must be tracked as running so sweepIdle can reclaim it.
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
       const store1 = createFileConversationStore(root);
@@ -593,7 +548,7 @@ describe("SessionManager", () => {
       const conv = await m1.start("gamma");
       const sandboxName = m1.get(conv.id)!.sandbox.name; // conv-<shortId>
 
-      // Fresh "process": its provisioner reports that conv's pod is STILL running.
+      // Fresh "process": its provisioner reports that conv's pod is still running.
       const prov2 = fakeProvisioner();
       prov2.reconcile = vi.fn(async () => [
         { ref: { name: sandboxName, namespace: "ns" }, running: true },
@@ -601,10 +556,10 @@ describe("SessionManager", () => {
       const m2 = createSessionManager({ provisioner: prov2, store: createFileConversationStore(root) });
       await m2.hydrate();
 
-      // Reconciled as running (not assume-suspended), with the real namespace.
+      // Reconciled as running, with the real namespace.
       expect(m2.get(conv.id)?.status).toBe("running");
 
-      // ...so the idle sweep can now actually suspend it (the leak is reclaimed).
+      // The idle sweep can now suspend it.
       const swept = await m2.sweepIdle(0); // 0 idle threshold -> everything idle
       expect(swept).toContain(conv.id);
       expect(prov2.suspend).toHaveBeenCalledOnce();
@@ -615,9 +570,7 @@ describe("SessionManager", () => {
   });
 
   it("hydrate RETRIES a transient reconcile failure (rides out a boot apiserver blip)", async () => {
-    // The outage: a boot-time 429 ("storage is (re)initializing") failed the
-    // reconcile ONCE, and hydrate served forever with an EMPTY map -> every prompt
-    // took create -> 409. Retrying rides out the blip so the map is CORRECT.
+    // A transient apiserver error during reconcile must be retried rather than hydrating an empty map.
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
       const store1 = createFileConversationStore(root);
@@ -625,7 +578,7 @@ describe("SessionManager", () => {
       const conv = await m1.start("delta");
       const sandboxName = m1.get(conv.id)!.sandbox.name;
 
-      // reconcile fails twice (transient 429), then succeeds.
+      // reconcile fails twice with a transient 429, then succeeds.
       let attempts = 0;
       const prov2 = fakeProvisioner();
       prov2.reconcile = vi.fn(async () => {
@@ -637,8 +590,7 @@ describe("SessionManager", () => {
       await m2.hydrate();
 
       expect(attempts).toBe(3); // retried past the two failures
-      // The map is CORRECT (running, real ref) despite the initial failures — NOT
-      // the empty-map / assume-suspended fallback.
+      // The map is correct despite the initial failures.
       expect(m2.get(conv.id)?.status).toBe("running");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -646,11 +598,7 @@ describe("SessionManager", () => {
   });
 
   it("hydrate keeps a SUSPENDED Sandbox's real ref so revive RESUMES it (not create -> 409)", async () => {
-    // Bug: reconcile() reported a suspended Sandbox (operatingMode=Suspended) as
-    // running:false, and hydrateEntry threw away its namespace (namespace: "").
-    // revive() then read the empty namespace as "never existed" and called
-    // create() -> 409 AlreadyExists against the still-present suspended CRD.
-    // A suspended Sandbox EXISTS on the cluster, so revive() must resume() it.
+    // A suspended Sandbox still exists on the cluster, so revive() must resume() it rather than create() a duplicate.
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
       const store1 = createFileConversationStore(root);
@@ -658,7 +606,7 @@ describe("SessionManager", () => {
       const conv = await m1.start("delta");
       const sandboxName = m1.get(conv.id)!.sandbox.name;
 
-      // Fresh "process": the Sandbox still EXISTS but is SUSPENDED (running:false).
+      // Fresh "process": the Sandbox still exists but is suspended.
       const prov2 = fakeProvisioner();
       prov2.reconcile = vi.fn(async () => [
         { ref: { name: sandboxName, namespace: "ns" }, running: false },
@@ -666,11 +614,11 @@ describe("SessionManager", () => {
       const m2 = createSessionManager({ provisioner: prov2, store: createFileConversationStore(root) });
       await m2.hydrate();
 
-      // Suspended, but its real ref (with namespace) is retained — not "".
+      // Suspended, with its real ref and namespace retained.
       expect(m2.get(conv.id)?.status).toBe("suspended");
       expect(m2.get(conv.id)?.sandbox).toMatchObject({ name: sandboxName, namespace: "ns" });
 
-      // Reviving RESUMES the existing Sandbox; it must NOT create() a duplicate.
+      // Reviving resumes the existing Sandbox without creating a duplicate.
       await m2.revive(conv.id);
       expect(prov2.resume).toHaveBeenCalledOnce();
       expect(prov2.create).not.toHaveBeenCalled();
@@ -680,15 +628,14 @@ describe("SessionManager", () => {
   });
 
   it("hydrate marks a GONE Sandbox (absent from reconcile) suspended, and revive re-creates it", async () => {
-    // The other side of the fix: if a conversation's Sandbox is NOT on the
-    // cluster at all (GC'd / never resumed), revive() must create() from scratch.
+    // A conversation whose Sandbox is absent from the cluster must be re-created by revive().
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
       const store1 = createFileConversationStore(root);
       const m1 = createSessionManager({ provisioner: fakeProvisioner(), store: store1 });
       const conv = await m1.start("epsilon");
 
-      // Fresh "process": reconcile finds NO Sandbox for this conversation.
+      // Fresh "process": reconcile finds no Sandbox for this conversation.
       const prov2 = fakeProvisioner();
       prov2.reconcile = vi.fn(async () => []);
       const m2 = createSessionManager({ provisioner: prov2, store: createFileConversationStore(root) });
@@ -704,10 +651,7 @@ describe("SessionManager", () => {
   });
 
   it("prompting a hydrated-but-running conversation revives it (builds the bridge)", async () => {
-    // Regression: hydrate() marks a still-running conversation 'running' (pod up)
-    // but it has NO bridge in this process. prompt() must revive on !bridge — NOT
-    // gate revive on status!=="running", or bridge?.prompt() silently no-ops and
-    // the agent never runs (the second-!scooter-does-nothing symptom).
+    // A conversation hydrated as running has no bridge in this process, so prompt() must revive on a missing bridge rather than on status.
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
       const store1 = createFileConversationStore(root);
@@ -715,7 +659,7 @@ describe("SessionManager", () => {
       const conv = await m1.start("delta");
       const sandboxName = m1.get(conv.id)!.sandbox.name;
 
-      // Fresh process: a recording bridge so we can see prompt() reach it.
+      // Fresh process: a recording bridge shows whether prompt() reaches it.
       const prompts: string[] = [];
       const bridgeFactory = () =>
         ({
@@ -744,10 +688,9 @@ describe("SessionManager", () => {
       // The webhook path: prompt the existing conversation by thread id.
       await m2.promptByThread("delta", "second !scooter mention");
 
-      // It revived (built the bridge) and the prompt reached the agent.
+      // It built the bridge and the prompt reached the agent.
       expect(prompts).toContain("second !scooter mention");
-      // Let the fire-and-forget activity write settle before teardown deletes the
-      // store dir (else a late touch -> saveMeta mkdir races rmSync -> ENOENT).
+      // Let the fire-and-forget activity write settle before teardown deletes the store dir.
       await new Promise((r) => setTimeout(r, 20));
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -755,11 +698,7 @@ describe("SessionManager", () => {
   });
 
   it("promptByThread continues a PERSISTED conversation even when hydrate() didn't run (no orphaned duplicate)", async () => {
-    // The restart-orphan bug: after an agent-host restart, a webhook follow-up
-    // hits promptByThread with a threadId that's in the STORE but not yet in the
-    // in-memory map (hydrate raced/failed/evicted). It must reconstruct + CONTINUE
-    // the existing conversation — NOT blind-create a duplicate that orphans the
-    // persisted event log. This mirrors the real failure: NO hydrate() call.
+    // A threadId that is in the store but not the in-memory map must be reconstructed and continued, not blind-created as a duplicate.
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
       const store1 = createFileConversationStore(root);
@@ -767,16 +706,12 @@ describe("SessionManager", () => {
       const conv = await m1.start("echo");
       const originalId = conv.id;
       const sandboxName = m1.get(conv.id)!.sandbox.name;
-      // A distinctive title + createdAt: a BLIND-create would reset these (new
-      // "New chat" entry, fresh createdAt) while CONTINUING preserves them — that's
-      // the observable proxy for "same conversation, event log intact" (the id is
-      // the threadId either way, so id-equality alone can't tell them apart).
+      // A distinctive title and createdAt are the observable proxy for continuing the same conversation, since the id is the threadId either way.
       await m1.setTitle(originalId, "The Original Conversation");
       const originalCreatedAt = m1.get(originalId)!.createdAt;
       await new Promise((r) => setTimeout(r, 25)); // settle saveMeta + a clock gap
 
-      // Fresh "process": a new manager over the SAME store, with a recording bridge.
-      // Deliberately DO NOT call hydrate() — the in-memory map is empty.
+      // Fresh "process": a new manager over the same store, deliberately without hydrate().
       const prompts: string[] = [];
       const bridgeFactory = () =>
         ({
@@ -799,14 +734,12 @@ describe("SessionManager", () => {
         store: createFileConversationStore(root),
         bridgeFactory,
       });
-      // No hydrate() — the map is empty.
+      // The map is empty without hydrate().
       expect(m2.list().length).toBe(0);
 
       await m2.promptByThread("echo", "follow-up after restart");
 
-      // It CONTINUED the same conversation (not a blind-create): the prompt reached
-      // the agent, and the persisted title + createdAt are preserved. A blind-create
-      // would show title "New chat" and a newer createdAt (orphaning the original).
+      // The prompt reached the agent and the persisted title and createdAt are preserved.
       expect(prompts).toContain("follow-up after restart");
       const revived = m2.get(originalId)!;
       expect(revived.title).toBe("The Original Conversation");
@@ -819,10 +752,7 @@ describe("SessionManager", () => {
   });
 
   it("promptByThread with a NEW model rebuilds the bridge with that model + persists it", async () => {
-    // Per-conversation model is switchable mid-conversation: passing a model to
-    // promptByThread that differs from the conversation's current model must tear
-    // down the live bridge and rebuild it with the new model (so goose relaunches
-    // with the new GOOSE_MODEL), and persist it so a restart keeps the switch.
+    // A different model on promptByThread must rebuild the live bridge with it and persist the switch.
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
       const built: Array<string | undefined> = [];
@@ -846,11 +776,11 @@ describe("SessionManager", () => {
       await m.start("t1", "opus"); // initial model
       expect(built).toEqual(["opus"]);
 
-      // Same model -> no rebuild.
+      // The same model does not rebuild.
       await m.promptByThread("t1", "hello", "opus");
       expect(built).toEqual(["opus"]);
 
-      // New model -> stop old bridge + rebuild with the new model.
+      // A new model stops the old bridge and rebuilds with the new one.
       await m.promptByThread("t1", "now switch", "sonnet");
       expect(stops.length).toBe(1);
       expect(built).toEqual(["opus", "sonnet"]);
@@ -879,8 +809,7 @@ describe("SessionManager", () => {
       await m1.end(gone.id);
       expect(m1.list().map((c) => c.id)).toEqual(["keep"]); // gone is GC'd now
 
-      // A fresh process hydrates from disk: the ended conversation must be gone,
-      // not resurrected as a "suspended" tombstone.
+      // A fresh process hydrating from disk must not resurrect the ended conversation.
       const m2 = createSessionManager({
         provisioner: fakeProvisioner(),
         store: createFileConversationStore(root),
@@ -893,8 +822,7 @@ describe("SessionManager", () => {
   });
 
   it("records last-activity metadata and persists it via saveMeta", async () => {
-    // Activity is a FIELD of the conversation record, persisted by the same saveMeta
-    // as every other meta change.
+    // Activity is a field of the conversation record, persisted by the same saveMeta as every other meta change.
     const provisioner = fakeProvisioner();
     const store = inMemoryStore();
     const saveMeta = vi.fn(async () => {});
@@ -949,7 +877,7 @@ describe("SessionManager", () => {
       const sessions = createSessionManager({ provisioner, store });
       const conv = await sessions.start("web-thread"); // stamped at t=0
 
-      // A user is actively using the pod's web services at t=9min — the proxy touches.
+      // The proxy touches at t=9min while a user is using the pod's web services.
       vi.setSystemTime(9 * 60_000);
       sessions.touchById(conv.id);
       // The touch is persisted as part of the conversation's meta record.
@@ -957,8 +885,7 @@ describe("SessionManager", () => {
         expect.objectContaining({ id: conv.id, lastActivityAt: 9 * 60_000 }),
       );
 
-      // At t=10min with a 5min threshold: WITHOUT the touch it'd be swept (10min old),
-      // but the touch reset lastActivityAt to t=9min → only 1min idle → NOT swept.
+      // At t=10min with a 5min threshold the touch leaves it only 1min idle, so it is not swept.
       const suspended = await sessions.sweepIdle(5 * 60_000, 10 * 60_000);
       expect(suspended).toEqual([]);
       expect(sessions.get(conv.id)?.status).toBe("running");
@@ -976,7 +903,7 @@ describe("SessionManager", () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(0);
-      // A bridge whose queueState we can flip to "running" — modelling goose mid-turn.
+      // A bridge whose queueState can be flipped to "running" models goose mid-turn.
       let running = false;
       const bridgeFactory = () =>
         ({
@@ -995,15 +922,13 @@ describe("SessionManager", () => {
       await sessions.revive(conv.id); // attach the live bridge
       running = true; // a long agent turn is now in flight
 
-      // Advance WELL past the idle window — lastActivityAt is stale (the turn started
-      // long ago and nothing bumps it mid-run), so the lastActivityAt check alone would
-      // suspend it. The in-flight-run guard must keep the pod up.
+      // Well past the idle window with a stale lastActivityAt, the in-flight-run guard must keep the pod up.
       const swept = await sessions.sweepIdle(5 * 60_000, 60 * 60_000); // 1h later, 5m threshold
       expect(swept).not.toContain(conv.id);
       expect(sessions.get(conv.id)?.status).toBe("running");
       expect(provisioner.suspend).not.toHaveBeenCalled();
 
-      // Once the run finishes, the same stale-idle conversation IS reclaimed.
+      // Once the run finishes, the same stale-idle conversation is reclaimed.
       running = false;
       const sweptAfter = await sessions.sweepIdle(5 * 60_000, 60 * 60_000);
       expect(sweptAfter).toContain(conv.id);
@@ -1025,7 +950,7 @@ describe("SessionManager", () => {
           onEvent: () => () => {},
           onPersist: () => () => {},
           onTitle: () => () => {},
-          // not "running" between turns, but a prompt is queued -> still busy.
+          // Not running between turns, but a queued prompt still counts as busy.
           queueState: () => ({ running: false, currentRunMs: 0, queued: 2, maxQueuedPriority: 0 }),
         }) as never;
       const provisioner = fakeProvisioner();
@@ -1048,7 +973,7 @@ describe("SessionManager", () => {
     await sessions.suspend(conv.id);
     (provisioner.suspend as ReturnType<typeof vi.fn>).mockClear();
 
-    // idleMs 0 + now in the future → everything "idle", but only running ones sweep.
+    // Everything is idle with idleMs 0, but only running conversations sweep.
     const suspended = await sessions.sweepIdle(0, conv.lastActivityAt + 1);
 
     expect(suspended).toEqual([]);
@@ -1063,7 +988,7 @@ describe("SessionManager", () => {
       const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
       const conv = await sessions.start("old"); // lastActivityAt = t0
 
-      // 31 days later, threshold 30 days → it's stale.
+      // 31 days later with a 30-day threshold it is stale.
       const reaped = await sessions.sweepRetention(30 * DAY, conv.lastActivityAt + 31 * DAY);
 
       expect(reaped).toEqual([conv.id]);
@@ -1089,7 +1014,7 @@ describe("SessionManager", () => {
       const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
       const conv = await sessions.start("recent");
 
-      // Only 5 days since last activity; threshold 30 → not stale.
+      // Only 5 days since last activity against a 30-day threshold.
       const reaped = await sessions.sweepRetention(30 * DAY, conv.lastActivityAt + 5 * DAY);
 
       expect(reaped).toEqual([]);
@@ -1111,8 +1036,7 @@ describe("SessionManager", () => {
         vi.setSystemTime(40 * DAY);
         const recent = await sessions.start("recent"); // t=40d
 
-        // Sweep at t=40d, threshold 30d: old1/old2 are 40d stale; starred is exempt;
-        // recent is 0d old.
+        // At t=40d with a 30d threshold old1/old2 are stale, starred is exempt and recent is 0d old.
         const reaped = await sessions.sweepRetention(30 * DAY, 40 * DAY);
 
         expect(reaped.sort()).toEqual([old1.id, old2.id].sort());
@@ -1144,9 +1068,7 @@ describe("SessionManager", () => {
       const parent = await sessions.start("parent");
       const child = await sessions.spawnChild(parent.id, "child-thread", { prompt: "x" });
 
-      // A subagent (parentId set) is never a reap CANDIDATE itself — even if stale.
-      // Here the parent is also live so nothing is reaped; the point is `child.id`
-      // never appears in the reaped list independently.
+      // A subagent is never a reap candidate itself, so `child.id` never appears in the reaped list independently.
       const reaped = await sessions.sweepRetention(30 * DAY, parent.lastActivityAt + 40 * DAY);
       expect(reaped).not.toContain(child.id);
     });
@@ -1155,8 +1077,7 @@ describe("SessionManager", () => {
   it("resumeInterrupted revives + nudges ONLY conversations with a dangling run", async () => {
     const root = mkdtempSync(join(tmpdir(), "convstore-"));
     try {
-      // First process: create two conversations, each with one completed run in
-      // the log, then leave ONE with a dangling run (RUN_STARTED, no RUN_FINISHED).
+      // First process: two conversations, one of them left with a dangling run.
       const store1 = createFileConversationStore(root);
       const m1 = createSessionManager({ provisioner: fakeProvisioner(), store: store1 });
       const done = await m1.start("clean-thread");
@@ -1164,7 +1085,7 @@ describe("SessionManager", () => {
       // A completed run for the clean one:
       await store1.appendEvent(done.id, { type: "RUN_STARTED", threadId: "clean-thread", runId: "r1" });
       await store1.appendEvent(done.id, { type: "RUN_FINISHED", threadId: "clean-thread", runId: "r1" });
-      // A DANGLING run for the interrupted one (started, never finished):
+      // A dangling run for the interrupted one:
       await store1.appendEvent(cut.id, { type: "RUN_STARTED", threadId: "interrupted-thread", runId: "r1" });
       await store1.appendEvent(cut.id, { type: "TEXT_MESSAGE_CONTENT", messageId: "m", delta: "working" });
 
@@ -1191,8 +1112,7 @@ describe("SessionManager", () => {
 
       const resumed = await m2.resumeInterrupted();
 
-      // Only the interrupted conversation was resumed, with the nudge (not the
-      // clean one, and not the user's literal prompt).
+      // Only the interrupted conversation was resumed, with the nudge.
       expect(resumed).toEqual([cut.id]);
       expect(prompted.map((p) => p.id)).toEqual([cut.id]);
       expect(prompted[0].text).toMatch(/interrupted by a restart/i);
@@ -1207,14 +1127,7 @@ describe("SessionManager", () => {
 
 describe("sweepIdle is OWNER-ONLY (the zombie-sandbox bug)", () => {
   it("a non-owner neither suspends NOR probes an idle conversation", async () => {
-    // The #297 residual, observed on valhalla as three sandbox pods running 9-12h with
-    // their conversations phase=Suspended: BOTH pods held the same (dual-adopted)
-    // conversation and both swept it ~3.5s apart. The second sweeper's background-job
-    // EXEC PROBE rides the pollForReadyPod self-heal, which RESUMED the sandbox the
-    // first sweeper had just suspended — and with the conversation then evicted from
-    // every pod, nothing ever re-suspended it. The probe is the destructive half, so
-    // this asserts the non-owner does not probe AT ALL, not merely that it skips the
-    // suspend.
+    // The background-job exec probe rides the pollForReadyPod self-heal that resumes a sandbox, so a non-owner must not probe at all.
     const provisioner = fakeProvisioner();
     let probes = 0;
     const sessions = createSessionManager({
@@ -1247,16 +1160,7 @@ describe("sweepIdle is OWNER-ONLY (the zombie-sandbox bug)", () => {
   });
 });
 
-/**
- * The CR is the source of truth for EXISTENCE, so ending a conversation must remove it.
- *
- * Found by the Tier-2 browser tests on their first run against a real cluster: DELETE
- * answered 204 while the conversation stayed listed as `running` indefinitely. end()
- * cleared local state and the store record, but nothing could delete the CR — the
- * registry had register/setPhase/list and no delete — so hydrate() re-adopted it and the
- * conversation came back. Every Tier-2 test failed on `cleanState could not empty the
- * server after 50 attempts`.
- */
+/** The CR is the source of truth for existence, so ending a conversation must remove it. */
 describe("end() removes the Conversation CR", () => {
   it("deletes the CR, not just local state", async () => {
     const remove = vi.fn(async () => {});
@@ -1270,14 +1174,13 @@ describe("end() removes the Conversation CR", () => {
     const conv = await sessions.start("thread-cr-remove" as never);
     await sessions.end(conv.id as SessionId);
 
-    // Without this the conversation is re-adopted from its surviving CR and comes back.
+    // Otherwise hydrate() re-adopts the conversation from its surviving CR.
     expect(remove).toHaveBeenCalledWith(conv.id);
     expect(sessions.get(conv.id as SessionId), "and it is gone locally").toBeUndefined();
   });
 
   it("a registry failure does NOT fail the delete", async () => {
-    // Matches register/setPhase: a k8s hiccup must not turn a successful local delete
-    // into a 500 for the caller. The registry logs it; end() carries on.
+    // A k8s hiccup must not turn a successful local delete into a 500 for the caller.
     const remove = vi.fn(async () => {
       throw new Error("apiserver unreachable");
     });

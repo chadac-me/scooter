@@ -16,15 +16,8 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { cn } from "@/lib/utils";
 import { ShareEmbed, SHARE_EMBED_TOKEN, preprocessShareEmbeds } from "@/src/ShareEmbed";
 
-// A fenced ```scooter-embed block renders as a sandboxed iframe of a static share
-// (see ShareEmbed), registered under `componentsByLanguage` — the only hook, since
-// assistant-ui owns the fenced-code render path and a `pre` override never sees the
-// fence. The token MUST be hyphen-free (assistant-ui keys language on /language-(\w+)/,
-// which stops at a hyphen), so preprocessShareEmbeds rewrites the authored fence to
-// SHARE_EMBED_TOKEN. Why this hook + rewrite: PR #393.
-
-// The renderer assistant-ui invokes for a `scooterembed` fence: the code body (the fence's
-// text) becomes the ShareEmbed spec; no code-chrome header.
+// A fenced scooter-embed block renders as a sandboxed iframe of a static share (see ShareEmbed) via `componentsByLanguage`, keyed on the hyphen-free SHARE_EMBED_TOKEN that preprocessShareEmbeds rewrites the fence to because assistant-ui's /language-(\w+)/ stops at a hyphen.
+// The code body becomes the ShareEmbed spec, with no code-chrome header.
 const shareEmbedComponentsByLanguage = {
   [SHARE_EMBED_TOKEN]: {
     SyntaxHighlighter: ({ code }: { code: string }) => <ShareEmbed body={code} />,

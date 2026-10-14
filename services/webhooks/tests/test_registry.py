@@ -1,13 +1,4 @@
-"""Tests for the webhook handler registry (plugin discovery).
-
-These are the APP-side assertions: the built-in handlers under webhooks.handlers
-self-register and app.py mounts whatever is discovered. The registry mechanism
-itself (the parameterized scan, entry points) is tested in the lib that owns it.
-
-Mirrors the broker's provider-registry contract: handler modules self-register
-via @register_webhook and app.py mounts whatever is discovered — no hardcoded
-per-provider wiring.
-"""
+"""The app side of handler discovery: the built-in handlers self-register and app.py mounts whatever is discovered, while the registry mechanism itself is tested in the lib."""
 
 from fastapi import APIRouter
 
@@ -36,12 +27,7 @@ def test_every_discovered_handler_has_a_router():
 
 
 def test_app_mounts_discovered_routes():
-    """The app wires each discovered router — the provider POST endpoints exist.
-
-    Uses the OpenAPI path map rather than introspecting Starlette route objects,
-    which is stable across FastAPI versions (dev venv vs. the flake-pinned one)
-    and doesn't execute any handler.
-    """
+    """The app wires each discovered router, asserted through the OpenAPI path map since it is stable across FastAPI versions."""
     from webhooks.app import app
 
     paths = set(app.openapi()["paths"].keys())
@@ -52,9 +38,7 @@ def test_app_mounts_discovered_routes():
 
 
 def test_disabled_handler_is_omitted_from_discovery():
-    """A handler whose factory reports enabled=False is not returned (the parity
-    knob for third-party handlers that prefer mount-time gating over in-route
-    gating)."""
+    """A handler whose factory reports enabled=False is not returned."""
 
     @register_webhook
     def _disabled_probe() -> WebhookHandler:  # noqa: D401
@@ -72,5 +56,5 @@ def test_failing_factory_is_skipped_not_fatal():
         raise RuntimeError("factory blew up")
 
     names = {h.name for h in discover_webhooks([handlers])}
-    assert BUILTIN_HANDLERS <= names  # the good ones still come through
+    assert BUILTIN_HANDLERS <= names
     assert "_boom" not in names

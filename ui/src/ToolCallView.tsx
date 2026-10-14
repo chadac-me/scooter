@@ -28,27 +28,17 @@ function readArgs(props: ToolCallMessagePartProps): unknown {
 
 export const ToolCallView: ToolCallMessagePartComponent = (props) => {
   const visual = matchToolCall(props.toolName, readArgs(props));
-  // Whether the turn is live. In the single-source render model assistant-ui
-  // FORCES every folded tool-call part's status to "complete" (ExternalThread's
-  // usePartResource clobbers it), so props.status is useless as a liveness signal.
-  // Derive "still running" from OUR run state instead: the turn is in flight AND
-  // this part has no result yet (the bridge emits the result on the tool_call
-  // update, so "no result" ⇔ "not finished").
+  // assistant-ui forces every folded tool-call part's status to "complete", so liveness is derived from our run state: in flight and no result yet.
   const { isRunning } = useConversationInterrupts();
   const stillRunning = isRunning && props.result === undefined;
 
-  // Not a provider "post" tool → the stock generic tool box (told the real
-  // running state, since its own status prop is likewise forced to complete).
+  // Not a provider "post" tool: the stock generic box, told the real running state.
   if (!visual) return <ToolFallback {...props} forceRunning={stillRunning} />;
 
   const status = props.status?.type;
   const failed = status === "incomplete" && !stillRunning;
   const isShell = visual.provider === "shell";
-  // A CLEAN one-line status from the tool result — NOT the raw ACP content blob
-  // (e.g. [{"content":{"text":"Posted to the Slack thread."}}]); the posted text
-  // is shown as the body above, the result is just a confirmation/error line. For
-  // a shell tool this is usually "" (the terminal-handle result carries no stdout —
-  // the real output streams into the assistant reply), so no noisy result line.
+  // A one-line status from the tool result rather than the raw ACP content blob; for a shell tool this is usually "".
   const resultText = resultStatusText(props.result);
 
   return (

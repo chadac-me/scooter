@@ -1,12 +1,6 @@
 /**
- * The AGENT and the SANDBOX are separate choices.
- *
- * Regression guard: `fakeSandbox` used to be `FAKE_SANDBOX === "1" || useFakeAgent`, so
- * setting GOOSE_BIN=fake — which the k3d platform does deliberately, to get a
- * deterministic agent with no model key — ALSO selected createNoopProvisioner(). No
- * Sandbox CR, no sandbox pod, nothing logged, and every turn hung to the 60s timeout.
- * The cluster tier's headline story ("a tool call runs in a real sandbox") could not
- * pass by construction.
+ * The agent and the sandbox are separate choices: a fake agent in a cluster still gets
+ * a real sandbox, while out of a cluster it implies a fake one.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
@@ -28,14 +22,14 @@ afterEach(() => {
 
 describe("fakeSandbox is independent of the fake AGENT", () => {
   it("IN-CLUSTER: the fake agent runs against a REAL sandbox", () => {
-    // THE BUG. This is the k3d platform's exact configuration.
+    // The k3d platform's configuration.
     process.env.GOOSE_BIN = "fake";
     process.env.KUBERNETES_SERVICE_HOST = "10.43.0.1";
     expect(configFromEnv().fakeSandbox).toBe(false);
   });
 
   it("OUT of a cluster: the fake agent still implies a fake sandbox", () => {
-    // The local Tier-3 stack has no k8s at all — it must keep working untouched.
+    // The local e2e stack has no k8s at all.
     process.env.GOOSE_BIN = "fake";
     expect(configFromEnv().fakeSandbox).toBe(true);
   });

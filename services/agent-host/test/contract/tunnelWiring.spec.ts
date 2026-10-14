@@ -1,10 +1,6 @@
 /**
- * Tier 1 — the tunnel COMPOSITION, not its parts.
- *
- * Every piece of MCP-over-the-wire is unit-tested against its own fake: target resolution, the
- * stream service, the container proxy, the relay. That is exactly the shape that shipped the
- * id-correlation hang (#304) and the release() drift (#307) — each side correct, the JOINT
- * untested. These assert the wiring that only exists when the pieces are assembled.
+ * The tunnel composition rather than its parts: the wiring that only exists once target
+ * resolution, the stream service and the provider are assembled.
  */
 
 import { describe, it, expect } from "vitest";
@@ -16,8 +12,7 @@ const exec = {} as ExecBackend;
 
 describe("BYO provider tunnel wiring", () => {
   it("OFFERS scooter-env by name when an MCP endpoint exists", () => {
-    // The container cannot reach the agent-host's loopback URL; it must receive a NAME to
-    // proxy. Offering the raw URL is the bug this whole feature exists to fix.
+    // The container cannot reach the agent-host's loopback URL, so it receives a name to proxy.
     const p = createRemotePersonalizedProvider({
       controllerUrl: "http://c:8080",
       exec,
@@ -30,7 +25,6 @@ describe("BYO provider tunnel wiring", () => {
   });
 
   it("offers NOTHING when no MCP endpoint is configured", () => {
-    // Better than offering a server whose every call dead-ends.
     const p = createRemotePersonalizedProvider({ controllerUrl: "http://c:8080", exec });
     expect(p.mcpServersFor?.("conv-a") ?? []).toEqual([]);
   });

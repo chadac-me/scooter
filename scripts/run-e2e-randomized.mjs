@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 /**
- * Run Playwright E2E tests in randomized order to surface ordering-dependent flakes.
+ * Run Playwright E2E tests in randomized file order to surface ordering-dependent
+ * flakes; the seed is printed at the start and E2E_SEED=<value> reproduces an
+ * ordering.
  *
  * Usage:
  *   node scripts/run-e2e-randomized.mjs [playwright args]
  *   E2E_SEED=42 node scripts/run-e2e-randomized.mjs --project=fast
- *
- * Sets a seed for reproducibility. The seed is printed at the start; rerun with
- * E2E_SEED=<value> to reproduce a specific ordering.
  */
 
 import { execSync } from "node:child_process";
@@ -34,7 +33,6 @@ function shuffle(array, seed) {
   return result;
 }
 
-// Recursively find all .spec.ts files
 function findTestFiles(dir, base = dir) {
   const files = [];
   for (const entry of readdirSync(dir)) {
@@ -43,7 +41,6 @@ function findTestFiles(dir, base = dir) {
     if (stat.isDirectory()) {
       files.push(...findTestFiles(fullPath, base));
     } else if (entry.endsWith(".spec.ts")) {
-      // Store relative path from the base test directory
       files.push(fullPath.replace(base + "/", ""));
     }
   }
@@ -57,11 +54,9 @@ const pwArgs = process.argv.slice(2);
 console.log(`\n🎲 Randomizing E2E test order with seed: ${seed}`);
 console.log(`   (reproduce with: E2E_SEED=${seed} node scripts/run-e2e-randomized.mjs)\n`);
 
-// Find and shuffle test files
 const testFiles = findTestFiles(testDir, testDir);
 const shuffled = shuffle(testFiles, seed);
 
-// Build the playwright command with explicit file list
 const fileArgs = shuffled.map((f) => `${testDir}/${f}`).join(" ");
 const cmd = `npx playwright test ${fileArgs} ${pwArgs.join(" ")}`;
 

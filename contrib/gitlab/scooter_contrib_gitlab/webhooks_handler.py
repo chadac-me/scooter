@@ -1,9 +1,8 @@
 """GitLab webhook handler.
 
-Trigger rules:
-- @openhands mention in a comment -> creates/forwards conversation
-- 'openhands' label added to issue/MR -> creates conversation
-- Any comment on resource with active conversation -> auto-forwarded
+A mention in a comment creates or forwards a conversation, the trigger label on an
+issue or MR creates one, and any comment on a resource with an active conversation
+is auto-forwarded.
 """
 
 import asyncio
@@ -47,10 +46,6 @@ async def _infer_conversation_from_jira(
     for key in jira_keys:
         conv_id = (
             await db.lookup_conversation("jira", "issue", key)
-            # The jira-specific lookup that used to sit between these is gone: it
-            # read a duplicate table, and would have made this contrib depend on
-            # contrib/jira. The generic one matches every known shape (#571), so it
-            # also catches a row written as a browse URL. Why: PR #582.
             or await db.get_conversation_for_resource("jira", "issue", key)
         )
         if conv_id:
@@ -173,10 +168,7 @@ async def _handle_note(payload: dict):
     if policy.is_own_ack(note_body):
         return
 
-    # Branch-specific fields, initialized so they're always bound (the later
-    # noteable_type-gated blocks reference the ones relevant to their branch; the
-    # unused-branch defaults are never read there, but binding them keeps the
-    # control flow provably safe rather than "possibly unbound").
+    # Branch-specific fields, bound up front so the noteable_type-gated blocks below are never "possibly unbound".
     mr: dict = {}
     issue: dict = {}
     mr_title = source_branch = ""
@@ -214,7 +206,6 @@ async def _handle_note(payload: dict):
         or await db.get_conversation_for_resource("gitlab", res_type, res_id)
     )
 
-    # Try Jira cross-linking
     if not existing and noteable_type == "MergeRequest":
         mr_desc = mr.get("description", "")
         jira_keys = extract_issue_keys(mr_title, source_branch, mr_desc)
@@ -358,15 +349,10 @@ async def _background_create_conversation(
     conv_title: str, project_id: int, note_api_type: str,
     noteable_iid: int, invoking_user: str | None = None,
 ) -> None:
-    # Register the mapping + link AND post the "on it — follow along" comment
-    # BEFORE the agent runs. create_conversation blocks until the whole turn
-    # finishes, so posting the link comment after it returned delayed it by the
-    # entire run (the 5-10min lag). Only conv_id is needed, known in the hook.
+    # Runs pre-run, since create_conversation blocks until the whole agent turn finishes.
     async def _register(conv_id: str) -> None:
         await db.store_conversation(source, res_type, res_id, conv_id)
-        # An ISSUE's iid goes in `iid`, not `mrIid`: gitlab_comment reads mrIid as
-        # "this is merge request N", so an issue link posted the agent's comment on
-        # the MR of the same number. Why: issue #563.
+        # gitlab_comment reads `mrIid` as "this is merge request N", so an issue's iid goes in `iid`.
         iid_key = "mrIid" if res_type == "merge_request" else "iid"
         await push_link(
             conv_id, source="gitlab", resource_type=res_type,
@@ -379,8 +365,7 @@ async def _background_create_conversation(
             body=f"Scooter is on it — follow along: [View conversation]({conversation_url(conv_id)})",
         )
 
-    # Map the invoking GitLab user -> their Scooter user (by email) so the
-    # conversation gets a real owner. Best-effort -> None -> unowned.
+    # Best-effort owner lookup; None leaves the conversation unowned.
     conv_owner = await resolve_owner("gitlab", invoking_user) if invoking_user else None
 
     try:
@@ -390,7 +375,7 @@ async def _background_create_conversation(
         )
         if not result:
             await _clear_pending(source, res_type, res_id)
-            # The optimistic "on it" comment already posted in _register; correct it.
+            # Correct the optimistic comment already posted in _register.
             await post_gitlab_comment(
                 project_id=project_id, noteable_type=note_api_type,
                 noteable_iid=noteable_iid,
@@ -399,13 +384,11 @@ async def _background_create_conversation(
             return
 
         if result.get("interrupted"):
-            # Run cut short by an agent-host restart; the conversation exists and is
-            # resumed on boot. Don't post a failure and don't flush pending here.
+            # The agent-host resumes the interrupted run on boot, so neither post a failure nor flush pending.
             return
 
         if result.get("errored"):
-            # The agent crashed mid-run; the conversation exists + did work. Post a
-            # truthful "hit an error partway through" note, not "couldn't start".
+            # The conversation exists and did work, so this is an error partway through, not a failed start.
             await _clear_pending(source, res_type, res_id)
             conv_id = result.get("conversation_id", "")
             await post_gitlab_comment(
@@ -417,7 +400,6 @@ async def _background_create_conversation(
 
         conv_id = result.get("conversation_id", "")
 
-        # Flush pending messages
         messages = await db.get_and_clear_pending_messages(source, res_type, res_id)
         for msg in messages:
             ok = await send_message(conv_id, msg, source="gitlab")
@@ -441,14 +423,10 @@ async def _clear_pending(source: str, res_type: str, res_id: str) -> None:
     await db.get_and_clear_pending_messages(source, res_type, res_id)
 
 
-# Discovered + mounted by the webhooks service via the entry-point registry.
-# Handlers self-gate in-route (a disabled provider returns {"status": "disabled"}),
-# so this registers enabled and keeps its per-request gating.
+# Discovered and mounted by the webhooks service via the entry-point registry; the handler self-gates in-route.
 from scooter_webhooks_lib.registry import WebhookHandler, register_webhook
 
-# Imported for their REGISTRATION side effects: this module is what the webhooks
-# service loads, so gitlab's owner lookup (#575) and resource shapes (#576) arm
-# with it. Nothing else imports either. Why: PR #580.
+# Imported for their registration side effects.
 from . import identity  # noqa: F401
 from . import resources  # noqa: F401
 

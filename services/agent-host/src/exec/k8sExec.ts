@@ -1,10 +1,7 @@
 /**
- * Production SandboxApiClient over the Kubernetes exec API (pods/exec).
- *
- * No in-pod server: commands run via the exec subresource, like upstream
- * examples/sandboxed-tools. `run`/`spawn` exec directly; file ops use cat / tee.
- *
- * Requires `get,create pods/exec` (+ get pods) RBAC — the WS exec upgrade is an HTTP GET on the agent-host SA.
+ * Production SandboxApiClient over the Kubernetes exec API (pods/exec). There is no
+ * in-pod server: commands run via the exec subresource and file ops use cat / tee.
+ * Requires `get,create pods/exec` (plus get pods) RBAC on the agent-host SA.
  */
 
 import { Writable, Readable, PassThrough } from "node:stream";
@@ -49,35 +46,23 @@ export interface K8sExecOptions {
   container?: string;
   /** Explicit pod name; otherwise resolved from the Sandbox's labelled pod. */
   podName?: string;
-  /** Self-heal a suspended sandbox: if the pod-readiness poll finds NO pod at all, the sandbox may
-   *  have been idle-SUSPENDED (operatingMode=Suspended, pod deleted) out from under a still-live
-   *  bridge — the mid-run-reassign case where bridge-liveness and pod-liveness diverge. Called ONCE
-   *  when the first lookup is empty to resume it (idempotent `provisioner.resume`), then the poll
-   *  picks up the recreated pod instead of timing out with "no ready pod". Absent = no self-heal. */
+  /** Called once when the pod-readiness poll finds no pod at all, to resume a sandbox suspended out from under a live bridge; absent means no self-heal. */
   ensureRunning?: () => Promise<void>;
 }
 
-/**
- * Resolves a SandboxRef to a connected pod-exec client. Looks up the Sandbox's
- * backing pod (the controller labels it with the sandbox name).
- */
+/** Resolves a SandboxRef to a connected pod-exec client. */
 export async function connectSandbox(
   ref: SandboxRef,
   opts: K8sExecOptions = {},
 ): Promise<SandboxApiClient> {
   const kc = opts.kubeConfig ?? defaultKubeConfig();
-  // Prefer a pod name the CALLER already knows (the broker provisioner returns the
-  // ready pod name on ensure/resume — the agent-sandbox controller names the pod
-  // after the Sandbox, so ref.name IS the pod name). That lets the agent-host exec
-  // WITHOUT `get/list pods` RBAC. Fall back to the k8s label lookup (legacy k8s
-  // provisioner path, whose ref carries no podIP).
+  // Prefer a pod name the caller already knows (the controller names the pod after the
+  // Sandbox, so ref.name is the pod name), which needs no `get/list pods` RBAC.
   const podName = opts.podName ?? (ref.podIP ? ref.name : await resolvePodName(kc, ref, opts.ensureRunning));
   return createK8sSandboxApiClient(ref, { ...opts, kubeConfig: kc, podName });
 }
 
-/** The conversation pod's address for direct in-cluster HTTP/WS (the web-service
- *  reverse proxy targets this). `podIP` changes across suspend/resume — never
- *  cache it across a suspend; re-resolve. */
+/** The conversation pod's address for direct in-cluster HTTP/WS; `podIP` changes across suspend/resume, so re-resolve rather than cache it. */
 export interface PodTarget {
   name: string;
   podIP: string;
@@ -85,9 +70,7 @@ export interface PodTarget {
 
 type Pod = Awaited<ReturnType<CoreV1Api["readNamespacedPod"]>>;
 
-/** Options for the ready-pod poll — injectable so the self-heal logic is unit-testable without a
- *  real k8s client. `listCandidates` returns the current pods for the ref; `sleep` + `deadlineMs`
- *  let a test collapse the poll. */
+/** Injectable options for the ready-pod poll, so a test can collapse it without a real k8s client. */
 export interface ResolveReadyPodDeps {
   listCandidates: () => Promise<Pod[]>;
   ensureRunning?: () => Promise<void>;
@@ -95,8 +78,7 @@ export interface ResolveReadyPodDeps {
   deadlineMs?: number;
 }
 
-/** Poll until a RUNNING + Ready pod backs the sandbox (the pure/injectable core). Fires
- *  `ensureRunning` ONCE if the first lookup finds no pod at all — the idle-suspend self-heal. */
+/** Poll until a Running and Ready pod backs the sandbox, firing `ensureRunning` once if the first lookup finds no pod at all. */
 export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps): Promise<Pod> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const started = Date.now();
@@ -106,20 +88,11 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
   let waitLogged = false; // one "waiting" line per call, not one per poll
   for (;;) {
     const candidates = await deps.listCandidates();
-    // SELF-HEAL: no pod at all → the sandbox may be idle-SUSPENDED (mode=Suspended, pod deleted) out
-    // from under a live bridge. Resume it ONCE (idempotent) so the controller recreates the pod, then
-    // keep polling for it instead of timing out with "no ready pod". Without this, a mid-run-reassign +
-    // idle-suspend leaves the pod gone while the bridge issues tool calls that all fail.
+    // No pod at all: resume once so the controller recreates it, then keep polling.
     if (candidates.length === 0 && deps.ensureRunning && !healed) {
       healed = true;
-      // LOUD. This resume is load-bearing for a live bridge — but fired against a
-      // just-suspended sandbox (a racing sweeper's probe) it is the destructive half
-      // of the zombie-sandbox bug: the resume lands last, the conversation is evicted
-      // everywhere, and the pod runs forever. Success was previously silent, which is
-      // why 9-12h zombies had no trace of WHO woke them.
-      // States the OBSERVATION, not a cause: this fires for any missing pod (eviction,
-      // node pressure, a deleted Sandbox), and naming idle-suspend here sent a flake
-      // investigation after a 30-minute timer that could not have fired. Why: PR #722.
+      // Logged loudly because a resume fired against a just-suspended sandbox leaves a
+      // pod running with no conversation attached.
       log.warn("resume-on-missing-pod: no pod for this sandbox; resuming it", {
         namespace: ref.namespace,
         pod_name: ref.name,
@@ -131,10 +104,7 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
           namespace: ref.namespace,
           pod_name: ref.name,
         });
-        // 404 = the Sandbox CR itself is GONE (the conversation was deleted or its
-        // sandbox reaped). No amount of polling brings it back — fail NOW instead of
-        // spinning to the deadline, so callers (job sweeps, tool calls) see a fast,
-        // classifiable failure rather than a 90s hang per attempt.
+        // A 404 means the Sandbox CR itself is gone, so fail now rather than poll to the deadline.
         if ((err as { code?: number }).code === 404) {
           throw new Error(`sandbox ${ref.namespace}/${ref.name} is gone (404 on resume)`);
         }
@@ -149,9 +119,7 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
     );
     if (ready?.metadata?.name) {
       const waitedMs = Date.now() - started;
-      // A wait that spanned more than one poll is the latency the caller's turn is
-      // eating — record it (this was invisible: a 60s boot-wait looked identical to
-      // an instant hit, and CI hangs died with no trace of WHICH stage ate the time).
+      // A wait that spanned more than one poll is latency the caller's turn is eating, so record it.
       if (waitedMs > 2_000) {
         log.info("ready-pod wait ended", {
           namespace: ref.namespace,
@@ -176,8 +144,7 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
     }
     lastRunning = candidates.find((p) => p.status?.phase === "Running") ?? lastRunning;
     if (Date.now() > deadline) {
-      // Fall back to any Running pod (or fail) rather than hang forever.
-      // Every sweep re-probes a wedged sandbox, so warn once per sandbox, not per probe.
+      // Fall back to any Running pod (or fail) rather than hang forever, warning once per sandbox.
       log.warnOnce(`ready-pod:${ref.namespace}/${ref.name}`, "ready-pod deadline expired", {
         namespace: ref.namespace,
         sandbox: ref.name,
@@ -191,9 +158,7 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
   }
 }
 
-/** Poll until a RUNNING + Ready pod backs the sandbox, returning the pod object.
- *  A freshly-provisioned sandbox may still be ContainerCreating when the first
- *  request arrives; exec'ing / proxying to a not-ready pod fails, so we wait. */
+/** Poll until a Running and Ready pod backs the sandbox, since exec against a ContainerCreating pod fails. */
 async function resolveReadyPod(
   kc: KubeConfig,
   ref: SandboxRef,
@@ -202,8 +167,7 @@ async function resolveReadyPod(
   const core = kc.makeApiClient(CoreV1Api);
   return pollForReadyPod(ref, {
     ensureRunning,
-    // Try both the label selector (v0.4.x) and direct pod name lookup (v0.5.0+ where the controller
-    // names the pod after the Sandbox but may not propagate podTemplate labels).
+    // Try both the label selector and the direct pod-name lookup.
     listCandidates: async () => {
       const pods = await core.listNamespacedPod({
         namespace: ref.namespace,
@@ -231,16 +195,12 @@ async function resolvePodName(
   return name;
 }
 
-/** Resolve a sandbox to its pod name + routable pod IP, for the web-service
- *  reverse proxy (which HTTPs directly to podIP:port). Same 90s ready-poll as
- *  exec. Throws if no ready pod, or a ready pod with no assigned IP. */
+/** Resolve a sandbox to its pod name and routable pod IP for the web-service reverse proxy; throws if no ready pod has an IP. */
 export async function resolvePodTarget(
   ref: SandboxRef,
   opts: { kubeConfig?: KubeConfig } = {},
 ): Promise<PodTarget> {
-  // When the caller already knows the pod IP (the broker provisioner returned it on
-  // ensure/resume), use it directly — no `get pods` needed. The legacy k8s path has
-  // no podIP on the ref, so it falls through to the label lookup.
+  // A pod IP the caller already knows needs no `get pods`.
   if (ref.podIP) return { name: ref.name, podIP: ref.podIP };
   const kc = opts.kubeConfig ?? defaultKubeConfig();
   const pod = await resolveReadyPod(kc, ref);
@@ -259,12 +219,8 @@ export function createK8sSandboxApiClient(
   const container = opts.container ?? DEFAULT_CONTAINER;
   const podName = opts.podName ?? ref.name;
 
-  // Build a fresh Exec per call. In-cluster the projected SA token ROTATES
-  // (~1h on EKS); the client-node Exec WebSocket caches user.token from the
-  // KubeConfig at construction, so a long-lived, reused Exec starts 403-ing on
-  // the pods/exec upgrade once the cached token expires. Re-reading the config
-  // (cheap — it just reads the token file) picks up the current token each time.
-  // An explicitly-injected kubeConfig (tests) is reused as-is.
+  // A fresh Exec per call picks up the rotating projected SA token, which the client-node
+  // Exec caches at construction.
   const freshExec = (): Exec => new Exec(opts.kubeConfig ?? defaultKubeConfig());
 
   const execRaw = (
@@ -276,12 +232,8 @@ export function createK8sSandboxApiClient(
       const out = sink();
       const err = sink();
       let status: V1Status | undefined;
-      // ── STALL WATCHDOG. The two silent-forever failure modes here are (a) the
-      // pods/exec UPGRADE request that a starved kubelet never answers (exec()'s
-      // promise never settles) and (b) a WS that opens but never receives a close
-      // frame. Without a timeout or log line, a hung tool call would produce nothing.
-      // The watchdog names the stage a still-running exec is stuck in; it never kills
-      // anything (a legitimately long command must stay legal), it just refuses to be silent.
+      // Stall watchdog: names the stage a still-running exec is stuck in (an unanswered
+      // upgrade or a WS with no close frame) without ever killing it.
       const startedAt = Date.now();
       let stage = "upgrade-pending"; // -> "ws-open" -> settled
       let settled = false;
@@ -302,8 +254,7 @@ export function createK8sSandboxApiClient(
         clearInterval(watchdog);
       };
       log.debug("exec dispatch", { namespace: ref.namespace, pod_name: podName, cmd: cmdSummary });
-      /** The WebSocket close frame, kept so a failure that surfaces as a property-less
-       *  event still has something diagnosable attached to its log line. */
+      /** The WebSocket close frame, kept so a property-less failure event still has something diagnosable attached. */
       let lastClose: { code: number; reason: string } | undefined;
       if (signal?.aborted) {
         // Already cancelled before we even opened the stream.
@@ -332,23 +283,16 @@ export function createK8sSandboxApiClient(
             pod_name: podName,
             upgrade_ms: Date.now() - startedAt,
           });
-          // Honor a cancel: closing the pods/exec WebSocket tears down the remote
-          // exec (SIGTERM/HUP to its process). Retained so kill()/abort can end a
-          // long-running command mid-flight (the whole point of cancel).
+          // Closing the pods/exec WebSocket tears down the remote exec, so a cancel ends
+          // a long-running command mid-flight.
           const onAbort = () => {
             try {
               (ws as { close?: () => void }).close?.();
             } catch {
               /* already closing */
             }
-            // Do NOT wait for the close handshake. kubelet keeps the exec'd process
-            // running after a client disconnect and may not ack the close until that
-            // process exits — so a kill() of `sh -c sleep 20` left waitForExit hanging
-            // ~20s on a real cluster while the fake stack (local subprocess, instant
-            // SIGTERM) resolved immediately. The agent then never finished its turn and
-            // Stop looked dead — the last two Tier-2 failures. The caller asked for the
-            // command to END; from its point of view it has: resolve now (130), and
-            // force the socket down so nothing leaks.
+            // Do not wait for the close handshake, which kubelet may not ack until the
+            // exec'd process exits: resolve now and force the socket down.
             try {
               (ws as { terminate?: () => void }).terminate?.();
             } catch {
@@ -365,11 +309,8 @@ export function createK8sSandboxApiClient(
             if (signal.aborted) onAbort();
             else signal.addEventListener("abort", onAbort, { once: true });
           }
-          // Capture the close code/reason on the way past. When the socket dies, the value
-          // reaching the error/catch paths below can be an event with NO own properties —
-          // which is why this logged a bare `{}` in production even though it ALREADY used
-          // getOwnPropertyNames. Serialization was never the problem; there was nothing to
-          // serialize. The close frame is the detail that was being thrown away here.
+          // Capture the close code/reason, since the error paths below may receive an
+          // event with no own properties.
           ws.on("close", (code?: number, reason?: Buffer) => {
             if (code !== undefined) lastClose = { code, reason: reason?.toString() || "" };
             settle();
@@ -422,11 +363,7 @@ export function createK8sSandboxApiClient(
     },
 
     async uploadBinary(path: string, base64: string): Promise<void> {
-      // STREAM the base64 over stdin into `base64 -d`. Do NOT embed it in the shell
-      // line: a single argv string is capped at MAX_ARG_STRLEN (~128KB) by execve,
-      // so an inline `printf '<b64>' | base64 -d` silently fails (E2BIG) for any
-      // upload past ~96KB. Over stdin there is no such cap. mkdir -p first so the
-      // parent (e.g. /workspace/uploads) exists.
+      // Stream the base64 over stdin, since a single argv string is capped at MAX_ARG_STRLEN.
       const dir = posixDirname(path);
       const stdin = Readable.from([base64]);
       const res = await execRaw(
@@ -438,31 +375,20 @@ export function createK8sSandboxApiClient(
   };
 }
 
-/** POSIX dirname without pulling in node:path just for one call (paths here are
- *  always sandbox-absolute POSIX paths, e.g. /workspace/uploads/x.pdf). */
+/** POSIX dirname for sandbox-absolute paths. */
 function posixDirname(p: string): string {
   const i = p.lastIndexOf("/");
   return i <= 0 ? (i === 0 ? "/" : ".") : p.slice(0, i);
 }
 
-/**
- * Build the argv for an ExecRequest as a `sh -c` invocation.
- *
- * Two input shapes:
- *  - argv form: command + args[] are separate tokens -> shell-quote each so they
- *    pass through literally.
- *  - shell-string form: command is a whole shell line (pipes, redirects, &&) and
- *    args is empty -> it is ALREADY shell syntax, so DON'T requote it (quoting
- *    the whole line makes the shell try to run one program literally named
- *    "echo X > f && cat f"). goose's ACP terminal sends this form.
- */
+/** Build the argv for an ExecRequest as a `sh -c` invocation: argv form (command + args) is shell-quoted per token, while a bare command with no args is already a shell line and passes through verbatim. */
 function wrapCommand(req: ExecRequest): string[] {
   const envPrefix = req.env
     ? Object.entries(req.env).map(([k, v]) => `${k}=${shellQuote(v)}`)
     : [];
   const inner =
     req.args.length === 0
-      ? req.command // already a shell line — pass through verbatim
+      ? req.command // already a shell line
       : [req.command, ...req.args].map(shellQuote).join(" ");
   const cd = req.cwd ? `cd ${shellQuote(req.cwd)} && ` : "";
   const assigns = envPrefix.length ? `${envPrefix.join(" ")} ` : "";

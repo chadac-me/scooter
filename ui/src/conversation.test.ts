@@ -29,9 +29,7 @@ describe("Conversation identity", () => {
   });
 
   it("the key does NOT change when the server assigns an id", async () => {
-    // The whole point. Anything keyed on the conversation — the React runtime above all —
-    // must not be torn down at the moment the id appears, because that discards the state
-    // of a run already in flight (a Stop button that stops responding).
+    // Anything keyed on the conversation, the React runtime above all, must not be torn down when the id appears.
     const c = Conversation.pending("local-1", CFG, creates("server-1"));
     const keyBefore = c.key;
 
@@ -103,7 +101,7 @@ describe("Conversation.withId (ACTIONS create first)", () => {
   });
 
   it("THROWS when the conversation cannot be created", async () => {
-    // The user asked for something. Silently doing nothing is a dead control.
+    // Silently doing nothing would be a dead control.
     const c = Conversation.pending("local-1", CFG, creates(null));
     const fn = vi.fn(async (id: string) => id);
 
@@ -114,8 +112,7 @@ describe("Conversation.withId (ACTIONS create first)", () => {
 
 describe("Conversation.ifCreated (READS skip the network)", () => {
   it("returns the fallback WITHOUT calling fn for a pending conversation", async () => {
-    // This is what stops a fresh page load from 404ing: links/ready/web-services have no
-    // answer for a conversation the server has never heard of.
+    // Links/ready/web-services have no answer for a conversation the server has never heard of.
     const c = Conversation.pending("local-1", CFG, creates("server-1"));
     const fn = vi.fn(async () => ["a-link"]);
 
@@ -141,8 +138,6 @@ describe("Conversation.ifCreated (READS skip the network)", () => {
 
 describe("addressing the server", () => {
   it("url() and shareUrl() are UNDEFINED before the server has created it", () => {
-    // The bug this exists to kill: the render stream opened against a local key and 404'd
-    // three times, and the ?thread= link named a conversation the server never had.
     const c = Conversation.pending("local-1", CFG, creates("server-1"));
     expect(c.url("/events.integrity")).toBeUndefined();
     expect(c.shareUrl("https://scooter.example")).toBeUndefined();
@@ -158,7 +153,7 @@ describe("addressing the server", () => {
     expect(c.shareUrl("https://scooter.example")).toBe(
       "https://scooter.example/?thread=server-1",
     );
-    // The local key must appear in NEITHER.
+    // The local key must appear in neither.
     expect(c.url("/x")).not.toContain("local-1");
     expect(c.shareUrl("https://scooter.example")).not.toContain("local-1");
   });
@@ -170,9 +165,7 @@ describe("addressing the server", () => {
 });
 
 describe("a BLANK id is not an id", () => {
-  // `""` is the one value that passes every `!== undefined` guard in this class and then
-  // addresses `/conversations//links` — the COLLECTION, not this conversation. The UI
-  // sent that every 10s per open tab.
+  // `""` passes every `!== undefined` guard in this class and would then address `/conversations//links`, the collection rather than this conversation.
   it("treats an empty constructed id as not-yet-created", () => {
     const c = new Conversation({ key: "local-1", id: "", config: CFG, create: creates("server-1") });
     expect(c.created).toBe(false);
@@ -209,11 +202,7 @@ describe("a BLANK id is not an id", () => {
 
 describe("AWAITING_ID — the type that blocks the ?? bug", () => {
   it("is NOT nullish, so ?? and || cannot silently substitute a placeholder", () => {
-    // The whole reason this is a value rather than `undefined`. With undefined,
-    // `serverId ?? localKey` compiles and quietly streams a local key at the server —
-    // which is the bug that produced a 404 storm and a spurious restart message.
-    // Being non-nullish means ?? passes it THROUGH, so the result is not a string and
-    // the compiler rejects the assignment. (Verified against tsc, not just asserted.)
+    // Being non-nullish means ?? passes it through, so `serverId ?? localKey` is not a string and tsc rejects the assignment.
     const awaiting: MaybeConversationId = AWAITING_ID;
     expect(awaiting ?? "fallback").toBe(AWAITING_ID);
     expect(awaiting || "fallback").toBe(AWAITING_ID);
@@ -238,10 +227,7 @@ describe("AWAITING_ID — the type that blocks the ?? bug", () => {
 
 describe("AWAITING_ID — the type that blocks the ?? bug", () => {
   it("is NOT nullish, so ?? and || pass it THROUGH instead of substituting", () => {
-    // The entire reason this is a value rather than `undefined`. With undefined,
-    // `serverId ?? localKey` compiles and quietly streams a local key at the server —
-    // the bug that produced a 404 storm and a spurious restart message. Being non-nullish
-    // means the result is not a string, so tsc rejects the assignment at compile time.
+    // Being non-nullish means ?? passes it through, so `serverId ?? localKey` is not a string and tsc rejects the assignment.
     const awaiting: MaybeConversationId = AWAITING_ID;
     expect(awaiting ?? "fallback").toBe(AWAITING_ID);
     expect(awaiting || "fallback").toBe(AWAITING_ID);

@@ -1,13 +1,4 @@
-"""GitHub App credential source — JWT -> installation access token.
-
-Generates a short-lived App JWT (RS256) from the App private key, exchanges it
-for an installation access token, caches the token (~50 min), refreshes before
-expiry. Logic lifted from openhands-nix github_app.py.
-
-Only the github provider composes it, and the git credentials it vends are served
-by that provider's own /github/git-credentials route — so it travels with it
-rather than staying in the broker app. Why: PR #591.
-"""
+"""GitHub App credential source: a short-lived RS256 App JWT exchanged for an installation access token, cached and refreshed before expiry."""
 
 from __future__ import annotations
 
@@ -23,7 +14,7 @@ from scooter_broker_lib.types import Credential, CredentialSource, Identity
 logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
-_TOKEN_TTL = 50 * 60  # tokens last 1h; refresh at 50m
+_TOKEN_TTL = 50 * 60  # tokens last 1h
 
 
 @dataclass
@@ -32,12 +23,11 @@ class GitHubAppSource(CredentialSource):
     private_key: str                   # PEM content or path
     installation_id: int
 
-    # (token, expires_at) cache, per source instance.
+    # (token, expires_at), per source instance.
     _cache: tuple[str, float] | None = field(default=None, repr=False)
 
     def _load_private_key(self) -> str:
         key = self.private_key
-        # A path (not inline PEM) -> read the file.
         if not key.startswith("-----") and "/" in key:
             with open(key) as f:
                 return f.read()
@@ -45,7 +35,8 @@ class GitHubAppSource(CredentialSource):
 
     def _generate_jwt(self) -> str:
         now = int(time.time())
-        payload = {"iat": now - 60, "exp": now + 10 * 60, "iss": self.app_id}
+        # GitHub caps exp at 10 minutes; 9 tolerates a fast clock.
+        payload = {"iat": now - 60, "exp": now + 9 * 60, "iss": self.app_id}
         return jwt.encode(payload, self._load_private_key(), algorithm="RS256")
 
     async def get(self, identity: Identity) -> Credential:

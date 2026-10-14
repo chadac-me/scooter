@@ -13,7 +13,6 @@ from webhooks.config import settings
 
 @pytest.fixture
 def client():
-    # Enable the test webhook on the live settings object (order-independent).
     with patch.object(settings, "test_webhook_enabled", True), patch("webhooks.app.db") as mock_db:
         mock_db.init_db = AsyncMock()
         mock_db.close_db = AsyncMock()

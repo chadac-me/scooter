@@ -1,11 +1,6 @@
 /**
- * Tier 1 contract — the sandbox container carries resource requests/limits.
- *
- * WHY: without requests the scheduler treats a sandbox as ~free and packs many onto
- * one node; a burst of in-pod nix builds then overwhelms the container runtime and the
- * kubelet's PLEG stalls the whole node (the node-death we hit). The Sandbox podTemplate
- * must carry the resources the provisioner is given, and omit the block entirely when
- * none are configured (so it can't accidentally reserve nothing/everything).
+ * The sandbox container carries the resource requests and limits the provisioner is
+ * given, and omits the block entirely when none are configured.
  */
 
 import { describe, it, expect } from "vitest";
@@ -22,11 +17,11 @@ const render = (deploy: Record<string, unknown>) =>
 
 describe("sandboxManifest resource requests/limits", () => {
   it("applies the passed resources to the sandbox container", () => {
-    // Guaranteed-QoS profile (the platform default): requests == limits on cpu + memory.
+    // The Guaranteed-QoS profile: requests equal limits on cpu and memory.
     const resources = { requests: { cpu: "2", memory: "4Gi" }, limits: { cpu: "2", memory: "4Gi" } };
     const c = render({ resources }).spec.podTemplate.spec.containers[0];
     expect(c.resources).toEqual(resources);
-    // A cpu limit IS emitted (== the request) so a runaway pod is throttled, not free.
+    // A cpu limit is emitted so a runaway pod is throttled.
     expect(c.resources?.limits?.cpu).toBe("2");
   });
 

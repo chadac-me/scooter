@@ -1,19 +1,8 @@
 /**
- * Tier 1 — replay the REAL goose subagent-fanout transcript (recorded against
- * Bedrock, real ACP tool calls) and assert the completion machinery works on
- * goose's actual event shapes.
- *
- * This is the provider that exposed the completion bug: a subagent finishes but
- * its result never reaches the parent. The host-side race is fixed + unit-tested in
- * store-flush.spec.ts (the fire-and-forget append/read window). THIS test guards the
- * OTHER half — that goose's real subagent event shape is one the completion path can
- * actually read: lastRunCompleted() sees the RUN_FINISHED and lastAssistantText()
- * extracts the child's final message (the haiku). If a goose version change alters
- * that shape (e.g. the final turn stops ending with an assistant TEXT message), this
- * catches it — which the fake-agent tests never would.
- *
- * The fixture is recorded, not hand-authored:
- *   GOOSE_BACKEND=bedrock node test/support/record-transcript.mjs goose subagent-fanout
+ * Replays the recorded goose subagent-fanout transcript and asserts the subagent
+ * completion path reads goose's real event shapes: lastRunCompleted() sees the
+ * RUN_FINISHED and lastAssistantText() extracts the child's final message.
+ * The fixture is recorded with `GOOSE_BACKEND=bedrock node test/support/record-transcript.mjs goose subagent-fanout`.
  */
 
 import { describe, it, expect } from "vitest";
@@ -25,8 +14,7 @@ import type { AguiEvent } from "../../src/bridge.js";
 
 const SCENARIO = "subagent-fanout";
 
-// The recorder concatenates parent + subagent conversations into one file, each
-// entry tagged with its conversationId. Group the agui-out events per conversation.
+// The recorder concatenates parent and subagent conversations into one file, each entry tagged with its conversationId.
 function eventsByConversation(entries: TranscriptEntry[]): Map<string, AguiEvent[]> {
   const byConv = new Map<string, AguiEvent[]>();
   for (const e of entries) {
@@ -37,14 +25,12 @@ function eventsByConversation(entries: TranscriptEntry[]): Map<string, AguiEvent
   return byConv;
 }
 
-// goose renders the MCP tool name as "Scooter-env: Spawn Subagent"; the SDK/other
-// paths use "spawn_subagent". Match either (space- or underscore-separated).
+// goose renders the MCP tool name as "Scooter-env: Spawn Subagent"; other paths use "spawn_subagent".
 const SPAWN_RE = /spawn[_ ]?subagent/i;
 const hasSpawn = (events: AguiEvent[]) =>
   events.some((e) => e.type === "TOOL_CALL_START" && SPAWN_RE.test((e as { toolCallName?: string }).toolCallName ?? ""));
 
-// Gated: the fixture is recorded on demand (needs Bedrock creds), so skip cleanly
-// when it isn't present rather than fail on a fresh checkout.
+// The fixture is recorded on demand, so skip when it is absent.
 const maybe = fixtureExists("goose", SCENARIO) ? describe : describe.skip;
 
 maybe("goose subagent-fanout (real Bedrock transcript)", () => {
@@ -69,9 +55,7 @@ maybe("goose subagent-fanout (real Bedrock transcript)", () => {
   });
 
   it("every subagent yields a non-empty result (lastAssistantText extracts goose's final message)", () => {
-    // The exact failure the parent saw: a finished subagent whose result was empty →
-    // "reported no final result message". On real goose the final turn IS a plain
-    // assistant TEXT message, so lastAssistantText must return it.
+    // On real goose the final turn is a plain assistant text message.
     for (const [conv, ev] of subagents) {
       const result = lastAssistantText(ev);
       expect(result, `subagent ${conv} produced no extractable final text`).toBeTruthy();

@@ -1,10 +1,4 @@
-"""Slack's broker half: the bot-token proxy to slack.com/api and its enable gate.
-
-The broker app never had a test for this — the provider was three lines of wiring
-inside it. It gets one on the way out (PR #588), driven through the ENVIRONMENT
-rather than a settings singleton, so the variable name a deployment sets is part
-of what is covered.
-"""
+"""Slack's broker half: the bot-token proxy to slack.com/api and its enable gate, driven through the environment."""
 
 from __future__ import annotations
 
@@ -33,7 +27,6 @@ def test_provider_proxies_slack_api_with_the_bot_token(monkeypatch):
     assert provider.enabled
     proxy = next(t for t in provider.transports if isinstance(t, HttpProxy))
     assert proxy.upstream == "https://slack.com/api"
-    # POST as well as GET: chat.postMessage / reactions.add are the whole point.
     assert set(proxy.methods) == {"GET", "POST"}
 
 
@@ -48,6 +41,4 @@ async def test_the_token_is_injected_not_handed_to_the_agent(monkeypatch):
 
 
 def test_no_token_disables_the_provider():
-    # Enabled iff the token is set: without it every /slack/* route would 401
-    # upstream, so the broker declines to mount them at all.
     assert not slack().enabled

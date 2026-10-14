@@ -1,10 +1,9 @@
 /**
- * UI unit test — the linked-resources panel's collapse default.
+ * The linked-resources panel's collapse default.
  *
- * SSR render (the house style, no jsdom) of the pure `LinkedResourcesPanel`, which is
- * exactly what first paint shows: a short list is expanded, a long one (>= 5) starts
- * collapsed so it can't crowd out the session list beside it. Clicking the toggle is a
- * DOM interaction and is covered by the Playwright e2e.
+ * SSR render of the pure `LinkedResourcesPanel`: a short list is expanded, a long
+ * one (>= 5) starts collapsed so it cannot crowd out the session list beside it.
+ * Clicking the toggle is covered by the Playwright e2e.
  */
 
 import { describe, it, expect } from "vitest";

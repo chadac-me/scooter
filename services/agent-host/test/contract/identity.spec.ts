@@ -1,6 +1,4 @@
-/**
- * Tier 1 contract test — user identity from the trusted ingress header.
- */
+/** User identity from the trusted ingress header. */
 
 import { describe, it, expect } from "vitest";
 import type { IncomingMessage } from "node:http";
@@ -15,7 +13,7 @@ import {
 
 const DEFAULT = { userHeader: "x-auth-user", emailHeader: "x-auth-email" };
 
-/** A fake request with the given (already-lowercased) headers. */
+/** A fake request with the given already-lowercased headers. */
 function req(headers: Record<string, string | string[]>): IncomingMessage {
   return { headers } as unknown as IncomingMessage;
 }
@@ -55,7 +53,7 @@ describe("user identity from header", () => {
       delete process.env.AUTH_EMAIL_HEADER;
       expect(identityConfigFromEnv()).toEqual({ userHeader: "x-auth-user", emailHeader: "x-auth-email" });
       process.env.AUTH_USER_HEADER = "X-Forwarded-User";
-      expect(identityConfigFromEnv().userHeader).toBe("x-forwarded-user"); // node lowercases header names
+      expect(identityConfigFromEnv().userHeader).toBe("x-forwarded-user");
     } finally {
       if (prev.u === undefined) delete process.env.AUTH_USER_HEADER; else process.env.AUTH_USER_HEADER = prev.u;
       if (prev.e === undefined) delete process.env.AUTH_EMAIL_HEADER; else process.env.AUTH_EMAIL_HEADER = prev.e;
@@ -64,7 +62,7 @@ describe("user identity from header", () => {
 });
 
 describe("ALB OIDC resolver", () => {
-  // A JWT whose payload claims carry email + name (base64url, no signature check).
+  // A JWT whose payload claims carry email and name, with no signature check.
   function jwt(claims: Record<string, unknown>): string {
     const b64 = (o: unknown) =>
       Buffer.from(JSON.stringify(o)).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");

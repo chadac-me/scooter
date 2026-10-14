@@ -1,15 +1,8 @@
 /**
- * Tier 1 contract — subagents at the SessionManager level (RED-FIRST; see
- * todo/docs/SUBAGENTS.md).
- *
- * A subagent is a full conversation that SHARES the parent's sandbox pod
- * (SandboxRef) and carries a `parentId`. So spawnChild:
- *   - does NOT provision a new sandbox (reuses the parent's ref),
- *   - stamps parentId + inherits the parent's owner,
- *   - is a normal conversation otherwise (own id/bridge/event log).
- * Lifecycle: end(id) cascade-ends the whole subtree (all share ONE root pod); a
- * conversation with a live descendant is NOT idle-swept. Subagents are
- * MULTI-LEVEL (a subagent may spawn its own).
+ * Contract tests for subagents at the SessionManager level. A subagent is a full
+ * conversation that shares the parent's sandbox pod and carries a `parentId`, so
+ * spawnChild provisions nothing new and inherits the owner. end(id) cascade-ends
+ * the whole subtree, and a conversation with a live descendant is not idle-swept.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -44,9 +37,7 @@ const inMemoryStore = (): ConversationStore => {
   };
 };
 
-/** A minimal fake bridge whose RUN_FINISHED we can drive, to exercise the
- *  event-driven subagent-completion path. Only the methods spawnChild + the
- *  completion hook touch are implemented; the rest are no-ops. */
+/** A minimal fake bridge whose RUN_FINISHED a test can drive. */
 function fakeBridgeFactory() {
   const bridges = new Map<string, { emit: (e: AguiEvent) => void }>();
   const factory = ({ conversationId }: { conversationId: string }) => {
@@ -72,31 +63,20 @@ describe("SessionManager subagents", () => {
     const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
 
     const parent = await sessions.start("parent-1", undefined, "alice");
-    expect(provisioner.create).toHaveBeenCalledOnce(); // the parent's cold sandbox
+    expect(provisioner.create).toHaveBeenCalledOnce();
 
     const child = await sessions.spawnChild(parent.id, "child-1", { prompt: "research X" });
 
-    // The child is a distinct conversation...
     expect(child.id).toBe("child-1");
     expect(child.id).not.toBe(parent.id);
-    // ...that SHARES the parent's sandbox ref (NO second provision)...
     expect(provisioner.create).toHaveBeenCalledOnce();
     expect(child.sandbox).toEqual(parent.sandbox);
-    // ...carries the parent link + inherits the owner.
     expect(child.parentId).toBe(parent.id);
     expect(child.owner).toBe("alice");
   });
 
   it("spawnChild RETURNS while the child is still working (it must not await the run)", async () => {
-    // The whole point of a subagent is that it works in the BACKGROUND: spawn_subagent's
-    // contract is "returns a subagent id — after spawning, END YOUR TURN, you'll be nudged
-    // when it finishes". SessionBridge.prompt() resolves when the run COMPLETES, not when
-    // it is enqueued, so awaiting it inside spawnChild holds the parent's turn hostage for
-    // the entire duration of the child's work — the parent's tool call never returns, the
-    // UI shows the parent still running, and the delegation bought nothing.
-    //
-    // Every other test here uses a fake bridge whose prompt() resolves immediately, which
-    // models the one case that cannot expose this. So: a child whose run never finishes.
+    // SessionBridge.prompt() resolves when the run completes, so this uses a child whose run never finishes.
     const provisioner = fakeProvisioner();
     let promptCalls = 0;
     const neverFinishes = () =>
@@ -105,7 +85,7 @@ describe("SessionManager subagents", () => {
         onPersist: () => () => {},
         prompt: () => {
           promptCalls++;
-          return new Promise<void>(() => {}); // a long-running turn: enqueued, never completes
+          return new Promise<void>(() => {});
         },
         cancel: () => {},
         stop: async () => {},
@@ -128,7 +108,6 @@ describe("SessionManager subagents", () => {
 
     expect((child as { id: string }).id).toBe("c-bg");
     expect(promptCalls, "the child's work must still be kicked off").toBe(1);
-    // …and the child is registered, so the parent can see it immediately.
     expect(sessions.get("c-bg" as SessionId)?.parentId).toBe(parent.id);
   });
 
@@ -150,7 +129,6 @@ describe("SessionManager subagents", () => {
     const grandchild = await sessions.spawnChild(child.id, "gc1", { prompt: "deeper" });
 
     expect(grandchild.parentId).toBe(child.id);
-    // Still ONE sandbox for the whole tree (only the root ever provisioned).
     expect(provisioner.create).toHaveBeenCalledOnce();
     expect(grandchild.sandbox).toEqual(root.sandbox);
   });
@@ -160,16 +138,13 @@ describe("SessionManager subagents", () => {
     const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
     const root = await sessions.start("root", undefined, "alice");
     await sessions.spawnChild(root.id, "c1", { prompt: "a" });
-    await sessions.spawnChild("c1", "gc1", { prompt: "deeper" }); // grandchild
+    await sessions.spawnChild("c1", "gc1", { prompt: "deeper" });
     await sessions.spawnChild(root.id, "c2", { prompt: "b" });
 
     await sessions.end(root.id);
 
-    // The whole subtree is ended + removed (end is delete-don't-tombstone), so
-    // none of the descendants remain get()-able.
     for (const id of ["root", "c1", "gc1", "c2"]) expect(sessions.get(id)).toBeUndefined();
-    // The shared sandbox is torn down exactly once (the root owns it; children
-    // share it and must NOT re-destroy).
+    // The root owns the shared sandbox, so it is torn down exactly once.
     expect(provisioner.destroy).toHaveBeenCalledOnce();
   });
 
@@ -177,12 +152,10 @@ describe("SessionManager subagents", () => {
     const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
     const root = await sessions.start("root", undefined, "alice");
     await sessions.spawnChild(root.id, "c1", { prompt: "a" });
-    await sessions.spawnChild("c1", "gc1", { prompt: "deeper" }); // a live grandchild
+    await sessions.spawnChild("c1", "gc1", { prompt: "deeper" });
 
-    // Force an idle sweep with a 0ms threshold.
     const suspended = await sessions.sweepIdle(0);
-    // The root + the middle child both have a live descendant → neither is swept
-    // (the shared pod can't drop while any descendant runs).
+    // The root and the middle child both have a live descendant.
     expect(suspended).not.toContain(root.id);
     expect(suspended).not.toContain("c1");
     expect(sessions.get(root.id)?.status).toBe("running");
@@ -201,7 +174,6 @@ describe("SessionManager subagents", () => {
     const fired: Array<{ subagentId: string; parentId: string }> = [];
     sessions.onSubagentComplete((subagentId, parentId) => fired.push({ subagentId, parentId }));
 
-    // The subagent's bridge emits RUN_FINISHED -> the hook fires immediately.
     bf.finish(child.id);
     expect(fired).toEqual([{ subagentId: "c1", parentId: parent.id }]);
   });

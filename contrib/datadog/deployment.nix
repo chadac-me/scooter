@@ -1,4 +1,4 @@
-# datadog's DEPLOYMENT half. Gated on contribs.datadog.enable; why: #599, #711.
+# datadog's deployment half, gated on contribs.datadog.enable.
 { config, lib, ... }:
 
 let

@@ -1,5 +1,4 @@
-/** Unit — the SSE parser + fold. The marimo execute stream shape is the contract;
- *  these lock the exact frames execute-code.sh consumes. */
+/** Unit tests for the SSE parser and fold, locking the exact marimo execute stream frames. */
 
 import { describe, it, expect } from "vitest";
 

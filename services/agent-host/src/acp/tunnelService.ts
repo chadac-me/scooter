@@ -1,15 +1,9 @@
 /**
- * The agent-host's tunnel service — the cloud half of MCP-over-the-wire (BYOC only).
- *
- * A BYO container opens a stream naming a TARGET; this resolves it (tunnelTargets.ts: names
- * only, conversation scoped server-side), makes the real HTTP call, and streams the response
- * back as tunnel frames. goose and the in-cluster SDK never come here — they reach scooter-env
- * on loopback, unchanged.
- *
- * EVERY FAILURE CLOSES WITH A REASON. A tunnel that goes quiet leaves the agent with a tool
- * call it waits on forever; the container turns a close-with-error into an HTTP 502 the SDK
- * surfaces as a tool error. That difference — a failing tool vs a hanging one — is the whole
- * point of the error paths below.
+ * The agent-host's tunnel service, the cloud half of MCP-over-the-wire for BYOC. A
+ * container opens a stream naming a target; this resolves it (tunnelTargets.ts),
+ * makes the real HTTP call, and streams the response back as tunnel frames. Every
+ * failure closes with a reason, since a tunnel that goes quiet leaves the agent
+ * with a tool call it waits on forever.
  */
 
 import { formatError, logger } from "../log.js";
@@ -27,47 +21,33 @@ export interface TunnelServiceDeps extends TunnelTargetDeps {
 }
 
 export interface TunnelService {
-  /** Handle one inbound tunnel frame for `conversationId` (supplied SERVER-SIDE). */
+  /** Handle one inbound tunnel frame for `conversationId`, which is supplied server-side. */
   onFrame(conversationId: string, frame: WireFrame): Promise<void>;
-  /** Await in-flight calls — tests only; production is fire-and-forget. */
+  /** Await in-flight calls (tests only). */
   drain?(): Promise<void>;
 }
 
-/** Rewrite an `initialize` whose protocolVersion our server cannot accept. Everything else —
- *  including every tool call — passes through BYTE FOR BYTE. */
 /** One in-flight stream: the request being assembled until `end` arrives. */
 interface Pending {
   url: string;
   method: string;
   headers: Record<string, string>;
   body: Buffer[];
-  /** The conversation this stream is scoped to — carried so log lines can name it. */
+  /** The conversation this stream is scoped to, so log lines can name it. */
   conversationId: string;
 }
 
-/** One structured trace line per tunnel event.
- *
- * WHY STRUCTURED. Debugging this feature took eight deploy cycles of adding one console.log at
- * whichever boundary was suspected next — each iteration a build + rollout, each answering
- * exactly one question. A tunnel carries a CONVERSATION between two processes; you cannot
- * understand it from a single boundary. Every event now emits the same key=value shape,
- * correlated by stream, so one run shows the whole exchange: which JSON-RPC method, which
- * direction, how many bytes, what status.
- *
- * Off by default (TUNNEL_TRACE=1) — it is per-frame and would drown a normal log. The proper
- * home for this is OTel spans (the metrics exporter is already wired); this is the cheap
- * version that makes the next bug readable today. */
+/** One structured trace line per tunnel event, correlated by stream, enabled with TUNNEL_TRACE=1 since it is per-frame. */
 const TRACE = process.env.TUNNEL_TRACE === "1";
 function trace(event: string, fields: Record<string, unknown>): void {
   if (!TRACE) return;
-  // `event` is one of a small closed set ("open"/"request"/"response"/…), so it stays a
-  // constant, groupable msg; every value it carries is already a separate field.
+  // `event` is a small closed set, so it stays a constant, groupable msg.
   const defined: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(fields)) if (v !== undefined) defined[k] = v;
   traceLog.info(event, defined);
 }
 
-/** The JSON-RPC method + id in a body, for correlation. Never throws on a non-JSON body. */
+/** The JSON-RPC method and id in a body, for correlation; never throws on a non-JSON body. */
 function rpcOf(body: Buffer): { method?: string; rpc_id?: string | number } {
   try {
     const m = JSON.parse(body.toString()) as { method?: string; id?: string | number };
@@ -95,12 +75,9 @@ export function createTunnelService(deps: TunnelServiceDeps): TunnelService {
         headers: p.headers,
         body: p.body.length ? Buffer.concat(p.body).toString() : undefined,
       });
-      // NB: do NOT read (or clone-and-read) the body here to log it. undici's clone shares the
-      // underlying stream, so consuming the clone leaves the original yielding nothing — the
-      // response reached the container EMPTY. A 4xx is not an error to swallow either: the CLI
-      // probes optional methods (server/discover) and RELIES on receiving the rejection so it
-      // can fall back to the standard initialize handshake. Eating that response is what left
-      // the SDK with no server at all.
+      // Do not read or clone the body here to log it (undici's clone shares the stream),
+      // and forward a 4xx rather than swallow it, since the CLI relies on rejections to
+      // fall back to the standard initialize handshake.
       trace("response", { stream: id, status: res.status, has_body: !!res.body });
       const headers: Record<string, string> = {};
       res.headers?.forEach?.((v, k) => (headers[k] = v));
@@ -108,8 +85,7 @@ export function createTunnelService(deps: TunnelServiceDeps): TunnelService {
       let total = 0;
       const body = res.body;
       if (body && typeof (body as ReadableStream<Uint8Array>).getReader === "function") {
-        // STREAM, don't buffer: MCP StreamableHTTP responses arrive incrementally and the
-        // agent should see them the same way.
+        // Stream rather than buffer, since MCP StreamableHTTP responses arrive incrementally.
         const reader = (body as ReadableStream<Uint8Array>).getReader();
         let first = true;
         for (;;) {
@@ -124,7 +100,7 @@ export function createTunnelService(deps: TunnelServiceDeps): TunnelService {
             ch: "tunnel", type: "chunk", id,
             payload: { data: Buffer.from(value).toString("base64"), ...head },
           });
-          head = {} as never; // status/headers ride the FIRST chunk only
+          head = {} as never; // status/headers ride the first chunk only
         }
       } else {
         const text = await res.text();
@@ -157,7 +133,7 @@ export function createTunnelService(deps: TunnelServiceDeps): TunnelService {
         trace("open", { stream: id, conversation_id: conversationId, target: payload.target, method: payload.method });
         const resolution = resolveTunnelTarget(payload.target ?? "", conversationId, deps);
         if (!resolution.ok) {
-          // Loud on both ends: the container logs the reason, and so do we.
+          // Loud on both ends.
           log.warn("refusing target", {
             conversation_id: conversationId,
             target: payload.target,
@@ -166,18 +142,13 @@ export function createTunnelService(deps: TunnelServiceDeps): TunnelService {
           closeWithError(id, resolution.reason);
           return;
         }
-        // NOTE: the resolved URL is used AS RESOLVED — the container's `path` is deliberately
-        // NOT appended. The target already encodes the endpoint + this conversation's scope,
-        // and honouring a container-supplied path would let it reach other conversations'
-        // resources (the cross-owner hole the attach path guards against).
+        // The resolved URL is used as resolved, with the container's `path` not appended,
+        // since honouring it would let the container reach other conversations' resources.
         const headers = { ...(payload.headers ?? {}) };
         delete headers.host; // the container's Host names its own loopback proxy
         delete headers["content-length"]; // recomputed by fetch
-        // The container's headers are forwarded, so a credential we inject must be
-        // set AFTER stripping any the container supplied under the same name — a
-        // merge would let the user's machine present its own Authorization to an
-        // endpoint that now authenticates with one. Case-insensitively, since HTTP
-        // header names are and the container chooses the spelling. Why: issue #700.
+        // An injected credential replaces any header the container supplied under the
+        // same name (case-insensitively), so the user's machine cannot present its own.
         for (const { name } of resolution.target.headers) {
           for (const existing of Object.keys(headers)) {
             if (existing.toLowerCase() === name.toLowerCase()) delete headers[existing];

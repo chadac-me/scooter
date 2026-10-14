@@ -1,19 +1,9 @@
-"""Static-share store — the broker-side persistence for published static bundles.
+"""Static-share store: the broker-side persistence for published static bundles.
 
-A *share* is identified by a broker-minted UUID (the URL). It has metadata
-(owner/description/visibility/latest_version) plus one or more *versions*, each a
-snapshot of the bundle's files. The root URL serves the latest version; updating
-a share adds a new version and keeps the UUID. Backed by the shared broker
-Postgres (SQLAlchemy async), mirroring broker/registry/store.py.
-
-Schema constraint: the tables (static_shares, static_share_versions) live in
-lib/sql/broker/schema.sql and are created by the db-migrator — this store issues
-no DDL, only reads/writes rows via the generated scooter_schema.broker models.
-Callers use the dataclass API (Share / ShareVersion / ShareFile), never a row.
-
-Two placeholders remain, both behind that API: inline base64 file bytes (intended
-backend: object storage) and `owner` = conversation id (no human identity yet, cf.
-#127). Rationale on PR #393.
+A share is identified by a broker-minted UUID and carries metadata plus one or more
+versions, each a snapshot of the bundle's files; updating a share adds a version and
+keeps the UUID. The tables live in lib/sql/broker/schema.sql and are created by the
+db-migrator, so this store issues no DDL and callers use the dataclass API, never a row.
 """
 
 from __future__ import annotations
@@ -28,8 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from scooter_broker_lib.store import StoreConfig, open_sessions
 
-# Generated ORM models (lib/sql/broker/schema.sql -> scooter_schema), aliased to this
-# store's private row names so the query helpers below read unchanged.
+# Generated ORM models from lib/sql/broker/schema.sql.
 from scooter_schema.broker import (
     StaticShares as _ShareRow,
     StaticShareVersions as _VersionRow,
@@ -39,7 +28,7 @@ from scooter_schema.broker import (
 
 @dataclass
 class ShareFile:
-    """One file in a bundle. `data` is the raw bytes (binary-safe: images, etc.)."""
+    """One file in a bundle, with `data` as raw bytes."""
 
     path: str
     content_type: str
@@ -60,7 +49,7 @@ class ShareVersion:
     created_at: str = ""
 
     def manifest(self) -> list[dict]:
-        """File list WITHOUT bytes — for list/metadata responses."""
+        """The file list without bytes, for metadata responses."""
         return [
             {"path": f.path, "content_type": f.content_type, "size": f.size}
             for f in self.files.values()
@@ -69,7 +58,7 @@ class ShareVersion:
 
 @dataclass
 class Share:
-    """A published static share. `uuid` is broker-minted and == the URL."""
+    """A published static share, whose broker-minted `uuid` is the URL."""
 
     uuid: str
     owner: str
@@ -81,7 +70,7 @@ class Share:
     updated_at: str = ""
 
     def summary(self) -> dict:
-        """Metadata WITHOUT any file bytes — for list responses."""
+        """Metadata without file bytes, for list responses."""
         return {
             "uuid": self.uuid,
             "owner": self.owner,
@@ -95,7 +84,7 @@ class Share:
 
 
 def _encode_files(files: dict[str, ShareFile]) -> str:
-    """Serialize a bundle to a portable JSON blob (base64 bytes)."""
+    """Serialize a bundle to a JSON blob with base64 bytes."""
     return json.dumps(
         {
             f.path: {
@@ -142,11 +131,7 @@ def _to_version(row: _VersionRow) -> ShareVersion:
 
 
 class ShareStore:
-    """Persists static shares + their versions. Async (asyncpg/aiosqlite).
-
-    Reads/writes rows through the generated scooter_schema.broker models; it does
-    NOT create tables (the db-migrator owns schema). Callers use the dataclass API.
-    """
+    """Persists static shares and their versions through the generated models, never creating tables."""
 
     def __init__(self, config: StoreConfig) -> None:
         self._engine: AsyncEngine
@@ -158,8 +143,7 @@ class ShareStore:
             return _to_share(row) if row else None
 
     async def get_version(self, uuid: str, version: int | None = None) -> ShareVersion | None:
-        """A specific version's files, or the latest when `version` is None.
-        Returns None if the share (or that version) doesn't exist."""
+        """A specific version (the latest when `version` is None), or None if the share or version does not exist."""
         async with self._session() as s:
             share = await s.get(_ShareRow, uuid)
             if share is None:
@@ -195,8 +179,7 @@ class ShareStore:
         entry_point: str,
         now_iso: str = "",
     ) -> Share:
-        """Mint a new UUID and store version 1. Owner is stamped by the caller
-        (the resolved identity), never a request field."""
+        """Mint a new UUID and store version 1 under the caller-resolved owner."""
         new_uuid = str(uuidlib.uuid4())
         async with self._session() as s, s.begin():
             s.add(
@@ -228,8 +211,7 @@ class ShareStore:
         description: str | None = None,
         now_iso: str = "",
     ) -> Share:
-        """Update an existing share: add the next version (root then serves it),
-        keeping the UUID. Raises KeyError if unknown, PermissionError if not owner."""
+        """Add the next version to an existing share, raising KeyError if unknown and PermissionError if not the owner."""
         async with self._session() as s, s.begin():
             row = await s.get(_ShareRow, uuid)
             if row is None:
@@ -250,8 +232,7 @@ class ShareStore:
             return _to_share(row)
 
     async def delete(self, uuid: str, *, owner: str) -> bool:
-        """Delete a share and all its versions. Returns False if unknown; raises
-        PermissionError if the caller isn't the owner."""
+        """Delete a share and all its versions, returning False if unknown and raising PermissionError if not the owner."""
         async with self._session() as s, s.begin():
             row = await s.get(_ShareRow, uuid)
             if row is None:

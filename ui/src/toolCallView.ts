@@ -1,23 +1,13 @@
 /**
  * Match an agent tool call to a provider-flavored visualization.
  *
- * WHAT ARRIVES AS `toolName`: goose surfaces the MCP tool through the ACP stream
- * as "<Server>: <Title-Cased Tool Name>" — e.g. the `slack_respond` tool on the
- * `scooter-env` MCP server arrives as "Scooter-env: Slack Respond" (NOT the raw
- * tool name, and NOT the registerTool `title`). So we normalize the incoming
- * string to the underlying tool-name identity (strip the "<server>:" prefix,
- * lowercase, spaces/punct -> "_") and match that against the known tool names.
- * We also accept the raw registerTool titles as a fallback, so either shape works.
- *
- * Returns null for anything we do not specialize (a search contrib’s
- * <provider>_web_search, web_fetch,
- * modify_environment, unknown) — the caller renders the generic ToolFallback.
- *
- * A CONTRIB registers its tools through the runtime manifest instead of this
- * file (contribManifest.ts), which is why the provider is a plain string: the
- * set is open, so there is nothing to switch on exhaustively. The single
- * consumer (ToolCallView) only passes it to the icon lookup, which already
- * falls back for an unknown name.
+ * goose surfaces an MCP tool through the ACP stream as "<Server>: <Title-Cased Tool
+ * Name>" (e.g. "Scooter-env: Slack Respond"), so the incoming string is normalized
+ * to the tool-name identity ("slack_respond") and matched against the known tool
+ * names, with the raw registerTool titles accepted as a fallback. Returns null for
+ * anything not specialized, and the caller renders the generic ToolFallback. A
+ * contrib registers its tools through the runtime manifest (contribManifest.ts), so
+ * the provider is an open string rather than an exhaustive union.
  */
 
 import type { ContribToolCard } from "./contribTypes.js";
@@ -27,8 +17,7 @@ import { contribToolCards, contribToolTitles } from "./contribManifest.js";
 export type ToolKind = string;
 
 export interface ToolCallVisual {
-  /** The provider (slack/…) or "shell". `provider` name kept for back-compat with
-   *  the icon lookup — "shell" renders a terminal glyph instead. */
+  /** The provider (slack/…) or "shell", which the icon lookup renders as a terminal glyph. */
   provider: ToolKind;
   /** What the agent posted / the command it ran. "" if absent. */
   body: string;
@@ -36,32 +25,22 @@ export interface ToolCallVisual {
   action: string;
 }
 
-/** Keyed by the underlying tool NAME (the stable identity).
- *
- *  KEPT after #700 moved slack_respond / slack_react / github_comment into
- *  contrib/slack and contrib/github, which now declare them under `ui.tools` as well.
- *  These are the NO-MANIFEST FALLBACK, not stale duplicates: `npm run dev` and the
- *  Playwright fast stack serve no manifest at all (contrib/README.md), so emptying this
- *  table would leave local development with no provider cards — which is what
- *  contribManifest.test.ts guards. cardFor consults the manifest FIRST, so a deployment
- *  still gets its rows from the contrib that owns the tool. */
+/** Keyed by the underlying tool name; the fallback for stacks that serve no manifest
+ *  (local dev, the fast e2e stack), consulted after the manifest. */
 const BUILTIN_BY_TOOL: Record<string, ContribToolCard> = {
   slack_respond: { provider: "slack", argKey: "text", action: "replied in Slack" },
   slack_react: { provider: "slack", argKey: "emoji", action: "reacted in Slack" },
   github_comment: { provider: "github", argKey: "body", action: "commented on GitHub" },
 };
 
-/** The registerTool `title` strings, accepted as a fallback (some ACP paths may
- *  surface the raw title instead of the "<server>: <Name>" form). */
+/** The registerTool `title` strings, accepted as a fallback for ACP paths that surface the raw title. */
 const BUILTIN_BY_TITLE: Record<string, string> = {
   "respond in the slack thread": "slack_respond",
   "react to the slack message": "slack_react",
   "comment on the github pr/issue": "github_comment",
 };
 
-/** Both lookups consult the manifest FIRST (a contrib of the same name wins) and
- *  resolve per CALL: the manifest is fetched at runtime, so a merged table built
- *  at module load would never see a contrib. Why: PR #601. */
+/** Both lookups consult the manifest first and resolve per call, since the manifest is fetched at runtime. */
 function cardFor(tool: string): ContribToolCard | undefined {
   return contribToolCards()[tool] ?? BUILTIN_BY_TOOL[tool];
 }
@@ -70,9 +49,7 @@ function toolForTitle(title: string): string | undefined {
   return contribToolTitles()[title] ?? BUILTIN_BY_TITLE[title];
 }
 
-/** Normalize goose's "Scooter-env: Slack Respond" (or a raw tool name) to the
- *  tool-name identity "slack_respond". Drops any "<server>:" prefix, lowercases,
- *  and turns runs of non-alphanumerics into single underscores. */
+/** Normalize goose's "Scooter-env: Slack Respond" (or a raw tool name) to the tool-name identity "slack_respond". */
 export function normalizeToolName(toolName: string): string {
   const afterColon = toolName.includes(":") ? toolName.slice(toolName.lastIndexOf(":") + 1) : toolName;
   return afterColon
@@ -86,11 +63,7 @@ function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
 }
 
-/**
- * Decide the provider visualization for a tool call, or null to fall back.
- * `toolName` is whatever the stream carried (server-prefixed title, or a title,
- * or a raw name); `args` is the parsed arguments object.
- */
+/** Decide the provider visualization for a tool call (`toolName` is whatever the stream carried), or null to fall back. */
 export function matchToolCall(toolName: string, args: unknown): ToolCallVisual | null {
   const norm = normalizeToolName(toolName);
   const tool = cardFor(norm) ? norm : toolForTitle(toolName.trim().toLowerCase());
@@ -100,21 +73,16 @@ export function matchToolCall(toolName: string, args: unknown): ToolCallVisual |
     const body = typeof raw === "string" ? raw : "";
     return { provider: meta.provider, body, action: meta.action };
   }
-  // Shell/command tools: goose surfaces them as "Shell" (or "run: <cmd>"). Show the
-  // COMMAND (from args.command) on a compact card, so the shell's noisy result — a
-  // terminal-handle blob like [{terminalId,type:terminal}] with no stdout (the real
-  // output streams into the assistant reply) — doesn't render as a raw JSON dump.
+  // Shell tools: show the command on a compact card, since the result is a
+  // terminal-handle blob with no stdout.
   const cmd = shellCommand(toolName, norm, args);
   if (cmd !== null) return { provider: "shell", body: cmd, action: "ran a command" };
   return null;
 }
 
-/** The command a shell/terminal tool ran, or null if this isn't one. Recognized by
- *  EITHER a shell-ish name OR a `command`/`cmd` string arg (the strongest signal —
- *  a command arg means it runs a command). We check the RAW name too because goose
- *  titles its shell tool "run: <cmd>", and normalizeToolName strips at the colon
- *  (which would drop the "run" marker). Returns the command string (or "" when the
- *  tool is shell-ish but the arg is absent). */
+/** The command a shell/terminal tool ran, or null if this is not one; the raw name is
+ *  checked as well because goose titles its shell tool "run: <cmd>" and normalization
+ *  strips everything before the colon. */
 function shellCommand(rawName: string, norm: string, args: unknown): string | null {
   const a = asRecord(args);
   const cmd = a.command ?? a.cmd;
@@ -132,11 +100,9 @@ function shellCommand(rawName: string, norm: string, args: unknown): string | nu
 }
 
 /**
- * Extract a CLEAN one-line status from a tool result, unwrapping the ACP shapes so
- * we don't dump a JSON blob into the card. Handles: a plain string; MCP
- * `{content:[{type:"text",text}]}`; the ACP content-array
- * `[{content:{type:"text",text}}]` (what slack_respond returns); `{text}`. Falls
- * back to "" (show nothing) rather than a raw JSON.stringify.
+ * Extract a one-line status from a tool result, unwrapping the plain-string, MCP
+ * `{content:[{text}]}`, ACP `[{content:{text}}]` and `{text}` shapes, or "" rather
+ * than a JSON dump.
  */
 export function resultStatusText(result: unknown): string {
   if (result == null) return "";

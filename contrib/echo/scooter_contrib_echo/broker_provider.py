@@ -1,17 +1,10 @@
-"""Echo broker provider — the broker half of the reference contrib.
+"""Echo broker provider: the broker half of the reference contrib.
 
-Registered into the broker via the ``agent_broker.providers`` entry point
-(see pyproject.toml). It build-depends on ``scooter_broker_lib`` — the broker's
-extension surface — and on nothing from the broker APP, so a typo here fails
-this package's own build rather than surfacing as a missing provider at broker
-startup. That replaces the "declare no dependency, resolve at import time"
-arrangement this contrib used before PR #567.
-
-The provider mounts a self-contained ``/echo/ping`` transport that
-authenticates the caller exactly like every real transport (SA token ->
-TokenReview -> Identity) and echoes the validated identity back. It carries no
-real secret. This demonstrates the full extension seam — a custom Transport,
-a Provider factory, and entry-point discovery — without touching broker core.
+Registered into the broker via the ``agent_broker.providers`` entry point and
+build-depending only on ``scooter_broker_lib``. It mounts a ``/echo/ping``
+transport that authenticates the caller like every real transport and echoes the
+validated identity back, demonstrating a custom Transport, a Provider factory and
+entry-point discovery without touching the broker core.
 """
 
 from __future__ import annotations
@@ -32,12 +25,7 @@ PROVIDER_NAME = "echo"
 
 @dataclass
 class EchoTransport(Transport):
-    """Minimal example transport: one authenticated route that echoes identity.
-
-    A real transport delivers a credential (http-proxy, git-credential, …); this
-    one delivers nothing, proving only that a contrib can define and mount its
-    own transport type. Mounted by the core under ``/{provider.name}``.
-    """
+    """Minimal example transport: one authenticated route that echoes the identity, mounted under ``/{provider.name}``."""
 
     name: str = "echo"
 
@@ -57,36 +45,15 @@ class EchoTransport(Transport):
 
 @register_provider
 def echo_contrib() -> Provider:
-    """Build the echo provider.
-
-    A real contrib would gate ``enabled`` on its own config (an env var / secret
-    presence), the way the built-in ``test`` provider gates on
-    ``settings.test_provider_enabled``. This example is always enabled because it
-    is only ever installed in test/example images, never the production broker.
-    """
+    """Build the echo provider, always enabled because it is only installed in test and example images."""
     return Provider(
         name=PROVIDER_NAME,
-        # Three transports: the identity echo, a HUMAN-APPROVAL flow built only from
-        # the public seam, and the contrib's AGENT TOOLS.
-        #
-        # The approval one exists so that path has a consumer that is not aws — the
-        # mechanism and one integration's needs were previously indistinguishable, and
-        # the end-to-end path could only be tested by mocking STS/IAM/OpenFGA. Why:
-        # PR #651.
-        #
-        # McpTools is the reference for the tool surface (issue #700): it carries the
-        # contrib's own FastMCP server, which the broker mounts namespace-less so tool
-        # names stay flat. `upstream` is declared on it rather than read off a sibling
-        # transport, because a provider may ship tools with NO proxy route — a search
-        # provider has no reason to expose one — and a factory shipping both passes the
-        # same local variable to each. httpbin is a stand-in for a real API; nothing in
-        # the test suite calls it, since the tools are unit-tested against a fake
-        # response.
+        # The identity echo, a human-approval flow built only from the public seam, and the contrib's agent tools; httpbin is a stand-in upstream nothing in the suite calls.
         transports=[
             EchoTransport(),
             EchoApprovals(),
             McpTools(server=echo_mcp_server(), upstream="https://httpbin.org"),
         ],
-        credential=None,  # diagnostic transport: delivers no secret
+        credential=None,  # a diagnostic transport delivers no secret
         enabled=True,
     )

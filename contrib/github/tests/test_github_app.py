@@ -1,12 +1,4 @@
-"""The GitHub App credential source — mocked HTTP, no real GitHub.
-
-Proves the JWT/installation-token flow produces the right Credential, caches it,
-and serves the cache on the second call.
-
-Moved out of the broker's test_sources with the source (PR #591): an App token
-minter is github implementation, and only the github provider composes it. The
-generic `static_token` is tested in scooter_broker_lib. See PR #567.
-"""
+"""The GitHub App credential source over mocked HTTP: the JWT/installation-token flow produces the Credential and caches it."""
 
 from __future__ import annotations
 
@@ -22,7 +14,6 @@ def _identity() -> Identity:
 
 
 def _rsa_key() -> str:
-    # Generate a real RSA key so jwt.encode(RS256) works.
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -41,7 +32,7 @@ async def test_github_app_source_mints_and_caches(monkeypatch):
     async def fake_post(self, url, **kwargs):  # noqa: ANN001
         calls["n"] += 1
         assert "access_tokens" in url
-        assert kwargs["headers"]["Authorization"].startswith("Bearer ")  # the App JWT
+        assert kwargs["headers"]["Authorization"].startswith("Bearer ")
         return httpx.Response(200, json={"token": "ghs_installation_token"}, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
@@ -51,6 +42,19 @@ async def test_github_app_source_mints_and_caches(monkeypatch):
     assert cred.kind == "bearer"
     assert cred.value == "ghs_installation_token"
 
-    # second call is served from cache (no new HTTP)
     await src.get(_identity())
     assert calls["n"] == 1
+
+
+def test_app_jwt_survives_a_fast_clock(monkeypatch):
+    """GitHub rejects an exp over 10 minutes ahead; a 30s-fast host must stay inside it."""
+    import time
+
+    import jwt
+
+    real = time.time()
+    monkeypatch.setattr(time, "time", lambda: real + 30)
+    token = GitHubAppSource(app_id="123", private_key=_rsa_key(), installation_id=42)._generate_jwt()
+    claims = jwt.decode(token, options={"verify_signature": False})
+    assert claims["exp"] - real <= 10 * 60, "exp lands past GitHub's 10-minute limit"
+    assert claims["iat"] <= real, "iat must not be in GitHub's future"

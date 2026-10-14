@@ -1,14 +1,13 @@
 /**
- * Graceful shutdown wiring (installShutdownHandlers) — the SIGTERM/preStop drain.
- * On the rollout signal the pod must flush + close cleanly (so clients reconnect
- * instead of eating a raw 502), bounded so a stuck drain can't outlive the pod's
- * terminationGracePeriod.
+ * Graceful shutdown wiring (installShutdownHandlers): on SIGTERM the pod drains and
+ * closes cleanly so clients reconnect, bounded so a stuck drain cannot outlive the
+ * pod's terminationGracePeriod.
  */
 import { describe, it, expect, vi } from "vitest";
 
 import { installShutdownHandlers } from "../../src/index.js";
 
-/** A fake process that captures signal handlers + exit calls. */
+/** A fake process that captures signal handlers and exit calls. */
 function fakeProc() {
   const handlers: Record<string, (sig: string) => void> = {};
   const exits: number[] = [];
@@ -34,7 +33,7 @@ describe("installShutdownHandlers", () => {
     const drained = vi.fn(async () => {});
     installShutdownHandlers(drained, { proc: proc as never });
     proc.fire("SIGTERM");
-    await Promise.resolve(); // let the shutdown().then microtask run
+    await Promise.resolve();
     await Promise.resolve();
     expect(drained).toHaveBeenCalledTimes(1);
     expect(proc.exits).toEqual([0]);
@@ -46,7 +45,7 @@ describe("installShutdownHandlers", () => {
     const drained = vi.fn(() => new Promise<void>((r) => { resolve = r; }));
     installShutdownHandlers(drained, { proc: proc as never });
     proc.fire("SIGTERM");
-    proc.fire("SIGTERM"); // repeat while the first drain is still in flight
+    proc.fire("SIGTERM");
     resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -57,13 +56,13 @@ describe("installShutdownHandlers", () => {
     const proc = fakeProc();
     let fireTimeout!: () => void;
     const fakeSetTimeout = ((fn: () => void) => { fireTimeout = fn; return { unref() {} }; }) as unknown as typeof setTimeout;
-    installShutdownHandlers(() => new Promise<void>(() => {}) /* never resolves */, {
+    installShutdownHandlers(() => new Promise<void>(() => {}), {
       proc: proc as never,
       timeoutMs: 10,
       setTimeoutFn: fakeSetTimeout,
     });
     proc.fire("SIGTERM");
-    fireTimeout(); // the grace timer fires before the (hung) drain finishes
+    fireTimeout();
     expect(proc.exits).toEqual([0]);
   });
 });

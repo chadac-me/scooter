@@ -1,4 +1,4 @@
-"""Slack provider module — static bot token, http-proxy only."""
+"""Slack provider: a static bot token over http-proxy and the agent tools."""
 
 from __future__ import annotations
 
@@ -17,17 +17,14 @@ UPSTREAM = "https://slack.com/api"
 
 @register_provider
 def slack() -> Provider:
-    # Read at BUILD time, like every provider factory (#573).
+    # Read at build time, like every provider factory.
     settings = SlackSettings()
     return Provider(
         name="slack",
         credential=StaticTokenSource(token=settings.slack_bot_token),
         transports=[
             HttpProxy(upstream=UPSTREAM, methods=("GET", "POST")),
-            # The agent tools (slack_respond / slack_react / get_slack_context), moved
-            # out of the agent-host by #700 so they ship with this contrib and are
-            # ABSENT when it is not enabled. Same upstream as the proxy, from one
-            # variable — a tool and the raw route must not drift.
+            # The agent tools share the proxy's upstream so the two cannot drift.
             McpTools(server=slack_mcp_server(), upstream=UPSTREAM),
         ],
         enabled=bool(settings.slack_bot_token),

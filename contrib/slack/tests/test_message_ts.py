@@ -1,10 +1,4 @@
-"""The forwarded Slack message must surface the message `ts` so the agent can
-react to THE SPECIFIC message via slack_react (message_ts is a required arg).
-
-Before this, the agent only ever saw the thread anchor, so slack_react could only
-land a reaction on the thread root — never the actual message it was acknowledging.
-Now each forwarded message carries a `message_ts: <ts>` line the agent passes on.
-"""
+"""A forwarded Slack message carries a `message_ts: <ts>` line so the agent can react to that specific message."""
 
 from __future__ import annotations
 
@@ -15,8 +9,7 @@ from scooter_contrib_slack import webhooks_handler as slack_h
 
 
 async def _capture_forward(handler_coro) -> str:
-    """Drive the handler with a send_message that records its forwarded text, then
-    return that text once the background forward has run."""
+    """Drive the handler with a send_message that records its forwarded text and return that text."""
     seen: dict[str, str] = {}
     started = asyncio.Event()
 
@@ -25,10 +18,7 @@ async def _capture_forward(handler_coro) -> str:
         started.set()
         return True
 
-    # The (channel:ts) dispatch guard is MODULE-level state that persists across
-    # tests; another test forwarding the same (channel, ts) first would make the
-    # handler skip ours as an already-dispatched twin (→ send_message never runs →
-    # this hangs). Clear it so this test is order-independent.
+    # The channel:ts dispatch guard is module-level state, so clear it to stay order-independent.
     slack_h._DISPATCHED_MESSAGES.clear()
 
     with (
@@ -42,7 +32,7 @@ async def _capture_forward(handler_coro) -> str:
 
         await asyncio.wait_for(handler_coro, timeout=1.0)
         await asyncio.wait_for(started.wait(), timeout=1.0)
-        await asyncio.sleep(0)  # let the background task drain
+        await asyncio.sleep(0)
     return seen["msg"]
 
 

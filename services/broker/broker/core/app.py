@@ -1,8 +1,4 @@
-"""App factory — assembles the broker from discovered provider modules.
-
-The core is generic: discover providers, and for each enabled one, mount every
-transport's routes under the provider's prefix. No per-provider code here.
-"""
+"""App factory: discover providers and mount every enabled one's transport routes under its prefix, with no per-provider code."""
 
 from __future__ import annotations
 
@@ -25,46 +21,33 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
-    # Re-read env into the shared settings so provider factories (which read
-    # `config.settings` at build time) reflect the CURRENT environment, not a
-    # snapshot frozen at first import — which is what makes create_app()
-    # deterministic regardless of test import order. The registry used to do this
-    # itself; it cannot now, because `config` is the app's, not the lib's.
+    # Provider factories read `config.settings` at build time, so it must reflect the current environment.
     refresh_settings()
 
-    # The built-in providers to scan. Passed in rather than hardcoded in the
-    # registry so the lib carries no import of this app. See PR #567.
+    # Passed in rather than hardcoded in the registry so the lib carries no import of this app.
     from .. import providers as builtin_providers
 
-    # The substrate a provider must not assemble for itself. Built here, once, and
-    # handed to any factory that declares a parameter (see BrokerContext).
+    # The substrate handed to any provider factory that declares a parameter.
     context = BrokerContext(
         authorizer=authorizer_from_settings(settings),
         store_config=settings.store_config(),
     )
     providers = list(discover_providers([builtin_providers], context=context))
 
-    # Do NOT add a sandbox-lifecycle router here. A sandbox can reach the broker over
-    # the network and cannot reach the agent-host, so provisioning lives there
-    # (session/k8sProvisioner.ts). Why: PR #584.
+    # Sandbox provisioning lives in the agent-host (session/k8sProvisioner.ts), not here.
 
-    # Module registry (broker/registry/) — the shareable-module catalog. Built when
-    # enabled; its store is init'd in the lifespan + its router mounted top-level.
+    # The module registry, mounted top-level when enabled.
     registry_store = None
     registry_router = None
     if settings.registry_enabled:
         from ..registry.routes import create_registry_router
         from ..registry.store import ModuleRegistryStore
 
-        # Share the AWS DB components (same shared Postgres `broker` DB); the SQLite
-        # registry_db_dsn is the dev default when no db_password is set.
         registry_store = ModuleRegistryStore(
             settings.store_config(dsn=settings.registry_db_dsn))
         registry_router = create_registry_router(registry_store)
 
-    # Static shares (broker/shares/) — persistent static webpages served at /s/<uuid>/.
-    # Built when enabled; its router is mounted top-level (like /modules and /link).
-    # The store issues no schema DDL — its tables are owned by the db-migrator.
+    # Static shares served at /s/<uuid>/, mounted top-level when enabled.
     shares_store = None
     shares_router = None
     if settings.shares_enabled:
@@ -78,12 +61,8 @@ def create_app() -> FastAPI:
             frame_ancestors=settings.shares_frame_ancestors,
         )
 
-    # The agent-facing MCP server — contrib-contributed tools, served to ONE
-    # conversation per request. Not per-provider: it aggregates every enabled
-    # provider's tools behind one endpoint, and it authenticates DIFFERENTLY from the
-    # provider routes (an SA token AND a conversation token — see
-    # core/auth.authenticate_mcp). Built HERE, before the lifespan, because the
-    # lifespan has to compose its own. Why: issue #700.
+    # The agent-facing MCP server aggregates every enabled provider's tools behind one
+    # endpoint with its own authentication, and is built before the lifespan that composes its own.
     mcp_app = None
     if settings.mcp_enabled:
         from ..mcp.routes import assert_tool_names_unique, create_mcp_app
@@ -97,20 +76,13 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with AsyncExitStack() as stack:
-            # fastmcp's streamable-HTTP app starts a session-manager task group in its
-            # own lifespan, and MOUNTING an ASGI app does not run that app's lifespan —
-            # the parent owns the only one ASGI knows about. Skip this and every tool
-            # call fails at RUNTIME with "task group was not initialized", which no
-            # mount-time check can catch. Entered first so it is torn down last.
+            # Mounting an ASGI app does not run its lifespan, so the MCP app's is entered
+            # here (first, so it is torn down last).
             if mcp_app is not None and mcp_app.lifespan is not None:
                 await stack.enter_async_context(mcp_app.lifespan(app))
             if mcp_app is not None:
-                # Refuse to serve a tool surface nobody chose: tool names are flat, so
-                # two providers owning one name leaves mount order to decide which the
-                # agent gets. Awaited here because reading a server's tools is async
-                # and create_mcp_app is not. Why: issue #700.
+                # Awaited here because reading a server's tools is async and create_mcp_app is not.
                 await assert_tool_names_unique(providers)
-            # Run providers' async startup hooks (e.g. open a DB, start a sweep).
             for p in providers:
                 if p.on_startup is not None:
                     await p.on_startup()
@@ -127,31 +99,22 @@ def create_app() -> FastAPI:
     if shares_router is not None:
         app.include_router(shares_router)
 
-    # Deployment-default modules — GET /modules/default.tar.gz, UNAUTHENTICATED (the
-    # pod fetches at boot; module Nix isn't a secret). Always mounted; serves an empty
-    # tarball when no default-modules dir is configured.
+    # Deployment-default modules at GET /modules/default.tar.gz, unauthenticated since the
+    # pod fetches them at boot and module Nix is not a secret.
     from .default_modules import create_default_modules_router
 
     app.include_router(create_default_modules_router())
 
     if mcp_app is not None:
-        # MOUNTED, not include_router: fastmcp serves MCP as its own ASGI app and
-        # mounting keeps its streaming intact (an APIRouter wrapper would have to
-        # buffer the body). Auth is an ASGI middleware in front of it, for the same
-        # reason — BaseHTTPMiddleware would break SSE.
+        # Mounted rather than included so fastmcp's streaming stays intact.
         app.mount("/mcp", mcp_app)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    # Conversation links — the agent-facing complement to the auto-link injector.
-    # The injector auto-links PRs/MRs/issues created THROUGH the proxy; this lets an
-    # agent explicitly attach a link the injector missed (e.g. created via the gh/glab
-    # CLI, or a resource type not watched) and list what's currently linked. The
-    # conversation is taken from the caller's SA token — never a request field — so an
-    # agent can only touch its OWN conversation's links. The sandbox reaches these via
-    # `agent-broker link ...` (see the scooter-links skill).
+    # Conversation links let an agent attach a link the auto-link injector missed and list
+    # what is linked, always for the conversation its SA token names.
     @app.post("/link", status_code=201)
     async def attach_link(
         body: dict, identity: Identity = Depends(authenticate)
@@ -198,14 +161,11 @@ def create_app() -> FastAPI:
 def main() -> None:
     import uvicorn
 
-    # Structured JSON logs (one object per line) — replaces logging.basicConfig.
-    # Installed BEFORE create_app() so provider discovery's own lines are captured
-    # in the same shape, and before uvicorn.run() so uvicorn's loggers inherit the
-    # root handler instead of installing their own prose formatter.
+    # Installed before create_app() and uvicorn.run() so their lines share the root handler.
     configure_logging("broker")
     uvicorn.run(
         create_app(),
         host="0.0.0.0",
         port=settings.port,
-        log_config=None,  # keep OUR root handler; uvicorn's default dictConfig replaces it
+        log_config=None,  # uvicorn's default dictConfig would replace the root handler
     )

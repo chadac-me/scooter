@@ -1,13 +1,4 @@
-"""The shared half of a search contrib's `web_search` (scooter_broker_lib/search.py).
-
-These live here rather than in brave's or kagi's suite because the point of the module
-is that every search contrib behaves IDENTICALLY from the agent's side: swapping the
-provider changes the bill and the ranking, never the output format or how the outcomes
-are told apart. A rule tested in one contrib's suite would be free to drift in the
-other's.
-
-Why: issue #700, porting PR #698.
-"""
+"""The shared half of a search contrib's `web_search` (scooter_broker_lib/search.py), so every search contrib behaves identically from the agent's side."""
 
 from __future__ import annotations
 
@@ -23,10 +14,7 @@ from scooter_broker_lib.search import (
 
 
 # --- the three outcomes, kept distinct --------------------------------------------
-#
-# The implementation this replaces answered a real query with HTTP 200 and "no instant
-# answer", so an agent could not tell an empty web from the wrong API. An agent told
-# "no results" retries the query; one told "HTTP 401" reports a broken key.
+# An agent told "no results" retries the query; one told "HTTP 401" reports a broken key.
 
 def test_a_failure_carries_the_status_and_body_VERBATIM():
     _body, failure = search_response(httpx.Response(429, text="quota exhausted"), provider="brave")
@@ -43,15 +31,13 @@ def test_a_success_is_decoded_and_not_a_failure():
 
 
 def test_a_204_is_not_a_failure():
-    """Any 2xx means the call worked; the body decides whether it found anything."""
+    """Any 2xx means the call worked."""
     body, failure = search_response(httpx.Response(204), provider="kagi")
     assert (body, failure) == ({}, None)
 
 
 def test_a_200_THAT_IS_NOT_JSON_is_a_FAILURE_not_an_empty_web():
-    """Something answered that was not the search API — a proxy error page, a captive
-    portal. Reporting that as "no results" is the exact bug this replaced: an agent
-    told "no results" retries the query forever."""
+    """Something that was not the search API answered, such as a proxy error page."""
     _body, failure = search_response(
         httpx.Response(200, text="<html>Gateway</html>"), provider="brave"
     )
@@ -61,8 +47,7 @@ def test_a_200_THAT_IS_NOT_JSON_is_a_FAILURE_not_an_empty_web():
 
 
 def test_a_200_whose_json_is_not_an_object_is_no_results():
-    """The call worked and we understood nothing in it, which is what an API change
-    looks like — distinct from nothing having answered at all."""
+    """The call worked and we understood nothing in it, which is what an API change looks like."""
     body, failure = search_response(httpx.Response(200, json=[1, 2, 3]), provider="kagi")
     assert failure is None and body == {}
 
@@ -98,8 +83,7 @@ def test_the_rendered_list_is_capped_even_if_a_provider_ignores_the_count():
 # --- unpacking a provider's rows --------------------------------------------------
 
 def test_each_provider_names_its_own_fields():
-    """The providers agree on the shape of a result and disagree only on the field
-    names, which is the whole reason this helper is parameterized by them."""
+    """The providers agree on the shape of a result and disagree only on the field names."""
     brave_rows = [{"title": "T", "url": "https://x.test", "description": "D"}]
     kagi_rows = [{"title": "T", "url": "https://x.test", "snippet": "D"}]
     assert hits_from(brave_rows, title="title", url="url", snippet="description") == hits_from(
@@ -108,8 +92,7 @@ def test_each_provider_names_its_own_fields():
 
 
 def test_a_row_with_no_url_is_DROPPED():
-    """A hit the agent cannot follow is not a result. Kagi's related-searches row is
-    the real case: it carries a `list` and no url."""
+    """A hit the agent cannot follow is not a result."""
     rows = [{"title": "unfollowable"}, {"title": "ok", "url": "https://x.test"}]
     assert hits_from(rows, title="title", url="url", snippet="snippet") == [
         SearchHit(title="ok", url="https://x.test", snippet=None)
@@ -121,7 +104,7 @@ def test_a_whitespace_url_counts_as_no_url():
 
 
 def test_a_titleless_row_falls_back_to_its_url():
-    """Better than rendering `- (https://…)`, which reads as a bug."""
+    """Better than rendering `- (https://…)`."""
     assert hits_from([{"url": "https://x.test"}], title="title", url="url", snippet="s") == [
         SearchHit(title="https://x.test", url="https://x.test", snippet=None)
     ]

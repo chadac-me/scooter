@@ -1,11 +1,8 @@
 /**
- * UI unit test — toRepositorySnapshot: fold our message array into an
- * ExportedMessageRepository for the INCREMENTAL external-store render path.
- *
- * The load-bearing property is ID STABILITY: the same logical message keeps its id
- * across pushes (so the core's per-message reconcile keeps it in place, no re-paint),
- * and the parent chain + head are linear/chronological (so the newest turn stays the
- * pinned leaf). fromBranchableArray throws on a missing id — this guards that too.
+ * UI unit test for toRepositorySnapshot, which folds our message array into an
+ * ExportedMessageRepository for the incremental external-store render path. The
+ * load-bearing property is id stability: the same logical message keeps its id across
+ * pushes, and the parent chain and head are linear so the newest turn stays the leaf.
  */
 
 import { describe, it, expect } from "vitest";
@@ -48,8 +45,7 @@ describe("toRepositorySnapshot", () => {
       msg("a1", "assistant", "b"),
       msg("u2", "user", "c"),
     ]);
-    // The first two messages keep the SAME ids in the grown snapshot — so the core
-    // reconciles by adding only u2, not by replacing u1/a1.
+    // The first two messages keep the same ids, so the core adds only u2.
     expect(second.messages.slice(0, 2).map((m) => m.message.id)).toEqual(
       first.messages.map((m) => m.message.id),
     );
@@ -59,12 +55,7 @@ describe("toRepositorySnapshot", () => {
 
 describe("duplicate message ids must not crash the UI", () => {
   it("dedupes by id instead of throwing (a duplicate used to WHITE-SCREEN the app)", () => {
-    // fromBranchableArray links each item into a parent tree; linking the same id twice
-    // throws inside assistant-ui ("A message with the same id already exists in the
-    // parent tree"). That throw happens during render, so it unmounts
-    // <ConversationRuntime> and the user gets a BLANK PAGE — the whole conversation is
-    // unreachable. Seen on CI reloading a revived conversation. Building the snapshot
-    // must never be able to do that.
+    // fromBranchableArray throws during render on a duplicate id, which unmounts the whole conversation.
     const dup = [
       { id: "m1", role: "user", content: "hello" },
       { id: "m2", role: "assistant", content: "hi" },
@@ -97,11 +88,7 @@ describe("enrichMessagesWithImages", () => {
   };
   const getImages = (id: string) => (id === "u1" ? [imgRef] : undefined);
 
-  // The regression this file guards: an enriched user-image message MUST survive
-  // fromAgUiMessages (inside toRepositorySnapshot) as an ATTACHMENT. The bug was
-  // emitting the content-part shape `{type:"image", image}`, which toSnapshotAttachments
-  // silently drops (no `source`) → an empty bubble on replay. The wire shape below is
-  // what makes it materialize.
+  // An enriched user-image message must survive fromAgUiMessages as an attachment, which requires the wire shape with `source`.
   it("materializes a user-image message as an attachment (not a dropped, empty bubble)", () => {
     const enriched = enrichMessagesWithImages(
       [{ id: "u1", role: "user", content: "look" }],

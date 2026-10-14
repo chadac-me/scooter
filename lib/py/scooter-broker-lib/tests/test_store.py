@@ -1,10 +1,4 @@
-"""The DSN assembly, and the reconnect guards every broker store now inherits.
-
-`open_sessions` is the only place an async engine is built (the broker's own
-test_db_pool_resilience asserts nothing else constructs one), so these guards being
-right here is what makes them right everywhere — including for a contrib's store,
-which never sees the kwargs at all.
-"""
+"""The DSN assembly, and the reconnect guards every broker store inherits from `open_sessions`."""
 
 from __future__ import annotations
 
@@ -30,8 +24,6 @@ def _engine_kwargs() -> dict[str, ast.expr]:
 
 
 def test_engine_pre_pings():
-    # Without it the pool hands out a connection a restart/failover already closed,
-    # and the request dies with asyncpg "connection is closed".
     pre_ping = _engine_kwargs().get("pool_pre_ping")
     assert isinstance(pre_ping, ast.Constant) and pre_ping.value is True
 
@@ -52,7 +44,6 @@ def test_explicit_postgres_dsn_wins_over_components():
 
 
 def test_sslmode_becomes_asyncpgs_ssl_param():
-    # asyncpg takes `ssl=`, not libpq's `sslmode=`.
     cfg = StoreConfig(db_password="pw", db_sslmode="require")
     assert cfg.resolved_dsn().endswith("?ssl=require")
 

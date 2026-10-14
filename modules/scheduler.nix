@@ -1,13 +1,8 @@
-# Scheduler — Deployment + Service + ServiceAccount.
-#
-# Fires scheduled tasks on a cron schedule by POSTing each run's prompt to the
-# agent-host /agui (a fresh conversation per run). Presents a projected SA token
-# (audience agent-host) so the agent-host honors the task `owner` — the scheduler's
-# SA is added to the agent-host WEBHOOKS_SERVICE_ACCOUNT trust list (platform.nix).
-#
-# Store: the shared platform Postgres (scooter.postgres, always on) — the
-# scheduler's own `scheduler` db + auto-provisioned role. Durable across restarts.
-# SQLite remains only as the app's local-dev / unit-test default (no DB_* env).
+# Scheduler: Deployment, Service and ServiceAccount. It fires cron-scheduled
+# tasks by POSTing each run's prompt to the agent-host /agui as a fresh
+# conversation, presenting a projected SA token (audience agent-host) so the
+# agent-host honors the task `owner`. State lives in the scheduler's own
+# database on the shared platform Postgres.
 
 { config, lib, ... }:
 
@@ -52,18 +47,12 @@ in
       example = "DEBUG";
       description = "Root log level (LOG_LEVEL) — INFO logs task fires/spawns; DEBUG is verbose.";
     };
-    # Durability: the scheduler ALWAYS uses the shared Postgres now (scooter.
-    # postgres) — its own `scheduler` db + role, auto-provisioned. No per-module
-    # Postgres knobs; point the platform at RDS via scooter.postgres.external.
   };
 
-  # mkMerge: the table declarations are UNCONDITIONAL (see modules/db-spec.nix) —
-  # the tables exist in lib/sql whether or not this deployment runs the service —
-  # while everything else stays gated on `enable`. The gated body keeps its own
-  # indentation so this wrapper is the whole diff.
+  # The table declarations are unconditional (see modules/db-spec.nix); everything else is gated on `enable`.
   config = lib.mkMerge [
 
-  # The tables the `scheduler` database holds (scooter.db, #606).
+  # The tables the `scheduler` database holds.
   {
     scooter.db.scheduler = {
       owner = "scheduler";
@@ -82,10 +71,7 @@ in
       deployments.agent-scheduler = {
         metadata = { name = "agent-scheduler"; namespace = cfg.namespace; };
         spec = {
-          # 2 replicas by default (consolidation resilience). Safe on Postgres: the
-          # loop uses claim_due, which advances next_run_at atomically under
-          # FOR UPDATE SKIP LOCKED, so each due task fires on exactly one replica (no
-          # double-fire). With the SQLite dev default there's a single pod anyway.
+          # Multiple replicas are safe because claim_due advances next_run_at under FOR UPDATE SKIP LOCKED.
           replicas = cfg.statelessReplicas;
           selector.matchLabels.app = "agent-scheduler";
           template = {
@@ -110,15 +96,11 @@ in
                   { name = "LOG_LEVEL"; value = scfg.logLevel; }
                 ] ++ lib.optional (scfg.relayKey != "") { name = "RELAY_KEY"; value = scfg.relayKey; }
                 ++ lib.optionals cfg.observability.otel.enable ([
-                  # OTel metrics ON. The OTLP endpoint/headers come from the standard
-                  # OTEL_EXPORTER_OTLP_* env (the SDK reads them).
+                  # The OTLP endpoint and headers come from the standard OTEL_EXPORTER_OTLP_* env.
                   { name = "OTEL_METRICS_ENABLED"; value = "1"; }
                   { name = "OTEL_SERVICE_NAME"; value = "agent-scheduler"; }
                 ] ++ lib.mapAttrsToList (k: v: { name = k; value = v; }) cfg.observability.otel.env)
-                # Durable Postgres — the shared platform DB (always on). DSN is
-                # assembled app-side from these parts; the password is the scheduler's
-                # OWN auto-generated role secret (agent-pg-scheduler), created by the
-                # postgres module's provisioning Job.
+                # The DSN is assembled app-side from these parts.
                 ++ [
                   { name = "DB_HOST"; value = cfg.postgres.host; }
                   { name = "DB_PORT"; value = toString cfg.postgres.port; }
@@ -128,7 +110,7 @@ in
                 ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; };
                 volumeMounts = [
                   { name = "data"; mountPath = "/data"; }
-                  # Projected SA token (audience agent-host) → /agui owner trust.
+                  # Projected SA token (audience agent-host) for /agui owner trust.
                   { name = "agent-host-token"; mountPath = "/var/run/secrets/agent-host"; readOnly = true; }
                 ];
                 readinessProbe.httpGet = { path = "/healthz"; port = "http"; };
@@ -157,8 +139,7 @@ in
       };
     };
 
-    # Register with the shared Postgres so the provisioning Job creates the
-    # `scheduler` database + a `scheduler` role that owns it (agent-pg-scheduler).
+    # The provisioning Job creates the `scheduler` database and role (secret agent-pg-scheduler).
     scooter.postgres.consumers.scheduler = { db = "scheduler"; user = "scheduler"; };
   })
   ];

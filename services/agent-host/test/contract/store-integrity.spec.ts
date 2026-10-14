@@ -1,10 +1,7 @@
 /**
- * Tier 1 contract test — the file store's integrity surface.
- *
- * onAppend must fire each event with its rolling checksum, in persisted order,
- * and those checksums must match what readEventsWithChecksum yields (so the live
- * stream and history agree). The chain must also survive a "restart" (a fresh
- * store over the same dir continues the same checksum).
+ * The file store's integrity surface: onAppend fires each event with its rolling
+ * checksum in persisted order, those checksums match what readEventsWithChecksum
+ * yields, and the chain continues across a fresh store over the same directory.
  */
 
 import { describe, it, expect } from "vitest";
@@ -36,13 +33,13 @@ describe("fileStore integrity surface", () => {
 
       for (const e of events) await store.appendEvent("conv-1", e);
 
-      // Live (onAppend) and replay (readEventsWithChecksum) must agree exactly.
+      // Live and replay must agree exactly.
       const replayed: ChecksummedEvent[] = [];
       for await (const c of store.readEventsWithChecksum!("conv-1")) replayed.push(c);
 
       expect(fired).toHaveLength(events.length);
       expect(fired.map((c) => c.checksum)).toEqual(replayed.map((c) => c.checksum));
-      // Each event links to the prior checksum (a real chain).
+      // Each event links to the prior checksum.
       for (let i = 1; i < fired.length; i++) {
         expect(fired[i].prevChecksum).toBe(fired[i - 1].checksum);
       }
@@ -57,8 +54,7 @@ describe("fileStore integrity surface", () => {
       const store1 = createFileConversationStore(root);
       for (const e of events) await store1.appendEvent("conv-1", e);
 
-      // "Restart": a new store over the same dir must seed from disk so the next
-      // append's prevChecksum == the last checksum store1 produced.
+      // A new store over the same dir must seed from disk.
       let last = "";
       for await (const c of store1.readEventsWithChecksum!("conv-1")) last = c.checksum;
 
@@ -68,7 +64,7 @@ describe("fileStore integrity surface", () => {
       await store2.appendEvent("conv-1", { type: "TEXT_MESSAGE_START", messageId: "m2", role: "assistant" });
 
       expect(fired).toHaveLength(1);
-      expect(fired[0].prevChecksum).toBe(last); // chain continued, not reset
+      expect(fired[0].prevChecksum).toBe(last);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -78,28 +74,28 @@ describe("fileStore integrity surface", () => {
     const root = mkdtempSync(join(tmpdir(), "store-integ-"));
     try {
       const store = createFileConversationStore(root);
-      // Write a divergent local log, then reconcile it to a different (mirror) log.
+      // Write a divergent local log, then reconcile it to the mirror's log.
       for (const e of events) await store.appendEvent("conv-1", e);
       const mirrorLog: AguiEvent[] = [
         { type: "RUN_STARTED", threadId: "t", runId: "r" },
         { type: "TEXT_MESSAGE_START", messageId: "m1", role: "user" },
         { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: "hello" },
-        { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: " world" }, // the mirror's real tail
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: " world" },
       ];
       await store.replaceEvents!("conv-1", mirrorLog);
 
-      // The on-disk log is EXACTLY the mirror's now.
+      // The on-disk log is exactly the mirror's now.
       const after: AguiEvent[] = [];
       for await (const e of store.readEvents("conv-1")) after.push(e);
       expect(after).toEqual(mirrorLog);
 
-      // And the checksum was re-seeded: the next append's prevChecksum == the chain through mirrorLog.
+      // The next append's prevChecksum is the chain through mirrorLog.
       let expectedPrev = "";
       for await (const c of store.readEventsWithChecksum!("conv-1")) expectedPrev = c.checksum;
       const fired: ChecksummedEvent[] = [];
       store.onAppend!((_id, c) => fired.push(c));
       await store.appendEvent("conv-1", { type: "TEXT_MESSAGE_END", messageId: "m1" });
-      expect(fired[0].prevChecksum).toBe(expectedPrev); // chained from the rewritten log, not the old one
+      expect(fired[0].prevChecksum).toBe(expectedPrev);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -119,12 +115,12 @@ describe("fileStore integrity surface", () => {
       for (let n = 1; n <= 5; n++) for (const e of run(n)) await store.appendEvent("conv-1", e);
 
       const tail = await store.readEventsTail!("conv-1", 2);
-      // Last 2 runs, starting at r4's RUN_STARTED; every kept run is complete.
+      // The last 2 runs, starting at r4's RUN_STARTED.
       expect(tail[0]).toMatchObject({ type: "RUN_STARTED", runId: "r4" });
       const runs = tail.filter((e) => e.type === "RUN_STARTED").map((e) => (e as { runId: string }).runId);
       expect(runs).toEqual(["r4", "r5"]);
 
-      // Fewer runs than requested → the whole log; a missing conversation → [].
+      // Fewer runs than requested yields the whole log; a missing conversation yields [].
       expect((await store.readEventsTail!("conv-1", 99)).filter((e) => e.type === "RUN_STARTED")).toHaveLength(5);
       expect(await store.readEventsTail!("nope", 3)).toEqual([]);
     } finally {
@@ -134,15 +130,12 @@ describe("fileStore integrity surface", () => {
 });
 
 describe("fileStore.readEventsTailByCount", () => {
-  // The UI asks for ?limit=N. fileStore did not implement this, so the route fell
-  // through to a RAW slice that starts mid-message — the client's fold discards such
-  // a window and the first-paint seed silently stops working. The pg store had it;
-  // the file store (which the e2e fake stack uses) did not.
+  // The UI asks for ?limit=N, and a window starting mid-message is discarded by the client's fold.
   it("returns the newest events, trimmed to a boundary", async () => {
     const root = mkdtempSync(join(tmpdir(), "tail-count-"));
     try {
       const store = createFileConversationStore(root);
-      // A tool call, then a clean run: a 4-event window cuts inside the tool call.
+      // A 4-event window cuts inside the tool call.
       for (const e of [
         { type: "TOOL_CALL_START", toolCallId: "t1", toolCallName: "x" },
         { type: "TOOL_CALL_RESULT", toolCallId: "t1" },

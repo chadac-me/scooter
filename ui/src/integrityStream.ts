@@ -1,20 +1,13 @@
 /**
- * Integrity event stream client.
- *
- * Subscribes to the agent-host's GET /conversations/:id/events.integrity — a
- * single ordered JSON SSE stream that replays the full event log (each event
- * with its rolling checksum) and then stays open for live appends. This is how
- * the UI renders a conversation reliably regardless of who drove the run (this
- * tab, another tab, or a webhook) — there's no replay-vs-live race, because
- * replay and live are the same stream.
- *
- * Integrity self-heal: each event carries { prevChecksum, checksum }. We track
- * the running checksum; if an event's prevChecksum != what we hold, a frame was
- * dropped/reordered — we refetch /history (the authoritative snapshot) and
- * resync. The chain is checksum_n = sha256(checksum_{n-1} || canonical(event)).
- *
- * The stream yields the folded message list (TEXT_MESSAGE_* -> one message per
- * id) plus a `synced` flag, so the caller can seed the thread.
+ * Integrity event stream client. Subscribes to the agent-host's
+ * GET /conversations/:id/events.integrity, a single ordered JSON SSE stream that
+ * replays the full event log and then stays open for live appends, so replay and
+ * live cannot race whoever drove the run. Each event carries { prevChecksum, checksum }
+ * with checksum_n = sha256(checksum_{n-1} || canonical(event)); a prevChecksum that
+ * does not match the running checksum means a dropped or reordered frame, and the
+ * client reconnects so the fresh stream re-replays the authoritative log. The stream
+ * yields the folded message list (one message per TEXT_MESSAGE_* id) plus a `synced`
+ * flag, so the caller can seed the thread.
  */
 
 import type { AgentHostConfig, AguiMessage } from "./client.js";
@@ -63,12 +56,8 @@ export interface IntegritySubscription {
   close(): void;
 }
 
-/**
- * Open the integrity stream for `conversationId`. `onUpdate` fires with the
- * current folded messages whenever the view changes (and once `synced`). Returns
- * a handle to close the subscription. Resilient: on a checksum gap it refetches
- * history and resyncs; on a network drop it reconnects (caller can close to stop).
- */
+/** Open the integrity stream for `conversationId`, firing `onUpdate` with the folded
+ *  messages whenever the view changes; the returned handle closes the subscription. */
 export function subscribeIntegrity(
   config: AgentHostConfig,
   conversationId: string,
@@ -114,13 +103,9 @@ export function subscribeIntegrity(
     return "ok";
   };
 
-  // A 404 can mean two things: the conversation doesn't exist YET (a brand-new
-  // thread the user hasn't sent in — it's created server-side on the first
-  // prompt) or it's gone (deleted). We can't tell them apart, so we retry 404
-  // with a backoff that's capped (404Cap) rather than giving up: a soon-to-exist
-  // thread connects once the user sends; a deleted one just polls slowly until
-  // the caller closes the subscription (on switch-away / unmount). The cap keeps
-  // us from hammering the server.
+  // A 404 is either a conversation not created yet (it appears server-side on the
+  // first prompt) or a deleted one, so retry with a capped backoff until the caller
+  // closes the subscription.
   let notFoundDelay = 500;
   const notFoundCap = 5000;
 
@@ -161,17 +146,14 @@ export function subscribeIntegrity(
             try {
               frame = JSON.parse(line.slice(5).trim()) as IntegrityFrame;
             } catch (e) {
-              // Finding #16: a malformed frame is skipped so one bad line doesn't
-              // kill the stream — but if it was the 'synced' marker, the UI would
-              // sit in perpetual loading. Log it so a stuck stream is diagnosable
-              // instead of silently dropping the frame.
+              // A malformed frame is skipped rather than killing the stream, and logged
+              // so a lost 'synced' marker is diagnosable.
               console.warn("[integrityStream] dropping unparseable frame:", line.slice(0, 200), e);
               continue;
             }
             const r = await apply(frame);
             if (r === "gap") {
-              // Desync: drop this stream, reconnect (a fresh stream re-replays
-              // the authoritative log from the seed, healing the gap).
+              // A checksum gap: reconnect so the fresh stream re-replays the log.
               controller.abort();
               break;
             }

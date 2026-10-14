@@ -1,16 +1,4 @@
-"""The provider must USE the authorizer it is handed, not one it made itself.
-
-This is the consumer half of the BrokerContext contract (PR #624). The app builds
-one authorizer and passes it in; if this factory ever constructed its own it could
-construct a NoopAuthorizer — which allows everything — and the deployment would look
-identical to a working one while enforcing nothing on approve/deny.
-
-The other half, "the app actually passes a context to a factory that asks for one",
-is the APP's guarantee and is tested there
-(services/broker/tests/test_provider_context_wiring.py), without naming aws. It used
-to live here as a create_app() test; a contrib suite importing the broker app is
-exactly the coupling this migration removes. Why: PR #599.
-"""
+"""The provider must use the authorizer it is handed, not one it made itself."""
 
 from __future__ import annotations
 
@@ -23,7 +11,7 @@ from scooter_broker_lib.store import StoreConfig
 
 
 class _Sentinel:
-    """Stands in for the app-built authorizer; identity is the whole assertion."""
+    """Stands in for the app-built authorizer."""
 
     async def check(self, *, user: str, relation: str, obj: str) -> bool:
         return True
@@ -45,7 +33,7 @@ def _aws_env(monkeypatch, tmp_path):
     }))
     monkeypatch.setenv("AWS_ENABLED", "true")
     monkeypatch.setenv("AWS_ACCOUNTS_FILE", str(accounts))
-    # The module-level snapshot was taken at import, before these env vars existed.
+    # The module-level settings were read at import, before these env vars existed.
     import scooter_contrib_aws.config as cfg
     import scooter_contrib_aws.broker_provider as bp
     fresh = cfg.AwsSettings()
@@ -55,7 +43,6 @@ def _aws_env(monkeypatch, tmp_path):
 
 
 def _context(tmp_path, authorizer):
-    # SQLite, so building the store opens nothing real.
     return BrokerContext(
         authorizer=authorizer,
         store_config=StoreConfig(dsn=f"sqlite+aiosqlite:///{tmp_path / 'aws.db'}"),
@@ -83,8 +70,7 @@ def test_service_gets_the_authorizer_it_was_given(_aws_env, monkeypatch):
 
 
 def test_the_transport_is_mounted_on_the_provider(_aws_env):
-    """The provider must carry its permissions transport; without it /aws/* 404s in
-    a deployment that enabled aws — the "absent, not disabled" failure."""
+    """The provider must carry its permissions transport."""
     import scooter_contrib_aws.broker_provider as aws_provider
 
     provider = aws_provider.aws(_context(_aws_env, _Sentinel()))

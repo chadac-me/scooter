@@ -1,13 +1,9 @@
-"""Conversation-token verification (issue #700).
+"""Conversation-token verification.
 
-The frozen-vector tests are the cross-language contract: the SAME token and secret
-are verified by `services/agent-host/test/contract/convToken.spec.ts`. If the
-agent-host's encoding drifts, this file fails — which is the only way a Python
-verifier can notice a TypeScript signer changing shape.
-
+The frozen-vector tests are the cross-language contract: the same token and secret are
+verified by `services/agent-host/test/contract/convToken.spec.ts`, and
 scripts/check-conv-token-vector.sh keeps the two committed copies of the fixture
-byte-identical, since the two nix derivations build from separate source trees and
-cannot share a path.
+byte-identical.
 """
 
 from __future__ import annotations
@@ -50,10 +46,7 @@ def _claims(**over) -> dict:
 # --- the cross-language vector ---------------------------------------------------
 
 def test_verifies_the_frozen_agent_host_token():
-    """The committed token was signed by the TypeScript implementation.
-
-    The clock is pinned: a frozen vector has a fixed `exp`, so verifying it against
-    the real clock would start failing the moment that timestamp passed."""
+    """The committed token was signed by the TypeScript implementation, and the clock is pinned because its `exp` is fixed."""
     res = verify_conv_token(VECTOR["token"], VECTOR["secret"], now=VECTOR["verifyAtEpochSeconds"])
     assert res.conversation_id == VECTOR["claims"]["sub"]
     assert res.owner == VECTOR["claims"]["owner"]
@@ -65,7 +58,7 @@ def test_frozen_vector_is_rejected_under_the_wrong_secret():
 
 
 def test_frozen_vector_is_expired_past_its_exp():
-    """The other half of pinning the clock: the TS suite asserts this too."""
+    """The other half of pinning the clock."""
     with pytest.raises(ConvTokenError, match="expired"):
         verify_conv_token(VECTOR["token"], VECTOR["secret"], now=VECTOR["expiredAtEpochSeconds"])
 
@@ -104,7 +97,7 @@ def test_rejects_a_repointed_conversation():
 
 
 def test_rejects_alg_none():
-    """The fixed algorithms=["HS256"] list is what makes this unreachable."""
+    """The fixed algorithms list is what rejects this."""
     import jwt
 
     unsigned = jwt.encode(_claims(), key="", algorithm="none")
@@ -128,7 +121,7 @@ def test_rejects_an_expired_token():
 
 
 def test_accepts_a_token_one_second_before_expiry():
-    """`<=` on the boundary second, matching verifyConvToken in the agent-host."""
+    """The boundary second is expired, matching verifyConvToken in the agent-host."""
     assert verify_conv_token(_mint(_claims(exp=1_100)), SECRET, now=1_099).conversation_id == "conv-1"
 
 
@@ -147,11 +140,6 @@ def test_rejects_malformed_tokens_without_raising_something_else():
 
 
 def test_fails_closed_with_no_secret_configured():
-    """A deployment that forgot to mount the Secret must reject EVERY token, not
-    accept every token signed with "".
-
-    Minted with a REAL secret: pyjwt refuses to sign with an empty HMAC key, so the
-    token an attacker would actually present here is an ordinary signed one that the
-    broker simply has no key to check."""
+    """A deployment with no secret must reject every token; this one is minted with a real secret since pyjwt refuses an empty HMAC key."""
     with pytest.raises(ConvTokenError, match="no conversation-token secret"):
         verify_conv_token(_mint(_claims()), "")

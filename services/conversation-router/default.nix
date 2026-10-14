@@ -1,9 +1,8 @@
-{ lib, buildGoModule, ... }:
+{ lib, buildGoModule, postgresql_16, ... }:
 
-# The conversation router (Go). Fronts the agent-host Service and reverse-proxies each
-# request to the agent-host pod that owns the conversation (status.hostPod). Go so a
-# single httputil.ReverseProxy handles HTTP + SSE + WebSocket uniformly (the /c/<id>/
-# web-service proxy is WS). See todo/docs/CONVERSATION_CRD_PR1.md.
+# The conversation router (Go): fronts the agent-host Service and reverse-proxies
+# each request to the agent-host pod that owns the conversation, with one
+# httputil.ReverseProxy handling HTTP, SSE and WebSocket uniformly.
 
 buildGoModule {
   pname = "conversation-router";
@@ -12,8 +11,11 @@ buildGoModule {
 
   vendorHash = "sha256-wHz3ypgaaUGIZXw9+mCBkYh9Oi+EH1VA0W//p2JicRw=";
 
-  # Static-ish; no cgo needed.
+  # No cgo needed.
   env.CGO_ENABLED = "0";
+  # The claim and trigger tests run against a real Postgres.
+  nativeCheckInputs = [ postgresql_16 ];
+  env.AGENT_HOST_MIGRATIONS = "${../../lib/sql/agent_host/migrations}";
 
   meta.description = "Scooter conversation router (hostPod reverse-proxy)";
 }

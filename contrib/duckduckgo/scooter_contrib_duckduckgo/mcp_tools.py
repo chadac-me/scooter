@@ -1,14 +1,9 @@
-"""DuckDuckGo's AGENT TOOL — `duckduckgo_web_search`. Keyless, and best-effort.
+"""DuckDuckGo's agent tool, `duckduckgo_web_search`: keyless and best-effort.
 
-Reads DDG's no-JavaScript results page, because DDG has no results API. Two things here
-look removable and are not:
-
-  * the browser User-Agent is REQUIRED — the page refuses a programmatic one;
-  * a page with no hits is a FAILURE unless DDG itself said "no results"
-    (`html_results.classify`), because both rate-limiting and a restyle arrive as a 200
-    with nothing in it.
-
-Why (including why this is not the DuckDuckGo tool PR #698 removed): PR #707.
+Reads DDG's no-JavaScript results page, since DDG has no results API. The browser
+User-Agent is required because the page refuses a programmatic one, and a page with
+no hits is a failure unless DDG itself said "no results", because rate-limiting and
+a restyle both arrive as an empty 200.
 """
 
 from __future__ import annotations
@@ -26,15 +21,13 @@ PROVIDER = "duckduckgo"
 UPSTREAM = "https://html.duckduckgo.com"
 SEARCH_PATH = "html/"
 
-# Required, not decorative: the no-JS page refuses a programmatic user agent. Pinned
-# here rather than left to a client default, which could change what DDG serves us.
+# The no-JS page refuses a programmatic user agent.
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Region-neutral. Without it DDG localizes by egress IP, so the same query answers
-# differently per cluster — something the agent reading the results cannot account for.
+# Region-neutral, so DDG does not localize by egress IP.
 REGION = "wt-wt"
 
 
@@ -48,8 +41,7 @@ async def duckduckgo_web_search(query: str, ctx: ToolContext = ToolContextDep) -
     another `*_web_search` tool if your list has one, or `web_fetch` on a URL you already
     know; repeating the query will be refused too.
     """
-    # NOT attachment-gated: there is no resource to be attached to. The gate is
-    # `duckduckgo_enabled` (broker_provider.py).
+    # Not attachment-gated; the gate is `duckduckgo_enabled` in broker_provider.py.
     text = query.strip()
     if not text:
         return ToolResult.error("`query` is required — pass the text to search for.")
@@ -71,7 +63,6 @@ async def duckduckgo_web_search(query: str, ctx: ToolContext = ToolContextDep) -
 
     outcome = classify(page)
     if outcome == "empty":
-        # DDG said so itself, so this is a successful search of a web that had nothing.
         return search_result([], query=text, provider=PROVIDER)
     if outcome == "blocked":
         return ToolResult.error(

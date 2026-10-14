@@ -1,11 +1,8 @@
 """Jira webhook handler.
 
-Trigger rules:
-- @openhands mention in issue comment -> creates/forwards conversation
-- 'openhands' label added to issue -> creates conversation
-- Any comment on issue with active conversation -> auto-forwarded
-
-Note: Jira relay endpoints (API proxy for agents) have moved to the broker service.
+A mention in an issue comment creates or forwards a conversation, the trigger label
+creates one, and any comment on an issue with an active conversation is
+auto-forwarded.
 """
 
 import asyncio
@@ -29,8 +26,7 @@ router = APIRouter()
 def _is_own_comment(body: str, author_account_id: str) -> bool:
     if settings.jira_bot_account_id and author_account_id == settings.jira_bot_account_id:
         return True
-    # Recognize Scooter's own comments; keep matching the legacy "OpenHands"
-    # marker so in-flight tickets created before the rename still match.
+    # Our own comments, including the legacy "OpenHands" marker.
     return body.startswith("Scooter is on it") or "OpenHands status:" in body
 
 
@@ -159,7 +155,7 @@ async def _handle_comment(payload: dict):
 
 
 async def _handle_issue_updated(payload: dict):
-    """Handle issue_updated event — check for 'openhands' label addition."""
+    """Handle an issue_updated event that adds the trigger label."""
     changelog = payload.get("changelog", {})
     items = changelog.get("items", [])
 
@@ -201,17 +197,11 @@ async def _handle_issue_updated(payload: dict):
 async def _background_create_conversation(
     issue_key: str, message: str, conv_title: str,
 ) -> None:
-    # Register the mapping + link AND post the "on it — follow along" comment
-    # BEFORE the agent runs. create_conversation blocks until the whole turn
-    # finishes, so posting the link comment after it returned delayed it by the
-    # entire run (the 5-10min lag). Only conv_id is needed, known in the hook.
+    # Runs pre-run, since create_conversation blocks until the whole agent turn finishes.
     async def _register(conv_id: str) -> None:
         await db.store_conversation("jira", "issue", issue_key, conv_id)
         await db.link_resource(conv_id, "jira", "issue", issue_key)
-        # Push the link to the agent-host too: without it the conversation shows no
-        # Jira ticket in the linked-resources panel, and jira_comment registers only
-        # via the conversation_map fallback. No url — the site base isn't configured
-        # here — so the ticket key is both the title and the ref. Why: issue #563.
+        # No url, since the site base is not configured here, so the ticket key is both the title and the ref.
         await push_link(
             conv_id, source="jira", resource_type="issue",
             title=issue_key, ref={"issueKey": issue_key},
@@ -225,7 +215,7 @@ async def _background_create_conversation(
         result = await create_conversation(message, title=conv_title, on_created=_register, source="jira")
         if not result:
             await _clear_pending(issue_key)
-            # The optimistic "on it" comment already posted in _register; correct it.
+            # Correct the optimistic comment already posted in _register.
             await post_jira_comment(
                 issue_key=issue_key,
                 body="…actually, Scooter couldn't start on this one — failed to create the conversation.",
@@ -233,13 +223,11 @@ async def _background_create_conversation(
             return
 
         if result.get("interrupted"):
-            # Run cut short by an agent-host restart; the conversation exists and is
-            # resumed on boot. Don't post a failure and don't flush pending here.
+            # The agent-host resumes the interrupted run on boot, so neither post a failure nor flush pending.
             return
 
         if result.get("errored"):
-            # The agent crashed mid-run; the conversation exists + did work. Post a
-            # truthful "hit an error partway through" note, not "couldn't start".
+            # The conversation exists and did work, so this is an error partway through, not a failed start.
             await _clear_pending(issue_key)
             conv_id = result.get("conversation_id", "")
             await post_jira_comment(
@@ -250,7 +238,6 @@ async def _background_create_conversation(
 
         conv_id = result.get("conversation_id", "")
 
-        # Flush pending messages
         messages = await db.get_and_clear_pending_messages("jira", "issue", issue_key)
         for msg in messages:
             ok = await send_message(conv_id, msg, source="jira")
@@ -274,10 +261,7 @@ async def _clear_pending(issue_key: str) -> None:
     await db.get_and_clear_pending_messages("jira", "issue", issue_key)
 
 
-# Discovered + mounted by webhooks.app via the registry (mirrors the broker's
-# provider registry, PR: contrib module system). Handlers self-gate in-route
-# (a disabled provider returns {"status": "disabled"}), so this registers
-# enabled and keeps its per-request gating.
+# Discovered and mounted by the webhooks service via the entry-point registry; the handler self-gates in-route.
 from scooter_webhooks_lib.registry import WebhookHandler, register_webhook
 
 

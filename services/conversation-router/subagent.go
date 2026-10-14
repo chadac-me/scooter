@@ -1,6 +1,6 @@
 package main
 
-// Subagent creation: one creator of a conversation (PR #726).
+// Subagent creation: a child conversation that inherits owner, sandbox and model from its parent row.
 
 import (
 	"context"
@@ -87,7 +87,7 @@ func serveSubagentCreate(w http.ResponseWriter, r *http.Request, creator Convers
 
 	id := uuid.NewString()
 	spec := map[string]interface{}{"parentId": parentID}
-	// Inherited, NEVER from the request, which could name another owner.
+	// Inherited and never taken from the request, which could name another owner.
 	if parent.Owner != nil && *parent.Owner != "" {
 		spec["owner"] = *parent.Owner
 	}

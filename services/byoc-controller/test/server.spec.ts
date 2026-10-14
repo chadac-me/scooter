@@ -1,18 +1,7 @@
 /**
- * Tier 1 contract — the BYOC controller's HTTP surface (increment 5, cloud half).
- *
- * The routes, and who may call them (§L Q3). The split matters because ONE of these endpoints is
- * deliberately exposed UNAUTHENTICATED on the ingress:
- *
- *   POST /byoc/sessions              MINT — authed (the UI, with a user session)
- *   GET  /byoc/ws/:id                CONNECT — unauthenticated ingress, gated by the join token
- *   POST /byoc/:id/prompt            agent-host -> container, SSE response
- *   POST /byoc/:id/permission/:pid   agent-host -> container (unblocks a permission)
- *   POST /byoc/:id/exec/:xid         agent-host -> container (Channel B result)
- *   GET  /byoc/status?owner=…        the UI badge: minted / connected / disconnected
- *
- * The connect path accepts anything the ingress lets through, so its ONLY defence is the token's
- * signature, expiry, and audience. Everything asserted about rejection here is load-bearing.
+ * Tier 1 contract for the BYOC controller's HTTP surface: the routes and who may call them.
+ * The connect path is exposed unauthenticated on the ingress, so its only defence is the
+ * token's signature, expiry and audience, and every rejection asserted here is load-bearing.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -27,9 +16,7 @@ import { generateKeyPairSync, sign as cryptoSign, createHmac } from "node:crypto
 
 const SECRET = "test-secret";
 
-/** Mint a token with an arbitrary audience, SIGNED correctly — so a rejection can only come from
- *  the audience check. (The previous version of this test tampered with the claims and left the
- *  signature stale, so it passed for the wrong reason and never exercised the guard.) */
+/** Mint a correctly signed token with an arbitrary audience, so a rejection can only come from the audience check. */
 function signWithAudience(owner: string, secret: string, aud: string): string {
   const now = Math.floor(Date.now() / 1000);
   const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
@@ -83,8 +70,7 @@ describe("BYOC controller HTTP surface", () => {
   });
 
   it("POST /byoc/sessions REFUSES an anonymous caller (a session must be owner-bound)", async () => {
-    // Without an owner there is nothing to bind the session to, and resolve-by-owner (the whole
-    // point of §L) would have no key. Minting anonymously would also let anyone create sessions.
+    // Without an owner there is nothing to bind the session to, and anyone could mint.
     const res = await req("POST", "/byoc/sessions");
     expect(res.status).toBe(401);
   });
@@ -114,8 +100,7 @@ describe("BYOC controller HTTP surface", () => {
 
   it("the WS upgrade REJECTS a token for a DIFFERENT owner (the unauthenticated-ingress attack)", async () => {
     const mint = (await req("POST", "/byoc/sessions", { owner: "alice" })).json as { sessionId: string };
-    // Anyone can reach /byoc/ws/:id — a valid token of one's OWN must not attach to someone
-    // else's session, or an attacker receives that user's prompts.
+    // A valid token of one's own must not attach to someone else's session.
     expect(server.authorizeUpgrade(mint.sessionId, mintJoinToken("mallory", SECRET)).ok).toBe(false);
   });
 
@@ -125,19 +110,14 @@ describe("BYOC controller HTTP surface", () => {
   });
 
   it("the WS upgrade ACCEPTS the agent-host's `remote-agent` audience (transitional)", async () => {
-    // The agent-host still mints `aud: "remote-agent"` — it is the only mint endpoint a signed-in
-    // user can reach while the webhooks bridge and this controller coexist. Rejecting it made
-    // registration IMPOSSIBLE against the deployed controller:
-    //   {"error":"join token rejected: wrong audience"}
-    // Remove this once the agent-host mints `byoc` directly and the bridge is retired.
+    // The agent-host still mints `aud: "remote-agent"`.
     const mint = (await req("POST", "/byoc/sessions", { owner: "alice" })).json as { sessionId: string };
     const legacy = signWithAudience("alice", SECRET, "remote-agent");
     expect(server.authorizeUpgrade(mint.sessionId, legacy).ok).toBe(true);
   });
 
   it("the WS upgrade REJECTS an UNRELATED audience — the replay guard still holds", async () => {
-    // The guard is narrowed, not abandoned: a token minted for some other purpose must not be
-    // replayable at /byoc/ws/:id, the one endpoint exposed unauthenticated (§L Q3).
+    // A token minted for some other purpose must not be replayable at the unauthenticated connect path.
     const mint = (await req("POST", "/byoc/sessions", { owner: "alice" })).json as { sessionId: string };
     const other = signWithAudience("alice", SECRET, "some-other-service");
     expect(server.authorizeUpgrade(mint.sessionId, other).ok).toBe(false);
@@ -146,8 +126,7 @@ describe("BYOC controller HTTP surface", () => {
   it("POST /byoc/:id/prompt for an offline container is 503, not a hang", async () => {
     const mint = (await req("POST", "/byoc/sessions", { owner: "alice" })).json as { sessionId: string };
     const res = await req("POST", `/byoc/${mint.sessionId}/prompt`, { body: { ch: "acp", type: "prompt", payload: {} } });
-    // The agent-host's transport turns a non-OK into a closed transport -> RUN_ERROR, so the user
-    // is told their Claude is offline instead of watching a spinner.
+    // The agent-host's transport turns a non-OK into a closed transport and a RUN_ERROR.
     expect(res.status).toBe(503);
   });
 
@@ -161,7 +140,7 @@ describe("BYOC controller HTTP surface", () => {
     expect((await req("POST", "/admin")).status).toBe(404);
   });
 
-  // --- Device auth over HTTP (§P) ---------------------------------------------------------
+  // --- Device auth over HTTP ---------------------------------------------------------------
 
   function laptop() {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -230,8 +209,7 @@ describe("BYOC controller HTTP surface", () => {
   });
 
   it("DELETE /byoc/devices/:id REFUSES an ANONYMOUS caller (401, and the device survives)", async () => {
-    // This route sits on the same server as the unauthenticated ingress paths. Without an identity
-    // check, anyone who learns a device id could revoke a stranger's laptop — a trivial DoS.
+    // Without an identity check anyone who learns a device id could revoke a stranger's laptop.
     const dev = laptop();
     const reg = await req("POST", "/byoc/devices", { body: { joinToken: mintJoinToken("alice", SECRET), publicKey: dev.pem } });
     const deviceId = (reg.json as { deviceId: string }).deviceId;
@@ -241,8 +219,7 @@ describe("BYOC controller HTTP surface", () => {
   });
 
   it("GET /byoc/devices returns EMPTY for an owner with no devices (not someone else's)", async () => {
-    // Guards against the list being scoped to anything other than the CALLER — a hardcoded or
-    // mis-threaded owner would leak one user's device inventory to another.
+    // The list must be scoped to the caller, or one user's device inventory leaks to another.
     const a = laptop();
     await req("POST", "/byoc/devices", { body: { joinToken: mintJoinToken("alice", SECRET), publicKey: a.pem, label: "alice-laptop" } });
     const res = await req("GET", "/byoc/devices", { owner: "carol" });
@@ -261,7 +238,7 @@ describe("BYOC controller HTTP surface", () => {
   });
 });
 
-// --- auth-failure surfacing (the "machine was totally fine with it" fix) --------------------
+// --- auth-failure surfacing ------------------------------------------------------------------
 
 describe("auth failures are visible in /byoc/status", () => {
   let server: ByocServer;
@@ -281,9 +258,7 @@ describe("auth failures are visible in /byoc/status", () => {
   };
 
   it("a token rejection shows up on the OWNER's status — decoded unverified, diagnostics only", async () => {
-    // The live shape: an EXPIRED join token still carries readable claims. Attribution uses
-    // them so the Settings page can say "a container failed to authenticate: token expired"
-    // instead of a clean "disconnected" indistinguishable from never-started.
+    // An expired join token still carries readable claims, which attribute the failure to the owner.
     const expired = mintJoinToken("alice", SECRET, { ttlSeconds: -1 });
     await server.noteAuthFailure({ token: expired, reason: "token expired" });
 
@@ -310,13 +285,9 @@ describe("auth failures are visible in /byoc/status", () => {
   });
 });
 
-// --- the FULL hop: POST /byoc/:id/prompt round-trips the caller's frame id ------------------
+// --- the full hop: POST /byoc/:id/prompt round-trips the caller's frame id ------------------
 //
-// The aeonai bug shipped because each side was tested against its own fake: the relay tests
-// asserted the relay's minted id, the agent-host tests used a fake transport, and the id
-// contract across the REAL hop had no coverage. This drives the actual route with the actual
-// registry + relay and a fake container, exactly the report's repro:
-// POST with id "MYID-123" -> the ack that streams back must carry "MYID-123".
+// This drives the actual route with the actual registry and relay and a fake container.
 
 describe("prompt route round-trips the caller's frame id", () => {
   it("the streamed ack carries the id the caller POSTed", async () => {
@@ -325,13 +296,13 @@ describe("prompt route round-trips the caller's frame id", () => {
     const server = createServer({ registry, relay, secret: SECRET });
     const { sessionId, token } = await registry.mint("alice");
 
-    // A container that echoes an ack for whatever id it is sent (a faithful client).
+    // A container that echoes an ack for whatever id it is sent.
     const sent: Array<{ id?: string }> = [];
     registry.attach(sessionId, token, {
       send: (raw: string) => {
         const f = JSON.parse(raw) as { id?: string };
         sent.push(f);
-        // ack back asynchronously with the id the CONTAINER saw
+        // ack back asynchronously with the id the container saw
         setTimeout(() => relay.onContainerFrame(sessionId, JSON.stringify({ ch: "acp", type: "ack", id: f.id, payload: { result: { protocolVersion: 1 } } })), 0);
       },
       close: () => {},
@@ -357,13 +328,9 @@ describe("prompt route round-trips the caller's frame id", () => {
   });
 });
 
-// --- the INBOUND tunnel stream (GET /byoc/:id/tunnel) ----------------------------------------
+// --- the inbound tunnel stream (GET /byoc/:id/tunnel) ----------------------------------------
 //
-// The gap the live test found: the agent-host reaches the controller over HTTP/SSE PER PROMPT,
-// so it has no inbound channel for frames a CONTAINER initiates. Exec works only because those
-// frames arrive during a prompt. A tunnel stream opens whenever the SDK calls MCP, and tunnel
-// frames are deliberately kept OUT of run streams (a run's stream is the transcript) — which
-// left them with nowhere to go. This is that channel.
+// The agent-host's channel for frames a container initiates, which are kept out of run streams.
 
 describe("GET /byoc/:id/tunnel — the agent-host's inbound stream", () => {
   it("streams CONTAINER-initiated tunnel frames to the agent-host", async () => {
@@ -397,8 +364,77 @@ describe("GET /byoc/:id/tunnel — the agent-host's inbound stream", () => {
     server.close();
   });
 
+  it("THE BUG: TWO readers on ONE session each get EVERY frame", async () => {
+    // All of an owner's conversations share one container session, and each conversation's bridge starts its own reader on it.
+    const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });
+    const relay = createRunRelay({ registry });
+    const server = createServer({ registry, relay, secret: SECRET });
+    const { sessionId, token } = await registry.mint("alice");
+    registry.attach(sessionId, token, { send: () => {}, close: () => {} });
+
+    const open = async () => {
+      const res = await server.handle({
+        method: "GET", path: `/byoc/${sessionId}/tunnel`, user: { id: "alice" },
+      } as never);
+      expect(res.status).toBe(200);
+      return (res as { stream: AsyncIterable<{ type?: string; id?: string }> }).stream;
+    };
+    const a = await open();
+    const b = await open();
+
+    const collect = (stream: AsyncIterable<{ type?: string; id?: string }>, n: number) => {
+      const got: Array<string | undefined> = [];
+      return {
+        got,
+        done: (async () => {
+          for await (const f of stream) {
+            got.push(f.id);
+            if (got.length >= n) break;
+          }
+        })(),
+      };
+    };
+    const ra = collect(a, 2);
+    const rb = collect(b, 2);
+
+    // Two conversations' MCP streams, interleaved on the one container socket.
+    for (const id of ["convA-s1", "convB-s1"]) {
+      relay.onContainerFrame(sessionId, JSON.stringify({
+        ch: "tunnel", type: "open", id, payload: { target: "scooter-env" },
+      }));
+    }
+    await Promise.all([ra.done, rb.done]);
+
+    // Both readers see both frames, and each ignores the stream it does not own.
+    expect(ra.got).toEqual(["convA-s1", "convB-s1"]);
+    expect(rb.got).toEqual(["convA-s1", "convB-s1"]);
+    server.close();
+  });
+
+  it("a reader joining LATE does not steal frames from an established one", async () => {
+    const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });
+    const relay = createRunRelay({ registry });
+    const server = createServer({ registry, relay, secret: SECRET });
+    const { sessionId, token } = await registry.mint("alice");
+    registry.attach(sessionId, token, { send: () => {}, close: () => {} });
+
+    const res1 = await server.handle({
+      method: "GET", path: `/byoc/${sessionId}/tunnel`, user: { id: "alice" },
+    } as never);
+    const s1 = (res1 as { stream: AsyncIterable<{ id?: string }> }).stream;
+    const first: Array<string | undefined> = [];
+    const d1 = (async () => {
+      for await (const f of s1) { first.push(f.id); if (first.length >= 1) break; }
+    })();
+
+    relay.onContainerFrame(sessionId, JSON.stringify({ ch: "tunnel", type: "open", id: "early" }));
+    await d1;
+    expect(first).toEqual(["early"]);
+    server.close();
+  });
+
   it("does NOT deliver another session's frames", async () => {
-    // Same isolation the run path has: a subscriber for session A must never see B's traffic.
+    // A subscriber for session A must never see B's traffic.
     const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });
     const relay = createRunRelay({ registry });
     const server = createServer({ registry, relay, secret: SECRET });
@@ -424,11 +460,7 @@ describe("GET /byoc/:id/tunnel — the agent-host's inbound stream", () => {
   });
 
   it("delivers BACK-TO-BACK frames — the open/chunk/end burst a real MCP call sends", async () => {
-    // THE LOST-FRAME BUG: the reader used to consume a frame directly and re-register only on
-    // its next loop iteration, so anything arriving in that window was queued while the woken
-    // reader had already passed its queue check. The container sends open/chunk/end back to
-    // back, so `open` arrived and `end` was stranded — the agent-host never fired the request
-    // and every BYO tool call timed out with the model reporting the tool does not exist.
+    // A reader woken by one frame must still drain frames that arrive before it re-registers.
     const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });
     const relay = createRunRelay({ registry });
     const server = createServer({ registry, relay, secret: SECRET });

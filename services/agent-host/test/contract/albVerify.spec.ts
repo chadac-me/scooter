@@ -1,10 +1,8 @@
 /**
- * Tier 1 — optional ALB OIDC JWT signature verification.
- *
- * Generates a real EC P-256 keypair, signs an ES256 JWT (JOSE raw R||S), and
- * proves verifyAlbJwt accepts a good signature / rejects a tampered one / a wrong
- * key / a missing kid. Then the withAlbVerification wrapper: a verified token
- * keeps its claims; an unverified one keeps the id but DROPS email/name.
+ * Optional ALB OIDC JWT signature verification, driven with a real EC P-256 keypair.
+ * verifyAlbJwt accepts a good signature and rejects a tampered payload, a wrong key or
+ * a missing kid; withAlbVerification keeps a verified token's claims and drops
+ * email/name from an unverified one while keeping the id.
  */
 
 import { describe, it, expect } from "vitest";
@@ -17,12 +15,12 @@ import { verifyAlbJwt, withAlbVerification } from "../../src/auth/albVerify.js";
 const b64url = (buf: Buffer | string) =>
   Buffer.from(buf).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
 
-/** Make an ES256 JWT signed by `privateKey` with header.kid = kid. */
+/** An ES256 JWT signed by `privateKey` with header.kid = kid. */
 function makeJwt(kid: string, claims: Record<string, unknown>, privateKey: ReturnType<typeof generateKeyPairSync>["privateKey"]): string {
   const header = b64url(JSON.stringify({ typ: "JWT", alg: "ES256", kid }));
   const payload = b64url(JSON.stringify(claims));
   const signingInput = `${header}.${payload}`;
-  // JOSE ES256 signature = raw R||S (ieee-p1363), 64 bytes.
+  // A JOSE ES256 signature is raw R||S (ieee-p1363).
   const sig = cryptoSign("sha256", Buffer.from(signingInput), { key: privateKey, dsaEncoding: "ieee-p1363" });
   return `${signingInput}.${b64url(sig)}`;
 }
@@ -57,9 +55,9 @@ describe("verifyAlbJwt", () => {
   it("rejects when the key can't be fetched / no kid / malformed", async () => {
     const { privateKey } = kp();
     const jwt = makeJwt("k1", {}, privateKey);
-    expect(await verifyAlbJwt(jwt, async () => undefined)).toBe(false); // key missing
+    expect(await verifyAlbJwt(jwt, async () => undefined)).toBe(false);
     expect(await verifyAlbJwt("not.a.jwt", async () => "x")).toBe(false);
-    expect(await verifyAlbJwt("a.b", async () => "x")).toBe(false); // not 3 parts
+    expect(await verifyAlbJwt("a.b", async () => "x")).toBe(false);
   });
 });
 
@@ -85,7 +83,7 @@ describe("withAlbVerification", () => {
     const jwt = makeJwt("k1", { email: "a@x.io" }, signer.privateKey);
     const wrapped = withAlbVerification(albResolver({ id: "sub-1", email: "a@x.io", name: "Al", anonymous: false }), {
       region: "us-east-1",
-      fetchKey: async () => pem(other.publicKey), // wrong key -> verify fails
+      fetchKey: async () => pem(other.publicKey),
     });
     const u = await wrapped.resolve(req({ "x-amzn-oidc-data": jwt }));
     expect(u.id).toBe("sub-1");

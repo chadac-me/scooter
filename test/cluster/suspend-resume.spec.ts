@@ -1,9 +1,6 @@
 /**
- * Tier 2 — suspend-don't-delete persistence.
- *
- * Proves the core revival guarantee (verified in the controller source):
- * suspend drops the Pod but keeps the PVCs; resume re-mounts them; workspace
- * data survives. Drives the real provisioner. RED until a cluster is up.
+ * Tier 2: suspend drops the Pod but keeps the PVCs, resume re-mounts them, and workspace
+ * data survives. Drives the real provisioner.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -22,11 +19,8 @@ type SandboxStatus = {
 };
 const cond = (s: SandboxStatus, type: string) =>
   s.status?.conditions?.find((c) => c.type === type);
-// v1beta1: Ready=True (reason DependenciesReady) once the pod is up.
 const readyP = (s: SandboxStatus) => cond(s, "Ready")?.status === "True";
-// v1beta1: operatingMode=Suspended drops the pod → Ready flips to False (reason
-// DependenciesNotReady / pod gone). Detect the not-ready state (or an explicit
-// pod-gone message) rather than a v1alpha1 "replicas is 0" string.
+// Suspension drops the pod, so Ready flips to False or the message says the pod is gone.
 const suspendedP = (s: SandboxStatus) => {
   const c = cond(s, "Ready");
   return c?.status === "False" || /pod does not exist|not.?ready/i.test(c?.message ?? c?.reason ?? "");
@@ -71,17 +65,13 @@ maybe("suspend / resume workspace persistence", () => {
     expect(stdout.trim()).toBe("marker");
   });
 
-  // The reliability fix: a web service the user had RUNNING before hibernate must be
-  // running again after resume — otherwise the proxy 502s ("upstream failed"). This is
-  // the real-PVC end-to-end for what nixos-tests/service-persist.nix proves hermetically.
+  // The real-PVC end-to-end for what nixos-tests/service-persist.nix proves hermetically.
   it("a service enabled before suspend is RUNNING again after resume (restore oneshot)", async () => {
-    // Enable via `scooter-service` so the enabled set is recorded on the workspace PVC
-    // (/workspace/.scooter/services.json). `terminal` (ttyd+tmux) is a lazy tool — the
-    // first start does a `nix build` in-pod, so allow generous time.
+    // `scooter-service` records the enabled set on the workspace PVC; `terminal` is a lazy tool, so its first start builds in-pod.
     await cluster.exec(SELECTOR(id), ["scooter-service", "start", "terminal"], NS);
     await waitExec(cluster, id, ["systemctl", "is-active", "--quiet", "webservice-terminal.service"], 180_000);
 
-    // The intent is persisted on the PVC (survives the pod recreate).
+    // The intent is persisted on the PVC.
     const state = await cluster.exec(
       SELECTOR(id),
       ["cat", "/workspace/.scooter/services.json"],
@@ -89,20 +79,18 @@ maybe("suspend / resume workspace persistence", () => {
     );
     expect(JSON.parse(state.stdout).enabled?.terminal?.autostart).toBe(true);
 
-    // Hibernate (pod dropped) then resume (fresh pod; every explicit-start unit dead).
+    // Suspend, then resume into a fresh pod where every explicit-start unit is dead.
     await provisioner.suspend(ref);
     await cluster.waitFor("Sandbox", `conv-${id}`, suspendedP, 120_000, NS);
     await provisioner.resume(ref);
     await cluster.waitFor("Sandbox", `conv-${id}`, readyP, 180_000, NS);
 
-    // No one re-issued a start — the boot `scooter-service-restore` oneshot brought it
-    // back from services.json. (Again allow for the lazy ttyd build on the new pod.)
+    // The boot `scooter-service-restore` oneshot brought it back without anyone re-issuing a start.
     await waitExec(cluster, id, ["systemctl", "is-active", "--quiet", "webservice-terminal.service"], 180_000);
   });
 });
 
-/** Poll an in-pod command until it exits 0, or throw after `timeoutMs`. The cluster
- *  `exec` surfaces a non-zero exit as a rejection, so we retry on any failure. */
+/** Poll an in-pod command until it exits 0, or throw after `timeoutMs`. */
 async function waitExec(
   cluster: Cluster,
   id: string,

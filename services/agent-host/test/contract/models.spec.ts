@@ -1,10 +1,7 @@
 /**
- * Tier 1 contract — the model catalog (agent model-switch, stage 1).
- *
- * Pins: AGENT_MODELS_JSON (rich form w/ hints + default) parses; the legacy
- * GOOSE_MODEL + AGENT_AVAILABLE_MODELS still yields a catalog; exactly one default
- * is derived; resolveModel guards against unoffered models. See
- * docs/AGENT_MODEL_SWITCH.md.
+ * The model catalog: AGENT_MODELS_JSON parses with hints, defaults and providers, the
+ * legacy GOOSE_MODEL + AGENT_AVAILABLE_MODELS form still yields a catalog, exactly one
+ * default is derived, and resolveModel guards against unoffered models.
  */
 
 import { describe, it, expect } from "vitest";
@@ -47,7 +44,7 @@ describe("model catalog", () => {
       ]),
     } as NodeJS.ProcessEnv);
     expect(cat.models.filter((m) => m.default)).toHaveLength(1);
-    expect(cat.defaultId).toBe("a"); // first flagged wins
+    expect(cat.defaultId).toBe("a");
   });
 
   it("falls back to the legacy GOOSE_MODEL + AGENT_AVAILABLE_MODELS (no hints)", () => {
@@ -88,20 +85,16 @@ describe("model catalog", () => {
       AGENT_MODELS_JSON: JSON.stringify([{ id: "sonnet", default: true }, { id: "opus" }]),
     } as NodeJS.ProcessEnv);
     expect(resolveModel("opus", cat)).toBe("opus");
-    expect(resolveModel("gpt-4", cat)).toBe("sonnet"); // unoffered -> default
+    expect(resolveModel("gpt-4", cat)).toBe("sonnet");
     expect(resolveModel(undefined, cat)).toBe("sonnet");
     expect(isOffered(cat, "opus")).toBe(true);
     expect(isOffered(cat, "gpt-4")).toBe(false);
   });
 });
 
-// --- the PROVIDER dimension ------------------------------------------------------------------
+// --- the provider dimension ------------------------------------------------------------------
 //
-// Model ids are PROVIDER-SPECIFIC namespaces: Bedrock ids (us.anthropic.claude-…) mean nothing
-// to a subscription-backed provider (claude-sonnet-4-5 style), and vice versa. A flat catalog
-// let a conversation pick a model its run's provider cannot serve — and the BYO container just
-// ignored the choice entirely. Each model may declare which providers offer it; empty = all
-// (back-compat, the pre-provider world).
+// Model ids are provider-specific namespaces, so each model may declare which providers offer it, with empty meaning all.
 
 import { modelAllowedFor, defaultFor } from "../../src/agent/models.js";
 
@@ -111,7 +104,7 @@ describe("model catalog: provider dimension", () => {
       { id: "us.anthropic.claude-sonnet-4-6", default: true, providers: ["goose", "claude-code"] },
       { id: "us.anthropic.claude-opus-4-8", providers: ["goose"] },
       { id: "claude-sonnet-4-5", providers: ["byoc"] },
-      { id: "everywhere-model" }, // no providers = offered on every provider
+      { id: "everywhere-model" },
     ]),
   } as never);
 
@@ -133,15 +126,13 @@ describe("model catalog: provider dimension", () => {
 
   it("defaultFor: the global default when the provider offers it, else the provider's first", () => {
     expect(defaultFor(catalog, "goose")).toBe("us.anthropic.claude-sonnet-4-6");
-    // byoc does not offer the global default -> its first offered model.
+    // byoc does not offer the global default, so it gets its first offered model.
     expect(defaultFor(catalog, "byoc")).toBe("claude-sonnet-4-5");
     expect(defaultFor(catalog, undefined)).toBe("us.anthropic.claude-sonnet-4-6");
   });
 
   it("defaultFor: a provider GROUP's own flagged default wins over the global default", () => {
-    // The kubenix surface is provider-first — each group marks its own default. byoc's group
-    // flagged claude-opus-4-x even though the global default is a goose model and another byoc
-    // model sorts first.
+    // Each provider group marks its own default in the kubenix surface.
     const c = catalogFromEnv({
       AGENT_MODELS_JSON: JSON.stringify([
         { id: "us.anthropic.claude-sonnet-4-6", default: true, providers: ["goose"], defaultFor: ["goose"] },

@@ -1,6 +1,4 @@
-"""Unit tests for the static-shares store + HTTP API (SQLite in-memory):
-UUID minting, versioning (root serves latest), owner-scoping, inline + zip
-ingest, path-traversal guards, and the unauthenticated /s/<uuid>/ serve path."""
+"""The static-shares store and HTTP API on in-memory SQLite."""
 
 from __future__ import annotations
 
@@ -29,9 +27,7 @@ def _identity(conv: str) -> Identity:
 @pytest.fixture
 async def store():
     s = ShareStore(StoreConfig(dsn="sqlite+aiosqlite:///:memory:"))
-    # Production schema is created by the db-migrator (atlas migrate apply); the
-    # store never issues DDL. Tests run against throwaway SQLite, so build the two
-    # tables here from the generated models to give the store something to query.
+    # The store issues no DDL, so the throwaway SQLite tables are built here.
     async with s._engine.begin() as conn:
         await conn.run_sync(
             _SchemaBase.metadata.create_all,
@@ -73,7 +69,7 @@ async def test_create_mints_uuid_and_serves_latest(store):
     share = await store.create(owner="conv-a", conversation_id="conv-a", description="d",
                                visibility="public", files=files, entry_point="index.html")
     assert share.uuid and share.latest_version == 1
-    ver = await store.get_version(share.uuid)  # None => latest
+    ver = await store.get_version(share.uuid)
     assert ver.version == 1 and ver.files["index.html"].data == b"v1"
 
 
@@ -85,8 +81,8 @@ async def test_add_version_bumps_and_keeps_uuid(store):
     files2 = {"index.html": ShareFile("index.html", "text/html", b"v2")}
     updated = await store.add_version(share.uuid, owner="conv-a", files=files2, entry_point="index.html")
     assert updated.uuid == share.uuid and updated.latest_version == 2
-    assert (await store.get_version(share.uuid)).files["index.html"].data == b"v2"      # latest
-    assert (await store.get_version(share.uuid, 1)).files["index.html"].data == b"v1"   # pinned
+    assert (await store.get_version(share.uuid)).files["index.html"].data == b"v2"
+    assert (await store.get_version(share.uuid, 1)).files["index.html"].data == b"v1"
 
 
 @pytest.mark.asyncio
@@ -113,7 +109,6 @@ async def test_publish_then_serve_unauthenticated(store):
     assert r.status_code == 201, r.text
     uuid = r.json()["uuid"]
     assert r.json()["url"] == f"https://scooter.example.com/s/{uuid}/"
-    # serve path takes NO auth override effect — it's open by capability URL
     served = c.get(f"/s/{uuid}/")
     assert served.status_code == 200 and served.text == "<h1>hi</h1>"
     assert served.headers["content-type"].startswith("text/html")
@@ -124,8 +119,8 @@ async def test_update_serves_new_version_at_root(store):
     c = _client(store)
     uuid = c.post("/shares", json=_inline("one")).json()["uuid"]
     c.put(f"/shares/{uuid}", json=_inline("two"))
-    assert c.get(f"/s/{uuid}/").text == "two"       # root = latest
-    assert c.get(f"/s/{uuid}/v/1/").text == "one"   # old version pinned
+    assert c.get(f"/s/{uuid}/").text == "two"
+    assert c.get(f"/s/{uuid}/v/1/").text == "one"
     assert c.get(f"/s/{uuid}/v/2/").text == "two"
 
 
@@ -136,8 +131,8 @@ async def test_zip_ingest_multifile(store):
     r = c.post("/shares", json={"zip_b64": zb})
     assert r.status_code == 201, r.text
     uuid = r.json()["uuid"]
-    assert c.get(f"/s/{uuid}/").text == "<img src=chart.png>"          # entry = index.html
-    assert c.get(f"/s/{uuid}/chart.png").content == b"\x89PNG..."      # asset by path
+    assert c.get(f"/s/{uuid}/").text == "<img src=chart.png>"
+    assert c.get(f"/s/{uuid}/chart.png").content == b"\x89PNG..."
 
 
 @pytest.mark.asyncio
@@ -156,8 +151,6 @@ async def test_disallowed_extension_rejected(store):
 
 @pytest.mark.asyncio
 async def test_serve_sets_frame_ancestors_csp(store):
-    # A served share carries a frame-ancestors CSP so only the allowed origin (the
-    # Scooter UI) can embed it in an <iframe> — never arbitrary external sites.
     c = _client(store, frame_ancestors="https://scooter.example.com")
     uuid = c.post("/shares", json=_inline("<h1>hi</h1>")).json()["uuid"]
     served = c.get(f"/s/{uuid}/")
@@ -170,19 +163,15 @@ async def test_list_and_delete_owner_scoped(store):
     alice = _client(store, "conv-alice")
     uuid = alice.post("/shares", json=_inline("mine")).json()["uuid"]
     assert any(s["uuid"] == uuid for s in alice.get("/shares").json()["shares"])
-    # bob can't see or delete alice's share
     bob = _client(store, "conv-bob")
     assert bob.get(f"/shares/{uuid}").status_code == 404
     assert bob.delete(f"/shares/{uuid}").status_code == 404
-    # alice can
     assert alice.delete(f"/shares/{uuid}").status_code == 204
     assert alice.get(f"/s/{uuid}/").status_code == 404
 
 
 def _admin_client(store):
-    """A control/approver caller (is_approver=True) — the agent-host relaying a UI
-    request. Its own conversation_id is "" (not a sandbox), so it must pass an
-    explicit conversation_id to list a named conversation's shares."""
+    """An approver caller with no conversation of its own, like the agent-host relaying a UI request."""
     app = FastAPI()
     app.include_router(create_shares_router(store, public_base_url="https://scooter.example.com"))
     app.dependency_overrides[authenticate] = lambda: Identity(
@@ -194,15 +183,13 @@ def _admin_client(store):
 
 @pytest.mark.asyncio
 async def test_admin_lists_named_conversation_shares(store):
-    # An admin (agent-host) relays a UI request: list conv-alice's shares by passing
-    # conversation_id explicitly — the path the right-panel Shares tab depends on.
     alice = _client(store, "conv-alice")
     uuid = alice.post("/shares", json=_inline("mine")).json()["uuid"]
 
     admin = _admin_client(store)
     shares = admin.get("/shares", params={"conversation_id": "conv-alice"}).json()["shares"]
     assert [s["uuid"] for s in shares] == [uuid]
-    # Without the param the admin (conversation_id="") sees nothing of alice's.
+    # Without the param the admin sees nothing of alice's.
     assert admin.get("/shares").json()["shares"] == []
 
 
@@ -210,9 +197,6 @@ async def test_admin_lists_named_conversation_shares(store):
 async def test_non_admin_cannot_list_another_conversation(store):
     alice = _client(store, "conv-alice")
     alice.post("/shares", json=_inline("mine"))
-    # A sandbox caller may only ever list its OWN — asking for another's is 403,
-    # never a silent cross-conversation read.
     bob = _client(store, "conv-bob")
     assert bob.get("/shares", params={"conversation_id": "conv-alice"}).status_code == 403
-    # Its own id explicitly is fine (== the default).
     assert bob.get("/shares", params={"conversation_id": "conv-bob"}).status_code == 200

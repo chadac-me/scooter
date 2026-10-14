@@ -1,9 +1,4 @@
-"""git-credential transport — vends a git credential blob.
-
-Mounts `/{provider}/git-credentials`. The in-pod `git-credential-broker` helper
-calls it with the pod's SA token and gets back
-`{protocol, host, username, password}` for HTTPS git operations.
-"""
+"""git-credential transport: `/{provider}/git-credentials` returns `{protocol, host, username, password}` to the in-pod `git-credential-broker` helper."""
 
 from __future__ import annotations
 

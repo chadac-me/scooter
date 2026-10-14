@@ -1,25 +1,8 @@
-# TEST-ONLY overrides — everything a cluster/e2e run needs and a production deploy must never get.
-#
-# Test-only overrides isolated from production modules to avoid conditional complexity.
-#
-#   1. Production config was written as the NEGATIVE of a test flag. Reading platform.nix, the
-#      real agent's provider/region/OAuth token/model catalog were all conditional on "not
-#      testing" — so the production path was the harder one to see, and a mistake in a guard
-#      silently changes what a real deploy ships.
-#   2. Nothing stopped a production render from setting them. `fakeAgent = true` in a deploy
-#      config would swap the real agent for a dummy that answers every prompt with canned text,
-#      and nothing in the module system would object.
-#
-# INVERTED HERE. Production modules now declare production config UNCONDITIONALLY. This module is
-# imported only by test renders and OVERRIDES what a test needs (`lib.mkForce`), so:
-#
-#   - platform.nix reads as what a real deploy gets, with no test branches;
-#   - a test render opts IN by importing this module — a deploy that never imports it CANNOT
-#     accidentally enable a dummy agent or an unauthenticated test webhook;
-#   - every test-only affordance is in one file, so "what does a test change?" has one answer.
-#
-# Import it from a test manifest ONLY:
-#   platform = mkPlatform { imports = [ ./modules/testing.nix ]; scooter.testing.enable = true; … }
+# Test-only overrides: everything a cluster/e2e run needs and a production
+# deploy must never get. Production modules declare production config
+# unconditionally; a test render opts in by importing this module, which
+# overrides with `lib.mkForce`, so a deploy that never imports it cannot enable
+# a dummy agent or an unauthenticated test webhook.
 
 { config, lib, ... }:
 
@@ -60,26 +43,18 @@ in
   };
 
   config = lib.mkIf tcfg.enable {
-    # mkForce, because these deliberately override whatever the production modules computed.
-    # Anything a test needs to CHANGE about a real deploy belongs here and only here.
+    # Anything a test needs to change about a real deploy belongs here and only here.
     scooter = {
       fakeAgent = lib.mkForce tcfg.fakeAgent;
       webhooks.testWebhook = lib.mkForce tcfg.testWebhook;
-      # SMALL sandboxes. The production default is Guaranteed QoS 2cpu/4Gi PER
-      # sandbox. Tests assert behaviour, not perf isolation: a fake agent's
-      # echo + a short shell command fit comfortably here, and several sandboxes
-      # must be schedulable side by side. REQUESTS are near-zero (scheduling
-      # density is the whole point); LIMITS stay real because the sandbox is a
-      # genuine systemd NixOS pod even under the fake agent — a tiny memory LIMIT
-      # would OOM-kill it at boot, and limits (not requests) are what kill.
+      # Near-zero requests for scheduling density, with real limits because a tiny memory limit would OOM-kill the systemd pod at boot.
       sandboxResources = lib.mkForce {
         requests = { cpu = "50m"; memory = "64Mi"; };
         limits = { cpu = "1"; memory = "1Gi"; };
       };
     };
 
-    # A loud marker on every rendered object, so a manifest built with test overrides is
-    # identifiable at a glance (and greppable in CI) rather than looking like a real deploy.
+    # A loud, greppable marker that this manifest was rendered with test overrides.
     kubernetes.resources.configMaps.agent-testing-marker = {
       metadata = {
         name = "agent-testing-marker";

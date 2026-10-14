@@ -1,11 +1,9 @@
 /**
- * Cluster fixture — provider-agnostic local/remote Kubernetes for Tier 2.
+ * Cluster fixture: provider-agnostic Kubernetes access for the Tier 2 tests.
  *
- * Targets whatever the current kubeconfig points at (cluster-up.sh brings up the
- * cluster; this just connects). Cluster-agnostic; k3s is the default provider.
- *
- *   CLUSTER_PROVIDER  = existing | k3s | kind | minikube | k3d   (default: k3s)
- *   RUN_CLUSTER_TESTS = 1  to enable Tier 2 at all
+ * Connects to whatever the current kubeconfig points at (cluster-up.sh brings the
+ * cluster up). CLUSTER_PROVIDER selects existing | k3s | kind | minikube | k3d
+ * (default k3s) and RUN_CLUSTER_TESTS=1 enables Tier 2 at all.
  */
 
 import { setTimeout as sleep } from "node:timers/promises";
@@ -28,7 +26,7 @@ export type ClusterProvider = "existing" | "k3s" | "kind" | "minikube" | "k3d";
 export interface Cluster {
   readonly provider: ClusterProvider;
   apply(manifest: object): Promise<void>;
-  /** Delete a Pod by name (best-effort; for tests that create bare pods). */
+  /** Delete a Pod by name, best-effort. */
   deletePod(name: string, namespace?: string): Promise<void>;
   get<T = unknown>(kind: string, name: string, namespace?: string): Promise<T>;
   waitFor<T = unknown>(
@@ -43,11 +41,7 @@ export interface Cluster {
     command: string[],
     namespace?: string,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
-  /**
-   * Optimistic label CAS on a PVC via a JSON-patch `test` op: `test` that guard label ==
-   * its expected value (the call REJECTS with 422 if it changed), then set new labels.
-   * Mirrors the provisioner's claimWarmStorePvc so a test exercises the exact race.
-   */
+  /** Optimistic label CAS on a PVC via a JSON-patch `test` op, mirroring the provisioner's claimWarmStorePvc. */
   patchPvcLabelsCAS(
     name: string,
     namespace: string,
@@ -55,31 +49,20 @@ export interface Cluster {
     expectStateValue: string,
     setLabels: Record<string, string>,
   ): Promise<void>;
-  /**
-   * Run a curl from inside the cluster (a throwaway curl pod) against an
-   * in-cluster URL. Returns the response body. For hitting Services whose pods
-   * lack a shell/curl (the minimal nix images).
-   */
+  /** Run a curl from a throwaway in-cluster pod and return the response body. */
   curlInCluster(
     url: string,
     opts?: { method?: string; body?: string; headers?: string[]; timeoutMs?: number },
   ): Promise<string>;
 
-  /** curlInCluster + a TOLERANT parse for JSON endpoints. `kubectl run -i` output can carry
-   *  stray lines after the payload (an attach/teardown warning, an event line) even with
-   *  unique per-call pod names — observed live as
-   *    SyntaxError: Unexpected non-whitespace character after JSON at position N (line 2)
-   *  where line 1 was the complete, valid response. Parsing the LEADING JSON value makes a
-   *  JSON assertion immune to appended junk without hiding a genuinely bad payload. */
+  /** curlInCluster plus a parse of the leading JSON value, since `kubectl run -i` can append stray lines after the payload. */
   curlJson<T = unknown>(
     url: string,
     opts?: { method?: string; body?: string; headers?: string[]; timeoutMs?: number },
   ): Promise<T>;
 }
 
-/** Parse the leading JSON value of `raw`, tolerating appended non-JSON lines. Tries the whole
- *  string first (the common case), then progressively shorter line-prefixes. Throws the
- *  ORIGINAL error when no prefix parses — a truly malformed payload must still fail loudly. */
+/** Parse the leading JSON value of `raw`, trying progressively shorter line prefixes and rethrowing the original error when none parses. */
 export function parseLeadingJson<T = unknown>(raw: string): T {
   try {
     return JSON.parse(raw) as T;
@@ -109,9 +92,8 @@ export function clusterTestsEnabled(): boolean {
 const provider = (): ClusterProvider =>
   (process.env.CLUSTER_PROVIDER as ClusterProvider) ?? "k3s";
 
-// Map a CRD/core "kind" to its REST coordinates. Extend as tests need.
+// Map a CRD/core "kind" to its REST coordinates.
 const RESOURCES: Record<string, { group: string; version: string; plural: string; core?: boolean }> = {
-  // agent-sandbox v0.5.x serves v1beta1 (v1alpha1 deprecated in v0.5.0).
   Sandbox: { group: "agents.x-k8s.io", version: "v1beta1", plural: "sandboxes" },
   Conversation: { group: "scooter.chadac.dev", version: "v1alpha1", plural: "conversations" },
   SandboxWarmPool: { group: "extensions.agents.x-k8s.io", version: "v1beta1", plural: "sandboxwarmpools" },
@@ -166,11 +148,10 @@ export async function withCluster(opts: ClusterFixtureOptions = {}): Promise<Clu
     provider: provider(),
 
     async apply(manifest: object) {
-      // Server-side apply for any object (CRDs included).
+      // Server-side apply, falling back to create when the object does not exist yet.
       await objects.patch(manifest as never, undefined, undefined, "agent-sandbox-tests", true, {
         headers: { "Content-Type": "application/apply-patch+yaml" },
       } as never).catch(async () => {
-        // Fall back to create if the object doesn't exist yet.
         await objects.create(manifest as never);
       });
     },
@@ -225,10 +206,7 @@ export async function withCluster(opts: ClusterFixtureOptions = {}): Promise<Clu
     },
 
     async patchPvcLabelsCAS(name, ns, expectStateLabel, expectStateValue, setLabels) {
-      // Optimistic label CAS via a JSON-PATCH `test` op — the SAME mechanism the provisioner's
-      // claimWarmStorePvc uses: `test` the guard label == its expected value (fails 422 if
-      // another claimer already changed it), then set the new labels. k8s only honors
-      // resourceVersion as a precondition on PUT, not PATCH — the `test` op IS the CAS for PATCH.
+      // The `test` op is the CAS for PATCH, since k8s honours resourceVersion as a precondition only on PUT.
       const ptr = (label: string) => `/metadata/labels/${label.replace(/~/g, "~0").replace(/\//g, "~1")}`;
       const body = [
         { op: "test", path: ptr(expectStateLabel), value: expectStateValue },
@@ -247,15 +225,9 @@ export async function withCluster(opts: ClusterFixtureOptions = {}): Promise<Clu
       if (opts.body !== undefined) args.push("-d", opts.body);
       args.push(url);
 
-      // UNIQUE PER CALL. Naming the pod by a hash of url+body meant repeated identical requests
-      // (e.g. the platform smoke's 5-attempt list loop) reused ONE pod name — `kubectl run --rm -i`
-      // then races the previous pod's teardown and can return the earlier attempt's output
-      // concatenated with the new one, which surfaces as
-      //   SyntaxError: Unexpected non-whitespace character after JSON at position N (line 2)
-      // i.e. two JSON documents in one string. A counter + timestamp makes every call its own pod.
+      // A unique pod name per call, so `kubectl run --rm -i` never races a previous pod's teardown.
       curlSeq += 1;
       const podName = `curltest-${Date.now().toString(36)}-${curlSeq}`;
-      // Run a throwaway curl pod; --restart=Never + --rm so it cleans up.
       const out = await kubectl([
         "run", podName,
         "-n", namespace,
@@ -264,7 +236,7 @@ export async function withCluster(opts: ClusterFixtureOptions = {}): Promise<Clu
         "--command", "--",
         "curl", ...args,
       ]);
-      // strip the trailing "pod ... deleted" line kubectl appends
+      // Strip the trailing "pod ... deleted" line kubectl appends.
       return out.replace(/pod "[^"]+" deleted.*$/s, "").trim();
     },
 
@@ -277,14 +249,12 @@ export async function withCluster(opts: ClusterFixtureOptions = {}): Promise<Clu
 
 let curlSeq = 0;
 
-
 import { execFile } from "node:child_process";
 
 function kubectl(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile("kubectl", args, { maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
-      // `kubectl run --rm` exits non-zero on a non-zero container exit even when
-      // we got output; prefer stdout when present.
+      // `kubectl run --rm` exits non-zero on a non-zero container exit, so prefer stdout when present.
       if (stdout) resolve(stdout);
       else if (err) reject(new Error(stderr || err.message));
       else resolve(stdout);

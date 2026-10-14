@@ -1,11 +1,6 @@
-// Read-only access to the linked-resource rows (resource_links) the sidebar enriches each
-// conversation with — the GitHub PR / Slack thread / Jira badges. These live in the WEBHOOKS
-// database (webhooks owns the table), a different database than the conversation metadata, so
-// this is a second read-only pool. Same conversation_router role, same read-only guarantees
-// (server-side role + client-side default_transaction_read_only via buildPoolConfig).
-//
-// Optional: with no WEBHOOKS_DB_* configured (webhooks disabled), the list is served WITHOUT
-// enrichment — bare rows, exactly as the agent-host degrades to when its link store is absent.
+// Read-only access to the resource_links rows the sidebar enriches each conversation with.
+// They live in the webhooks database, so this is a second read-only pool, and it is
+// optional: without WEBHOOKS_DB_* the list is served as bare rows.
 package main
 
 import (
@@ -17,8 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Link is one linked resource, projected to the four fields the sidebar list shows (matching
-// agent-host's withSources: source, resourceType, url, title).
+// Link is one linked resource, projected to the four fields the sidebar list shows.
 type Link struct {
 	Source       string  `json:"source"`
 	ResourceType string  `json:"resourceType"`
@@ -26,14 +20,12 @@ type Link struct {
 	Title        *string `json:"title,omitempty"`
 }
 
-// LinkStore is a read-only handle on the webhooks database's resource_links table. nil when
-// webhooks (and thus the links DB + grant) is not configured.
+// LinkStore is a read-only handle on the webhooks database's resource_links table, nil when not configured.
 type LinkStore struct {
 	pool *pgxpool.Pool
 }
 
-// OpenLinkStore connects the read-only links pool (read-only pinned via buildPoolConfig, same
-// as the metadata store). The caller must Close it.
+// OpenLinkStore connects the read-only links pool, which the caller must Close.
 func OpenLinkStore(ctx context.Context, dsn string) (*LinkStore, error) {
 	cfg, err := buildPoolConfig(dsn)
 	if err != nil {
@@ -46,8 +38,7 @@ func OpenLinkStore(ctx context.Context, dsn string) (*LinkStore, error) {
 	return &LinkStore{pool: pool}, nil
 }
 
-// linkStoreDSNFromEnv assembles the webhooks DSN from WEBHOOKS_DB_* (the router's read-only
-// conversation_router credentials on the webhooks database). "" when not configured.
+// linkStoreDSNFromEnv assembles the webhooks DSN from WEBHOOKS_DB_*, "" when not configured.
 func linkStoreDSNFromEnv() string {
 	if dsn := os.Getenv("WEBHOOKS_DB_DSN"); dsn != "" {
 		return dsn
@@ -68,8 +59,7 @@ func linkStoreDSNFromEnv() string {
 	return dsn
 }
 
-// LinksByConversation reads EVERY link once and groups by conversation id — one query for the
-// whole list, not one per row (which is what made listLinks-per-conversation a fan of N reads).
+// LinksByConversation reads every link in one query and groups by conversation id.
 func (s *LinkStore) LinksByConversation(ctx context.Context) (map[string][]Link, error) {
 	rs, err := s.pool.Query(ctx, `
 		SELECT conversation_id, source, resource_type, url, title
@@ -90,9 +80,7 @@ func (s *LinkStore) LinksByConversation(ctx context.Context) (map[string][]Link,
 	return out, rs.Err()
 }
 
-// LinksForConversation reads the links of ONE conversation — the enrichment the LISTEN loop
-// attaches to a single `upsert` frame (vs LinksByConversation, which reads the whole table for the
-// snapshot). Returns an empty slice, never nil, so a row with no links still carries `links: []`.
+// LinksForConversation reads the links of one conversation, returning an empty slice rather than nil.
 func (s *LinkStore) LinksForConversation(ctx context.Context, convID string) ([]Link, error) {
 	rs, err := s.pool.Query(ctx, `
 		SELECT source, resource_type, url, title
@@ -113,7 +101,7 @@ func (s *LinkStore) LinksForConversation(ctx context.Context, convID string) ([]
 	return out, rs.Err()
 }
 
-// Close releases the pool. Safe on a nil LinkStore (the not-configured case).
+// Close releases the pool and is safe on a nil LinkStore.
 func (s *LinkStore) Close() {
 	if s != nil && s.pool != nil {
 		s.pool.Close()

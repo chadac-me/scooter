@@ -1,22 +1,17 @@
 /**
- * ShareEmbed — renders a published static share (/s/<uuid>/) as a sandboxed,
- * fixed-width <iframe> inline in the conversation.
- *
- * Driven by a fenced markdown code block the agent emits:
+ * ShareEmbed renders a published static share (/s/<uuid>/) as a sandboxed, fixed-width
+ * <iframe> inline in the conversation, driven by a fenced markdown block the agent emits:
  *
  *     ```scooter-embed
- *     share: 7f3c2a1e-1b2c-4d5e-8f90-abcdef012345   # uuid OR /s/<uuid>/ path
- *     width: 720      # optional px (clamped); default a fixed width
+ *     share: 7f3c2a1e-1b2c-4d5e-8f90-abcdef012345   # uuid or /s/<uuid>/ path
+ *     width: 720      # optional px (clamped)
  *     height: 480     # optional px
- *     center: true    # optional — center the frame in the message
+ *     center: true    # optional, centers the frame in the message
  *     ```
  *
- * Security posture (see also the broker's frame-ancestors CSP on /s/ responses):
- *   - The src is ALWAYS rebuilt as `<base>/s/<uuid>/` from a validated UUID, so an
- *     agent can never point this at an external site — only at a share.
- *   - `sandbox="allow-scripts allow-popups"` (NO allow-same-origin): interactive
- *     JS charts (Plotly, etc.) run, but in an opaque origin — the frame cannot read
- *     the parent, cookies, or same-origin storage.
+ * The src is always rebuilt as `<base>/s/<uuid>/` from a validated UUID, so an agent can
+ * only point the frame at a share, and the sandbox omits allow-same-origin so the frame
+ * runs in an opaque origin that cannot read the parent, cookies or same-origin storage.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,8 +23,7 @@ const MAX_WIDTH = 1200;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 4000;
 
-// Absolute origin the broker serves shares from. Empty => relative `/s/<uuid>/`
-// (works when the UI and the share serve path share an origin behind the ingress).
+// Absolute origin the broker serves shares from; empty means a relative `/s/<uuid>/`.
 const SHARES_BASE = (import.meta.env.VITE_SHARES_BASE_URL ?? "").replace(/\/$/, "");
 
 export interface ShareEmbedSpec {
@@ -84,15 +78,13 @@ export function parseShareEmbed(body: string): ShareEmbedParse {
   };
 }
 
-// The fence language agents author + the hyphen-free token it's normalised to for
-// rendering (see markdown-text.tsx for why the rewrite is needed).
+// The fence language agents author and the hyphen-free token it is normalised to for rendering (see markdown-text.tsx).
 export const SHARE_EMBED_LANG = "scooter-embed";
 export const SHARE_EMBED_TOKEN = "scooterembed";
 
 const SHARE_EMBED_FENCE_RE = /^([ \t]{0,3}(?:`{3,}|~{3,}))[ \t]*scooter-embed[ \t]*$/gm;
 
-/** Rewrite each OPENING ```scooter-embed fence to ```scooterembed (body + closing fence
- *  untouched) so assistant-ui keeps the whole language token. */
+/** Rewrite each opening ```scooter-embed fence to ```scooterembed so assistant-ui keeps the whole language token. */
 export function preprocessShareEmbeds(text: string): string {
   return text.replace(SHARE_EMBED_FENCE_RE, `$1${SHARE_EMBED_TOKEN}`);
 }
@@ -122,7 +114,7 @@ export function ShareEmbed({ body }: { body: string }) {
         title={`shared page ${uuid}`}
         loading="lazy"
         referrerPolicy="no-referrer"
-        // NO allow-same-origin: keep the frame in an opaque origin.
+        // No allow-same-origin: keep the frame in an opaque origin.
         sandbox="allow-scripts allow-popups"
         className="aui-share-embed rounded-xl border border-border/60 bg-background"
         style={{ width, height, maxWidth: "100%" }}

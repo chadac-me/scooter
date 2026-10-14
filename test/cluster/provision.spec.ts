@@ -1,11 +1,9 @@
 /**
- * Tier 2 — per-conversation cold Sandbox provisioning against a real cluster.
+ * Tier 2: per-conversation cold Sandbox provisioning against a real cluster.
  *
- * Drives the REAL provisioner (createK8sProvisioner) — the production code path
- * the agent-host uses — and asserts the cluster reconciles it: unique SA,
- * workspace PVC bound, Sandbox pod Ready, exec-able, broker token projected.
- *
- * Gated: RUN_CLUSTER_TESTS=1.
+ * Drives the real provisioner (createK8sProvisioner) and asserts the cluster reconciles it:
+ * a unique SA, the workspace PVC bound, the Sandbox pod Ready and exec-able, and the broker
+ * token projected. Gated on RUN_CLUSTER_TESTS=1.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -79,11 +77,7 @@ maybe("cold Sandbox per conversation", () => {
   });
 
   it("a NON-LOGIN exec (bash -c) has the nix profile bin on PATH", async () => {
-    // The agent-host execs commands as non-login `bash -c`, which sources no
-    // profile — it inherits PID 1's env (the container-image PATH). That PATH must
-    // include the writable per-user nix profile bin, else a `nix profile install`
-    // tool "isn't found" (the sandbox-nix-profile-not-in-path bug). This is the
-    // faithful check — a nixosTest VM boot doesn't exercise the image Env layer.
+    // A non-login `bash -c` inherits PID 1's env, so the container-image PATH itself must include the per-user nix profile bin.
     const { stdout, exitCode } = await cluster.exec(
       `agents.x-k8s.io/sandbox-name=conv-${id}`,
       ["bash", "-c", "echo $PATH"],

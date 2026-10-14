@@ -1,10 +1,7 @@
 /**
- * Tier 1 contract — the agent_host DSN builder shared by the live service (index.ts) and the
- * one-shot event-backfill Job (scripts/runEventBackfill.ts).
- *
- * These two MUST assemble the exact same connection string from the same env, or the backfill
- * writes to a different database/role than agent-host reads from — a "successful" migration that
- * loads nothing anyone can see. This pins the precedence + encoding both rely on.
+ * The agent_host DSN builder shared by the live service (index.ts) and the event-backfill
+ * Job (scripts/runEventBackfill.ts), which must assemble the same connection string
+ * from the same env.
  */
 
 import { describe, it, expect } from "vitest";
@@ -35,7 +32,7 @@ describe("agentHostDsnFromEnv", () => {
     const dsn = agentHostDsnFromEnv({
       AGENT_HOST_DB_PASSWORD: "p@ss:w/rd?",
     } as NodeJS.ProcessEnv);
-    // defaults fill host/port/name/user; the password is percent-encoded so the URL parses.
+    // Defaults fill host/port/name/user, and the password is percent-encoded.
     expect(dsn).toBe("postgresql://agent_host:p%40ss%3Aw%2Frd%3F@agent-shared-db:5432/agent_host");
   });
 

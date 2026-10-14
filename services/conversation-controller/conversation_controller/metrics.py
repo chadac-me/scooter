@@ -1,15 +1,10 @@
-"""A tiny Prometheus /metrics endpoint — no dependency, just the http.server stdlib.
-
-Exposes the autoscale signals as gauges so they're observable (dashboards) and available to
-a future HPA (custom-metrics adapter), EVEN THOUGH the controller does the scaling itself.
-The controller is the single writer of agent-host replicas; this is purely read-only
-observability. See todo/docs/AGENT_HOST_FLEET_SCALING.md.
+"""A stdlib-only Prometheus /metrics endpoint exposing the autoscale signals as gauges.
 
 Gauges:
-  scooter_conversations_total            — top-level conversations (demand)
-  scooter_agent_host_ready_pods          — ready agent-host pods
-  scooter_conversations_per_pod          — demand / ready_pods (the scale metric)
-  scooter_agent_host_replicas_desired    — the controller's current target
+  scooter_conversations_total            top-level conversations (demand)
+  scooter_agent_host_ready_pods          ready agent-host pods
+  scooter_conversations_per_pod          demand / ready_pods
+  scooter_agent_host_replicas_desired    the controller's current target
 """
 
 from __future__ import annotations
@@ -23,9 +18,7 @@ from .logging_config import format_error
 logger = logging.getLogger(__name__)
 _C = {"component": "metrics"}
 
-# The latest snapshot, updated each reconcile tick; served on /metrics. A plain dict guarded
-# by the GIL (single writer = the reconcile loop; readers = HTTP handler threads) — the reads
-# are of immutable floats, so no lock needed for correctness of a single value.
+# The latest snapshot, written by the reconcile loop and read by handler threads under the GIL.
 _snapshot: dict[str, float] = {
     "scooter_conversations_total": 0.0,
     "scooter_agent_host_ready_pods": 0.0,
@@ -35,7 +28,7 @@ _snapshot: dict[str, float] = {
 
 
 def update(demand: int, ready_pods: int, per_pod: float, target: int) -> None:
-    """Update the served gauges from an autoscale pass (called by the loop)."""
+    """Update the served gauges from an autoscale pass."""
     _snapshot["scooter_conversations_total"] = float(demand)
     _snapshot["scooter_agent_host_ready_pods"] = float(ready_pods)
     _snapshot["scooter_conversations_per_pod"] = float(per_pod)
@@ -68,13 +61,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 — stdlib name
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass  # silence per-request stderr logging
 
 
 def serve(port: int, stop: threading.Event) -> None:
-    """Start the /metrics server in a daemon thread. Best-effort — a bind failure is logged
-    and swallowed (metrics are observability, not correctness; the controller runs regardless)."""
+    """Start the /metrics server in a daemon thread, logging and swallowing a bind failure."""
+
     try:
         httpd = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
     except OSError as e:

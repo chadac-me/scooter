@@ -1,10 +1,7 @@
 /**
- * Tier 1 — SCOOTER_ENV parsing (deployment sandbox env vars).
- *
- * Regression for a multi-line NIX_CONFIG reaching the sandbox as a single line
- * with LITERAL `\n`: the old `k=v;k=v` channel split on `;` and trim()'d each
- * chunk, which dropped newlines. The JSON channel round-trips every value —
- * newlines, `;`, `=`, whitespace — exactly.
+ * SCOOTER_ENV parsing for deployment sandbox env vars: the JSON channel round-trips
+ * every value exactly (newlines, `;`, `=`, whitespace), and the legacy `k=v;k=v`
+ * channel is still accepted.
  */
 
 import { describe, it, expect } from "vitest";
@@ -17,10 +14,10 @@ describe("parseScooterEnv — JSON channel (current)", () => {
     const raw = JSON.stringify({ NIX_CONFIG: nixConfig, NIXPKGS_ALLOW_UNFREE: "1" });
     const out = parseScooterEnv(raw);
     const nc = out.find((e) => e.name === "NIX_CONFIG");
-    expect(nc?.value).toBe(nixConfig); // byte-for-byte, incl. the real \n chars
-    expect(nc?.value).toContain("\n"); // a REAL newline
-    expect(nc?.value).not.toContain("\\n"); // NOT a literal backslash-n
-    // The `=` inside the trusted-key value survived (would break k=v;k=v).
+    expect(nc?.value).toBe(nixConfig);
+    expect(nc?.value).toContain("\n");
+    expect(nc?.value).not.toContain("\\n");
+    // The `=` inside the trusted-key value survived.
     expect(nc?.value).toContain("itops:abc=");
     expect(out.find((e) => e.name === "NIXPKGS_ALLOW_UNFREE")?.value).toBe("1");
   });

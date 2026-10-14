@@ -1,13 +1,4 @@
-"""The in-tree providers' resource-identity knowledge.
-
-The mechanism (registry, variant expansion, canonicalisation) is in
-`scooter_webhooks_lib.resources`. What lives here is the part that is genuinely
-per-provider: how a URL decomposes, and which type spellings mean the same thing.
-Only jira is left — the block #582 did not take with it, tracked as #589 — and when
-it goes this module goes with it.
-
-Imported for its REGISTRATION side effect — `app.py` imports it at startup. Why: PR #576.
-"""
+"""The in-tree providers' resource-identity knowledge: how a URL decomposes and which type spellings mean the same thing, registered with `scooter_webhooks_lib.resources` as an import side effect."""
 
 from __future__ import annotations
 

@@ -1,15 +1,8 @@
-"""Brave broker provider — a key-bearing provider with TOOLS AND NO PROXY ROUTE.
+"""Brave broker provider: a key-bearing provider with tools and no proxy route.
 
-Registered into the broker through the ``agent_broker.providers`` entry point. It
-ships one transport, ``McpTools``, and deliberately no ``HttpProxy``: a raw
-``/brave/*`` route would let the agent spend the search quota on arbitrary paths while
-adding nothing a typed tool does not already do. (That is the case ``McpTools`` carries
-its own ``upstream`` for, rather than reading it off a sibling proxy transport.)
-
-``enabled`` is gated on the key being present, like every other keyed provider. With
-no key the provider does not mount, so ``web_search`` is not in the agent's tool list
-— which is the whole point of moving tools into contribs: a tool that cannot work is
-absent rather than present-and-failing.
+It ships only ``McpTools``, since a raw ``/brave/*`` route would let the agent spend
+the search quota on arbitrary paths; ``enabled`` is gated on the key, so without one
+the tool is absent from the agent's list.
 """
 
 from __future__ import annotations
@@ -27,14 +20,12 @@ PROVIDER_NAME = "brave"
 
 @register_provider
 def brave() -> Provider:
-    # Read at BUILD time, like every provider factory — the broker calls this once per
-    # create_app(), after refreshing the environment.
+    # Read at build time, like every provider factory.
     settings = BraveSettings()
     key = (settings.brave_search_api_key or "").strip()
     return Provider(
         name=PROVIDER_NAME,
-        # kind="header": Brave authenticates with X-Subscription-Token, and putting the
-        # key in a header rather than the query string keeps it out of access logs.
+        # A header rather than a query param keeps the key out of access logs.
         credential=StaticTokenSource(
             token=key, kind="header", header_name="X-Subscription-Token"
         ),

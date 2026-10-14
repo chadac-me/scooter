@@ -1,7 +1,7 @@
 /**
- * ensureGooseConfig must FAIL LOUDLY on a real deployment: goose keeps its session
- * db under $HOME, so an unset/unwritable $HOME is a broken deployment. This does
- * NOT guard the developer extension — see gooseAcpBuiltins.spec.ts and PR #524.
+ * ensureGooseConfig fails loudly on a real deployment: goose keeps its session db
+ * under $HOME, so an unset or unwritable $HOME is a broken deployment. The developer
+ * extension is covered in gooseAcpBuiltins.spec.ts.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -29,7 +29,7 @@ describe("ensureGooseConfig", () => {
   });
 
   it("THROWS on a real deployment (fatal) when the config dir cannot be written", () => {
-    // Make $HOME/.config a FILE so mkdir/write of .config/goose fails (ENOTDIR).
+    // A file at $HOME/.config makes the write of .config/goose fail with ENOTDIR.
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, ".config"), "not a dir", "utf8");
     expect(() => ensureGooseConfig(home, { fatal: true })).toThrow();
@@ -43,7 +43,7 @@ describe("ensureGooseConfig", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, ".config"), "not a dir", "utf8");
     expect(() => ensureGooseConfig(home, { fatal: false })).not.toThrow();
-    // ...and a missing home is a no-op, not a throw, when non-fatal.
+    // A missing home is a no-op when non-fatal.
     expect(() => ensureGooseConfig(undefined, { fatal: false })).not.toThrow();
   });
 });

@@ -1,23 +1,8 @@
 /**
- * Tier 1 contract — permissions + the exec tunnel (increment 3, §M; resolves §L Q1/Q2).
- *
- * PERMISSIONS (Q1). ACP permission is request/response MID-RUN: the container's agent asks, then
- * BLOCKS until answered. Over HTTP/SSE that is two halves:
- *
- *   controller --SSE--> agent-host   {type:"permission_request", id, ...}
- *   agent-host --POST-> controller   /byoc/:session/permission/:id  {optionId}
- *
- * Deliberately NOT a WebSocket. A pending permission ENDS the run (bridge.ts emits RUN_FINISHED
- * with outcome:{type:"interrupt"} and parks a promise; there is NO timeout — a human may answer an
- * hour later), so a socket would have to stay open across the whole decision window and lose
- * in-flight state on every rollout. The answer is a stateless POST that mirrors what the UI already
- * does today at POST /conversations/:id/permission/:toolCallId.
- *
- * EXEC (Q2). The BYOC promise is BRAIN LOCAL / BODY CLOUD: when the user's Claude calls a tool, it
- * must run in the CLOUD sandbox. But `pods/exec` RBAC belongs to the AGENT-HOST only — granting it
- * to a service whose job is terminating untrusted user sockets would widen the blast radius exactly
- * where it should be narrowest. So the controller NEVER touches the sandbox: it relays Channel B
- * frames to the agent-host, which serves them on its EXISTING ExecBackend.
+ * Tier 1 contract for permissions and the exec tunnel. A permission request surfaces on the
+ * run's SSE stream and is answered by a stateless POST to /byoc/:session/permission/:id,
+ * since the human-decision window has no timeout. Exec frames are relayed to the agent-host,
+ * which runs them on its own ExecBackend; the controller never touches the sandbox.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -75,7 +60,7 @@ describe("BYOC permissions + exec relay", () => {
     registry.attach(sessionId, minted.token, container);
   });
 
-  // --- Permissions (Q1) -----------------------------------------------------------------------
+  // --- Permissions ----------------------------------------------------------------------------
 
   it("a permission_request from the container surfaces on the run's SSE stream", async () => {
     const stream = relay.prompt(sessionId, { sessionId: "acp-1", prompt: [] });
@@ -86,7 +71,7 @@ describe("BYOC permissions + exec relay", () => {
     container.push({ ch: "acp", type: "ack", id: container.idOf(), payload: { result: { stopReason: "end_turn" } } });
     const events = await collect(stream);
     expect(events.map((e) => e.type)).toEqual(["permission_request", "ack"]);
-    // The id must ride along — it is what the agent-host POSTs back against.
+    // The id is what the agent-host POSTs back against.
     expect(events[0].id).toBe("perm-1");
   });
 
@@ -111,9 +96,7 @@ describe("BYOC permissions + exec relay", () => {
   });
 
   it("an answer that arrives LATE (after a controller restart dropped the pending map) is rejected, not crashed", () => {
-    // The human-decision window has no timeout, so an answer can arrive against a permission this
-    // process never saw. It must fail cleanly — the agent-host surfaces "this approval expired"
-    // rather than the controller throwing on an unknown id.
+    // An answer can arrive against a permission this process never saw and must fail cleanly.
     const res = relay.answerPermission(sessionId, "perm-does-not-exist", { optionId: "allow" });
     expect(res.ok).toBe(false);
     expect(res.ok === false && res.reason).toMatch(/unknown permission/i);
@@ -129,21 +112,19 @@ describe("BYOC permissions + exec relay", () => {
     container.push({ ch: "acp", type: "permission_request", id: "perm-1", payload: { request: { sessionId: "acp-1", toolCallId: "tc-9", title: "x", options: [] } } });
     expect(relay.answerPermission(sessionId, "perm-1", { optionId: "allow" }).ok).toBe(true);
     const acksAfterFirst = container.sent.filter((f) => f.type === "ack").length;
-    // Two browser tabs both answering, or a retried POST, must not send a second ACP reply — the
-    // container's pending call is already resolved and a second ack would desync the protocol.
+    // A second ack would resolve an already-settled call and desync the protocol.
     expect(relay.answerPermission(sessionId, "perm-1", { optionId: "deny" }).ok).toBe(false);
     expect(container.sent.filter((f) => f.type === "ack")).toHaveLength(acksAfterFirst);
   });
 
-  // --- Exec tunnel (Q2) -----------------------------------------------------------------------
+  // --- Exec tunnel ----------------------------------------------------------------------------
 
   it("an exec_run from the container surfaces on the SSE stream for the AGENT-HOST to serve", async () => {
     const stream = relay.prompt(sessionId, { sessionId: "acp-1", prompt: [] });
     container.push({ ch: "exec", type: "exec_run", id: "x-1", payload: { command: "ls", args: ["-la"] } });
     container.push({ ch: "acp", type: "ack", id: container.idOf(), payload: { result: { stopReason: "end_turn" } } });
     const events = await collect(stream);
-    // The controller must NOT execute this itself — it has no pods/exec RBAC and must not get any
-    // (§L Q2). It forwards, and the agent-host runs it on its existing ExecBackend.
+    // The controller forwards rather than executing; it has no pods/exec RBAC.
     expect(events[0]).toMatchObject({ ch: "exec", type: "exec_run", id: "x-1" });
   });
 
@@ -165,9 +146,7 @@ describe("BYOC permissions + exec relay", () => {
   });
 
   it("a permission id from ANOTHER session cannot be answered through this one (cross-session reply)", async () => {
-    // Two owners' containers are multiplexed through the same controller process. The pending-id
-    // map is global, so without a session check a caller who learns (or guesses) an id could
-    // answer someone ELSE'S permission prompt — approving a tool call on a stranger's agent.
+    // The pending-id map is global, so without a session check a caller who guesses an id could answer someone else's permission prompt.
     const other = await registry.mint("mallory");
     const otherContainer = fakeContainer();
     otherContainer.bind((raw) => relay.onContainerFrame(other.sessionId, raw));
@@ -176,7 +155,7 @@ describe("BYOC permissions + exec relay", () => {
     relay.prompt(sessionId, { sessionId: "acp-1", prompt: [] });
     container.push({ ch: "acp", type: "permission_request", id: "perm-1", payload: { request: { sessionId: "acp-1", toolCallId: "tc", title: "x", options: [] } } });
 
-    // alice's permission, answered while naming MALLORY's session — must be refused.
+    // alice's permission, answered while naming mallory's session, must be refused.
     const res = relay.answerPermission(other.sessionId, "perm-1", { optionId: "allow" });
     expect(res.ok).toBe(false);
     expect(otherContainer.sent.filter((f) => f.type === "ack")).toHaveLength(0);
@@ -189,8 +168,7 @@ describe("BYOC permissions + exec relay", () => {
   it("an EXEC id cannot be answered as a permission (or vice-versa) — kinds are not interchangeable", () => {
     relay.prompt(sessionId, { sessionId: "acp-1", prompt: [] });
     container.push({ ch: "exec", type: "exec_run", id: "x-1", payload: { command: "ls" } });
-    // Answering an exec through the permission path would send an ACP `ack` where the container
-    // expects an `exec_result` — a protocol desync that hangs the agent's pending tool call.
+    // Answering an exec through the permission path would send an `ack` where the container expects an `exec_result`.
     expect(relay.answerPermission(sessionId, "x-1", { optionId: "allow" }).ok).toBe(false);
     expect(container.sent.filter((f) => f.type === "ack")).toHaveLength(0);
     expect(relay.answerExec(sessionId, "x-1", { result: {} }).ok).toBe(true);
@@ -202,8 +180,7 @@ describe("BYOC permissions + exec relay", () => {
     container.push({ ch: "exec", type: "exec_run", id: "x-1", payload: { command: "ls" } });
     relay.onContainerGone(sessionId);
     await collect(stream);
-    // Both are gone: answering either must fail rather than write into a dead socket, and a
-    // reconnecting container must not inherit the previous connection's pending work.
+    // Answering either must fail, and a reconnecting container must not inherit the previous connection's pending work.
     expect(relay.answerPermission(sessionId, "perm-1", { optionId: "allow" }).ok).toBe(false);
     expect(relay.answerExec(sessionId, "x-1", { result: {} }).ok).toBe(false);
   });

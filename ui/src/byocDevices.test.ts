@@ -1,9 +1,8 @@
 /**
- * Tier 1 (ui) — the BYOC device-list client (§P).
+ * The BYOC device-list client.
  *
- * The behaviours that matter to a user in Settings: their devices are listed newest-first,
- * deregistering actually revokes, and a deployment WITHOUT device auth degrades to an empty list
- * rather than an error banner.
+ * Devices are listed newest-first, deregistering revokes, and a deployment without
+ * device auth degrades to an empty list rather than an error banner.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -22,8 +21,7 @@ describe("byoc device list", () => {
   });
 
   it("a deployment WITHOUT device auth (404) shows an empty list, not an error", async () => {
-    // BYO device auth is optional per deployment. A 404 here means "not enabled", which the user
-    // cannot act on — surfacing it as an error banner would be noise on every settings visit.
+    // Device auth is optional per deployment, so a 404 means "not enabled" and is not an error the user can act on.
     const fetchImpl = vi.fn(async () => json({ error: "device auth not enabled" }, 404)) as unknown as typeof fetch;
     await expect(loadDevices({ fetchImpl })).resolves.toEqual([]);
   });
@@ -34,9 +32,7 @@ describe("byoc device list", () => {
   });
 
   it("an HTML fallback (200 + index.html) reads as 'not available', not a parser error", async () => {
-    // A deployment without the BYOC controller has no /byoc/* route, so the SPA catch-all serves
-    // index.html with a 200. res.ok is true and res.json() throws the PARSER's message, which
-    // surfaced verbatim in Settings: `Unexpected token '<', "<!doctype "... is not valid JSON`.
+    // Without the BYOC controller the SPA catch-all serves index.html with a 200, so res.json() throws a parser error.
     const fetchImpl = vi.fn(
       async () => new Response("<!doctype html><html></html>", { status: 200, headers: { "Content-Type": "text/html" } }),
     ) as unknown as typeof fetch;

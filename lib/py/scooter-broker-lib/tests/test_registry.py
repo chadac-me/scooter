@@ -1,10 +1,4 @@
-"""The provider registry, with the built-in scan as a parameter.
-
-This is the seam PR #567 turns on: `discover_providers` used to do
-`from .. import providers`, hardcoding the broker app package. It now takes the
-packages to scan, so the registry can live in the lib and a contrib needs no
-built-in package at all.
-"""
+"""The provider registry, with the packages to scan as a parameter."""
 
 from __future__ import annotations
 
@@ -24,7 +18,7 @@ from scooter_broker_lib.types import Provider
 
 @pytest.fixture(autouse=True)
 def _isolated_registry():
-    """@register_provider writes to module state; don't leak it across tests."""
+    """@register_provider writes to module state, so isolate it per test."""
     saved = dict(registry._REGISTRY)
     registry._REGISTRY.clear()
     yield
@@ -33,11 +27,7 @@ def _isolated_registry():
 
 
 def _package(name: str, modules: dict[str, str]):
-    """Build an importable throwaway package with `modules` as its source files.
-
-    A real package on disk, not a mock: the scan walks __path__ with pkgutil and
-    imports by name, so a stub that does not do both proves nothing.
-    """
+    """Build an importable throwaway package on disk, since the scan walks __path__ with pkgutil."""
     import pathlib
     import tempfile
 
@@ -79,8 +69,6 @@ def test_scans_the_packages_it_is_given(monkeypatch):
 
 
 def test_scans_nothing_when_given_nothing(monkeypatch):
-    # A contrib-only broker has no in-tree providers; that must not be an error,
-    # and it must not fall back to some hardcoded package.
     monkeypatch.setattr(registry, "_load_entrypoint_providers", lambda: None)
     assert discover_providers() == []
 
@@ -113,8 +101,7 @@ def test_a_disabled_provider_is_left_out(monkeypatch):
 
 
 def test_a_factory_that_raises_is_skipped_loudly(monkeypatch, caplog):
-    # One bad provider must not take down the whole broker — but it is then
-    # ABSENT, which reads exactly like "disabled" unless the log says otherwise.
+    # A bad provider is absent, which reads like "disabled" unless the log says otherwise.
     @register_provider
     def exploding() -> Provider:
         raise RuntimeError("bad config")
@@ -142,8 +129,7 @@ def test_register_provider_keys_on_the_factory_name():
 
 
 def test_entry_point_group_is_named_once():
-    # The contribs' pyproject files spell this group out; a drifted constant here
-    # would silently stop discovering every contrib.
+    # The contribs' pyproject files spell this group out.
     assert ENTRY_POINT_GROUP == "agent_broker.providers"
 
 
@@ -161,8 +147,7 @@ def test_a_broken_entry_point_does_not_stop_the_others(monkeypatch, caplog):
             def from_entry_point() -> Provider:
                 return Provider(name="from-ep", transports=[])
 
-    # _load_entrypoint_providers imports entry_points INSIDE the function, so
-    # swapping the module in sys.modules is enough — no import-order games.
+    # _load_entrypoint_providers imports entry_points inside the function, so swapping the module in sys.modules is enough.
     eps = [_Ep("broken", True), _Ep("good", False)]
     monkeypatch.setitem(
         sys.modules,

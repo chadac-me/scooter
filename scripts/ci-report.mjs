@@ -1,20 +1,10 @@
 #!/usr/bin/env node
-// ci-report.mjs — ONE PR comment, written incrementally by every reporting job.
-//
-// A PR used to collect four separate sticky comments (image size, e2e fast, the
-// e2e-full verdict, the flake verdicts) and a reader had to find them and hold
-// the result in their head. This puts all of them in one comment, one
-// collapsible section each, under a gate table derived from .github/ci-gates.yml.
-//
-// THE COMMENT IS THE STATE. Every write re-reads the posted body, replaces its
-// own section, recomputes the gate table from ALL sections, and PATCHes. No
-// coordinator job holds the result, so a section appears the moment its job
-// finishes rather than at the end of the run — and a gate nobody has reported
-// yet renders as pending instead of being silently absent.
-//
-// Zero runtime dependencies on purpose: the jobs that post are not all node
-// jobs. `nix run nixpkgs#nodejs_22 -- scripts/ci-report.mjs …` is enough, so a
-// nix-only job (image sizes, a nixosTest leg) needs no npm install.
+// ci-report.mjs — one PR comment, written incrementally by every reporting job:
+// one collapsible section per job under a gate table derived from
+// .github/ci-gates.yml. The comment is the state: every write re-reads the posted
+// body, replaces its own section, recomputes the gate table from all sections and
+// PATCHes, so a gate nobody has reported yet renders as pending. Zero runtime
+// dependencies, so a nix-only job can run it with the runner's node.
 //
 // Usage:
 //   ci-report.mjs post --section <id> --status <pass|fail|warn|skip> \
@@ -22,9 +12,8 @@
 //   ci-report.mjs evaluate [--gates <f>] [--labels a,b]   # exit 1 if blocked
 //     env: GH_TOKEN, GITHUB_REPOSITORY, PR
 //
-// `--summary` wraps the body in a <details> for you. Omit it when the job
-// renders its own <details> (the e2e-full verdict does), and the body is placed
-// verbatim — each job stays the author of its own presentation.
+// `--summary` wraps the body in a <details>; omit it when the job renders its own
+// and the body is placed verbatim.
 
 import { readFileSync } from "node:fs";
 
@@ -45,12 +34,7 @@ const ICON = {
 const startTag = (id, status) => `<!-- ci:${id}:start status=${status} -->`;
 const endTag = (id) => `<!-- ci:${id}:end -->`;
 
-/**
- * Parse .github/ci-gates.yml. A hand-rolled reader for the one shape this file
- * has — a `gates:` list of flat scalar keys — because the alternative is an npm
- * dependency in every job that posts, and the file is ours to keep simple. It
- * FAILS on anything it does not understand rather than guessing.
- */
+/** Parse .github/ci-gates.yml, a `gates:` list of flat scalar keys, failing on anything else rather than guessing. */
 export function parseGates(text) {
   const gates = [];
   let cur = null;
@@ -95,8 +79,7 @@ export function activeGates(gates, labels = []) {
 export function parseSections(body) {
   const sections = new Map();
   if (!body) return sections;
-  // Any id, not just the declared ones: a section from an older or newer commit
-  // must survive a merge rather than be dropped by whoever writes next.
+  // Any id, not just the declared ones, so a section from another commit survives a merge.
   const re =
     /<!-- ci:([a-z0-9-]+):start status=([a-z]+) -->\n?([\s\S]*?)\n?<!-- ci:\1:end -->/g;
   for (const m of body.matchAll(re))
@@ -104,12 +87,7 @@ export function parseSections(body) {
   return sections;
 }
 
-/**
- * The gate table: what a reader sees before expanding anything.
- *
- * Derived, never stored — so whichever job writes last produces a table that
- * matches the sections around it, with no ownership and nothing to reconcile.
- */
+/** The gate table a reader sees before expanding anything; derived from the sections, never stored. */
 export function gateTable(sections, gates) {
   const rows = gates.map((g) => {
     const s = sections.get(g.id);
@@ -124,13 +102,7 @@ export function gateTable(sections, gates) {
   return ["| gate | policy | |", "|---|---|---|", ...rows].join("\n");
 }
 
-/**
- * Is the PR mergeable on what has reported so far?
- *
- * `pending` counts as blocking for a gate that must answer: a gate nobody has
- * reported is not a passing gate, and treating absence as success is how an
- * opt-in suite ends up decorative.
- */
+/** Whether the PR is mergeable on what has reported so far; `pending` blocks for a gate that must answer, since an unreported gate is not a passing gate. */
 export function evaluateGates(sections, gates) {
   const blocking = [];
   const pending = [];
@@ -175,17 +147,13 @@ export function renderComment(sections, gates) {
   ].join("\n");
 }
 
-/**
- * Replace (or add) one section, leaving every other section untouched.
- *
- * Pure, so the retry in `post()` is trivial: re-read, re-apply, write.
- */
+/** Replace or add one section, leaving every other untouched; pure, so `post()` can retry by re-reading and re-applying. */
 export function mergeSection(body, section, gates) {
   const sections = parseSections(body);
   const content =
     section.summary != null
-      ? // The blank line after </summary> is load-bearing: without it GitHub
-        // renders the markdown inside as literal text.
+      ? // The blank line after </summary> is required or GitHub renders the
+        // markdown inside as literal text.
         `<details><summary>${ICON[section.status] ?? ""} <b>${section.summary}</b></summary>\n\n${section.body ?? ""}\n</details>`
       : (section.body ?? "");
   sections.set(section.id, {
@@ -234,11 +202,7 @@ async function findComment(repo, pr, token) {
   return null;
 }
 
-/**
- * Upsert one section on the PR, retrying if a job that finished at the same
- * moment clobbered us. Read-modify-write converges in one extra pass: two
- * writers, one section each, and re-applying ours cannot drop theirs.
- */
+/** Upsert one section on the PR, retrying if a concurrent writer clobbered it; re-applying ours cannot drop theirs. */
 export async function post({ repo, pr, token, section, gates }) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     const existing = await findComment(repo, pr, token);

@@ -1,79 +1,54 @@
 import { defineConfig, devices } from "@playwright/test";
 import { readFileSync } from "node:fs";
 
-// The FULL-target allowlist lives in test/e2e/full-specs.json — ONE source of truth
-// shared with CI's shard distribution (shard-e2e.mjs SPEC_SET=full). START SMALL,
-// WIDEN AS IT EARNS IT: add a spec once it has passed against a cluster.
+// The full-target allowlist lives in test/e2e/full-specs.json, shared with CI's shard
+// distribution (shard-e2e.mjs SPEC_SET=full).
 const fullSpecs: string[] = JSON.parse(
   readFileSync(new URL("./test/e2e/full-specs.json", import.meta.url), "utf8"),
 );
 
 /**
- * Tier 3 E2E config. Two modes:
- *
- *  - DEFAULT: boots the full local stack (agent-host in fake-agent mode + the UI
- *    dev server) so tests drive the real UI end to end with no cluster or model.
- *    The dummy ACP agent gives deterministic streamed responses.
- *
- *  - EXTERNAL (RUN_EXTERNAL_E2E=1, AGENT_HOST_URL=<live agent-host>): skips the
- *    local webServer and points the external spec at a LIVE deployment, so a
- *    real conversation runs a real shell tool call against a real sandbox —
- *    catching in-cluster failures (e.g. the pods/exec WebSocket) the fake stack
- *    can't. See test/e2e/external.spec.ts.
+ * Tier 3 E2E config. The default mode boots the full local stack (agent-host in fake-agent
+ * mode + the UI dev server) so tests drive the real UI end to end with no cluster or model.
+ * External mode (RUN_EXTERNAL_E2E=1, AGENT_HOST_URL=<live agent-host>) skips the local
+ * webServer and points test/e2e/external.spec.ts at a live deployment.
  */
 const external = process.env.RUN_EXTERNAL_E2E === "1";
 
-// FULL target: the same specs, against a REAL cluster (k3d in CI, or a live
-// deployment). The browser/real-server seam is otherwise untested — the fast target
-// drives a UI with no real cluster, and test/cluster drives a real cluster with no
-// UI, so a bug living between them is invisible to both.
-// E2E_TARGET=full + E2E_CLUSTER_URL=<ui> selects it.
+// The full target (E2E_TARGET=full + E2E_CLUSTER_URL=<ui>) runs the same specs against a
+// real cluster, the only place the browser meets the real server.
 const full = process.env.E2E_TARGET === "full";
 const clusterUrl = process.env.E2E_CLUSTER_URL ?? "";
 
 export default defineConfig({
   testDir: "./test/e2e",
-  // 180s on the full target. A ceiling BELOW the helpers it contains (startLongRun waits 90s
-  // there, completeTurn 120s) kills them mid-wait, replacing their call log with a bare "Test
-  // timeout exceeded". Why: PR #551.
+  // test/e2e/support holds the harness and its vitest specs, which playwright's default
+  // testMatch would otherwise load as browser tests.
+  testIgnore: "**/support/**",
+  // The full-target ceiling must exceed the helpers it contains (startLongRun waits 90s
+  // there, completeTurn 120s).
   timeout: full ? 180_000 : 60_000,
   expect: { timeout: 15_000 },
-  // The whole suite shares ONE agent-host webServer + its persisted conversation
-  // state (the `cleanState` fixture wipes conversations between tests). Running
-  // spec FILES in parallel (multiple workers) lets that shared state interleave —
-  // one spec's conversations/streams leak into another's assertions (observed:
-  // ~6 fail + 4 flaky in parallel vs green serially). So the backend is a serial
-  // resource: one worker. (fullyParallel is already false = serial within a file.)
+  // The whole suite shares one agent-host webServer and its persisted conversation state,
+  // so the backend is a serial resource.
   fullyParallel: false,
   workers: 1,
-  // No retries: a flake is a signal to fix or quarantine, not to paper over. A
-  // test that only passes on retry is reported and dealt with deliberately.
+  // No retries: a flake is a signal to fix or quarantine.
   retries: 0,
   use: {
     baseURL: process.env.BASE_URL ?? "http://localhost:5173",
-    // NOT "on-first-retry": retries are 0 by policy (above), so a first retry never happens and
-    // that setting would capture NOTHING on failure. retain-on-failure keeps the no-retry policy
-    // while still producing the trace that makes a hang diagnosable.
+    // retain-on-failure, because retries are 0 and "on-first-retry" would capture nothing.
     trace: "retain-on-failure",
     video: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   projects: [
-    // full — a real cluster. Only the specs that opt in (or do not opt out) run here;
-    // see test/e2e/target.ts. No local webServer: the stack is already up.
+    // full: a real cluster with no local webServer; only the specs that opt in run here
+    // (see test/e2e/target.ts).
     ...(full
       ? [
           {
             name: "full",
-            // START SMALL, WIDEN AS IT EARNS IT. A cluster run costs k3d startup and
-            // this target is the one nobody watches, so 153 specs on day one buys
-            // noise, not confidence — and a flaky rarely-run suite trains everyone to
-            // dismiss it (see FLAKE_platform_smoke_empty_create_body). These are the
-            // user stories that justify the target existing:
-            //   cluster-stories      — multi-pod + rollout; impossible on the fake stack
-            //   client-server-identity — the class that shipped (#353)
-            //   refresh-history      — "send a message, see the response", across a reload
-            //   stop-run             — a run starts and can be stopped, for real
             // Add a spec here once it has passed against a cluster; do not bulk-enable.
             testMatch: fullSpecs.map((f) => `**/${f}`),
             use: {
@@ -90,9 +65,8 @@ export default defineConfig({
       name: "fast",
       use: {
         ...devices["Desktop Chrome"],
-        // On Nix the npm-downloaded browser revision often doesn't match the
-        // playwright-driver build; PW_CHROME points at the nix chromium binary
-        // (set in the dev shell / CI). Unset elsewhere -> default download.
+        // On Nix, PW_CHROME points at the nix chromium binary; unset elsewhere means the
+        // default download.
         ...(process.env.PW_CHROME
           ? { launchOptions: { executablePath: process.env.PW_CHROME } }
           : {}),
@@ -100,106 +74,73 @@ export default defineConfig({
     },
   ],
 
-  // External mode targets a live deployment, so boot no local servers.
-  // The full target's cluster is already running, so boot nothing locally there either.
+  // External mode targets a live deployment and the full target's cluster is already
+  // running, so neither boots local servers.
   webServer: external || full
     ? undefined
     : [
         {
-          // THE FAKE BACKEND STACK: ephemeral Postgres → atlas migrate → agent-host (fake agent)
-          // → conversation-router (ROUTER_DEV_MODE), all as one process (test/e2e/support/
-          // fakeBackend.mjs). The router now owns the conversation LIST + events stream + CREATE
-          // (served from Postgres), so the UI targets the ROUTER on 8080; the orchestrator runs
-          // agent-host internally on 8079 and the router proxies everything else through to it.
-          // The model catalog (a default + offered models) still comes from agent-host's env so the
-          // model-selection UI has a catalog (the fake agent echoes GOOSE_MODEL via "~model").
+          // The fake backend stack: ephemeral Postgres → atlas migrate → agent-host (fake agent)
+          // → conversation-router (ROUTER_DEV_MODE), all as one process; the UI targets the
+          // router on 8080, which proxies to agent-host on 8079.
           command: "node test/e2e/support/fakeBackend.mjs",
           env: {
             E2E_ROUTER_PORT: "8080",
             E2E_AGENT_HOST_PORT: "8079",
             LOCAL_STATE_PATH: "/tmp/agent-host-e2e",
-            // Run PRODUCTION's two-store topology. mirroredConversationStore is only
-            // constructed when MIRROR_STATE_PATH is set (index.ts:189, :442) — without it
-            // the e2e stack ran a single-store shape production NEVER runs, so every
-            // local-vs-mirror divergence was structurally untestable here. That is exactly
-            // how `listLinks` reading the wiped emptyDir reached production.
+            // Production's two-store topology: mirroredConversationStore is only constructed
+            // when MIRROR_STATE_PATH is set.
             MIRROR_STATE_PATH: "/tmp/agent-host-e2e-mirror",
             GOOSE_MODEL: "model-default",
             AGENT_AVAILABLE_MODELS: "model-default,model-fast,model-smart",
-            // The MCP endpoint takes its conversation from a signed token, so the stack
-            // needs a signing key exactly as production does (the kubenix module provides
-            // it there). Without this the endpoint rejects every request and the fake
-            // agent's `~subagent` directive — which calls spawn_subagent over MCP, the
-            // only way an e2e test can produce a subagent — fails. Why: issue #700.
+            // A provider-tagged catalog so the picker renders its grouped branch, with one model on both providers, one on each alone, and a per-provider default.
+            AGENT_MODELS_JSON: JSON.stringify([
+              { id: "model-default", providers: ["byoc", "claude-code"], defaultFor: ["byoc", "claude-code"] },
+              { id: "model-fast", providers: ["claude-code"] },
+              { id: "model-smart", providers: ["byoc"] },
+            ]),
+            // The MCP endpoint resolves its conversation from a signed token, so without a signing key the fake agent's `~subagent` directive fails.
             CONV_TOKEN_SECRET: "e2e-fake-stack-conv-token-secret",
           },
-          // Wait on the router's readiness ROUTE (GET /healthz -> 200, proxied to agent-host), so
-          // the WHOLE chain (PG + migrate + agent-host + router) is serving before tests start.
+          // Wait on the router's /healthz (proxied to agent-host) so the whole chain is serving
+          // before tests start.
           url: "http://localhost:8080/healthz",
-          // PG init + migrate + two service boots — give the chain generous headroom on a cold runner.
+          // PG init + migrate + two service boots need headroom on a cold runner.
           timeout: 120_000,
-          // Reuse is opt-IN locally (E2E_REUSE_SERVER=1), not the default. A server left over from
-          // an earlier run keeps serving its OLD build, so a fresh run silently tests stale code:
-          // identical specs then yield different failure counts and any baseline/before-after
-          // comparison is worthless. That cost a long debugging detour once — default to a clean
-          // build and let the caller opt into reuse when iterating on test code alone.
+          // Reuse is opt-in locally (E2E_REUSE_SERVER=1): a leftover server keeps serving its old build.
           reuseExistingServer: !process.env.CI && process.env.E2E_REUSE_SERVER === "1",
           stdout: "pipe",
           stderr: "pipe",
         },
         {
-          // The DEFAULT UI dev server — unchanged, 5173 -> agent-host 8080 directly.
-          // EVERY spec except the SSE-resilience one uses this untouched stack, so
-          // the fault proxy + small idle-watchdog below can't perturb them.
-          //
-          // Wait on `url` (a real GET of the page), NOT `port`. Vite binds its port
-          // instantly but compiles the app LAZILY on the first request — a bare
-          // port-bind check lets tests start before the first navigation can serve,
-          // and the cold first-compile (several seconds on a fresh CI runner) then
-          // eats the opening tests as `chat.open()` timeouts. Fetching the page here
-          // forces that compile ONCE at boot; `timeout` gives it room. This got much
-          // worse under sharding: each shard boots its own cold Vite.
+          // The default UI dev server, 5173 -> agent-host 8080 directly, used by every spec except the SSE-resilience one.
           command: "npm --prefix ui run dev",
           env: {
             AGENT_HOST_URL: "http://localhost:8080",
-            // Span-per-line to the browser console when debugging a spec:
-            //   E2E_TELEMETRY=1 npx playwright test <spec>
-            // Off by default — a chat UI emits enough spans to bury real console errors.
+            // E2E_TELEMETRY=1 emits a span per line to the browser console, off by default because it buries real console errors.
             ...(process.env.E2E_TELEMETRY === "1" ? { VITE_TELEMETRY_CONSOLE: "1" } : {}),
           },
+          // Wait on `url` rather than `port`, since Vite binds its port instantly but compiles the app lazily on the first request.
           url: "http://localhost:5173",
           timeout: 120_000,
-          // Reuse is opt-IN locally (E2E_REUSE_SERVER=1), not the default. A server left over from
-          // an earlier run keeps serving its OLD build, so a fresh run silently tests stale code:
-          // identical specs then yield different failure counts and any baseline/before-after
-          // comparison is worthless. That cost a long debugging detour once — default to a clean
-          // build and let the caller opt into reuse when iterating on test code alone.
+          // Reuse is opt-in locally (E2E_REUSE_SERVER=1): a leftover server keeps serving its old build.
           reuseExistingServer: !process.env.CI && process.env.E2E_REUSE_SERVER === "1",
         },
         // --- SSE-resilience-only stack (isolated on its own ports) ----------------
         {
-          // SSE fault proxy: sits between a SECOND UI dev server and agent-host so
-          // the resilience spec can drop/stall/kill integrity-stream frames or
-          // return 401. Pass-through when no fault is set. See faultProxy.mjs.
+          // SSE fault proxy between a second UI dev server and agent-host, so the resilience
+          // spec can drop/stall/kill integrity-stream frames or return 401 (see faultProxy.mjs).
           command: "node test/e2e/support/faultProxy.mjs",
           env: { FAULT_PROXY_PORT: "8090", AGENT_HOST_PORT: "8080" },
           port: 8090,
-          // Reuse is opt-IN locally (E2E_REUSE_SERVER=1), not the default. A server left over from
-          // an earlier run keeps serving its OLD build, so a fresh run silently tests stale code:
-          // identical specs then yield different failure counts and any baseline/before-after
-          // comparison is worthless. That cost a long debugging detour once — default to a clean
-          // build and let the caller opt into reuse when iterating on test code alone.
+          // Reuse is opt-in locally (E2E_REUSE_SERVER=1): a leftover server keeps serving its old build.
           reuseExistingServer: !process.env.CI && process.env.E2E_REUSE_SERVER === "1",
           stdout: "pipe",
           stderr: "pipe",
         },
         {
-          // A SECOND UI dev server (port 5273) with a small idle-watchdog so
-          // recovery fires in seconds. ONLY the integrity STREAM is routed through
-          // the fault proxy (AGENT_HOST_STREAM_URL); every other API call goes
-          // straight to agent-host (AGENT_HOST_URL) so multi-turn sends aren't
-          // raced/400'd by the extra hop. ONLY the SSE-resilience spec targets this
-          // (via its baseURL); the default 5173 stack is pristine for other specs.
+          // A second UI dev server (port 5273) with a small idle-watchdog; only the integrity
+          // stream is routed through the fault proxy, and only the SSE-resilience spec targets it.
           command: "npm --prefix ui run dev -- --port 5273",
           env: {
             AGENT_HOST_URL: "http://localhost:8080",
@@ -207,14 +148,10 @@ export default defineConfig({
             VITE_IDLE_RECONNECT_MS: "2000",
             ...(process.env.E2E_TELEMETRY === "1" ? { VITE_TELEMETRY_CONSOLE: "1" } : {}),
           },
-          // Same cold-compile warm-up as the 5173 server — GET the page until it 200s.
+          // Same cold-compile warm-up as the 5173 server.
           url: "http://localhost:5273",
           timeout: 120_000,
-          // Reuse is opt-IN locally (E2E_REUSE_SERVER=1), not the default. A server left over from
-          // an earlier run keeps serving its OLD build, so a fresh run silently tests stale code:
-          // identical specs then yield different failure counts and any baseline/before-after
-          // comparison is worthless. That cost a long debugging detour once — default to a clean
-          // build and let the caller opt into reuse when iterating on test code alone.
+          // Reuse is opt-in locally (E2E_REUSE_SERVER=1): a leftover server keeps serving its old build.
           reuseExistingServer: !process.env.CI && process.env.E2E_REUSE_SERVER === "1",
         },
       ],

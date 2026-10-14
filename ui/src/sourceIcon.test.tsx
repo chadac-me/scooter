@@ -1,15 +1,10 @@
 /**
- * UI unit test — the linked-resource provider icons.
+ * The linked-resource provider icons.
  *
- * This is the test that catches the `SiSlack` breakage: react-icons dropped the
- * Slack mark, so the import resolved to `undefined` and the sidebar icon broke
- * (only `tsc` caught it, and only in CI). We RENDER SourceBadge to static markup
- * for every known provider — rendering actually invokes the icon component, so a
- * dropped/renamed icon (an undefined `Icon`) throws here. A fast unit test now
- * guards it, not just the type-check.
- *
- * Scope is the app's OWN sources: a contrib's row is runtime data with no
- * component to drop, and is covered in contribManifest.test.ts. Why: PR #601.
+ * SourceBadge is rendered to static markup for every known provider; rendering
+ * invokes the icon component, so a dropped or renamed icon import (an undefined
+ * `Icon`) throws here. A contrib's row is runtime data and is covered in
+ * contribManifest.test.ts.
  */
 
 import { describe, it, expect } from "vitest";
@@ -23,8 +18,7 @@ const KNOWN = ["github", "slack", "shell"];
 describe("sourceIcon", () => {
   it("RENDERS a real icon for every known provider (catches a dropped icon import)", () => {
     for (const source of KNOWN) {
-      // renderToStaticMarkup invokes the icon component; an undefined Icon (the
-      // SiSlack failure mode) throws here. We also assert non-empty SVG output.
+      // An undefined Icon throws here; the SVG assertion catches an empty render.
       const html = renderToStaticMarkup(createElement(SourceBadge, { source }));
       expect(html).toContain("source-icon");
       expect(html).toContain("<svg"); // a real react-icons component renders an <svg>

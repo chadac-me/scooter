@@ -1,8 +1,7 @@
 /**
- * goose config.yaml — best-effort; ACP sessions never read it (we always pass
- * mcpServers). `developer` is enabled by `--with-builtin` in index.ts, not here.
- * The `available_tools` allowlist never reaches goose, so `tree`/`read_image`
- * still run locally. Why, and why this file is kept: PR #524.
+ * goose's config.yaml, written best-effort; ACP sessions never read it, `developer`
+ * is enabled by `--with-builtin` in index.ts, and the `available_tools` allowlist
+ * never reaches goose.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -12,13 +11,10 @@ import { formatError, logger } from "../log.js";
 
 const log = logger("agent-host");
 
-/** The developer-extension tools that goose's AcpTools redirects to the ACP
- *  client (the sandbox): read/write/edit/shell. Excludes tree + read_image,
- *  which AcpTools does NOT redirect (they'd run locally in the agent-host pod). */
+/** The developer-extension tools goose's AcpTools redirects to the sandbox, excluding tree and read_image, which would run locally. */
 const SANDBOX_ROUTED_TOOLS = ["read", "write", "edit", "shell"];
 
-/** Write goose's config.yaml under `home` (its $HOME), enabling developer with
- *  only the sandbox-routed tools available. */
+/** Write goose's config.yaml under `home`, enabling developer with only the sandbox-routed tools. */
 export function writeGooseConfig(home: string): void {
   const dir = join(home, ".config", "goose");
   mkdirSync(dir, { recursive: true });
@@ -30,8 +26,7 @@ export function writeGooseConfig(home: string): void {
     "    name: developer",
     "    display_name: Developer",
     "    timeout: 300",
-    // Allowlist -> only the tools goose's AcpTools redirects to the sandbox.
-    // tree/read_image are omitted so the agent can't run them locally.
+    // Only the tools goose's AcpTools redirects to the sandbox.
     "    available_tools:",
     ...SANDBOX_ROUTED_TOOLS.map((t) => `      - ${t}`),
     "",
@@ -39,10 +34,7 @@ export function writeGooseConfig(home: string): void {
   writeFileSync(join(dir, "config.yaml"), yaml, "utf8");
 }
 
-/**
- * Write the config; fatal=true rejects startup on an unset/unwritable $HOME —
- * goose keeps its session db there, so that is a broken deployment. PR #524.
- */
+/** Write the config; fatal=true rejects startup on an unset or unwritable $HOME, since goose keeps its session db there. */
 export function ensureGooseConfig(
   home: string | undefined,
   opts: { fatal: boolean },
@@ -54,7 +46,7 @@ export function ensureGooseConfig(
           "db and state under $HOME, so it cannot run correctly. Refusing to start.",
       );
     }
-    return; // fake/dev: nothing to configure
+    return; // fake/dev has nothing to configure
   }
   try {
     writeGooseConfig(home);

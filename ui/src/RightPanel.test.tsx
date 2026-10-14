@@ -1,13 +1,11 @@
 /**
- * UI unit test — the right-side tabbed panel (Sandbox + Approvals + Queue + Services).
- * SSR render (the house style, no jsdom), so this covers the STRUCTURE: the persistent
- * Sandbox status tab (leftmost, always present + default-active on first paint), the tab
- * bar + count badges. The interactive bits — clicking to another tab and the
- * auto-focus-Approvals-on-new-interrupt effect (a useEffect, doesn't run in SSR) — need
- * a real DOM and are covered by the Playwright e2e.
+ * The right-side tabbed panel (Sandbox, Approvals, Queue, Services).
  *
- * Note: the sessions store always has a current conversation (freshState seeds one), so
- * the panel is always shown — the Sandbox status tab is persistent by design.
+ * SSR render, so this covers the structure: the persistent Sandbox status tab
+ * (leftmost, default-active on first paint), the tab bar and count badges. Tab
+ * clicks and the auto-focus-Approvals effect need a real DOM and are covered by
+ * the Playwright e2e. The sessions store always seeds a current conversation, so
+ * the panel is always shown.
  */
 
 import { describe, it, expect } from "vitest";
@@ -63,11 +61,10 @@ describe("RightPanel", () => {
 
   it("first paint is the Sandbox tab even with pending approvals (auto-focus is a client effect)", () => {
     const html = render({ interrupts: [interrupt("i1", "approve the deploy?")] });
-    // SSR first paint: Sandbox content shows; the interrupt lives in the inactive
-    // Approvals tab (the auto-focus effect runs only in the real DOM).
+    // On the SSR first paint the interrupt lives in the inactive Approvals tab.
     expect(html).toContain('data-testid="sandbox-panel"');
     expect(html).not.toContain("approve the deploy?");
-    // The approvals badge is the RED alert variant (a gate the user must act on).
+    // The approvals badge is the alert variant.
     expect(html).toContain('data-testid="right-panel-badge-approvals"');
     expect(html).toMatch(/right-panel-badge-approvals"[^>]*data-alert="true"/);
   });

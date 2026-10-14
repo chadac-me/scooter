@@ -1,9 +1,4 @@
-/**
- * Tier 1 contract test — ExecBackend over the agent-sandbox API.
- *
- * Asserts ACP client methods (terminal/*, fs/*) map onto /execute, /upload,
- * /download against a fake sandbox API. RED against Design interfaces.
- */
+/** ExecBackend over the agent-sandbox API: terminal/* and fs/* map onto /execute, /upload and /download. */
 
 import { describe, it, expect, vi } from "vitest";
 
@@ -44,15 +39,14 @@ describe("ExecBackend (agent-sandbox SDK)", () => {
   it("writeBinaryFile() streams base64 (not a shell arg) and round-trips binary bytes", async () => {
     const api = createFakeSandboxApi();
     const exec = createSandboxExecBackend(api);
-    // Includes NUL + high bytes that a UTF-8 string round-trip would corrupt.
+    // NUL and high bytes that a UTF-8 string round-trip would corrupt.
     const bytes = Buffer.from([0x00, 0xff, 0x10, 0x89, 0x50, 0x4e, 0x47]);
     const b64 = bytes.toString("base64");
 
     await exec.writeBinaryFile("/workspace/uploads/x.bin", b64);
 
     expect(api.uploadedBinary).toEqual([{ path: "/workspace/uploads/x.bin", base64: b64 }]);
-    // The base64 must NOT ride as an /execute shell argument — that path caps a single
-    // argv string at ~128KB (MAX_ARG_STRLEN), the exact bug this method exists to avoid.
+    // A single argv string is capped at MAX_ARG_STRLEN, so the base64 must not ride as a shell argument.
     const shell = api.executed.map((e) => [e.command, ...e.args].join(" ")).join("\n");
     expect(shell).not.toContain(b64);
   });
@@ -73,30 +67,25 @@ describe("ExecBackend (agent-sandbox SDK)", () => {
   });
 
   it("concurrent spawns of the SAME command get DISTINCT terminal ids", () => {
-    // Regression: ids were hash(command+args), so identical concurrent bash
-    // calls collided on one id — the ACP client's per-id terminal/buffer maps
-    // then clobbered each other and a call's waitForExit never resolved (hang).
+    // Identical concurrent calls colliding on one id would clobber the ACP client's per-id terminal maps.
     const api = createFakeSandboxApi();
     const exec = createSandboxExecBackend(api);
 
     const a = exec.spawn({ command: "bash", args: ["-c", "echo hi"] });
-    const b = exec.spawn({ command: "bash", args: ["-c", "echo hi"] }); // identical
-    const c = exec.spawn({ command: "bash", args: ["-c", "echo hi"] }); // identical
+    const b = exec.spawn({ command: "bash", args: ["-c", "echo hi"] });
+    const c = exec.spawn({ command: "bash", args: ["-c", "echo hi"] });
 
     expect(new Set([a.id, b.id, c.id]).size).toBe(3);
   });
 
   it("concurrent identical spawns each resolve independently (no orphaned hang)", async () => {
-    // Each spawn's waitForExit must resolve with ITS OWN result even when three
-    // identical commands run at once. Distinct per-call exit codes prove no
-    // handle was overwritten/orphaned.
+    // Distinct per-call exit codes prove no handle was overwritten.
     const api = createFakeSandboxApi();
     let n = 0;
     api.whenExecute(() => ({ stdout: `out${n}`, stderr: "", exitCode: n++ }));
     const exec = createSandboxExecBackend(api);
 
     const terms = [0, 1, 2].map(() => exec.spawn({ command: "bash", args: ["-c", "x"] }));
-    // All three must resolve (a hang would time the test out).
     const exits = await Promise.all(terms.map((t) => t.waitForExit()));
 
     expect(exits.map((e) => e.exitCode).sort()).toEqual([0, 1, 2]);
@@ -104,8 +93,7 @@ describe("ExecBackend (agent-sandbox SDK)", () => {
 });
 
 describe("ExecBackend hard command timeout (P0 — runaway-command deadlock fix)", () => {
-  /** An api whose execute() HANGS until its AbortSignal fires, then rejects like
-   *  the real pods/exec WS does on close. Lets us drive the deadline. */
+  /** An api whose execute() hangs until its AbortSignal fires, then rejects as the real pods/exec WS does on close. */
   function hangingApi(): SandboxApiClient {
     return {
       mode: "k8s-exec",
@@ -128,12 +116,12 @@ describe("ExecBackend hard command timeout (P0 — runaway-command deadlock fix)
       term.onOutput((c) => chunks.push(c));
       const exitP = term.waitForExit();
 
-      await vi.advanceTimersByTimeAsync(5000); // cross the deadline
+      await vi.advanceTimersByTimeAsync(5000);
       const { exitCode } = await exitP;
 
-      expect(exitCode).toBe(124); // conventional timeout exit code
+      expect(exitCode).toBe(124);
       expect(chunks.join("")).toMatch(/timed out after 5s/i);
-      expect(chunks.join("")).toMatch(/narrow it|background/i); // actionable guidance
+      expect(chunks.join("")).toMatch(/narrow it|background/i);
     } finally {
       vi.useRealTimers();
     }
@@ -151,7 +139,7 @@ describe("ExecBackend hard command timeout (P0 — runaway-command deadlock fix)
       const exec = createSandboxExecBackend(api, { commandTimeoutMs: 5000 });
       const term = exec.spawn({ command: "echo", args: ["hi"] });
       const { exitCode } = await term.waitForExit();
-      // Advancing past the deadline must NOT re-fire / change the settled result.
+      // Advancing past the deadline must not change the settled result.
       await vi.advanceTimersByTimeAsync(10_000);
       expect(exitCode).toBe(0);
     } finally {
@@ -166,9 +154,9 @@ describe("ExecBackend hard command timeout (P0 — runaway-command deadlock fix)
       const term = exec.spawn({ command: "sleep", args: ["999"] });
       let settled = false;
       void term.waitForExit().then(() => (settled = true));
-      await vi.advanceTimersByTimeAsync(60 * 60 * 1000); // an hour — no timer to fire
-      expect(settled).toBe(false); // still running (only a user kill() would end it)
-      await term.kill(); // clean up (aborts the hanging api)
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(settled).toBe(false);
+      await term.kill();
     } finally {
       vi.useRealTimers();
     }

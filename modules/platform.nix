@@ -1,36 +1,24 @@
-# Platform manifests — the long-lived deployment of kubenix-agent-manager.
-#
-# Renders: namespace, the agent-host Deployment + Service, and the RBAC the
-# agent-host needs to (a) provision per-conversation Sandboxes/SAs/PVCs and
-# (b) exec into sandbox pods.
-#
-# The agent-sandbox controller + CRDs are installed separately (upstream release
-# manifests); this module only deploys OUR platform on top.
-#
-# Per-conversation Sandboxes are created at runtime by the agent-host via the
-# kube API (not here) — see modules/conversation.nix for that shape.
+# Platform manifests: the long-lived deployment of the agent-host, its RBAC, the
+# UI, the ingress, and the services the other modules contribute. The
+# agent-sandbox controller and CRDs are installed separately, and per-conversation
+# Sandboxes are created at runtime by the agent-host (see modules/conversation.nix).
 
 { kubenix, config, options, lib, ... }:
 
 let
   cfg = config.scooter;
 
-  # EVERY contrib's declaration (<name>/contrib.nix, via all-modules.nix) and its
-  # deployment half (<name>/deployment.nix) where one exists — imported whether or
-  # not it is enabled. `enable` gates what SHIPS, never what is imported; a disabled
-  # contrib is inert because its halves render behind their own `mkIf`, and
-  # `shipGate` below is what still rejects configuring one. Derived from
-  # all-modules.nix, so adding an integration edits no file here. Why: PR #719.
+  # Every contrib's declaration and deployment half, imported whether or not it is
+  # enabled, since `enable` only gates what ships.
   contribDecls = lib.filter (p: lib.hasSuffix "/contrib.nix" (toString p))
     (import ../contrib/all-modules.nix).imports;
   contribModules = [ ../contrib/all-modules.nix ]
     ++ lib.filter builtins.pathExists
       (map (p: builtins.dirOf p + "/deployment.nix") contribDecls);
 
-  # Configuring an unshipped contrib must fail the render. Why: #599, #719.
-  # Two filters find deployer-set fields: not in the shared spec,
-  # and differing from a registry-only eval. Rationale: PR #727.
-  # Known gap: spec fields (src, ui, skills) are not caught.
+  # Configuring an unshipped contrib fails the render, where a deployer-set field is
+  # one outside the shared spec that differs from a registry-only eval (spec fields
+  # such as src, ui and skills are not caught).
   specFields = lib.attrNames (lib.evalModules {
     specialArgs = { inherit lib; name = "schema"; };
     modules = [ ../contrib/submodule.nix ];
@@ -67,16 +55,8 @@ let
       `contrib/default.nix`'s `withModules` and the sandbox checks already use.
     '';
 
-  # THE OLD ROOT. `agentSandbox.*` was renamed to `scooter.*` (#710), and the sink
-  # option below is declared for one reason: so a manifest still on the old prefix
-  # gets THIS message instead of the module system's bare "option does not exist",
-  # which says nothing about where the option went.
-  #
-  # A `throw` rather than an `assertions` block because kubenix's module system has
-  # no NixOS `assertions` option — an assertions block there evaluates as a plain
-  # attribute and silently checks nothing (the repo's convention; see db-spec.nix).
-  # Forced from the namespace name below: the one leaf every render produces, so the
-  # guard cannot be bypassed by a deployment that renders something else.
+  # Guard for the removed `agentSandbox.*` root, forced from the namespace name
+  # every render produces (a `throw`, since kubenix has no `assertions` option).
   legacyRoot = v:
     if !options.agentSandbox.isDefined then v
     else throw ''
@@ -89,18 +69,12 @@ let
       property of the agent's sandbox, when `sandboxPod` is one child among the
       services.
     '';
-  # The ingress targets the UI when it's deployed (the UI proxies the API on the
-  # same origin); otherwise it targets the agent-host API directly.
+  # The ingress targets the UI when it is deployed (it proxies the API on the same
+  # origin), else the agent-host directly.
   ingressBackend = if cfg.ui.enable then "ui" else "agent-host";
 
-  # The enabled contribs' sandbox-pod parts (modules/sandbox-pod.nix), shaped as a
-  # manifest OVERLAY. The agent-host creates the real Sandbox CR and is the only place
-  # these can take effect, and it already has one mechanism for splicing k8s fragments
-  # into that manifest — deployTools.sandboxManifestOverlay. A contrib rides it rather
-  # than getting a second payload the provisioner must know how to parse. Why: PR #640.
-  #
-  # Empty when nothing contributes, so a deployment with no such contrib renders no
-  # extra ConfigMap key at all.
+  # The enabled contribs' sandbox-pod parts as a manifest overlay spliced into the
+  # Sandbox CR the agent-host creates; empty when nothing contributes.
   contribPodOverlay = lib.optionalAttrs
     (cfg.sandboxPod.extraEnv != [ ] || cfg.sandboxPod.extraVolumes != [ ] || cfg.sandboxPod.extraVolumeMounts != [ ])
     {
@@ -114,14 +88,12 @@ let
         volumes = cfg.sandboxPod.extraVolumes;
       };
     };
-  # One ConfigMap carries both halves, so it renders when EITHER is non-empty.
+  # One ConfigMap carries both halves, so it renders when either is non-empty.
   overlayCmNeeded = cfg.deployTools.sandboxManifestOverlay != { } || contribPodOverlay != { };
 
-  # --- Model catalog: fold availableModels (PROVIDER-FIRST: provider -> model id -> opts) into
-  # the rich list the agent-host reads as AGENT_MODELS_JSON. Model ids are provider-specific
-  # namespaces (Bedrock ids via "goose"; API ids via "claude-code"/"byoc"), so the provider is
-  # the natural OUTER key: a model offered by two providers is listed under both, and each
-  # provider group marks its own default.
+  # --- Model catalog: fold availableModels (provider -> model id -> opts) into the list
+  # the agent-host reads as AGENT_MODELS_JSON, where a model offered by two providers is
+  # listed under both.
   providerNames = lib.attrNames cfg.agent.availableModels;
   # id -> the providers offering it.
   providersOf = id: lib.filter (p: cfg.agent.availableModels.${p} ? ${id}) providerNames;
@@ -134,14 +106,12 @@ let
     (lib.genAttrs providerNames providerDefault);
   providerModelIds = lib.unique
     (lib.concatMap (p: lib.attrNames cfg.agent.availableModels.${p}) providerNames);
-  # The GLOBAL default (provider-less contexts): the goose group's — the cloud floor is what a
-  # provider-less context runs — else the deprecated agent.model, else ANY provider's explicit
-  # default (an operator's choice beats sort order), else the first model anywhere.
+  # The global default for provider-less contexts: the goose group's, else the deprecated
+  # agent.model, else any provider's explicit default, else the first model anywhere.
   defaultModelId =
     if providerDefaults ? goose then providerDefaults.goose
     else if cfg.agent.model != null then cfg.agent.model
-    # attrValues is alphabetical BY PROVIDER — arbitrary when providers disagree, but it only ever
-    # picks a model someone marked `default`, never the alphabetically-first id. Why: PR pending.
+    # attrValues is alphabetical by provider, but only ever picks a model someone marked `default`.
     else if providerDefaults != { } then lib.head (lib.attrValues providerDefaults)
     else if providerModelIds != [ ] then lib.head providerModelIds
     else null;
@@ -158,33 +128,21 @@ let
     inherit id;
     hint = hintOf id;
     default = id == defaultModelId;
-    # A model from the deprecated flat `agent.model` has no tags = every provider.
+    # A model from the deprecated flat `agent.model` is offered by every provider.
     providers = providersOf id;
-    # The providers this model is THE default for — the runtime's per-provider default.
+    # The providers this model is the default for.
     defaultFor = lib.filter (p: providerDefaults.${p} == id) (lib.attrNames providerDefaults);
   }) modelIds);
   hasModels = modelIds != [ ];
 
-  # Contrib skills, each gated on the capability it documents. A skill whose gate is
-  # false is NOT shipped: the agent should not read instructions for a route that
-  # 404s. Deployment `skills` win on a filename collision, so an operator can always
-  # override one of ours.
-  #
-  # DERIVED from contrib/, not listed here: the .md lives next to the code it
-  # documents and its contrib's NAME is the gate, so no table here can fall out of
-  # date with the contrib set. Why: PR #618.
-  #
-  # Read straight off `config.contribs` — the contribs are modules in THIS eval
-  # (see `imports`), so there is no second module system to re-derive them from.
-  # `enable` is filtered HERE rather than at the import: an unshipped contrib's skill
-  # would document a route no image serves. Why: #711, #719.
+  # Contrib skills read off `config.contribs` and gated on each contrib's `enable`, so
+  # an unshipped contrib's skill never documents a route no image serves; deployment
+  # `skills` win on a filename collision.
   contribSkills = lib.mapAttrs (_: c: c.skills)
     (lib.filterAttrs (_: c: c.enable && c.skills != { }) config.contribs);
 
-  # The contribs that raise human approvals -> how the agent-host reaches their verbs.
-  # Read straight off the evaluated config: each contrib's deployment.nix sets its
-  # own row inside its own `mkIf`, so the gating is the contrib's and there is nothing
-  # to re-derive here.
+  # The contribs that raise human approvals and how the agent-host reaches their
+  # verbs; each contrib's deployment.nix sets its own row inside its own `mkIf`.
   approvalContribsJson =
     if cfg.approvals == { } then null else builtins.toJSON cfg.approvals;
   builtins' = lib.optionalAttrs cfg.agent.builtinSkills
@@ -193,25 +151,15 @@ let
   allSkills = builtins' // cfg.agent.skills;
 in
 {
-  # NOTE: ./testing.nix is deliberately NOT imported here. Test-only overrides (a dummy agent, an
-  # unauthenticated test webhook) must be opted into by a TEST manifest, so a deploy that never
-  # imports it cannot enable them by setting a stray boolean. See modules/testing.nix.
-  # The contribs are modules in THIS eval (`contribModules` above), derived from
-  # contrib/ and not listed: each declares its own `contribs.<name>` options and
-  # renders its own manifests, so adding an integration edits no platform file.
-  # contrib/spec.nix comes with them, via all-modules.nix — it is the schema for the
-  # `contribs.*` tree the skills above are read from. Why: #599, #711, #719.
+  # ./testing.nix is absent on purpose (test-only overrides are opted into by a test
+  # manifest), and the contribs arrive via `contribModules`, each declaring its own
+  # `contribs.<name>` options and manifests with contrib/spec.nix as their schema.
   imports = [ kubenix.modules.k8s ./images.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./legacy-state-migration.nix ./event-backfill.nix ]
     ++ contribModules;
 
-  # Declared ONLY so a definition on the old root matches something and reaches
-  # `legacyRoot`'s message above. `internal` + `visible = false`, so it is absent from
-  # the option reference (docs render `options.scooter` alone anyway) and nothing but
-  # the guard ever reads it. Delete once no deployment can plausibly be on the old
-  # prefix. Why: #710.
-  # NO `default`: a default is injected as a definition (mkOptionDefault), which would
-  # make `isDefined` true for every render. Nothing reads the value, so there is
-  # nothing to default.
+  # Declared only so a definition on the old root reaches `legacyRoot`'s message; no
+  # `default`, because a default is injected as a definition and would make
+  # `isDefined` true for every render.
   options.agentSandbox = lib.mkOption {
     type = lib.types.raw;
     internal = true;
@@ -386,10 +334,8 @@ in
           };
         };
       });
-      # Deliberately just two: a cheap size for chat/light edits and the medium that a
-      # sandbox comes up with. Every additional preset is a claim about what the
-      # cluster's nodes can schedule, which the platform cannot make for a deployment —
-      # so bigger sizes (and any GPU size) are opt-in. See the example config.
+      # Only two presets ship, because every additional one is a claim about what the
+      # cluster's nodes can schedule.
       default = {
         tiny = { cpu = "250m"; memory = "512Mi"; hint = "Chat and light edits."; };
         medium = { cpu = "2"; memory = "4Gi"; hint = "Builds and test suites."; default = true; };
@@ -425,16 +371,14 @@ in
       type = types.nullOr types.str;
       internal = true;
       readOnly = true;
-      # Derived, not set: the default is declared on the preset itself, so there is
-      # no second option naming a key that can drift out of sync with the map.
+      # Derived from the preset marked `default`, so no second option can drift from the map.
       default =
         let
           flagged = lib.attrNames (lib.filterAttrs (_: p: p.default) cfg.sandboxSizes);
           names = lib.concatStringsSep ", " (lib.attrNames cfg.sandboxSizes);
         in
-        # A `throw` rather than an assertion because kubenix's module system has no
-        # NixOS `assertions` option — an assertions block there evaluates as a plain
-        # attribute and silently checks nothing.
+        # A `throw` rather than an assertion, because kubenix's module system has no
+        # `assertions` option.
         if cfg.sandboxSizes == { } then null
         else if lib.length flagged == 1 then lib.head flagged
         else if flagged == [ ] then
@@ -454,9 +398,8 @@ in
         declare the default on the preset.
       '';
     };
-    # Generic, DEPLOYMENT-parameterized tool injection — the platform doesn't know
-    # what's in these; a deployment fills them with its own .scooter tools + the
-    # token audiences / env its tools need. See docs/SCOOTER_DIR_INJECTION.md.
+    # Generic deployment-parameterized tool injection: a deployment fills these with
+    # its own .scooter tools and the token audiences and env they need.
     deployTools = {
       scooterConfigMap = mkOption {
         type = types.nullOr types.str;
@@ -473,7 +416,7 @@ in
         default = { };
         example = {
           EXAMPLE_TOOL_URL = "http://example-tool.ns.svc:8080";
-          # Multi-line values are fine (carried as JSON, not k=v;k=v):
+          # Multi-line values are fine (carried as JSON).
           NIX_CONFIG = "extra-substituters = http://cache/itops\nflake-registry = /etc/nix/registry.json";
         };
         description = ''
@@ -572,9 +515,7 @@ in
         RWO state PVC) or openfga (its own store).
       '';
     };
-    # INTERNAL. Set by modules/testing.nix, never by a deploy config. It exists as an option only
-    # because the production env-var block below has to read it; the guard in that module is what
-    # keeps a real deploy from turning it on. See modules/testing.nix for why this inverted.
+    # Internal: set by modules/testing.nix, never by a deploy config.
     sandboxResources = mkOption {
       type = types.nullOr types.attrs;
       default = null;
@@ -687,8 +628,8 @@ in
           '';
         };
       };
-      # BRING-YOUR-OWN-CLAUDE (Increment 2): users run a container with THEIR Claude subscription
-      # that dials in over a WS; scooter routes their human-triggered conversations to it.
+      # Bring-your-own-Claude: users run a container with their own Claude subscription
+      # that dials in over a WebSocket, and scooter routes their conversations to it.
       remoteAgent = {
         enable = mkOption {
           type = types.bool;
@@ -743,10 +684,8 @@ in
         default = "Scooter";
         description = "Display name the agent goes by (AGENT_NAME) — its identity in the UI + prompt.";
       };
-      # Skills the platform SHIPS, each gated on the capability it documents. A skill
-      # for a service that is not wired teaches the agent to attempt something that
-      # 404s, then to misread that 404 as the feature being broken — which is exactly
-      # how the grafana skill sent an agent chasing a `loki/` path that never existed.
+      # Skills the platform ships, each gated on the capability it documents, so the
+      # agent never reads instructions for a route that 404s.
       builtinSkills = mkOption {
         type = types.bool;
         default = true;
@@ -806,25 +745,16 @@ in
     };
 
     auth = {
-      # The agent-host trusts an identity header injected by the ingress (an OIDC
-      # proxy / forward-auth / basic-auth the deployer configures). It does NOT do
-      # login itself. A missing header => the `anonymous` user (single-user/dev).
-      # SECURITY: only expose the agent-host behind an ingress that SETS (and
-      # strips any client-supplied) these headers — else identity is spoofable.
-      # Provider-agnostic: the "header" mode reads userHeader/emailHeader (Traefik,
-      # basic-auth, forward-auth, oauth2-proxy, …); "alb-oidc" reads AWS ALB's
-      # OIDC headers (sub from x-amzn-oidc-identity, email/name from the signed
-      # x-amzn-oidc-data JWT). More providers can be added without config churn.
+      # The agent-host does no login itself: it trusts an identity header the ingress
+      # sets (a missing header means the `anonymous` user), so the ingress must strip
+      # any client-supplied copy or identity is spoofable.
       mode = mkOption {
         type = types.enum [ "header" "alb-oidc" ];
         default = "header";
         description = "Identity source: `header` (default; a proxy sets userHeader/emailHeader) or `alb-oidc` (AWS ALB OIDC).";
       };
-      # Optional hardening for alb-oidc: cryptographically verify the ALB's
-      # x-amzn-oidc-data JWT signature (fetch the ALB public key by kid) before
-      # trusting its email/name claims. On a verify failure the id (from the
-      # separate header) is kept but the claims are dropped. Off by default (the
-      # ALB is already the trust boundary).
+      # Optional alb-oidc hardening: verify the x-amzn-oidc-data JWT signature before
+      # trusting its claims (on failure the id is kept and the claims dropped).
       albVerify = mkOption {
         type = types.bool;
         default = false;
@@ -847,10 +777,8 @@ in
         example = "x-forwarded-email";
         description = "header mode: request header carrying the user's email (optional; set by the ingress).";
       };
-      # ALB with OIDC only puts the `sub` in a header; the email is inside the
-      # signed x-amzn-oidc-data JWT. When available it's learned into a shared
-      # Postgres table (user_identity) so it can be filled in later; this static
-      # map seeds/overrides it for known users (sub -> email). Optional.
+      # ALB OIDC only puts the `sub` in a header, so this static sub -> email map
+      # seeds the learned identity store.
       subEmailMap = mkOption {
         type = types.attrsOf types.str;
         default = { };
@@ -860,12 +788,9 @@ in
     };
 
     observability = {
-      # BROWSER telemetry (RUM). Separate from `otel` below, which is the
-      # agent-host's own metrics: this is the UI, running in the user's browser,
-      # pushing OTLP over the same origin. It exists because the failures that
-      # matter most in a chat UI — a render stream reconnecting to the wrong
-      # conversation, a runtime remounting mid-run — happen entirely client-side
-      # and never reach a pod log.
+      # Browser telemetry (RUM), separate from `otel` below: the UI pushes OTLP
+      # same-origin, because the client-side failures that matter most never reach a
+      # pod log.
       browserTelemetry = {
         enable = mkOption {
           type = types.bool;
@@ -968,11 +893,8 @@ in
       };
     };
 
-    # Expose the platform via a GENERIC networking.k8s.io/v1 Ingress so deployers
-    # can bring their own controller (ALB, nginx, traefik, …) by setting
-    # className + annotations. Controller-specific config (auth, the identity
-    # header the agent-host trusts, cert ARN / cluster-issuer, etc.) is passed
-    # through `annotations` — the module renders a portable Ingress, no CRDs.
+    # A generic networking.k8s.io/v1 Ingress; controller-specific config (auth, the
+    # identity header, certs) is passed through `annotations`.
     ingress = {
       enable = mkOption {
         type = types.bool;
@@ -1043,7 +965,7 @@ in
         '';
       };
       # The webhooks receiver has its own ingress options under
-      # `scooter.webhooks.ingress` (separate host, NO auth) — see webhooks.nix.
+      # `scooter.webhooks.ingress` (see webhooks.nix).
     };
   };
 
@@ -1051,14 +973,12 @@ in
     # No package: the unfree claude CLI would force allowUnfree.
     scooter.images.remote-agent = { };
 
-    # The agent_host database: the tables agent-host OWNS (conversation_jobs). The
-    # provisioning Job creates the db + an `agent_host` role that owns it, and writes the
-    # password to `agent-pg-agent-host`.
+    # The agent_host database, which the provisioning Job creates with an owning
+    # `agent_host` role whose password lands in `agent-pg-agent-host`.
     scooter.postgres.consumers.agent-host = { db = "agent_host"; user = "agent_host"; };
 
-    # The tables the `agent_host` database holds (scooter.db, #606). Declared
-    # here because this is the module that registers the consumer; owners.toml, the
-    # migrator's database list and the GRANTs below are generated from it.
+    # The tables the `agent_host` database holds; owners.toml, the migrator's database
+    # list and the grants below are generated from this.
     scooter.db.agent_host = {
       owner = "agent-host";
       tables = {
@@ -1071,9 +991,9 @@ in
           note = ''
             Conversation metadata: the sidebar list + rehydration fields. THREE writers, one table:
             agent-host owns the row; conversation-router INSERTs it at create time, writes
-            title/starred for IDLE conversations, and SELECTs the table for GET /conversations;
-            conversation-controller mirrors `phase` (it writes Failed/Pending/the Suspended drift
-            repair, which nothing else does). A writer implies read, so none are also readers.'';
+            title/starred for IDLE conversations, claims host_pod on first route, and SELECTs
+            the table for GET /conversations; conversation-controller writes `phase` and
+            (re)assigns host_pod. A writer implies read, so none are also readers.'';
         };
         conversation_events = {
           writers = [ "agent-host" ];
@@ -1089,22 +1009,8 @@ in
       };
     };
 
-    # The conversation-router gets READ-ONLY access so it can serve the durable conversation
-    # list itself instead of fanning out to every agent-host pod. Its `conversation_router` role
-    # owns nothing — granted SELECT on EXACTLY the tables the list reads, nothing else (notably
-    # NOT conversation_events, the transcripts), and pinned read-only at the server.
-    #
-    # The table set is DERIVED from the `scooter.db` spec: readers → SELECT grants,
-    # writers → read-write grants, so the grant can't drift from the declaration.
-    #
-    # This used to read lib/sql/owners.toml with `builtins.fromTOML` — the manifest was
-    # the source and the grant the rendering. #606 inverted it: the option is the source
-    # and owners.toml is now generated FROM it, so a contrib that declares a table also
-    # gets its grants with no second edit.
-    # grantsFor derives one consumer's per-database grants from the `scooter.db` spec: a table
-    # listing it under `readers` becomes SELECT, under `writers` becomes read-write. Shared by the
-    # consumers below so a second consumer cannot drift from the first by copy-paste — the bug this
-    # replaces was five hand-maintained lists that nothing checked against each other (#606).
+    # Per-consumer grants derived from the `scooter.db` spec: a table listing the
+    # consumer under `readers` becomes SELECT, under `writers` becomes read-write.
     scooter.postgres.readers =
       let
         tablesWhere = consumer: field: db: lib.attrNames (lib.filterAttrs
@@ -1113,7 +1019,7 @@ in
         grantFor = consumer: db: {
           inherit db;
           tables = tablesWhere consumer "readers" db;       # SELECT-only
-          writeTables = tablesWhere consumer "writers" db;  # read-write. Why: PR #475.
+          writeTables = tablesWhere consumer "writers" db;  # read-write
         };
       in
       {
@@ -1122,22 +1028,19 @@ in
           grants = [ (grantFor "conversation-router" "agent_host") ]
             ++ lib.optional cfg.webhooks.enable (grantFor "conversation-router" "webhooks");
         };
-        # The controller mirrors conversation phase onto the row (services/conversation-controller
-        # rows.py). agent_host only — it has no business in any other database. Why: PR #654.
+        # The controller mirrors conversation phase onto the row, so it gets agent_host only.
         conversation-controller = {
           user = "conversation_controller";
           grants = [ (grantFor "conversation-controller" "agent_host") ];
         };
       };
 
-    # mkMerge (not //): the optional UI / ingress blocks below ALSO define
-    # `deployments` / `services`, and a shallow `//` update would replace the
-    # whole `deployments` attrset (dropping agent-host). mkMerge deep-merges.
+    # mkMerge, not //: the optional UI and ingress blocks also define `deployments` /
+    # `services`, and a shallow update would drop agent-host.
     kubernetes.resources = lib.mkMerge [
     {
-      # legacyRoot: the #710 rename guard; shipGate: the #719 unshipped-contrib guard.
-      # Both forced here because every render produces this name, and both return the
-      # namespace unchanged unless their config mistake is actually present.
+      # Both guards are forced from the namespace name because every render produces
+      # it, and both return it unchanged unless the mistake is present.
       namespaces.${shipGate (legacyRoot cfg.namespace)} = {
         metadata.name = cfg.namespace;
       };
@@ -1152,18 +1055,14 @@ in
       };
 
       # The agent-host provisions per-conversation Sandboxes/SAs/PVCs and execs into
-      # sandbox pods, so it needs broad-but-namespaced RBAC. Nothing else gets it —
-      # the broker in particular. Why: PR #584.
+      # sandbox pods, so it alone gets this namespaced RBAC.
       roles.agent-host = {
         metadata = { name = "agent-host"; namespace = cfg.namespace; };
         rules =
           [
             {
-              # exec is how the ExecBackend runs the agent's commands in the pod.
-              # `get` AND `create`: the WebSocket exec stream (client-node, kubectl)
-              # opens with an HTTP GET upgrade, which RBAC checks as `get pods/exec` —
-              # `create` alone passes `can-i create pods/exec` but the real exec 403s
-              # ("cannot get resource pods/exec").
+              # The WebSocket exec stream opens with an HTTP GET upgrade, which RBAC
+              # checks as `get pods/exec`, so `create` alone is not enough.
               apiGroups = [ "" ];
               resources = [ "pods/exec" ];
               verbs = [ "get" "create" ];
@@ -1176,37 +1075,23 @@ in
             {
               apiGroups = [ "" ];
               # configmaps: destroy() reaps the legacy per-conversation module ConfigMap
-              # that older clusters still carry. Drop the verb once none remain.
+              # older clusters still carry.
               resources = [ "serviceaccounts" "persistentvolumeclaims" "pods" "configmaps" ];
               verbs = [ "get" "list" "watch" "create" "update" "patch" "delete" ];
             }
             {
-              # Multi-replica: the agent-host WATCHES Conversations (ownershipGuard fencing)
-              # and CREATES one per new conversation (conversationRegistry) so the controller
-              # can assign it a hostPod.
-              #
-              # PATCH is needed because the router now creates the CR (POST /conversations)
-              # WITHOUT a sandboxRef — it does not provision. The host owns that field, and
-              # the router derives its routing short-id from it, so the host must merge-patch
-              # spec.sandboxRef onto an already-existing CR. Without this verb that patch
-              # 403s silently (fire-and-forget) and the conversation stays unroutable.
+              # The agent-host watches Conversations for ownership fencing, creates one
+              # per new conversation, and merge-patches spec.sandboxRef onto the CR the
+              # router created without one.
               apiGroups = [ "scooter.chadac.dev" ];
               resources = [ "conversations" ];
-              # DELETE: ending a conversation must remove its CR. The CR is the source of
-              # truth for existence, so without this a deleted conversation is re-adopted by
-              # hydrate() and comes back — DELETE answered 204 while the conversation stayed
-              # listed as `running` forever, and the 403 was invisible until remove() logged it.
+              # delete: ending a conversation must remove its CR, or hydrate() re-adopts it.
               verbs = [ "get" "list" "watch" "create" "patch" "delete" ];
             }
             {
-              # The agent-host PUBLISHES liveness to status.phase (Assigned on
-              # revive/resume, Suspended on idle-suspend) via conversationRegistry.setPhase
-              # — owner-fenced, so only the hosting pod writes. WITHOUT this the setPhase
-              # PATCH 403s silently (fire-and-forget), the phase never reaches Suspended, and
-              # the autoscaler counts the conversation as demand forever → the fleet never
-              # sleeps. (The controller ALSO patches status for assignment; both are writers,
-              # coordinated by ownership-fencing + phase semantics.) status is its OWN
-              # subresource RBAC-wise, hence a separate rule.
+              # The agent-host publishes liveness to status.phase via
+              # conversationRegistry.setPhase; status is its own subresource for RBAC,
+              # hence the separate rule.
               apiGroups = [ "scooter.chadac.dev" ];
               resources = [ "conversations/status" ];
               verbs = [ "get" "patch" "update" ];
@@ -1214,9 +1099,8 @@ in
           ];
       };
 
-      # TokenReview is cluster-scoped → ClusterRole + ClusterRoleBinding. The
-      # agent-host verifies the webhooks SA token on /agui (to honor a conversation
-      # `owner`), mirroring the broker's SA-token auth.
+      # TokenReview is cluster-scoped, so a ClusterRole; the agent-host verifies the
+      # webhooks SA token on /agui to honor a conversation `owner`.
       clusterRoles.agent-host-tokenreview = {
         metadata.name = "agent-host-tokenreview";
         rules = [{
@@ -1246,41 +1130,14 @@ in
         subjects = [{ kind = "ServiceAccount"; name = "agent-host"; namespace = cfg.namespace; }];
       };
 
-      # agent-host is a StatefulSet (not a Deployment) so each replica has a STABLE
-      # ordinal name + per-pod DNS (agent-host-<n>.agent-host-headless.<ns>.svc) — the
-      # address the conversation-router forwards to for the pod that owns a conversation
-      # (status.hostPod). At replicas=1 this behaves exactly like the old single-replica
-      # Deployment: one pod, one shared state PVC. A StatefulSet's RollingUpdate also
-      # terminates the old ordinal pod BEFORE creating its replacement, so the shared
-      # RWO agent-host-state volume is never Multi-Attach-deadlocked (the reason the
-      # Deployment needed Recreate) — RollingUpdate is safe here.
-      #
-      # DESIGN (rollout-drain, todo/docs/ROLLOUT_DRAIN_AND_POD_IP.md) — NOT YET APPLIED:
-      # convert this StatefulSet → a Deployment for seamless upgrades:
-      #   - deployments.agent-host (random pod names — routing is by POD IP now, not DNS).
-      #   - strategy RollingUpdate maxSurge=1, maxUnavailable=0 (new pod Ready BEFORE the old
-      #     drains → no capacity gap; terminate-before-create was ONLY forced by the RWO PVC).
-      #   - per-pod `state` volumeClaimTemplate → emptyDir (it's a HOT CACHE; the durable copy
-      #     is the shared RWX history mirror ⇒ no RWO PVC ⇒ no Multi-Attach blocker).
-      #   - REMOVE services.agent-host-headless (no per-pod DNS); keep the `agent-host`
-      #     ClusterIP Service (the router's fallback target).
-      # SEAMLESS ROLLOUT (todo/docs/ROLLOUT_DRAIN_AND_POD_IP.md): a Deployment with
-      # maxSurge=1/maxUnavailable=0 — a new-gen pod becomes Ready BEFORE any old pod drains,
-      # so capacity never dips during an upgrade (the StatefulSet's terminate-before-create,
-      # forced by the RWO PVC's Multi-Attach, was what caused the gap). Routing is by POD IP
-      # now (status.hostIP), so random Deployment pod names are fine — no ordinal/DNS needed.
-      # The per-pod `state` volume is an emptyDir HOT CACHE: durable history lives on the
-      # shared RWX mirror (MIRROR_STATE_PATH), and a reassigned conversation is revived from
-      # it (controller revive-push). No RWO PVC ⇒ no Multi-Attach ⇒ surge is safe.
+      # A Deployment with maxSurge=1/maxUnavailable=0, so a new pod is Ready before any
+      # old pod drains; routing is by pod IP (status.hostIP), and the per-pod `state`
+      # volume is an emptyDir hot cache of the durable history mirror.
       deployments.agent-host = {
         metadata = { name = "agent-host"; namespace = cfg.namespace; };
-        # When the controller autoscales the agent-host, it is the SINGLE writer of
-        # spec.replicas — so OMIT replicas from the manifest (a re-apply that set it would
-        # fight the autoscaler, resetting the fleet to a fixed count each deploy). k8s keeps
-        # the controller-set value on apply when the field is absent. The autoscaler's
-        # minReplicas is the effective floor (+ its initial scale-up on first tick). When
-        # autoscale is OFF, pin the fixed count as before. (lib.optionalAttrs, NOT mkIf: this is
-        # a kubenix RESOURCE attrset, not a module option — mkIf would pass through unmerged.)
+        # When the controller autoscales it is the single writer of spec.replicas, so the
+        # manifest omits it (lib.optionalAttrs rather than mkIf, since this is a resource
+        # attrset, not a module option).
         spec = (lib.optionalAttrs (!cfg.conversationController.autoscale) {
           replicas = cfg.conversationController.agentHostReplicas;
         }) // {
@@ -1293,8 +1150,7 @@ in
             metadata.labels.app = "agent-host";
             spec = {
               serviceAccountName = "agent-host";
-              # fsGroup 0 (root group) so the agent-host process — running as root — can write
-              # its scratch/state dirs. (Kept from the PVC era; harmless with emptyDir.)
+              # fsGroup 0 so the root agent-host process can write its scratch/state dirs.
               securityContext = {
                 fsGroup = 0;
                 fsGroupChangePolicy = "OnRootMismatch";
@@ -1303,18 +1159,9 @@ in
                 name = "agent-host";
                 image = cfg.agentHostImage;
                 imagePullPolicy = cfg.pullPolicy;
-                # Requests so the scheduler places the platform pods deliberately
-                # (they were resource-less, which let them all pack onto one node
-                # that then fell over). Memory-limited to protect the node; no cpu
-                # limit (bursty provisioning uses spare CPU). agent-host hosts goose +
-                # drives provisioning, so it gets the largest platform reservation.
-                # Memory scales with ACTIVE conversations, not with the process: each one
-                # holds its hydrated event log and spawns an agent CLI with its own heap
-                # (measured ~190 MiB per active conversation; a replica with four sat at
-                # 784 MiB). At 1 GiB a fifth conversation OOM-killed the pod, and a
-                # restart re-resumed every dangling run at once and killed it again.
-                # 2 GiB covers the ~5 conversations a replica hosts, with the request at
-                # half so the scheduler packs on steady state rather than on the burst.
+                # Memory-limited to protect the node with no cpu limit; memory scales with
+                # active conversations (each holds a hydrated event log and an agent CLI
+                # heap), so the limit covers the handful a replica hosts.
                 resources = lib.mkDefault {
                   requests = { cpu = "250m"; memory = "1Gi"; };
                   limits = { memory = "2Gi"; };
@@ -1323,38 +1170,29 @@ in
                 env = [
                   { name = "PORT"; value = "8080"; }
                   { name = "NAMESPACE"; value = cfg.namespace; }
-                  # This pod's own name (downward API) — its identity for the
-                  # Conversation CRD hostPod + generation-fencing (multi-replica). Set
-                  # unconditionally (harmless single-replica); the StatefulSet gives it
-                  # the stable ordinal name (agent-host-<n>).
+                  # This pod's own name (downward API): its identity for the Conversation
+                  # CRD hostPod and generation fencing.
                   { name = "POD_NAME"; valueFrom.fieldRef.fieldPath = "metadata.name"; }
                   { name = "SANDBOX_IMAGE"; value = cfg.sandboxImage; }
-                  # imagePullPolicy for the per-conversation sandbox pods — mirror the
-                  # platform pullPolicy (IfNotPresent for side-loaded kind/k3s, Always
-                  # for a registry). Without this the provisioner defaults to "Always",
-                  # which fails ImagePullBackOff on a local cluster with no registry.
+                  # imagePullPolicy for the sandbox pods mirrors the platform pullPolicy,
+                  # since the provisioner's default of Always fails on a local cluster
+                  # without a registry.
                   { name = "SANDBOX_PULL_POLICY"; value = cfg.pullPolicy; }
-                  # The trusted SA(s) the agent-host lets set a conversation `owner`
-                  # on /agui (verified via TokenReview) — COMMA-SEPARATED. The webhooks
-                  # service always; the scheduler too when enabled (both spawn
-                  # owner-set conversations). Unset = owner never honored.
+                  # Comma-separated SAs allowed to set a conversation `owner` on /agui
+                  # (verified via TokenReview): webhooks always, the scheduler when enabled.
                   { name = "WEBHOOKS_SERVICE_ACCOUNT";
                     value = lib.concatStringsSep "," (
                       [ "system:serviceaccount:${cfg.namespace}:agent-webhooks" ]
                       ++ lib.optional cfg.scheduler.enable "system:serviceaccount:${cfg.namespace}:agent-scheduler"
                     ); }
-                  # Subagent creation goes through the router (PR #726).
+                  # Subagent creation goes through the router.
                   { name = "CONVERSATION_ROUTER_URL"; value = "http://agent-host.${cfg.namespace}.svc.cluster.local:8080"; }
                   { name = "CONVERSATION_ROUTER_TOKEN_PATH"; value = "/var/run/secrets/conversation-router/token"; }
-                  # Durable: the AG-UI event log (history) on the per-pod PVC.
-                  # EPHEMERAL cache (emptyDir), not the durable record — see
-                  # docs/CONVERSATION_STATE_MODEL.md.
+                  # emptyDir hot cache of the AG-UI event log; the durable record is the
+                  # history mirror.
                   { name = "LOCAL_STATE_PATH"; value = "/var/lib/agent-host/conversations"; }
-                  # Ephemeral scratch (emptyDir): goose's per-conversation cwd +
-                  # $HOME (sessions DB + .goosehints). The agent's real work execs
-                  # into the SANDBOX, so none of this is durable — keeping it off
-                  # the PVC avoids the SELinux/fsGroup subdir-context problems an
-                  # EBS volume hits, and the image's "/" default is unwritable.
+                  # Ephemeral scratch (emptyDir) for goose's per-conversation cwd and
+                  # $HOME; the agent's real work execs into the sandbox.
                   { name = "SCRATCH_PATH"; value = "/var/lib/agent-scratch"; }
                   { name = "HOME"; value = "/var/lib/agent-scratch/home"; }
                   { name = "IDLE_SUSPEND_MS"; value = toString cfg.idleSuspendMs; }
@@ -1362,46 +1200,36 @@ in
                 ++ lib.optional cfg.conversationController.assets.enable
                   { name = "ASSETS_PATH"; value = "/var/lib/agent-assets"; }
                 ++ lib.optional cfg.byoc.traceTunnel
-                  # Per-frame tracing of the BYOC MCP tunnel (method, direction, bytes,
-                  # status, correlated by stream). Off by default — it is per-frame and
-                  # would drown a normal log — but the whole exchange in one run is the
-                  # difference between reading a bug and guessing at it.
+                  # Per-frame tracing of the BYOC MCP tunnel, off by default because it
+                  # would drown a normal log.
                   { name = "TUNNEL_TRACE"; value = "1"; }
                 ++ [
                 ]
                 ++ lib.optional (cfg.sandboxRuntimeClass != null)
-                  # RuntimeClass for the sandbox pod (e.g. crun) — a cgroup-delegating
-                  # runtime so the sandbox's systemd PID 1 runs NON-privileged in its
-                  # own private cgroup namespace (privileged forces the host cgroup ns
-                  # → the sandbox churns the host /kubepods.slice tree → node instability
-                  # / host logout). Unset ⇒ cluster default runtime.
+                  # A cgroup-delegating RuntimeClass (e.g. crun) lets the sandbox's systemd
+                  # run non-privileged in a private cgroup namespace; unset means the
+                  # cluster default.
                   { name = "SANDBOX_RUNTIME_CLASS"; value = cfg.sandboxRuntimeClass; }
                 ++ lib.optional (cfg.retentionMaxAgeMs > 0)
-                  # Auto-delete unstarred conversations inactive past the window
-                  # (0/default = off, so absent unless a deployment opts in).
+                  # Auto-delete unstarred conversations inactive past the window (absent
+                  # unless a deployment opts in).
                   { name = "RETENTION_MAX_AGE_MS"; value = toString cfg.retentionMaxAgeMs; }
                 ++ [
-                  # Agent identity + skills: the agent-host writes these into the
-                  # per-conversation .goosehints. SKILLS_DIR is the ConfigMap mount.
+                  # Agent identity and skills, written into the per-conversation
+                  # .goosehints; SKILLS_DIR is the ConfigMap mount.
                   { name = "AGENT_NAME"; value = cfg.agent.name; }
                   { name = "SKILLS_DIR"; value = "/etc/agent-sandbox/skills"; }
                 ] ++ lib.optional (cfg.ingress.host != "")
-                  # Public chat UI base URL → each sandbox gets a CONVERSATION_URL
-                  # to its own conversation (the agent can share the link, e.g. to
-                  # have a human approve an AWS request). Set WHENEVER the host is
-                  # configured — NOT gated on ingress.enable: the host is the public
-                  # URL even when scooter doesn't render its own Ingress (e.g. an
-                  # oauth2-proxy reverse-proxy fronts it). Gating on enable left
-                  # PUBLIC_URL/CONVERSATION_URL empty in that setup.
+                  # Public chat UI base URL, so each sandbox gets a CONVERSATION_URL; keyed
+                  # on the host rather than ingress.enable because the host is public
+                  # even when an external proxy fronts it.
                   { name = "PUBLIC_URL"; value = "https://${cfg.ingress.host}"; }
                 ++ lib.optional (cfg.auth.mode != "header")
                   # Identity provider: header (default) or alb-oidc.
                   { name = "AUTH_MODE"; value = cfg.auth.mode; }
                 ++ lib.optional cfg.auth.albVerify
-                  # Verify the ALB x-amzn-oidc-data JWT signature before trusting
-                  # it. Requires a region (the public-key host is region-specific:
-                  # public-keys.auth.elb.<region>.amazonaws.com) — assert rather
-                  # than silently guessing.
+                  # Verifying the ALB JWT needs a region (the public-key host is
+                  # region-specific), so assert rather than guess.
                   (assert lib.assertMsg (cfg.auth.albRegion != null)
                     "scooter.auth.albVerify = true requires scooter.auth.albRegion to be set (the ALB public-key endpoint is region-specific).";
                     { name = "AUTH_ALB_VERIFY"; value = "1"; })
@@ -1417,91 +1245,72 @@ in
                   { name = "AUTH_SUB_EMAIL_MAP";
                     value = lib.concatStringsSep "," (lib.mapAttrsToList (k: v: "${k}=${v}") cfg.auth.subEmailMap); }
                 ++ lib.optionals cfg.scheduler.enable ([
-                  # Scheduled-task MCP tools (list/search/view/create/edit/delete): the
-                  # agent-host proxies to the scheduler service, scoped to the
-                  # conversation owner. Only wired when the scheduler is deployed.
+                  # Scheduled-task MCP tools, proxied to the scheduler service and scoped
+                  # to the conversation owner.
                   { name = "SCHEDULER_URL"; value = "http://agent-scheduler.${cfg.namespace}.svc.cluster.local:8080"; }
                 ] ++ lib.optional (cfg.scheduler.relayKey != "")
                     { name = "SCHEDULER_RELAY_KEY"; value = cfg.scheduler.relayKey; })
                 ++ lib.optional (!cfg.fakeAgent)
-                  # Real `goose acp`. The provider selects the model backend.
+                  # Real `goose acp`; the provider selects the model backend.
                   { name = "GOOSE_PROVIDER"; value = cfg.agent.provider; }
                 ++ lib.optionals (!cfg.fakeAgent && cfg.agent.provider != "claude-code") [
-                  # Bedrock (or another AWS-backed provider): the agent process inherits
-                  # the pod's IRSA identity via the AWS SDK web-identity chain — no keys.
+                  # Bedrock (or another AWS-backed provider): the agent inherits the pod's
+                  # IRSA identity via the AWS SDK web-identity chain.
                   { name = "AWS_REGION"; value = cfg.agent.region; }
                   { name = "AWS_DEFAULT_REGION"; value = cfg.agent.region; }
                 ] ++ lib.optionals (!cfg.fakeAgent && cfg.agent.provider == "claude-code") [
                   # claude-code provider: the agent-host drives the agent via the Claude
-                  # Agent SDK (services/claude-sdk-provider, baked in) instead of goose —
-                  # so the agent's shell/file tools run IN THE SANDBOX (an in-process MCP
-                  # server → ExecBackend), fixing the "tools ran in the agent-host pod,
-                  # scooter-rebuild unreachable" bug. GOOSE_PROVIDER=claude-code (set above)
-                  # selects that branch. Auth is the long-lived subscription OAuth token
-                  # (`claude setup-token`) from a Secret; the SDK reads CLAUDE_CODE_OAUTH_TOKEN.
+                  # Agent SDK, whose shell/file tools run in the sandbox through an
+                  # in-process MCP server, with the subscription OAuth token from a Secret.
                   {
                     name = "CLAUDE_CODE_OAUTH_TOKEN";
                     valueFrom.secretKeyRef = { name = cfg.agent.claudeCode.tokenSecret; key = "token"; };
                   }
-                  # The SDK bundles a musl `claude` that fails on the glibc image;
-                  # point it at the glibc `claude` baked onto the image (nixpkgs
-                  # claude-code, on PATH) via pathToClaudeCodeExecutable.
+                  # The SDK's bundled musl `claude` fails on the glibc image, so point it
+                  # at the glibc `claude` on PATH.
                   { name = "CLAUDE_CODE_COMMAND"; value = "claude"; }
-                  # The SDK spawns the bundled `claude` CLI, which uses
-                  # `--dangerously-skip-permissions`; that flag is refused under root (the
-                  # agent-host runs as root) unless IS_SANDBOX marks a sandboxed context.
-                  # (Proper long-term fix: run the agent-host as a non-root user.)
+                  # The SDK runs `claude --dangerously-skip-permissions`, which is refused
+                  # under root unless IS_SANDBOX marks a sandboxed context.
                   { name = "IS_SANDBOX"; value = "1"; }
-                ] ++ lib.optional (!cfg.fakeAgent && defaultModelId != null)
-                  # The default model. Derived from availableModels.<id>.default
-                  # (or the deprecated agent.model).
+                ] ++ lib.optional (defaultModelId != null)
+                  # The default model, derived from availableModels.<id>.default (or the
+                  # deprecated agent.model).
                   { name = "GOOSE_MODEL"; value = defaultModelId; }
-                ++ lib.optional (!cfg.fakeAgent && hasModels)
-                  # The rich catalog (ids + hints + default) the agent-host reads.
-                  # Powers list_models / switch_model + the per-conversation override.
+                ++ lib.optional hasModels
+                  # The catalog is DATA, not an agent capability: a fake agent still has
+                  # models to list, group by provider and switch between, and gating it on
+                  # fakeAgent left the cluster tier unable to test any of that.
                   { name = "AGENT_MODELS_JSON"; value = modelsJson; }
                 ++ lib.optional cfg.fakeAgent
-                  # Run the bundled dummy ACP agent (no model/cluster) — for the
-                  # spawn-from-webhook + UI e2e on the cluster.
+                  # Run the bundled dummy ACP agent (no model, no cluster) for the cluster e2e.
                   { name = "GOOSE_BIN"; value = "fake"; }
                 ++ lib.optional (cfg.sandboxResources != null || cfg.defaultSandboxSizeName != null)
-                  # The DEFAULT size a new sandbox comes up at, as a rendered k8s
-                  # resources block. Normally the preset marked `default = true`.
-                  #
-                  # sandboxResources (INTERNAL, set only by modules/testing.nix) WINS:
-                  # the test size is deliberately Burstable (near-zero requests, real
-                  # limits) so several sandboxes co-schedule on a 4-vCPU CI runner, and
-                  # a preset cannot express that — presets are requests == limits by
-                  # construction. Without the override the suites would reserve the
-                  # production size each and a second concurrent conversation would
-                  # never schedule.
+                  # The default size a new sandbox comes up at as a rendered k8s resources
+                  # block; the internal sandboxResources override wins because the test
+                  # size is Burstable, which a preset cannot express.
                   { name = "SANDBOX_RESOURCES";
                     value = if cfg.sandboxResources != null then builtins.toJSON cfg.sandboxResources
                     else
                     let
                       preset = cfg.sandboxSizes.${cfg.defaultSandboxSizeName};
-                      # A GPU renders under its extended-resource name on BOTH sides —
+                      # A GPU renders under its extended-resource name on both sides, since
                       # k8s rejects a GPU request that differs from its limit.
                       side = { cpu = preset.cpu; memory = preset.memory; }
                         // lib.optionalAttrs (preset.gpu != null) { "nvidia.com/gpu" = toString preset.gpu; };
                     in builtins.toJSON { requests = side; limits = side; };
                   }
                 ++ [
-                  # CONVERSATION TOKENS (#700). The agent-host mints one per conversation and
-                  # hands it to the agent as the MCP endpoint's bearer credential; it verifies
-                  # the same token on that endpoint, and the broker verifies it on /mcp. The
-                  # conversation used to travel as `?conv=` on an unauthenticated route.
-                  #
-                  # No `optional`: a missing Secret must fail container creation rather than
-                  # degrade to an endpoint that accepts any conversation from any caller.
+                  # The agent-host mints a conversation token per conversation as the MCP
+                  # endpoint's bearer credential and verifies it there, as does the broker
+                  # on /mcp; no `optional`, so a missing Secret fails container creation
+                  # rather than degrading to an open endpoint.
                   {
                     name = "CONV_TOKEN_SECRET";
                     valueFrom.secretKeyRef = { name = cfg.convTokenSecret; key = "secret"; };
                   }
                 ]
                 ++ lib.optionals cfg.agent.remoteAgent.enable [
-                  # Bring-your-own-Claude: enable /remote-agent/connect + the Settings section.
-                  # The HS256 signing key for owner-bound join tokens (one server-side secret).
+                  # Bring-your-own-Claude: the HS256 signing key for owner-bound join tokens.
                   {
                     name = "REMOTE_AGENT_JOIN_SECRET";
                     valueFrom.secretKeyRef = { name = cfg.agent.remoteAgent.joinSecret; key = "secret"; };
@@ -1510,74 +1319,61 @@ in
                   { name = "REMOTE_AGENT_IMAGE"; value = cfg.agent.remoteAgent.image; }
                 ]
                 ++ lib.optional (cfg.agent.remoteAgent.enable && cfg.agent.remoteAgent.bridgeUrl != "")
-                  # The BYOC controller's PUBLIC base — what the container dials from the user's
-                  # laptop (/byoc/ws/<session-id> is appended per owner).
+                  # The BYOC controller's public base URL, which the user's container dials
+                  # (/byoc/ws/<session-id> appended per owner).
                   { name = "BYOC_PUBLIC_URL"; value = cfg.agent.remoteAgent.bridgeUrl; }
                 ++ lib.optional cfg.byoc.enable
-                  # The controller's IN-CLUSTER base — where the agent-host mints sessions, resolves
-                  # ownership, and sends every ACP frame. Without this there is NO BYO path and every
-                  # run takes the cloud floor.
+                  # The controller's in-cluster base, where the agent-host mints sessions,
+                  # resolves ownership, and sends every ACP frame.
                   { name = "BYOC_CONTROLLER_URL"; value = "http://byoc-controller.${cfg.namespace}.svc.cluster.local:8080"; }
                 ++ lib.optional (approvalContribsJson != null)
-                  # The contribs that raise human approvals: name -> where its verbs
-                  # live on the broker. The agent-host relays a user's Approve/Deny
-                  # there. It carries no prose and no policy — what is being approved
-                  # is the contrib's business, and the UI's half of this declaration
-                  # travels separately in the contrib manifest.
+                  # The contribs that raise human approvals, name -> where its verbs live
+                  # on the broker, so the agent-host can relay a user's Approve/Deny.
                   { name = "APPROVAL_CONTRIBS_JSON"; value = approvalContribsJson; }
                 ++ lib.optionals cfg.broker.enable [
-                  # BROKER_URL + the projected broker token: the AWS approve/deny relay
+                  # BROKER_URL and the projected broker token for the approve/deny relay
                   # and the shares/links queries the agent-host makes on a conversation's
-                  # behalf. NOT provisioning — the agent-host writes the Sandbox CR
-                  # itself and never asks the broker for a pod.
+                  # behalf.
                   { name = "BROKER_URL"; value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080"; }
                   { name = "BROKER_TOKEN_PATH"; value = "/var/run/secrets/broker/token"; }
                 ] ++ lib.optionals overlayCmNeeded [
-                  # The manifest-overlay CM (patches deep-merged onto the generated
-                  # Sandbox — see session/sandboxOverlay.ts): the consumer's own, and
-                  # the enabled contribs' pod parts. Read at create time, so editing it
-                  # lands on the next conversation without a restart.
+                  # The manifest-overlay ConfigMap (patches deep-merged onto the generated
+                  # Sandbox), read at create time so an edit lands on the next conversation.
                   { name = "SANDBOX_MANIFEST_OVERLAY_CONFIGMAP"; value = "sandbox-manifest-overlay"; }
                 ] ++ [
-                  # The named size catalog (name → {cpu, memory, gpu?, hint?}) and which
-                  # preset is the default — the UI dropdown and the agent's size
-                  # discovery. Each preset renders requests == limits (Guaranteed QoS).
+                  # The named size catalog and which preset is the default, behind the UI
+                  # dropdown and the agent's size discovery.
                   { name = "SANDBOX_SIZES_JSON";
                     value = builtins.toJSON (lib.mapAttrs (_name: preset:
                       { cpu = preset.cpu; memory = preset.memory; }
                       // lib.optionalAttrs (preset.gpu != null) { gpu = preset.gpu; }
-                      # Omit an empty hint rather than emitting "" — the agent and the
-                      # dropdown both branch on presence, not on emptiness.
+                      # Omit an empty hint, since the agent and the dropdown branch on presence.
                       // lib.optionalAttrs (preset.hint != "") { hint = preset.hint; }
                     ) cfg.sandboxSizes);
                   }
-                  # "" (not null) when no presets are configured — an env value must be a
-                  # string, and the agent-host reads empty as "no deployment default".
+                  # "" (not null) when no presets are configured, since an env value must be
+                  # a string and the agent-host reads empty as no default.
                   { name = "SANDBOX_DEFAULT_SIZE_NAME";
                     value = if cfg.defaultSandboxSizeName == null then "" else cfg.defaultSandboxSizeName;
                   }
                 ] ++ lib.optionals (cfg.deployTools.scooterConfigMap != null) [
-                  # Deployment tool injection (generic): the agent-host mounts the
-                  # deployment's .scooter ConfigMap + projects the named token
-                  # audiences + sets the deployment env on each sandbox.
+                  # Generic deployment tool injection: the agent-host mounts the .scooter
+                  # ConfigMap, projects the token audiences, and sets the deployment env
+                  # on each sandbox.
                   { name = "SCOOTER_CONFIGMAP"; value = cfg.deployTools.scooterConfigMap; }
                 ] ++ lib.optional (cfg.deployTools.tokenAudiences != [ ])
                   { name = "SCOOTER_TOKEN_AUDIENCES"; value = lib.concatStringsSep "," cfg.deployTools.tokenAudiences; }
                 ++ lib.optional (cfg.deployTools.env != { })
-                  # JSON, not `k=v;k=v` — a value with a newline (a multi-line
-                  # NIX_CONFIG), a `;`, or a `=` cannot survive the flat encoding
-                  # (it splits/mangles, and the parser's trim() ate the newlines).
-                  # toJSON round-trips every value losslessly into the pod env.
+                  # JSON rather than `k=v;k=v`, so values with newlines, `;` or `=`
+                  # round-trip losslessly.
                   { name = "SCOOTER_ENV"; value = builtins.toJSON cfg.deployTools.env; }
                 ++ lib.optional (cfg.deployTools.configFiles != { })
-                  # The agent-host mounts this ConfigMap (filename -> contents) as a
-                  # flat dir at /etc/agent-sandbox/config in each sandbox. File-based
-                  # (not env) so multi-line config survives the CRD controller.
+                  # Mounted by the agent-host as a flat dir at /etc/agent-sandbox/config in
+                  # each sandbox, file-based so multi-line config survives the CRD controller.
                   { name = "SCOOTER_CONFIG_FILES_CONFIGMAP"; value = "deploy-config-files"; }
                 ++ lib.optionals cfg.observability.otel.enable ([
-                  # OTel metrics ON. The OTLP endpoint/headers come from the
-                  # OTEL_EXPORTER_OTLP_* env in observability.otel.env (the SDK
-                  # reads them). Pricing comes from the mounted ConfigMap.
+                  # OTel metrics on; the OTLP endpoint/headers come from
+                  # observability.otel.env and pricing from the mounted ConfigMap.
                   { name = "OTEL_METRICS_ENABLED"; value = "1"; }
                   { name = "OTEL_SERVICE_NAME"; value = "agent-host"; }
                 ] ++ lib.optional (cfg.observability.otel.environment != null)
@@ -1586,21 +1382,16 @@ in
                     { name = "AGENT_PRICING_FILE"; value = "/etc/agent-sandbox/pricing/pricing.json"; }
                   ++ lib.mapAttrsToList (k: v: { name = k; value = v; }) cfg.observability.otel.env)
                 ++ lib.optionals cfg.webhooks.enable ([
-                  # READ access to the webhooks conversation_map + identity store (the
-                  # shared Postgres `webhooks` db). Powers the agent-tools' target
-                  # DISCOVERY fallback AND the settings Users page (identity store).
-                  # Uses the webhooks role's own secret (agent-pg-webhooks). Present
-                  # whenever webhooks is enabled — its db is always provisioned then.
+                  # Read access to the webhooks conversation_map and identity store, using
+                  # the webhooks role's own secret.
                   { name = "WEBHOOKS_DB_HOST"; value = cfg.postgres.host; }
                   { name = "WEBHOOKS_DB_PORT"; value = toString cfg.postgres.port; }
                   { name = "WEBHOOKS_DB_NAME"; value = "webhooks"; }
                   { name = "WEBHOOKS_DB_USER"; value = "webhooks"; }
                   { name = "WEBHOOKS_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-webhooks"; key = "password"; }; }
                 ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "WEBHOOKS_DB_SSLMODE"; value = cfg.postgres.sslmode; })
-                # The BYOC database: agent-host writes byoc.remote_agents (the liveness
-                # badge) alongside byoc-controller, which owns session_id. Gated on BYOC
-                # being enabled — NOT on webhooks: agent-host's own tables must not vanish
-                # because an unrelated service is off (the failure this whole chain fixes).
+                # The BYOC database, where agent-host writes byoc.remote_agents alongside
+                # byoc-controller; gated on BYOC, not on webhooks.
                 ++ lib.optionals cfg.byoc.enable ([
                   { name = "BYOC_DB_HOST"; value = cfg.postgres.host; }
                   { name = "BYOC_DB_PORT"; value = toString cfg.postgres.port; }
@@ -1608,10 +1399,8 @@ in
                   { name = "BYOC_DB_USER"; value = "byoc"; }
                   { name = "BYOC_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-byoc"; key = "password"; }; }
                 ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "BYOC_DB_SSLMODE"; value = cfg.postgres.sslmode; })
-                # The agent_host database: the tables agent-host OWNS (conversation_jobs,
-                # conversations). Wired whenever Postgres is configured — NOT behind
-                # another service's enable flag, or agent-host's own state disappears when
-                # that service is off. See todo/draft/SHARED_DB_TABLE_OWNERSHIP.md.
+                # The agent_host database (the tables agent-host owns), wired whenever
+                # Postgres is configured rather than behind another service's flag.
                 ++ [
                   { name = "AGENT_HOST_DB_HOST"; value = cfg.postgres.host; }
                   { name = "AGENT_HOST_DB_PORT"; value = toString cfg.postgres.port; }
@@ -1620,12 +1409,11 @@ in
                   { name = "AGENT_HOST_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-agent-host"; key = "password"; }; }
                 ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; };
                 volumeMounts = [
-                  # Per-pod hot history (RWO volumeClaimTemplate).
+                  # Per-pod hot history cache.
                   { name = "state"; mountPath = "/var/lib/agent-host"; }
                   # Ephemeral agent scratch (emptyDir): goose cwd + $HOME.
                   { name = "scratch"; mountPath = "/var/lib/agent-scratch"; }
-                  # The image's /tmp is read-only (nix store). goose needs a
-                  # writable /tmp for session/new temp files — mount one.
+                  # The image's /tmp is read-only and goose needs a writable one.
                   { name = "tmp"; mountPath = "/tmp"; }
                 ]
                 ++ lib.optional cfg.conversationController.assets.enable
@@ -1637,31 +1425,21 @@ in
                   # Per-model price table -> cost derivation (AGENT_PRICING_FILE).
                   { name = "pricing"; mountPath = "/etc/agent-sandbox/pricing"; readOnly = true; }
                 ++ lib.optional cfg.broker.enable
-                  # The agent-host's own broker token — it relays AWS approve/deny and
-                  # queries shares/links on a conversation's behalf. NOT provisioning:
-                  # the agent-host writes the Sandbox CR itself.
+                  # The agent-host's own broker token for the approve/deny relay and the
+                  # shares/links queries it makes on a conversation's behalf.
                   { name = "broker-token"; mountPath = "/var/run/secrets/broker"; readOnly = true; }
                 ++ [
                   { name = "conversation-router-token"; mountPath = "/var/run/secrets/conversation-router"; readOnly = true; }
                 ];
                 readinessProbe.httpGet = { path = "/healthz"; port = "agui"; };
-                # Graceful drain on rollout. preStop sleeps briefly so the Service
-                # stops routing NEW traffic to this pod (endpoint removal propagates)
-                # BEFORE the kubelet sends SIGTERM; the app's SIGTERM handler then
-                # flushes in-flight event-log writes + closes SSE cleanly (clients get
-                # a proper close + reconnect, not a raw 502 from a hard kill). Under
-                # today's Recreate + replicas:1 this slightly lengthens the rollout gap
-                # (accepted — the clean drain is the reusable primitive; once #123 moves
-                # agent-host to a RollingUpdate StatefulSet the drain removes the gap
-                # entirely). grace period bounds the whole stop; keep it > preStop +
-                # SHUTDOWN_TIMEOUT_MS (8s) so the drain can finish.
+                # preStop sleeps so endpoint removal propagates before SIGTERM, and the
+                # grace period stays above preStop + SHUTDOWN_TIMEOUT_MS so the drain can
+                # finish.
                 lifecycle.preStop.exec.command = [ "sleep" "5" ];
               };
               terminationGracePeriodSeconds = 20;
-              # `state` is an emptyDir HOT CACHE (not a PVC): the durable copy is the shared
-              # RWX history mirror, and a reassigned conversation is revived from it. Using an
-              # emptyDir (no RWO PVC) is what lets the Deployment surge (maxSurge=1) without a
-              # Multi-Attach deadlock. scratch/tmp are also ephemeral emptyDirs.
+              # `state` is an emptyDir hot cache of the durable history mirror, which is what
+              # lets the Deployment surge without a Multi-Attach deadlock.
               volumes = [
                 { name = "state"; emptyDir = { }; }
                 { name = "scratch"; emptyDir = { }; }
@@ -1686,34 +1464,27 @@ in
       };
 
 
-      # Agent skills (filename -> markdown), injected per conversation as
-      # .goosehints. Edit this (the option) to add/change a skill — no image
-      # rebuild. Only rendered when skills are configured.
+      # Agent skills (filename -> markdown) injected per conversation as .goosehints;
+      # edit the ConfigMap to change a skill without an image rebuild.
       configMaps = lib.optionalAttrs (allSkills != { }) {
         agent-skills = {
           metadata = { name = "agent-skills"; namespace = cfg.namespace; };
           data = allSkills;
         };
       } // lib.optionalAttrs (cfg.deployTools.configFiles != { }) {
-        # Deployment config FILES (filename -> contents), mounted as a flat dir at
-        # /etc/agent-sandbox/config in each sandbox. File-based, so multi-line config
-        # (e.g. a nix.conf) survives the sandbox CRD controller's env-var newline
-        # corruption. The agent-host provisioner mounts it (SCOOTER_CONFIG_FILES_CONFIGMAP).
+        # Deployment config files mounted as a flat dir at /etc/agent-sandbox/config in
+        # each sandbox (SCOOTER_CONFIG_FILES_CONFIGMAP).
         deploy-config-files = {
           metadata = { name = "deploy-config-files"; namespace = cfg.namespace; };
           data = cfg.deployTools.configFiles;
         };
       } // lib.optionalAttrs overlayCmNeeded {
-        # Manifest overlays (recursive PATCHes deep-merged onto the generated
-        # per-conversation Sandbox — see agent-host session/sandboxOverlay.ts). The
-        # agent-host reads it by name (SANDBOX_MANIFEST_OVERLAY_CONFIGMAP) at create
-        # time, so a ConfigMap edit takes effect on the next conversation without a
-        # redeploy.
+        # Manifest overlays deep-merged onto the generated Sandbox, read by name at
+        # create time so an edit takes effect on the next conversation.
         sandbox-manifest-overlay = {
           metadata = { name = "sandbox-manifest-overlay"; namespace = cfg.namespace; };
-          # Each key holds a whole patch as YAML (JSON is valid YAML): the consumer's,
-          # and the enabled contribs' pod parts. The host merges contrib UNDER consumer,
-          # so a deployment can still override a contrib's env or volume by name.
+          # Each key holds a whole patch as YAML; the host merges contrib under consumer,
+          # so a deployment can override a contrib's env or volume by name.
           data = lib.optionalAttrs (cfg.deployTools.sandboxManifestOverlay != { }) {
             "overlay.yaml" = builtins.toJSON cfg.deployTools.sandboxManifestOverlay;
           } // lib.optionalAttrs (contribPodOverlay != { }) {
@@ -1721,8 +1492,7 @@ in
           };
         };
       } // lib.optionalAttrs (cfg.observability.otel.enable && cfg.observability.otel.pricing != { }) {
-        # Per-model price table (USD per 1M tokens) -> cost derivation. Serialized
-        # to the shape pricing.ts parses; null cached rates are dropped.
+        # Per-model price table in the shape pricing.ts parses; null cached rates are dropped.
         agent-pricing = {
           metadata = { name = "agent-pricing"; namespace = cfg.namespace; };
           data."pricing.json" = builtins.toJSON (
@@ -1736,10 +1506,8 @@ in
         };
       };
 
-      # The `agent-host` Service — the public front door every caller uses
-      # (agent-host.<ns>.svc:8080). Selects the ROUTER, which reverse-proxies each request to
-      # the pod owning the conversation (status.hostIP). Callers (UI/broker/webhooks) are
-      # unchanged.
+      # The `agent-host` Service is the front door every caller uses; it selects the
+      # router, which reverse-proxies each request to the pod owning the conversation.
       services.agent-host = {
         metadata = { name = "agent-host"; namespace = cfg.namespace; };
         spec = {
@@ -1747,10 +1515,8 @@ in
           ports = [{ port = 8080; targetPort = "agui"; name = "agui"; }];
         };
       };
-      # ClusterIP Service selecting the agent-host PODS directly — the ROUTER'S FALLBACK
-      # target (AGENT_HOST_SERVICE) for non-scoped / unassigned / stale-IP requests: k8s
-      # load-balances to any ready pod. (Replaces the per-pod headless Service — routing is
-      # by pod IP now, so no per-pod DNS is needed; this is just the "any ready pod" door.)
+      # ClusterIP Service selecting the agent-host pods directly: the router's fallback
+      # target for unassigned or stale-IP requests.
       services.agent-host-pods = {
         metadata = { name = "agent-host-pods"; namespace = cfg.namespace; };
         spec = {
@@ -1759,31 +1525,28 @@ in
         };
       };
     }
-    # The PVC is provisioned when the mirror is IN USE, or when it is being kept
-    # alive purely so the Postgres migration can read history out of it.
+    # The PVC is provisioned when the mirror is in use, or kept alive so the Postgres
+    # migration can read history out of it.
     (lib.mkIf (cfg.conversationController.historyMirror.enable
                || cfg.conversationController.historyMirror.retainForMigration) (
       let hm = cfg.conversationController.historyMirror; in {
-        # Shared history-mirror PVC — ONE ReadWriteMany volume every agent-host
-        # pod appends its events to (async, off the hot path). After a
-        # conversation reassigns to a different pod, the new host reads its
-        # history back from here. This is what makes cross-pod revival work; the
-        # per-pod `state` volumeClaimTemplate is only each pod's local hot copy.
+        # Shared ReadWriteMany history-mirror PVC every agent-host pod appends to, from
+        # which a reassigned conversation's new host reads its history back.
         persistentVolumeClaims.agent-host-history = {
           metadata = { name = "agent-host-history"; namespace = cfg.namespace; };
           spec = {
             accessModes = [ hm.accessMode ];
             resources.requests.storage = hm.size;
           }
-          # hostPath escape hatch → bind to the
-          # explicit PV below by class; otherwise use the given/ default class.
+          # The hostPath escape hatch binds to the explicit PV below by class; otherwise
+          # the given/default class.
           // (if hm.hostPath != null
               then { storageClassName = "agent-host-history-hostpath"; }
               else lib.optionalAttrs (hm.storageClassName != null) { storageClassName = hm.storageClassName; });
         };
       }
-      # Single-node hostPath PV so a ReadWriteMany PVC binds where there's no RWX
-      # provisioner (all agent-host pods land on the one node, sharing the dir).
+      # Single-node hostPath PV so a ReadWriteMany PVC binds where there is no RWX
+      # provisioner.
       // lib.optionalAttrs (hm.hostPath != null) {
         persistentVolumes.agent-host-history = {
           metadata.name = "agent-host-history";
@@ -1799,27 +1562,23 @@ in
     ))
     (lib.mkIf cfg.conversationController.assets.enable (
       let as = cfg.conversationController.assets; in {
-      # Dedicated assets PVC for uploaded images. BYTES-ONLY: asset metadata
-      # (conversation_id, asset_id, mime_type, size, sha256_hash, created_at) lives
-      # in Postgres; the PVC holds only the raw image data, keyed by asset_id.
-      # ReadWriteMany: all agent-host replicas write to the shared assets storage.
+      # Dedicated bytes-only assets PVC (metadata lives in Postgres), ReadWriteMany so
+      # every replica writes to it.
       persistentVolumeClaims.agent-host-assets = {
         metadata = { name = "agent-host-assets"; namespace = cfg.namespace; };
         spec = {
           accessModes = [ as.accessMode ];
           resources.requests.storage = as.size;
         }
-        # hostPath escape hatch → bind to the explicit PV below by class; otherwise
-        # use the given/default class. Mirrors historyMirror: an RWX claim never binds
-        # on a cluster whose only provisioner (k3d local-path) is RWO, so on a single
-        # node a hostPath PV backs it and every pod shares the one node's directory.
+        # The hostPath escape hatch binds to the explicit PV below by class; otherwise
+        # the given/default class.
         // (if as.hostPath != null
             then { storageClassName = "agent-host-assets-hostpath"; }
             else lib.optionalAttrs (as.storageClassName != null) { storageClassName = as.storageClassName; });
       };
     }
-    # Single-node hostPath PV so a ReadWriteMany assets PVC binds where there's no RWX
-    # provisioner (all agent-host pods land on the one node, sharing the dir).
+    # Single-node hostPath PV so a ReadWriteMany assets PVC binds where there is no RWX
+    # provisioner.
     // lib.optionalAttrs (cfg.conversationController.assets.hostPath != null) {
       persistentVolumes.agent-host-assets = {
         metadata.name = "agent-host-assets";
@@ -1834,14 +1593,12 @@ in
     }
     ))
     (lib.mkIf cfg.ui.enable {
-      # Conversation UI — nginx serving the assistant-ui build and proxying the
-      # agent-host API on the same origin (so the browser's /agui SSE + /sessions
-      # + management calls work without CORS).
+      # Conversation UI: nginx serving the assistant-ui build and proxying the
+      # agent-host API on the same origin.
       deployments.ui = {
         metadata = { name = "ui"; namespace = cfg.namespace; };
         spec = {
-          # Stateless static nginx (+ agent-host proxy) — 2 replicas by default so
-          # consolidation can't take the UI offline.
+          # Stateless, so several replicas keep the UI up through a node drain.
           replicas = cfg.statelessReplicas;
           selector.matchLabels.app = "ui";
           template = {
@@ -1850,7 +1607,7 @@ in
               name = "ui";
               image = cfg.uiImage;
               imagePullPolicy = cfg.pullPolicy;
-              # A static file server — small footprint.
+              # A static file server, so a small footprint.
               resources = lib.mkDefault {
                 requests = { cpu = "50m"; memory = "64Mi"; };
                 limits = { memory = "256Mi"; };
@@ -1861,16 +1618,12 @@ in
                 value = "http://agent-host.${cfg.namespace}.svc.cluster.local:8080";
               } {
                 # nginx forwards /s/ (static shares) here so the broker stays
-                # cluster-internal. Set unconditionally (harmless when shares is
-                # off — the broker 404s /s/); the FQ address matches AGENT_HOST_URL.
+                # cluster-internal; harmless when shares is off.
                 name = "BROKER_URL";
                 value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080";
               }] ++ lib.optionals cfg.observability.browserTelemetry.enable [
-                # Where nginx forwards /telemetry/. ASSERT rather than defaulting to a
-                # plausible-looking address: a wrong collector URL fails SILENTLY — the UI
-                # collects spans, posts them, and nginx's 204 sink swallows the result, so
-                # the deployment looks healthy while producing no telemetry at all. Fail
-                # at eval instead.
+                # Where nginx forwards /telemetry/, asserted rather than defaulted because
+                # a wrong collector URL fails silently.
                 (assert lib.assertMsg (cfg.observability.browserTelemetry.collectorUrl != null)
                   "scooter.observability.browserTelemetry.enable = true requires observability.browserTelemetry.collectorUrl to be set (e.g. http://alloy-singleton.monitoring.svc.cluster.local:4318 for the Grafana k8s-monitoring chart). There is no safe default: a wrong collector URL discards telemetry silently.";
                   {
@@ -1893,12 +1646,9 @@ in
       };
     })
     (lib.mkIf cfg.ingress.enable {
-      # The chat/API Ingress — a generic networking.k8s.io/v1 Ingress. The
-      # controller (className) + all controller-specific config (TLS cert, scheme,
-      # AUTH + the trusted identity header, external-dns hostname, …) come from
-      # `annotations`, so any controller (ALB, nginx, traefik) works. SECURITY: the
-      # agent-host trusts an identity header the ingress sets — that auth lives in
-      # `annotations` (the module gates nothing itself).
+      # The chat/API Ingress: all controller-specific config, including auth and the
+      # trusted identity header, comes from `annotations`, and the module gates
+      # nothing itself.
       ingresses.agent-host = {
         metadata = {
           name = "agent-host";
@@ -1908,9 +1658,8 @@ in
         spec = {
           ingressClassName = lib.mkIf (cfg.ingress.className != "") cfg.ingress.className;
           rules = [(
-            # Omit `host` entirely when unset — a host-less rule is a valid
-            # catch-all (any Host), whereas `host: ""` is rejected by some
-            # controllers. Set `ingress.host` for name-based routing.
+            # Omit `host` when unset, since a host-less rule is a valid catch-all while
+            # `host: ""` is rejected by some controllers.
             lib.optionalAttrs (cfg.ingress.host != "") { host = cfg.ingress.host; }
             // {
               http.paths = [{
@@ -1920,8 +1669,7 @@ in
               }];
             }
           )];
-          # Only emit a tls entry when there's a host to name — a hostless
-          # default-on ingress (local/dev) carries no TLS block.
+          # Only emit a tls entry when there is a host to name.
           tls = lib.optionals (cfg.ingress.tls && cfg.ingress.host != "") [
             ({ hosts = [ cfg.ingress.host ]; }
               // lib.optionalAttrs (cfg.ingress.tlsSecretName != "") {
@@ -1931,9 +1679,8 @@ in
         };
       };
     })
-    # NOTE: the webhooks receiver gets its OWN generic Ingress, defined in
-    # webhooks.nix (its own host + annotations + NO auth — providers can't send an
-    # identity header; the handlers verify provider signatures themselves).
+    # The webhooks receiver gets its own Ingress in webhooks.nix, with no auth since
+    # the handlers verify provider signatures themselves.
     ];
   };
 }

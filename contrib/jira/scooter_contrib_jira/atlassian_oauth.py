@@ -1,9 +1,4 @@
-"""Atlassian OAuth credential source — client-credentials -> access token.
-
-Exchanges client_id/secret for a short-lived Atlassian access token (cached,
-refreshed early). Used by the Jira provider. Logic lifted from openhands-nix
-jira.py.
-"""
+"""Atlassian OAuth credential source: client credentials exchanged for a short-lived access token, cached and refreshed early."""
 
 from __future__ import annotations
 

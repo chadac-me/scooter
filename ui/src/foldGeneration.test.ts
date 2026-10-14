@@ -1,14 +1,11 @@
 /**
- * FOLD GENERATION — the signal that tells a re-fold apart from a shrink.
+ * Fold generation: the signal that tells a re-fold apart from a shrink.
  *
  * Each connection re-folds the log from an empty accumulator over the server's trailing
- * window, so the list it produces can be SHORTER than the one before it. The render pump
- * suppresses shrinking lists (a shorter list mid-render crashes assistant-ui's lookup),
- * so it needs to know when a shrink is a new fold rather than a mid-fold frame —
- * otherwise its high-water mark latches and the transcript freezes until a refresh.
- *
- * This asserts the generation moves exactly when a fold restarts: per CONNECTION, and
- * not for a prepend of paged-in history (same fold, list legitimately grows).
+ * window, so the list it produces can be shorter than the one before it. The render pump
+ * suppresses shrinking lists, so it needs to know when a shrink is a new fold rather than
+ * a mid-fold frame. The generation moves exactly when a fold restarts: per connection,
+ * and not for a prepend of paged-in history.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -17,8 +14,7 @@ import { createIntegrityAgent } from "./integrityAgent.js";
 
 const msg = (id: string) => ({ id, role: "assistant", content: id });
 
-/** A finished turn, then the stream goes byte-silent without closing — the drop the
- *  idle watchdog exists to heal. Every connection serves the same body. */
+/** A finished turn, then the stream goes byte-silent without closing; every connection serves the same body. */
 function silentAfterSyncFetch(onConnect: () => void): typeof fetch {
   const frames = [
     { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },

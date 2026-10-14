@@ -1,10 +1,7 @@
-"""Shared test helpers.
+"""Shared test helpers, importable as `from conftest import ...` because pyproject sets pythonpath = ["tests"].
 
-SQLite has no migrations, so the test suite builds its schema from the ORM models.
-On Postgres the Atlas migrations under lib/sql own the schema and the services issue
-no DDL at all — which is why this lives here and not in a store's init().
-
-Importable as `from conftest import ...` because pyproject sets pythonpath = ["tests"].
+SQLite has no migrations, so the test suite builds its schema from the ORM models here,
+while on Postgres the lib/sql migrations own the schema and the services issue no DDL.
 """
 
 from sqlalchemy.orm import DeclarativeBase
@@ -20,8 +17,7 @@ def sqlite_config(**kw) -> StoreConfig:
 
 
 async def create_schema(store, base: type[DeclarativeBase]) -> None:
-    """Create `base`'s tables on the store's engine. SQLite only, by construction:
-    a Postgres store would be a test reaching for DDL that the migrations own."""
+    """Create `base`'s tables on the store's engine, SQLite only."""
     engine = store._engine
     assert engine.dialect.name == "sqlite", (
         f"create_schema is SQLite-only; got {engine.dialect.name!r}. "

@@ -1,14 +1,4 @@
-"""Echo's approval flow — the SECOND consumer of the approval seam.
-
-aws was the only integration that ever raised an approval, so "the mechanism" and
-"what aws needs" were the same code, and the path could only be exercised by mocking
-STS, IAM and OpenFGA. These tests drive the same routes the agent-host relays to,
-with nothing aws-shaped anywhere, which is the actual claim the seam makes.
-
-The assertion that matters most is `test_records_the_human_who_answered`: it is the
-one PR #649 would have failed. Every piece of that path had unit coverage and the
-identity still never arrived.
-"""
+"""Echo's approval flow, driving the routes the agent-host relays to with nothing aws-shaped anywhere."""
 
 from __future__ import annotations
 
@@ -20,11 +10,11 @@ from scooter_broker_lib.types import Identity
 
 from scooter_contrib_echo.approvals import EchoApprovals
 
-CONV = "k3f9zq"  # the SHORT id — the only handle the broker has on a conversation
+CONV = "k3f9zq"  # the short id, the only handle the broker has on a conversation
 
 
 def _client(transport: EchoApprovals) -> TestClient:
-    """Mount the transport the way broker core does: under /{provider.name}."""
+    """Mount the transport the way the broker core does, under /{provider.name}."""
 
     async def authed() -> Identity:
         return Identity(
@@ -48,12 +38,7 @@ def _open_request(client: TestClient, message: str = "echo asks") -> str:
 
 
 def test_routes_match_the_declared_broker_prefix():
-    """The paths the agent-host builds from contrib/echo/default.nix must exist.
-
-    `brokerPrefix = "/echo/approval"` + `/{request_id}/{optionId}`, and
-    `pendingPath = "/echo/approval/pending"`. A declaration that disagrees with the
-    routes is a 404 at answer time — after a human has already clicked Approve.
-    """
+    """The paths the agent-host builds from contrib/echo/default.nix's `brokerPrefix` and `pendingPath` must exist."""
     client = _client(EchoApprovals())
     rid = _open_request(client)
     assert client.get("/echo/approval/pending", params={"conversation_id": CONV}).status_code == 200
@@ -62,13 +47,7 @@ def test_routes_match_the_declared_broker_prefix():
 
 
 def test_records_the_human_who_answered():
-    """WHO approved is the human, not the conversation.
-
-    The bug this pins (PR #649): the agent-host relayed `{id: <conversationId>}`
-    because the answering user's identity was dropped on the /agui resume path. With
-    FGA on that principal matches no tuple; with FGA off it was recorded as the
-    approver and the audit trail named nobody.
-    """
+    """The recorded approver is the human, not the conversation."""
     client = _client(EchoApprovals())
     rid = _open_request(client)
 
@@ -83,8 +62,7 @@ def test_records_the_human_who_answered():
 
 
 def test_refuses_an_answer_that_carries_no_identity():
-    """No approver -> 400, loudly. The fixture's job is to FAIL when the identity is
-    lost, so an e2e regression of #649 cannot pass quietly."""
+    """No approver is a 400, so a lost identity cannot pass quietly."""
     client = _client(EchoApprovals())
     rid = _open_request(client)
     res = client.post(f"/echo/approval/{rid}/approve", json={})
@@ -94,8 +72,7 @@ def test_refuses_an_answer_that_carries_no_identity():
 
 
 def test_the_verb_is_the_option_id():
-    """The platform relays the chosen optionId as a path segment and does not
-    interpret it, so deny is a route rather than `approved=false`."""
+    """The platform relays the chosen optionId as a path segment, so deny is a route rather than `approved=false`."""
     client = _client(EchoApprovals())
     rid = _open_request(client)
     res = client.post(f"/echo/approval/{rid}/deny", json={"approver": {"id": "u@x"}})
@@ -112,16 +89,14 @@ def test_rejects_an_unknown_verb():
 
 
 def test_pending_is_scoped_to_one_conversation_and_clears_when_answered():
-    """What the revive re-raise reads. A request that leaked across conversations would
-    raise someone else's approval window in your chat."""
+    """What the revive re-raise reads; a leak across conversations would raise someone else's approval window."""
     transport = EchoApprovals()
     client = _client(transport)
     rid = _open_request(client)
 
     pending = client.get("/echo/approval/pending", params={"conversation_id": CONV}).json()["requests"]
     assert [r["request_id"] for r in pending] == [rid]
-    # The prose travels WITH the pending row, so a window rebuilt after a rollout is
-    # worded exactly like the one the user lost.
+    # The prose travels with the pending row, so a window rebuilt after a rollout is worded the same.
     assert pending[0]["message"] == "echo asks"
 
     assert client.get("/echo/approval/pending", params={"conversation_id": "someone-else"}).json()["requests"] == []
@@ -136,7 +111,7 @@ def test_pending_requires_a_conversation_id():
 
 
 def test_can_approve_is_per_viewer():
-    """Powers the greyed option. Per-viewer because one interrupt is seen by many."""
+    """Per-viewer because one interrupt is seen by many."""
     transport = EchoApprovals()
     client = _client(transport)
     rid = _open_request(client)
@@ -144,11 +119,9 @@ def test_can_approve_is_per_viewer():
     assert client.post(f"/echo/approval/{rid}/can-approve", json={"approver": {"id": "u@x"}}).json() == {
         "can_approve": True
     }
-    # Anonymous: nothing to authorize.
     assert client.post(f"/echo/approval/{rid}/can-approve", json={}).json() == {"can_approve": False}
 
-    # The refusing case, without standing up OpenFGA — this is what makes the UI's
-    # greyed-option path reachable in an end-to-end test.
+    # The refusing case, without standing up OpenFGA.
     transport.deny_all = True
     assert client.post(f"/echo/approval/{rid}/can-approve", json={"approver": {"id": "u@x"}}).json() == {
         "can_approve": False
@@ -156,8 +129,7 @@ def test_can_approve_is_per_viewer():
 
 
 def test_a_second_answer_does_not_overwrite_the_first():
-    """Two people racing: the first decision stands, and the second gets a 409 rather
-    than silently replacing a recorded security decision."""
+    """Two people racing: the first decision stands and the second gets a 409."""
     client = _client(EchoApprovals())
     rid = _open_request(client)
     client.post(f"/echo/approval/{rid}/approve", json={"approver": {"id": "alice"}})

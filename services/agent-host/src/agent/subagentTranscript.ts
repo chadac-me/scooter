@@ -1,12 +1,7 @@
 /**
- * Subagent transcript builder — folds a persisted AG-UI event log into ordered
- * turns INCLUDING compact tool-call summaries, so a parent monitoring a subagent
- * sees what it DID (tools) as well as what it SAID (text). Used by
- * monitor_subagent (tail) + search_subagent (filter). See
- * todo/docs/SUBAGENT_INTERACTION.md.
- *
- * Distinct from agent/transcript.ts's `foldTurns` (text-only, for the revive
- * preamble) — here tool calls matter, since divergence is often in the actions.
+ * Subagent transcript builder: folds a persisted AG-UI event log into ordered turns
+ * including compact tool-call summaries, so a parent monitoring a subagent sees what
+ * it did as well as what it said. Used by monitor_subagent and search_subagent.
  */
 
 import type { AguiEvent } from "../bridge.js";
@@ -17,16 +12,15 @@ export interface SubagentTurn {
   text: string;
 }
 
-/** Max chars of a tool's args preview in the summary (keeps lines readable). */
+/** Max chars of a tool's args preview in the summary. */
 const TOOL_ARG_PREVIEW = 60;
 
-/** A compact one-line summary for a tool call: `ran <name>` + a short arg preview
- *  (the command / first meaningful field), so the parent sees WHAT it ran. */
+/** A compact one-line summary for a tool call: `ran <name>` plus a short arg preview. */
 function toolSummary(name: string, rawArgs: string): string {
   const args = rawArgs.trim();
   let preview = "";
   if (args) {
-    // Prefer a `command`/`path`/`query` field if the args are JSON; else the raw.
+    // Prefer a `command`/`path`/`query` field if the args are JSON.
     try {
       const obj = JSON.parse(args) as Record<string, unknown>;
       const pick = obj.command ?? obj.path ?? obj.query ?? obj.subagent_id ?? Object.values(obj)[0];
@@ -40,19 +34,13 @@ function toolSummary(name: string, rawArgs: string): string {
   return preview ? `ran ${name} \`${preview}\`` : `ran ${name}`;
 }
 
-/**
- * Fold an event log into ordered turns: user/assistant TEXT_MESSAGE_* become one
- * turn each (concatenated deltas; empty dropped), and each TOOL_CALL_START (with
- * its TOOL_CALL_ARGS, if any) becomes a compact `tool` summary line, in emission
- * order. RUN_* / QUEUE_UPDATED / CONTEXT_USAGE / reasoning framing is skipped.
- */
+/** Fold an event log into ordered turns: one turn per text message (empty dropped) and one compact `tool` summary line per tool call, in emission order. */
 export function foldTurnsWithTools(events: Iterable<AguiEvent>): SubagentTurn[] {
   const textRole = new Map<string, "user" | "assistant">();
   const textBuf = new Map<string, string>();
   const toolName = new Map<string, string>();
   const toolArgs = new Map<string, string>();
-  // A tool summary is emitted when the call is first seen (TOOL_CALL_START); its
-  // args may arrive later (TOOL_CALL_ARGS), so we keep the turn's index to patch it.
+  // A tool summary is emitted at TOOL_CALL_START and patched when its args arrive later.
   const toolTurnIdx = new Map<string, number>();
   const turns: SubagentTurn[] = [];
   for (const e of events) {

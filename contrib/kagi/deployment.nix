@@ -1,4 +1,4 @@
-# kagi's DEPLOYMENT half. Gated on contribs.kagi.enable; why: #599, #711.
+# kagi's deployment half, gated on contribs.kagi.enable.
 { config, lib, ... }:
 
 let

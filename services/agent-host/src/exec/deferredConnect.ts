@@ -1,15 +1,8 @@
 /**
- * Lazy connect with IN-FLIGHT dedupe.
- *
- * The sandbox exec client connects on first use (connectSandbox polls for a
- * Ready pod, up to ~90s). A burst of concurrent first tool calls must share ONE
- * connect, not run N independent pod-readiness waits.
- *
- * `real ??= await connect()` does NOT dedupe: `??=` only caches the *resolved*
- * value, so concurrent awaits all see `undefined` and each call connect. We
- * memoize the *promise* instead. On failure we clear it, so a transient
- * pod-not-ready error doesn't permanently wedge the conversation — the next call
- * retries.
+ * Lazy connect with in-flight dedupe: the sandbox exec client connects on first use
+ * (a pod-readiness poll of up to ~90s), so a burst of concurrent first tool calls
+ * must share one connect. The promise itself is memoized, and cleared on failure so
+ * a transient error does not permanently wedge the conversation.
  */
 
 export function createDeferredConnector<T>(connect: () => Promise<T>): () => Promise<T> {
@@ -25,8 +18,7 @@ export function createDeferredConnector<T>(connect: () => Promise<T>): () => Pro
         resolved = value;
         return value;
       } finally {
-        // Clear the in-flight slot: on success `resolved` now short-circuits;
-        // on failure the next call re-attempts a fresh connect.
+        // On success `resolved` now short-circuits; on failure the next call retries.
         pending = undefined;
       }
     })();

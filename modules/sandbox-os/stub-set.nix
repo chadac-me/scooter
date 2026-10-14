@@ -1,9 +1,7 @@
-# Which packages are nix-stubs SHIMS, as options — so a deployment can point the
-# in-pod re-converge at its OWN stub set instead of this repo's.
-#
-# The two files move together: mkOverlay iterates the LOCK, so a declaration with
-# no lock entry is never applied. Regenerate a pair with
-# `nix run github:chadac/nix-stubs#gen`. See PR #502.
+# Which packages are nix-stubs shims, as options so a deployment can point the
+# in-pod re-converge at its own stub set. The declarations and lock move together
+# (regenerate with `nix run github:chadac/nix-stubs#gen`), since mkOverlay only
+# applies declarations with a lock entry.
 
 { config, lib, stubBits, ... }:
 
@@ -37,10 +35,8 @@ in
     };
   };
 
-  # `stubBits` is null in every eval EXCEPT the in-pod re-converge, which is the
-  # only one that both has the vendored nix-stubs and can set this option: the
-  # image build goes through pkgs.nixos, whose `nixpkgs.pkgs` conflicts with
-  # `nixpkgs.overlays`, so it applies the same overlay at pkgs construction.
+  # `stubBits` is null in every eval except the in-pod re-converge; the image build
+  # applies the same overlay at pkgs construction instead.
   config = lib.mkIf (cfg.enable && stubBits != null) {
     nixpkgs.overlays = [
       (import ./stub-overlay.nix {

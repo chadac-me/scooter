@@ -1,6 +1,4 @@
-"""Thin k8s access for the controller — Conversation CRs, agent-host pods, and the
-leader-election Lease. Mirrors the broker's `_apis()` singleton + 409/404 tolerance
-(the agent-host's session/k8sProvisioner.ts)."""
+"""Thin k8s access for the controller: Conversation CRs, agent-host pods, Sandboxes and the agent-host Deployment."""
 
 from __future__ import annotations
 
@@ -28,8 +26,7 @@ def _parse_ts(ts: str) -> datetime:
 
 
 def _ignore_404(e: client.ApiException) -> None:
-    """A 404 means the object is already gone — the delete's goal. Re-raise anything else so
-    the reap retries (a swallowed 403/5xx would silently leak)."""
+    """Swallow a 404 (the object is already gone) and re-raise anything else so the caller retries."""
     if e.status != 404:
         raise e
 
@@ -40,18 +37,16 @@ AGENT_HOST_LABEL = "app=agent-host"
 DELETION_COST_ANNOTATION = "controller.kubernetes.io/pod-deletion-cost"
 AGENT_HOST_DEPLOYMENT = "agent-host"  # the Deployment the controller autoscales
 
-# The upstream agent-sandbox Sandbox CR (what the reaper GCs). EVERY Sandbox call must address
-# itself through these — an open-coded group/version 404s silently. Why: PR #725.
+# The upstream agent-sandbox Sandbox CR; every Sandbox call addresses it through these, since an
+# unserved group/version 404s silently.
 SANDBOX_GROUP = "agents.x-k8s.io"
 SANDBOX_VERSION = "v1beta1"
 SANDBOX_PLURAL = "sandboxes"
-# agent-sandbox's label on the pod it runs for a Sandbox. Mirrors SANDBOX_NAME_LABEL in
-# k8sProvisioner.ts.
+# agent-sandbox's label on the pod it runs for a Sandbox, as in k8sProvisioner.ts.
 SANDBOX_NAME_LABEL = "agents.x-k8s.io/sandbox-name"
 
-# Per-conversation object names, derived from the Sandbox name `conv-<id>` — MUST match the
-# agent-host provisioner (saName/moduleCmName in k8sProvisioner.ts). The reaper deletes all
-# three because a Sandbox delete cascades its pod + vct PVCs but NOT the SA or module CM.
+# Per-conversation object names derived from the Sandbox name, matching saName/moduleCmName in
+# k8sProvisioner.ts.
 def _sa_name(sandbox_name: str) -> str:
     return "sandbox-" + sandbox_name.removeprefix("conv-")
 
@@ -59,13 +54,7 @@ def _sa_name(sandbox_name: str) -> str:
 def _module_cm_name(sandbox_name: str) -> str:
     return sandbox_name + "-module"
 
-# agent-host container port + how long to wait on a revive-push before giving up (the push
-# is a best-effort pre-warm — the host also revives lazily on the first forwarded request,
-# so we must not let a slow/hung host stall the reconcile loop).
-#
-# NOTE: do NOT name this env AGENT_HOST_PORT — Kubernetes auto-injects a service-link env
-# `AGENT_HOST_PORT=tcp://<clusterIP>:8080` for the `agent-host` Service, which would shadow a
-# numeric override and crash int(). Use a distinct name.
+# The env is not named AGENT_HOST_PORT because Kubernetes injects a service-link env of that name.
 AGENT_HOST_PORT = int(os.environ.get("REVIVE_TARGET_PORT", "8080"))
 REVIVE_TIMEOUT_SECONDS = float(os.environ.get("REVIVE_PUSH_TIMEOUT_SECONDS", "3"))
 
@@ -98,18 +87,13 @@ def _apps_api() -> client.AppsV1Api:
 
 @dataclass
 class ControllerK8s:
-    """Imperative k8s ops the reconcile LOOP uses. Pure decisions live in reconcile.py.
-
-    :param namespace: the k8s namespace all operations target (list pods, list/patch
-        Conversations) — the controller's own namespace.
-    """
+    """Imperative k8s ops the reconcile loop uses, all targeting the controller's own namespace."""
 
     namespace: str
 
     # --- agent-host pods (assignment targets) ------------------------------
     def list_host_pods(self) -> list[Pod]:
-        """Name, READY-ness, and IP of every agent-host pod. The IP is the routing address
-        the router proxies to (status.hostIP on the CR); None until the pod is scheduled."""
+        """Name, readiness, IP, deletion cost and terminating flag of every agent-host pod."""
         core, _, _ = _apis()
         out: list[Pod] = []
         for p in core.list_namespaced_pod(self.namespace, label_selector=AGENT_HOST_LABEL).items:
@@ -130,8 +114,7 @@ class ControllerK8s:
         return out
 
     def set_pod_deletion_cost(self, name: str, cost: int) -> None:
-        """Annotate an agent-host pod with its scale-down deletion cost (see
-        reconcile.deletion_costs). 404-tolerant: the pod may be terminating."""
+        """Annotate an agent-host pod with its scale-down deletion cost, tolerating a 404."""
         core, _, _ = _apis()
         body = {"metadata": {"annotations": {DELETION_COST_ANNOTATION: str(cost)}}}
         try:
@@ -141,20 +124,7 @@ class ControllerK8s:
 
     # --- revive-push (seamless rollout) ------------------------------------
     def notify_revive(self, host_ip: str, conv_name: str, generation: int) -> None:
-        """Tell the newly-assigned host to revive `conv_name` from the mirror NOW (pre-warm,
-        before user traffic). POSTs http://<host_ip>:<AGENT_HOST_PORT>/internal/revive/<name>.
-
-        FIRE-AND-FORGET (runs in a daemon thread): the push MUST NOT block the reconcile
-        loop. A stale hostIP (a pod replaced across rollouts) is UNROUTABLE, and a TCP connect
-        to an unroutable IP can hang well past urlopen's `timeout` (the timeout bounds each
-        socket op, not a black-holed SYN) — a synchronous call there WEDGED the whole reconcile
-        pass (observed live on odin: no conversation got assigned). So we return immediately and
-        let the thread do the (timeout-bounded) HTTP in the background. Best-effort: the host
-        also revives LAZILY on the first forwarded request, so a dropped push is harmless.
-        `generation` lets the host fence a stale push.
-
-        Cluster-internal: reaches the pod IP directly on the pod network (the CRD's hostIP).
-        """
+        """POST a fire-and-forget revive for `conv_name` to the newly assigned host from a daemon thread, so an unroutable hostIP can never block the reconcile loop."""
         url = f"http://{host_ip}:{AGENT_HOST_PORT}/internal/revive/{conv_name}?gen={generation}"
 
         def _push() -> None:
@@ -173,7 +143,6 @@ class ControllerK8s:
                             },
                         )
             except (urllib.error.URLError, TimeoutError, OSError) as e:
-                # Non-fatal — the host revives lazily on first request as the backstop.
                 logger.warning(
                     "revive-push failed",
                     extra={
@@ -182,8 +151,6 @@ class ControllerK8s:
                         "url": url,
                         "generation": generation,
                         "fallback": "lazy-revive",
-                        # str() on TimeoutError/URLError is often EMPTY — format_error falls
-                        # back to repr() + the type name so this line still says something.
                         "error": format_error(e),
                     },
                 )
@@ -197,7 +164,7 @@ class ControllerK8s:
         return resp.get("items", [])
 
     def patch_status(self, name: str, status: dict) -> None:
-        """Patch a Conversation's status subresource (the assignment record)."""
+        """Patch a Conversation's status subresource."""
         _, custom, _ = _apis()
         custom.patch_namespaced_custom_object_status(
             GROUP, VERSION, self.namespace, PLURAL, name, {"status": status}
@@ -205,9 +172,7 @@ class ControllerK8s:
 
     # --- orphaned-Sandbox reaper -------------------------------------------
     def suspend_sandbox(self, name: str) -> None:
-        """Set the Sandbox's spec.operatingMode=Suspended (the zombie repair). Merge-patch,
-        idempotent; a 404 (sandbox already gone) is fine — which is why the version MUST come
-        from SANDBOX_VERSION: an unserved version 404s too, and lands here as success. PR #725."""
+        """Merge-patch the Sandbox's spec.operatingMode to Suspended, tolerating a 404."""
         _, custom, _ = _apis()
         try:
             custom.patch_namespaced_custom_object(
@@ -219,12 +184,7 @@ class ControllerK8s:
             _ignore_404(e)
 
     def reclaim_sandbox_pod(self, name: str) -> None:
-        """Terminal zombie escalation: reclaim the leaked RUNNING POD of a sandbox that will not
-        suspend. NEVER delete the Sandbox CR to do this — that cascades its volumeClaimTemplate
-        PVCs, i.e. the conversation's /workspace (issue #709).
-
-        Suspend first so the controller does not just recreate the pod. 404-tolerant per object;
-        a non-404 propagates so the loop retries."""
+        """Suspend the Sandbox and delete its leaked pod, never the Sandbox CR itself (that would cascade the workspace PVC)."""
         core, _, _ = _apis()
         self.suspend_sandbox(name)
         for p in core.list_namespaced_pod(
@@ -236,7 +196,7 @@ class ControllerK8s:
                 _ignore_404(e)
 
     def list_sandboxes(self) -> list["SandboxRef"]:
-        """Every per-conversation Sandbox, as (name, age_seconds) for the reaper decision."""
+        """Every per-conversation Sandbox as a SandboxRef."""
         _, custom, _ = _apis()
         resp = custom.list_namespaced_custom_object(
             SANDBOX_GROUP, SANDBOX_VERSION, self.namespace, SANDBOX_PLURAL
@@ -248,14 +208,27 @@ class ControllerK8s:
             created = cr["metadata"].get("creationTimestamp")
             age = (now - _parse_ts(created)).total_seconds() if created else 0.0
             mode = (cr.get("spec") or {}).get("operatingMode")
-            out.append(SandboxRef(name=name, age_seconds=age, operating_mode=mode))
+            suspended = None
+            for c in (cr.get("status") or {}).get("conditions") or []:
+                if c.get("type") == "Suspended" and c.get("status") == "True" and c.get("lastTransitionTime"):
+                    suspended = (now - _parse_ts(c["lastTransitionTime"])).total_seconds()
+            out.append(SandboxRef(name=name, age_seconds=age, operating_mode=mode, suspended_seconds=suspended))
         return out
 
+    def list_pvc_names(self) -> set[str]:
+        core, _, _ = _apis()
+        return {p.metadata.name for p in core.list_namespaced_persistent_volume_claim(self.namespace).items}
+
+    def delete_pvc(self, name: str) -> None:
+        """Delete a PVC, tolerating one already gone."""
+        core, _, _ = _apis()
+        try:
+            core.delete_namespaced_persistent_volume_claim(name, self.namespace)
+        except client.ApiException as e:
+            _ignore_404(e)
+
     def delete_sandbox_tree(self, sandbox_name: str) -> None:
-        """Destroy the whole per-conversation tree for an orphaned Sandbox: the Sandbox CR
-        (cascades its pod + vct PVCs), plus the ServiceAccount + module ConfigMap (which the
-        provisioner creates outside the Sandbox's ownership → they don't cascade). 404-tolerant
-        per object (already-gone is the goal); a non-404 error propagates so the reap retries."""
+        """Delete an orphaned Sandbox plus its ServiceAccount and module ConfigMap (which do not cascade), tolerating a 404 per object."""
         core, custom, _ = _apis()
         try:
             custom.delete_namespaced_custom_object(
@@ -272,15 +245,15 @@ class ControllerK8s:
         except client.ApiException as e:
             _ignore_404(e)
 
-    # --- agent-host autoscaling (the controller IS the autoscaler) ----------
+    # --- agent-host autoscaling --------------------------------------------
     def get_agent_host_replicas(self) -> int:
-        """The agent-host Deployment's DESIRED replica count (spec.replicas)."""
+        """The agent-host Deployment's spec.replicas."""
         d = _apps_api().read_namespaced_deployment(AGENT_HOST_DEPLOYMENT, self.namespace)
         return int(d.spec.replicas or 0)
 
     def set_agent_host_replicas(self, replicas: int) -> None:
-        """Scale the agent-host Deployment to `replicas` via the scale subresource (a small,
-        conflict-free patch that touches ONLY spec.replicas — not the whole Deployment)."""
+        """Scale the agent-host Deployment to `replicas` via the scale subresource."""
+
         _apps_api().patch_namespaced_deployment_scale(
             AGENT_HOST_DEPLOYMENT, self.namespace, {"spec": {"replicas": replicas}}
         )

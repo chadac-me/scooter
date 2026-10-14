@@ -1,25 +1,17 @@
 /**
- * Tunnel target resolution — the security boundary for MCP-over-the-wire (BYOC only).
- *
- * A container asks for a NAMED target ("scooter-env"); this maps it to a real URL. Names, not
- * host:port, so a user's machine can never reach arbitrary cluster addresses through the
- * tunnel — the container can only reach servers the platform decided to offer it.
- *
- * THE CONVERSATION ID IS SERVER-SIDE. It comes from the stream's session (the `sid` the relay
- * stamps, mapped to the conversation the agent-host is driving), NEVER from the frame payload.
- * Taking it from the payload would let a container name another conversation's resources —
- * exactly the cross-owner hole the attach path guards against.
- *
- * `sandbox:<name>` is RESERVED (the agent will declare MCP servers in its nixosConfiguration
- * and pick them up on the next message) but is not resolvable yet — it fails with a reason
- * naming that, rather than half-working.
+ * Tunnel target resolution, the security boundary for MCP-over-the-wire (BYOC only).
+ * A container asks for a named target and this maps it to a real URL; names rather
+ * than host:port mean a user's machine can only reach servers the platform offers it.
+ * The conversation id is supplied server-side from the stream's session, never from
+ * the frame payload, so a container cannot name another conversation's resources.
+ * `sandbox:<name>` is reserved but not resolvable yet.
  */
 
 /** The one target every conversation gets: the agent-host's in-process MCP endpoint. */
 export const SCOOTER_ENV = "scooter-env";
-/** The broker's MCP endpoint, proxied: the CONTRIB provider tools (github, gitlab,
- *  jira, slack). Offered separately from scooter-env because it is a different
- *  upstream with its own auth -- the proxy attaches the rotating SA token. */
+/** The broker's MCP endpoint, proxied: the contrib provider tools (github, gitlab, jira,
+ *  slack), offered separately from scooter-env since it is a different upstream whose
+ *  rotating SA token the proxy attaches. */
 export const SCOOTER_BROKER = "scooter-broker";
 /** Reserved prefix for sandbox-declared servers (not resolvable yet). */
 export const SANDBOX_PREFIX = "sandbox:";
@@ -30,27 +22,19 @@ export interface ResolvedTarget {
   url: string;
   /** For logs: which rule matched. */
   rule: "scooter-env" | "scooter-broker" | "sandbox";
-  /**
-   * Headers the AGENT-HOST injects on the proxied request — the conversation token.
-   *
-   * Server-side for the same reason the conversation id is: the container runs on the
-   * user's machine, and a credential handed to it is a credential they hold. The
-   * container's own headers are forwarded too, so these must OVERWRITE rather than
-   * merge — see the open handler in tunnelService.ts. Why: issue #700.
-   */
+  /** Headers the agent-host injects on the proxied request (the conversation token), supplied
+   *  server-side since a credential handed to the container is one the user holds, and
+   *  overwriting rather than merging with the container's own headers. */
   headers: Array<{ name: string; value: string }>;
 }
 
 export interface TunnelTargetDeps {
-  /** The in-process MCP endpoint's URL for a conversation (mcpEndpoint.urlFor). Absent when
-   *  the endpoint is not configured — then scooter-env simply is not offered. */
+  /** The in-process MCP endpoint's URL for a conversation; absent means scooter-env is not offered. */
   mcpUrlFor?: (conversationId: string) => string;
-  /** The conversation token headers for that endpoint (mcpEndpoint.headersFor). Absent, or
-   *  empty, when no signing secret is configured — then the endpoint is unauthenticated and
-   *  the tunnel behaves exactly as it did before. */
+  /** The conversation-token headers for that endpoint; absent or empty when no signing secret is configured. */
   mcpHeadersFor?: (conversationId: string) => Array<{ name: string; value: string }>;
-  /** The broker MCP proxy's URL (brokerMcpProxy.url). Absent when the broker is not
-   *  configured -- then scooter-broker simply is not offered. */
+  /** The broker MCP proxy's URL (brokerMcpProxy.url); absent when the broker is not
+   *  configured, so scooter-broker is not offered. */
   brokerMcpUrlFor?: () => string;
 }
 
@@ -58,10 +42,7 @@ export type TunnelResolution =
   | { ok: true; target: ResolvedTarget }
   | { ok: false; reason: string };
 
-/**
- * Resolve `target` for a stream belonging to `conversationId`.
- *
- */
+/** Resolve `target` for a stream belonging to `conversationId`. */
 export function resolveTunnelTarget(
   target: string,
   conversationId: string,
@@ -69,10 +50,8 @@ export function resolveTunnelTarget(
 ): TunnelResolution {
   if (target === SCOOTER_ENV) {
     if (!deps.mcpUrlFor) return { ok: false, reason: "scooter-env is not configured on this deployment" };
-    // The conversation comes from the caller (the stream's session), so the scope is never
-    // something the container chose — and since #700 it is carried by a token the agent-host
-    // mints HERE rather than by a query param, which is what makes that true of the endpoint
-    // too and not only of this resolver.
+    // The scope comes from the stream's session and travels in a token minted here, never
+    // from anything the container chose.
     return {
       ok: true,
       target: {
@@ -85,8 +64,8 @@ export function resolveTunnelTarget(
   if (target === SCOOTER_BROKER) {
     if (!deps.brokerMcpUrlFor)
       return { ok: false, reason: "scooter-broker is not configured on this deployment" };
-    // Same conversation token as scooter-env: the proxy verifies it, then attaches
-    // the broker SA token itself. The container never sees either.
+    // The same conversation token as scooter-env, which the proxy verifies before attaching
+    // the broker SA token itself, so the container never sees either.
     return {
       ok: true,
       target: {
@@ -102,29 +81,21 @@ export function resolveTunnelTarget(
       reason: "sandbox-declared MCP servers are not supported yet (the target name is reserved)",
     };
   }
-  // Everything else — including anything host:port shaped — is refused. Names only: this is
-  // what stops the tunnel from becoming arbitrary cluster network access from a laptop.
+  // Everything else, including anything host:port shaped, is refused.
   return { ok: false, reason: `unknown target ${JSON.stringify(target)}` };
 }
 
-/**
- * The servers to OFFER a session, as `new_session`'s mcpServers entries. The container starts
- * one local proxy per entry; `url` is a placeholder the container replaces with its own
- * loopback address — what matters over the wire is the NAME.
- *
- */
+/** The servers to offer a session as `new_session` mcpServers entries; the container starts one local proxy per entry and replaces the placeholder `url`, since only the name matters over the wire. */
 export function offeredTunnelServers(
   conversationId: string,
   deps: TunnelTargetDeps,
 ): Array<{ type: "http"; name: string; url: string; headers: Array<{ name: string; value: string }> }> {
-  if (!deps.mcpUrlFor) return []; // nothing to offer -> the container starts no proxy
-  // The URL here is a PLACEHOLDER: the container replaces it with its own local proxy address.
-  // What travels over the wire — and what the agent-host resolves — is the NAME.
+  if (!deps.mcpUrlFor) return []; // nothing to offer, so the container starts no proxy
   void conversationId;
   return [
     { type: "http", name: SCOOTER_ENV, url: `tunnel://${SCOOTER_ENV}`, headers: [] },
-    // The contrib provider tools. Without this a BYO agent has the github SKILL
-    // telling it to call agent-broker and no github tool to call.
+    // The contrib provider tools, without which a BYO agent has the github skill but no
+    // github tool to call.
     ...(deps.brokerMcpUrlFor
       ? [{ type: "http" as const, name: SCOOTER_BROKER, url: `tunnel://${SCOOTER_BROKER}`, headers: [] }]
       : []),

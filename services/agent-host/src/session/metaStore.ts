@@ -1,23 +1,10 @@
 /**
- * Durable conversation METADATA on the shared Postgres — the record behind the sidebar
- * list and everything hydrate() rebuilds an in-memory conversation from.
- *
- * This is what makes listConversations a QUERY instead of a directory walk: the file
- * store read every conversation's meta.json on every list, which is one syscall per
- * conversation per call, and it read them from LOCAL_STATE_PATH — an emptyDir wiped on
- * every rollout.
- *
- * A ConversationMeta is not six scalars. Two fields carry real weight and must survive
- * the round trip exactly:
- *   - pendingQueue: messages the user already sent that were still QUEUED when the
- *     conversation was suspended. revive() re-enqueues them. Dropping it destroys a
- *     user's message silently — it never runs and never errors.
- *   - parentId: the subagent hierarchy. A subagent shares its parent's sandbox pod, so
- *     losing the link orphans the tree.
- *
- * Best-effort on errors with ONE exception: listConversations must never answer [] after
- * a failed query. Returning "no conversations" for "I could not read them" is how an
- * entire sidebar goes blank while the data is intact, so a list failure propagates.
+ * Durable conversation metadata on the shared Postgres: the record behind the sidebar
+ * list and everything hydrate() rebuilds an in-memory conversation from. pendingQueue
+ * (messages still queued at suspend, which revive() re-enqueues) and parentId (the
+ * subagent hierarchy) must survive the round trip exactly. Writes are best-effort, but
+ * listConversations propagates a failed query rather than answering [] for data that is
+ * intact.
  */
 
 import { desc, eq } from "drizzle-orm";
@@ -44,14 +31,11 @@ export interface MetaStore {
 
 
 export interface PgMetaStoreConfig {
-  /** Postgres connection string. Ignored when `db` is supplied. */
+  /** Postgres connection string, ignored when `db` is supplied. */
   dsn?: string;
-  /** Override the database handle (tests). Defaults to a hardened pool over `dsn`. */
+  /** Override of the database handle for tests, defaulting to a hardened pool over `dsn`. */
   db?: NodePgDatabase;
-  /**
-   * File-backed metadata to seed from when Postgres holds no conversations at all.
-   * Backfilled once, so a deployment's existing history appears on first boot.
-   */
+  /** File-backed metadata to seed from, once, when Postgres holds no conversations at all. */
   legacy?: Pick<MetaStore, "listConversations">;
 }
 
@@ -78,8 +62,7 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
     id: row.id as SessionId,
     threadId: row.threadId as ThreadId,
     title: row.title,
-    // bigint comes back as a string from node-postgres; these are ms-epoch numbers the
-    // idle sweep and the sidebar sort do arithmetic on.
+    // bigint comes back as a string from node-postgres.
     createdAt: Number(row.createdAt),
     lastActivityAt: Number(row.lastActivityAt),
     ...(row.model == null ? {} : { model: row.model }),
@@ -109,8 +92,8 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
       parentId: meta.parentId ?? null,
       userTitled: meta.userTitled ?? null,
       starred: meta.starred ?? null,
-      // A CLEARED queue must persist as an empty array, not vanish: revive() clears it
-      // after re-enqueuing, and collapsing that to NULL would re-deliver the messages.
+      // A cleared queue must persist as an empty array, not NULL, or revive() would re-deliver the
+      // messages.
       pendingQueue: meta.pendingQueue === undefined ? null : meta.pendingQueue,
     };
     return values;
@@ -138,15 +121,13 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
     },
 
     async listConversations() {
-      // NOT best-effort: answering [] for a failed read is what blanks a sidebar while
-      // the data is intact. Let the caller see the failure.
+      // Not best-effort: answering [] for a failed read blanks a sidebar while the data is intact.
       const res = await db.select().from(conversations).orderBy(desc(conversations.lastActivityAt));
       const rows = (res as MetaRow[]).map(rowToMeta);
       if (rows.length > 0 || !config.legacy) return rows;
 
-      // The table is empty: either this is a fresh deployment, or its history is still
-      // only on disk. Seed once so the sidebar is not blank on the first boot after
-      // cutting over.
+      // The table is empty: seed once from the file store so the sidebar is not blank on first
+      // boot.
       const legacy = await config.legacy.listConversations();
       if (legacy.length === 0) return rows;
       await backfill(legacy).catch((e) =>

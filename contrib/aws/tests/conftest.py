@@ -1,10 +1,8 @@
 """Shared helpers for the aws contrib's suite.
 
 SQLite has no migrations, so these tests build the permission store's schema from
-its own model. On Postgres the Atlas migrations under lib/sql own `broker`'s
-schema and no service issues DDL — which is why this lives here and not in
-PermissionStore.init(). Mirrors services/broker/tests/conftest.py, which the
-in-app suite used before this provider moved out (PR #599).
+its own model; on Postgres the Atlas migrations under lib/sql own the schema and
+no service issues DDL.
 """
 
 from __future__ import annotations
@@ -20,8 +18,7 @@ def sqlite_config(**kw) -> StoreConfig:
 
 
 async def create_schema(store, base) -> None:
-    """Create `base`'s tables on the store's engine. SQLite only, by construction:
-    a Postgres store would be a test reaching for DDL that the migrations own."""
+    """Create `base`'s tables on the store's engine, SQLite only."""
     engine = store._engine
     assert engine.dialect.name == "sqlite", (
         f"create_schema is SQLite-only; got {engine.dialect.name!r}. "

@@ -22,6 +22,27 @@ prefix:
   };
   # testWebhook comes from modules/testing.nix.
   webhooks.enable = true;
+  # BYOC, so the cluster tier can exercise the tunnel and provider routing.
+  # No ingress: it defaults its TLS host to scooter.ingress.host, which is empty
+  # here, and the tests reach the controller in-cluster anyway.
+  byoc = {
+    enable = true;
+    ingress.enable = false;
+  };
+  # A PROVIDER-GROUPED catalog, mirroring production's shape: one model both
+  # providers offer, one exclusive to each, and a single global default. Without
+  # it the catalog is untagged, the picker renders a flat list, and the grouped
+  # branch the provider-routing spec exists to test never renders.
+  agent.availableModels = {
+    byoc = {
+      "model-shared" = { default = true; hint = "Offered by both providers."; };
+      "model-byoc-only" = { hint = "byoc exclusive."; };
+    };
+    claude-code = {
+      "model-shared" = { };
+      "model-cloud-only" = { hint = "claude-code exclusive."; };
+    };
+  };
   # e2e configures no credentials; drop contribs needing one.
   contribs = testContribs;
 }

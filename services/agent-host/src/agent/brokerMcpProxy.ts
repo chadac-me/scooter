@@ -1,27 +1,10 @@
 /**
- * The broker-MCP proxy — how the agent reaches the broker's contrib-contributed tools.
- *
- * WHY A PROXY AND NOT A DIRECT URL. The broker's /mcp requires TWO credentials: an
- * allowlisted control-plane SA token (which proves a trusted platform component is
- * calling, and whose kubelet rotation is the freshness guarantee) and a signed
- * conversation token (which says WHICH conversation). An MCP server's `headers` are
- * fixed when the agent session is created, but a projected SA token rotates roughly
- * hourly — so embedding one would work for an hour and then 401 every provider tool
- * mid-conversation. That is the same silent-degradation failure the conversation
- * token's long TTL exists to avoid.
- *
- * So the agent connects HERE with the conversation token it already holds, and the
- * agent-host attaches a FRESH SA token server-side on every request. The agent never
- * holds the SA token — which also means a BYOC container, reaching this over the
- * tunnel, cannot be handed one. See issue #700.
- *
- * The conversation token is RE-MINTED for the outbound call rather than forwarded.
- * Decoupling the two means a nearly-expired inbound token does not produce a
- * nearly-expired outbound one, and the broker only ever sees a token this process
- * just signed.
- *
- * STREAMS, never buffers: MCP streamable-HTTP responses arrive incrementally (SSE),
- * and buffering one would hold a tool's output until it completed.
+ * The broker-MCP proxy, how the agent reaches the broker's contrib tools. The
+ * broker's /mcp needs an allowlisted control-plane SA token (which rotates roughly
+ * hourly, so it cannot be fixed into the session's MCP headers) plus a conversation
+ * token, so the agent connects here with the conversation token it holds and the
+ * agent-host attaches a fresh SA token and a freshly minted conversation token on
+ * every request. Responses are streamed, never buffered.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -34,36 +17,30 @@ const log = logger("broker-mcp-proxy");
 export const CONV_TOKEN_HEADER = "x-scooter-conversation";
 
 export interface BrokerMcpProxy {
-  /** Handle a request the agent made to this proxy. The conversation comes from
-   *  `resolveConversation` — never from the URL or the agent's own headers. */
+  /** Handle a request the agent made to this proxy, with the conversation from `resolveConversation`. */
   handle(req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void>;
   /** The URL to advertise to the agent as the broker MCP server. */
   url(): string;
 }
 
 export interface BrokerMcpProxyDeps {
-  /** The agent-host's own base URL, as the agent reaches it (loopback in-pod). */
+  /** The agent-host's own base URL as the agent reaches it. */
   baseUrl: string;
   /** Path this proxy is served on. */
   path?: string;
   /** The broker's MCP endpoint, e.g. "http://agent-broker:8080/mcp". */
   brokerMcpUrl: string;
-  /** Resolve + verify the caller's conversation token. Returns the conversation id,
-   *  or undefined when the caller presented nothing usable. */
+  /** Resolve and verify the caller's conversation token to a conversation id, or undefined. */
   resolveConversation(req: IncomingMessage): string | undefined;
-  /** Mint the conversation token for the OUTBOUND call. */
+  /** Mint the conversation token for the outbound call. */
   mintConvToken(conversationId: string): string;
-  /** A FRESH control-plane SA token, read per request because it rotates on disk.
-   *  Returns undefined when none is configured (local/dev) — the broker then 401s,
-   *  which is surfaced rather than hidden. */
+  /** A fresh control-plane SA token, read per request because it rotates on disk; undefined when none is configured. */
   saToken(): Promise<string | undefined>;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
 }
 
-/** Headers we never forward: hop-by-hop, plus the two we REPLACE. An agent-supplied
- *  Authorization must not reach the broker — the whole point is that the credential is
- *  ours, attached here. Case-insensitive, since the caller chooses the spelling. */
+/** Headers never forwarded: hop-by-hop ones plus the two credentials replaced here, matched case-insensitively. */
 const DROP = new Set([
   "host",
   "connection",
@@ -76,6 +53,20 @@ const DROP = new Set([
   "authorization",
   CONV_TOKEN_HEADER,
 ]);
+
+/** "fetch failed <- connect ECONNREFUSED (ECONNREFUSED)": each cause, readable. */
+function describe(err: unknown): string {
+  const parts: string[] = [];
+  for (let e: unknown = err; e !== undefined && parts.length < 4; e = (e as { cause?: unknown }).cause) {
+    if (!(e instanceof Error)) {
+      parts.push(String(e));
+      break;
+    }
+    const code = (e as { code?: unknown }).code;
+    parts.push(code ? `${e.message} (${String(code)})` : e.message);
+  }
+  return parts.join(" <- ");
+}
 
 export function createBrokerMcpProxy(deps: BrokerMcpProxyDeps): BrokerMcpProxy {
   const path = deps.path ?? "/broker-mcp";
@@ -113,21 +104,20 @@ export function createBrokerMcpProxy(deps: BrokerMcpProxyDeps): BrokerMcpProxy {
           body: body === undefined || req.method === "GET" ? undefined : JSON.stringify(body),
         });
       } catch (err) {
-        // The agent gets a real failure rather than a hang. Logged with the
-        // conversation so "my github_comment stopped working" is answerable.
+        // The agent gets a real failure rather than a hang.
         log.warn("could not reach the broker MCP endpoint", {
           conversation_id: conversationId,
           upstream,
           error: formatError(err),
         });
         res.statusCode = 502;
-        res.end(`could not reach the broker MCP endpoint: ${formatError(err)}`);
+        res.end(`could not reach the broker MCP endpoint: ${describe(err)}`);
         return;
       }
 
       res.statusCode = upstreamRes.status;
       upstreamRes.headers.forEach((value, name) => {
-        // Re-chunked by node; copying either would corrupt the response.
+        // Node re-chunks the body, so copying either would corrupt the response.
         if (name.toLowerCase() === "content-length" || name.toLowerCase() === "transfer-encoding") return;
         res.setHeader(name, value);
       });
@@ -137,9 +127,7 @@ export function createBrokerMcpProxy(deps: BrokerMcpProxyDeps): BrokerMcpProxy {
         res.end();
         return;
       }
-      // STREAM it through. Buffering would hold an SSE tool result until the whole
-      // response completed, which for a streaming tool is the difference between
-      // incremental output and a stall.
+      // Stream it through, since buffering would hold an SSE tool result until the response completed.
       const reader = stream.getReader();
       try {
         for (;;) {

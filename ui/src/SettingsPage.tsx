@@ -1,14 +1,10 @@
 /**
- * Settings page — Scheduled Tasks + Users.
+ * Settings page: the Scheduled Tasks, Bring Your Own Claude, Modules and Admin tabs.
  *
- * A scheduled task cron-spawns a fresh Scooter conversation with a prompt (the
- * scheduler service). This page lists the signed-in user's tasks and lets them
- * create / enable-disable / edit / delete them, proxied through the agent-host's
- * /scheduled-tasks routes (scoped to the caller). When the scheduler isn't
- * deployed, it shows a "not configured" note instead.
- *
- * The Users section lists the learned Scooter users (from the identity store);
- * it likewise shows a "not configured" note when no identity store is wired.
+ * A scheduled task cron-spawns a fresh Scooter conversation with a prompt via the
+ * scheduler service, proxied through the agent-host's /scheduled-tasks routes and
+ * scoped to the caller. Each section shows a "not configured" note when its backing
+ * service is not deployed.
  */
 
 import { useCallback, useEffect, useState, type FC } from "react";
@@ -36,7 +32,7 @@ import { cn } from "@/lib/utils";
 
 const BLANK: ScheduledTaskInput = { title: "", prompt: "", cron: "", timezone: "UTC", enabled: true };
 
-/** The create / edit form. `initial` seeds edit mode; onDone closes it. */
+/** The create / edit form; `initial` seeds edit mode. */
 function TaskForm({
   initial,
   submitLabel,
@@ -255,8 +251,7 @@ function TaskRow({
   );
 }
 
-/** The Users section — the learned Scooter users (signed-in / webhook-mapped).
- *  Hidden with a "not configured" note when no identity store is wired (501). */
+/** The Users section; shows a "not configured" note when no identity store is wired (501). */
 function UsersSection() {
   const [users, setUsers] = useState<UserView[]>([]);
   const [configured, setConfigured] = useState(true);
@@ -318,9 +313,8 @@ function UsersSection() {
   );
 }
 
-/** Available modules — the public registry catalog (read-only list here; install is
- *  on the Sandbox tab, since it runs in-pod). Uses the current conversation to reach
- *  the registry (it execs the in-pod broker CLI). */
+/** Available modules from the public registry, read-only here (install lives on the
+ *  Sandbox tab), reached through the current conversation's in-pod broker CLI. */
 function ModulesSettingsSection() {
   const { currentId } = useSessions();
   const [modules, setModules] = useState<RegistryModule[]>([]);
@@ -330,7 +324,7 @@ function ModulesSettingsSection() {
   useEffect(() => {
     void (async () => {
       // Modules live in the conversation's sandbox, so there is nothing to list until the
-      // conversation exists server-side. Unavailable, not a 404 against a synthetic id.
+      // conversation exists server-side.
       const res = await currentConversation()?.ifCreated(
         (id) => searchModules(agentHostConfig, id, ""),
         null as Awaited<ReturnType<typeof searchModules>> | null,
@@ -378,8 +372,7 @@ function ModulesSettingsSection() {
   );
 }
 
-/** Scheduled tasks — the cron-driven prompts. Extracted from the old single-page
- *  Settings so it can live behind its own tab. Behaviour is unchanged. */
+/** Scheduled tasks: the cron-driven prompts. */
 function ScheduledTasksSection() {
   const [tasks, setTasks] = useState<ScheduledTaskView[]>([]);
   const [configured, setConfigured] = useState(true);
@@ -456,19 +449,9 @@ function ScheduledTasksSection() {
   );
 }
 
-/** Bring Your Own Claude — the user runs a container holding THEIR Claude
- *  subscription and scooter routes the brain to it. The settings UI for this ships
- *  with the BYO feature itself (PR #275, still in review); this tab is the shell it
- *  drops into, so the section can be added without restructuring the page again. */
-/** Connect-your-Claude-agent section (bring-your-own-Claude). Shows a copyable `docker run`
- *  one-liner (with a freshly-minted owner-bound join token) + a LIVE status badge that flips to
- *  "Connected" when the user's container registers. Hidden when BYO isn't enabled (routes 404). */
-/** Registered devices (§P) — the laptops allowed to serve this user's conversations.
- *
- *  A device is an Ed25519 PUBLIC key the container registered once with a join token; it then
- *  authenticates by signing a server nonce, so it reconnects indefinitely without a fresh token.
- *  Deregistering is a COMPLETE revocation: the key stops working immediately and that laptop
- *  cannot re-register without a new (authenticated) join token. */
+/** Registered devices: the laptops (Ed25519 public keys registered once with a join
+ *  token) allowed to serve this user's conversations, where deregistering revokes the
+ *  key immediately. */
 function DeviceList() {
   const [devices, setDevices] = useState<ByocDevice[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -479,8 +462,7 @@ function DeviceList() {
       setDevices(await loadDevices());
       setError(null);
     } catch (e) {
-      // A real failure must not render as "no devices" — that would look like a silent
-      // deregistration of every laptop the user owns.
+      // A real failure must not render as "no devices".
       setError(e instanceof Error ? e.message : "Could not load devices");
     }
   }, []);
@@ -504,8 +486,8 @@ function DeviceList() {
     [refresh],
   );
 
-  // Nothing registered and nothing broken: stay quiet rather than showing an empty table on a
-  // deployment where device auth is not enabled at all.
+  // Nothing registered and nothing broken: stay quiet rather than show an empty table
+  // where device auth is off.
   if (!devices.length && !error) return null;
 
   return (
@@ -537,6 +519,8 @@ function DeviceList() {
   );
 }
 
+/** Bring-your-own-Claude section: a copyable `docker run` one-liner with a fresh
+ *  owner-bound join token plus a live status badge, hidden when BYO is not enabled. */
 function ClaudeAgentSection() {
   const [enabled, setEnabled] = useState(true);
   const [connected, setConnected] = useState(false);
@@ -585,9 +569,8 @@ function ClaudeAgentSection() {
 
   if (loading) return null; // avoid a flash before we know if BYO is enabled
 
-  // NOT ENABLED on this deployment. Render an EXPLANATION, never nothing: an empty tab looks like
-  // a broken page, and the reader has no way to tell "off by config" from "the UI failed to load".
-  // The fix is an operator action, so show exactly what to change rather than a bare apology.
+  // Not enabled on this deployment: render the operator fix rather than nothing, since
+  // an empty tab looks broken.
   if (!enabled) {
     return (
       <section data-testid="claude-agent-section" className="flex flex-col gap-3">
@@ -650,9 +633,7 @@ function ClaudeAgentSection() {
         )}
       </div>
 
-      {/* A rejected connection is a different state than "no container": say WHY, loudly.
-          Previously a container with a bad/expired token fast-looped in silence while this
-          page showed a clean "Not connected" — invisible on both ends. */}
+      {/* A rejected connection is a different state than "no container", so say why. */}
       {!connected && authFailure ? (
         <p data-testid="claude-agent-auth-failure" className="text-sm text-destructive">
           A container failed to authenticate at {new Date(authFailure.at).toLocaleString()}:{" "}
@@ -726,17 +707,11 @@ const TAB_BODIES: Record<SettingsTab, FC> = {
 };
 
 /**
- * The settings page: a collapsible tab menu + the selected tab's body.
+ * The settings page: a collapsible tab menu plus the selected tab's body.
  *
- * Each tab is a real URL (/settings/<tab>) owned by view.ts, so a tab is
- * bookmarkable, survives a refresh, and Back/Forward moves between tabs — rather
- * than the previous single scrolling page reached only by a header toggle.
- *
- * The tabs are an accordion (mirrors the conversations sidebar's disclosure): a
- * trigger showing the active tab that expands the list. Collapsed by default at
- * every width — a fixed side rail has no room on a phone, and a horizontal scroll
- * strip is hard to discover/reach. Selecting a tab does NOT auto-close the menu, so
- * the open list stays put while you move between tabs.
+ * Each tab is a real URL (/settings/<tab>) owned by view.ts, so it is bookmarkable,
+ * survives a refresh, and Back/Forward moves between tabs. The tabs are an accordion
+ * collapsed by default at every width, and selecting a tab does not auto-close it.
  */
 export function SettingsPage() {
   const tab = useSettingsTab();
@@ -777,11 +752,8 @@ export function SettingsPage() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 sm:flex-row sm:gap-6">
-        {/* Accordion tab menu — a trigger showing the active tab that expands the
-            tab list (mirrors the conversations sidebar's disclosure). Collapsed by
-            default below the `desk` (1200px) breakpoint. At/above desk the list is
-            always shown and the trigger is hidden — the same desk: override the
-            sidebar/right-panel use, so the tabs read as a plain in-flow rail. */}
+        {/* Accordion tab menu, collapsed below the desk (1200px) breakpoint; at desk and
+            above the list is always shown and the trigger hidden. */}
         <div data-testid="settings-tabs" className="shrink-0 sm:w-56">
           <Button
             variant="outline"
@@ -798,8 +770,7 @@ export function SettingsPage() {
               ›
             </span>
           </Button>
-          {/* Always in the DOM so the desk: variant can force it open with pure CSS;
-              hidden below desk until the trigger expands it. */}
+          {/* Always in the DOM so the desk: variant can force it open with pure CSS. */}
           <nav
             id="settings-tab-menu"
             role="tablist"

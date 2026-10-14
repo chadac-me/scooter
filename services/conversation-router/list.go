@@ -1,15 +1,7 @@
-// The conversation LIST, served by the router directly from Postgres instead of fanning out to
-// every agent-host pod and merging their in-memory views. The merge is what let a stale per-pod
-// copy flap `starred` between polls; reading the durable store once removes both the fan-out and
-// the divergence. Only the JSON GET /conversations moves here — the /conversations/events SSE
-// stream stays fed by each owning host (live changes come from the pod that owns the
-// conversation), which the router still aggregates.
-//
-// The row is assembled from ONE store: every field the response needs — title/star/owner/timestamps,
-// existence, phase→status, sandbox — is a column on `conversations`. So the list makes no Kubernetes
-// read at all, and a CR-says-X-row-says-Y disagreement has nowhere to live. Existence is the row's
-// own existence: end() deletes it. Anything reintroduced here from the CR brings that disagreement
-// back. Why: PR #654.
+// The conversation list, served directly from Postgres. Every field the response needs is
+// a column on `conversations`, so the list makes no Kubernetes read and a CR-versus-row
+// disagreement has nowhere to live; existence is the row's own existence, which end()
+// deletes.
 package main
 
 import (
@@ -26,8 +18,7 @@ type sandboxProjection struct {
 	Namespace string `json:"namespace"`
 }
 
-// listRow is the exact shape agent-host's view()+withSources returns, so the router is a drop-in
-// for the same endpoint (the UI merge reads these fields verbatim).
+// listRow is the exact shape agent-host's view()+withSources returns, which the UI merge reads verbatim.
 type listRow struct {
 	ID             string            `json:"id"`
 	ThreadID       string            `json:"threadId"`
@@ -47,14 +38,7 @@ type listRow struct {
 	Links          []Link            `json:"links"`
 }
 
-// assembleList applies the visibility filter and enriches with links — the whole GET /conversations
-// body, as a pure function so it is unit-testable without a DB. It does NOT sort: it PRESERVES the
-// order of metas, which Store.Conversations establishes (most-recently-active first). Anything added
-// here that reorders or regroups rows silently changes the endpoint's contract.
-//
-// EXISTENCE is the row: there is no existence set to join, so no "row with no CR" case to omit —
-// end() deletes the row. One code path in both stacks, so the e2e suite exercises what production
-// runs; a filter sourced from anywhere but the row would break that.
+// assembleList applies the visibility filter and enriches with links, preserving the order of metas that Store.Conversations establishes.
 func assembleList(metas []ConversationRow, links map[string][]Link, now int64, callerOwner, scope string) []listRow {
 	rows := make([]listRow, 0, len(metas))
 	for _, m := range metas {
@@ -66,12 +50,7 @@ func assembleList(metas []ConversationRow, links map[string][]Link, now int64, c
 	return rows
 }
 
-// statusForPhase maps status.phase to the sidebar dot state. The controller
-// writes exactly four phases (Pending | Assigned | Suspended | Failed). Only Suspended and Failed
-// are distinguished; Pending/Assigned/"" are a live/starting sandbox → "running". Failed is
-// TERMINAL (the zombie-repair escalation force-deleted the Sandbox and gave up) — it MUST NOT read
-// as "running": a dead conversation with no sandbox was showing the blue active dot because the old
-// mapping treated every non-Suspended phase as running. Why: PR (sandbox-state icon accuracy).
+// statusForPhase maps status.phase to the sidebar dot state: Suspended and Failed are distinguished, and Pending, Assigned and "" are "running".
 func statusForPhase(phase string) string {
 	switch phase {
 	case "Suspended":
@@ -83,13 +62,9 @@ func statusForPhase(phase string) string {
 	}
 }
 
-// makeListRow projects one metadata row + its links into the wire shape. Shared by the snapshot
-// (assembleList) and the live LISTEN upsert (events.go) so both emit byte-identical rows — if they
-// diverged, a conversation would render one way on first paint and another on the next push. status
-// mapping and the "" namespace match agent-host's old view()+withSources exactly.
+// makeListRow projects one metadata row and its links into the wire shape, shared by the snapshot and the live upsert so both emit byte-identical rows.
 func makeListRow(m ConversationRow, ls []Link, now int64) listRow {
-	// NULL phase = no writer has reached this row yet, which statusForPhase maps to "running" —
-	// the same answer an unreconciled CR (status: null) always produced.
+	// A NULL phase means no writer has reached this row yet, which maps to "running".
 	phase := ""
 	if m.Phase != nil {
 		phase = *m.Phase
@@ -112,16 +87,14 @@ func makeListRow(m ConversationRow, ls []Link, now int64) listRow {
 		ParentID:       m.ParentID,
 		UserTitled:     deref(m.UserTitled),
 		Starred:        deref(m.Starred),
-		// namespace is "" to match the old projection; the UI list ignores sandbox, and the
-		// owner pod's GET /conversations/:id carries the live sandbox detail when needed.
+		// The UI list ignores sandbox; the owner pod's GET /conversations/:id carries the live detail.
 		Sandbox: sandboxProjection{Name: derefStr(m.SandboxRef), Namespace: ""},
 		Sources: sourcesOf(ls),
 		Links:   ls,
 	}
 }
 
-// listScope reads the ?scope= filter shared by GET /conversations and its events stream,
-// defaulting to "mine" (a known caller sees only their own) — the same default agent-host used.
+// listScope reads the ?scope= filter shared by GET /conversations and its events stream, defaulting to "mine".
 func listScope(r *http.Request) string {
 	if s := r.URL.Query().Get("scope"); s != "" {
 		return s
@@ -129,8 +102,7 @@ func listScope(r *http.Request) string {
 	return "mine"
 }
 
-// visible mirrors agent-host's visibleFilter: scope=all or an anonymous caller sees everything;
-// a known caller under the default "mine" scope sees strictly their own conversations.
+// visible mirrors agent-host's visibleFilter: scope=all or an anonymous caller sees everything, and a known caller under "mine" sees only their own.
 func visible(owner *string, callerOwner, scope string) bool {
 	if scope == "all" || callerOwner == "" {
 		return true
@@ -138,8 +110,7 @@ func visible(owner *string, callerOwner, scope string) bool {
 	return owner != nil && *owner == callerOwner
 }
 
-// sourcesOf is the distinct, sorted provider set for a conversation's links (the sidebar's
-// per-row provider filter/icons).
+// sourcesOf is the distinct, sorted provider set for a conversation's links.
 func sourcesOf(links []Link) []string {
 	seen := map[string]struct{}{}
 	out := []string{}
@@ -154,11 +125,7 @@ func sourcesOf(links []Link) []string {
 	return out
 }
 
-// serveConversationList serves GET /conversations from Postgres — the durable source of truth for
-// the whole sidebar (no fan-out, no per-pod flap). The caller guarantees store != nil. A read error
-// yields 503, NOT an empty 200: a transient DB blip must not hand the UI an empty list it would
-// render as "you have no conversations" (the poll keeps the last good list on a failed fetch and
-// retries). Link enrichment is best-effort — its failure degrades to bare rows, never fails the list.
+// serveConversationList serves GET /conversations from Postgres; a read error yields 503 rather than an empty 200, and link enrichment is best-effort.
 func serveConversationList(w http.ResponseWriter, r *http.Request, store *Store, links *LinkStore) {
 	log := logger("list")
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -196,9 +163,7 @@ func nonNeg(v int64) int64 {
 
 func deref(b *bool) bool { return b != nil && *b }
 
-// derefStr reads a nullable text column as "". A NULL sandbox_ref means "agent-host has not
-// registered this conversation yet", which must project exactly as a CR without spec.sandboxRef
-// did: an empty sandbox name.
+// derefStr reads a nullable text column as "".
 func derefStr(s *string) string {
 	if s == nil {
 		return ""

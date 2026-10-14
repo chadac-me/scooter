@@ -2,11 +2,8 @@
 
 # UI: assistant-ui frontend + the reusable AG-UI client library (ui/src/client.ts).
 # Builds the static site (vite -> dist/) and installs it to $out, ready to be
-# copied into an nginx image (pkgs/ui-image).
-#
-# The UI calls the agent-host via same-origin relative paths (/agui, /sessions),
-# so it's served behind a reverse proxy that forwards those to the agent-host.
-# VITE_AGENT_HOST_URL is left empty => same-origin.
+# copied into an nginx image (pkgs/ui-image). The UI calls the agent-host via
+# same-origin relative paths behind a reverse proxy, so VITE_AGENT_HOST_URL is left empty.
 
 buildNpmPackage {
   pname = "agent-sandbox-ui";
@@ -19,7 +16,7 @@ buildNpmPackage {
   VITE_AGENT_HOST_URL = "";
 
 
-  # `npm run build` -> dist/. Static output, no bin to wrap.
+  # Static output from `npm run build`, no bin to wrap.
   installPhase = ''
     runHook preInstall
     mkdir -p $out

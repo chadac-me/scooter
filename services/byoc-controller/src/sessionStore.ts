@@ -1,19 +1,8 @@
 /**
- * The DURABLE half of a BYOC session: which owner has which session id, and whether it was last
- * seen online (§L Q4).
- *
- * Extends the `remote_agents` table #275 created. VERIFIED against that branch: it is
- * `(owner text PRIMARY KEY, status, last_seen)` with NO session column, so `session_id` is an ADD,
- * not a reuse as-is. `ADD COLUMN IF NOT EXISTS` keeps this compatible with a database where the
- * agent-host already created the table.
- *
- * WHAT IS NOT HERE: the socket. A TCP connection cannot outlive the process, and the container
- * reconnects on its own, so persisting liveness would only create a way to be WRONG — a stale
- * "online" row after a crash would send a prompt into a socket nobody is listening on. Liveness
- * comes from the in-memory socket map; this table is for the mapping and the UI badge.
- *
- * BEST EFFORT: every error is swallowed. A DB blip should degrade the badge, never break a live
- * connection or fail a request — the socket is the thing that actually matters.
+ * The durable half of a BYOC session: which owner has which session id, and whether it was
+ * last seen online. The socket is not here; liveness comes from the in-memory socket map and
+ * this table serves the mapping and the UI badge. Every error is swallowed, so a DB blip
+ * degrades the badge rather than breaking a live connection.
  */
 
 import { eq, sql } from "drizzle-orm";
@@ -38,7 +27,7 @@ export interface SessionStore {
   close(): Promise<void>;
 }
 
-/** In-memory store for local dev / tests. The mapping does not survive a restart. */
+/** In-memory store for local dev and tests. */
 export function createMemorySessionStore(): SessionStore {
   const rows = new Map<string, SessionRow>();
   return {
@@ -63,13 +52,9 @@ export interface PgSessionStoreConfig {
 }
 
 export function createPgSessionStore(config: PgSessionStoreConfig): SessionStore {
-  // pool_pre_ping equivalent: `keepAlive` plus a bounded pool. The broker/scheduler learned this
-  // the hard way — an engine with no reconnect guard dies permanently on a postgres restart.
+  // `keepAlive` plus a bounded pool, so a postgres restart does not kill the engine permanently.
   const pool = new Pool({ connectionString: config.dsn, max: 4, keepAlive: true });
-  // Read/write byoc.remote_agents through the generated @scooter/schema Drizzle client. The
-  // table (with session_id) is declared in lib/sql/byoc/schema.sql and provisioned by the migrate
-  // job, so this store no longer self-CREATE/ALTERs it — a column rename there is a compile error
-  // here. Why: PR #407 chain.
+  // The table is declared in lib/sql/byoc/schema.sql and provisioned by the migrate job, so a column rename there is a compile error here.
   const db = drizzle(pool);
 
   return {
@@ -83,7 +68,7 @@ export function createPgSessionStore(config: PgSessionStoreConfig): SessionStore
             set: { sessionId, status: "offline", lastSeen: sql`now()` },
           });
       } catch {
-        /* best effort — the in-memory registry still serves this process */
+        /* best effort; the in-memory registry still serves this process */
       }
     },
 
@@ -113,7 +98,7 @@ export function createPgSessionStore(config: PgSessionStoreConfig): SessionStore
           status: row.status === "online" ? "online" : "offline",
         };
       } catch {
-        return null; // a DB blip reads as "no durable session", never as a wrong one
+        return null; // a DB blip reads as no durable session, never as a wrong one
       }
     },
 
@@ -124,9 +109,9 @@ export function createPgSessionStore(config: PgSessionStoreConfig): SessionStore
 }
 
 
-// --- Device store (§P) -------------------------------------------------------------------------
+// --- Device store ------------------------------------------------------------------------------
 
-/** In-memory device store for local dev / tests. */
+/** In-memory device store for local dev and tests. */
 export function createMemoryDeviceStore(): DeviceStore {
   const rows = new Map<string, DeviceRow>();
   return {
@@ -140,13 +125,9 @@ export function createMemoryDeviceStore(): DeviceStore {
 }
 
 /**
- * Postgres-backed device store. A SEPARATE table from `remote_agents`, because devices are 1:N per
- * owner (laptop + desktop + spare) while `remote_agents` is keyed `owner PRIMARY KEY`.
- *
- * NOT best-effort, unlike the session store: a device row IS the credential. Swallowing a read
- * failure here would mean "unknown device" -> a working laptop silently rejected; swallowing a
- * write failure on deregister would mean a revoked key still authenticating. Errors propagate so
- * the caller fails closed and loudly.
+ * Postgres-backed device store, a separate table from `remote_agents` because devices are
+ * 1:N per owner. Unlike the session store it is not best-effort: a device row is the
+ * credential, so errors propagate and the caller fails closed.
  */
 export function createPgDeviceStore(config: PgSessionStoreConfig): DeviceStore {
   const pool = new Pool({ connectionString: config.dsn, max: 4, keepAlive: true });
@@ -157,8 +138,7 @@ export function createPgDeviceStore(config: PgSessionStoreConfig): DeviceStore {
     owner: r.owner,
     publicKey: r.publicKey,
     label: r.label ?? undefined,
-    // The generated binding maps timestamptz with mode:'string', so this is an ISO
-    // string and not a Date — the hand-written store called .getTime() on it.
+    // The generated binding maps timestamptz as an ISO string, not a Date.
     lastSeen: Math.floor(new Date(r.lastSeen).getTime() / 1000),
   });
 
@@ -194,8 +174,7 @@ export function createPgDeviceStore(config: PgSessionStoreConfig): DeviceStore {
     },
 
     async touch(id, at) {
-      // last_seen drives BOTH the settings list and which device gets evicted at the cap, so a
-      // missed touch would make an active laptop look idle and cost it its slot.
+      // last_seen drives both the settings list and which device gets evicted at the cap.
       await db
         .update(byoc.remoteAgentDevices)
         .set({ lastSeen: sql`to_timestamp(${at})` })

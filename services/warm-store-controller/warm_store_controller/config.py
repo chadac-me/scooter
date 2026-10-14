@@ -1,6 +1,4 @@
-"""Controller configuration. A plain value dataclass; `Config.from_env()` reads it from
-the environment (kept explicit rather than in dataclass defaults, so the value type has no
-I/O and is trivial to construct in tests)."""
+"""Controller configuration: a plain value dataclass that `Config.from_env()` reads from the environment."""
 
 from __future__ import annotations
 
@@ -12,20 +10,18 @@ from dataclasses import dataclass
 class Config:
     """Runtime configuration for the warm-store controller.
 
-    :param namespace: k8s namespace the controller watches (pool PVCs + Sandboxes).
-    :param current_image_tag: the sandbox image content tag NEW conversations get — the
-        version the pool keeps warm (PVCs of any other tag are GC'd).
+    :param namespace: the k8s namespace the pool PVCs and Sandboxes live in.
+    :param current_image_tag: the sandbox image tag new conversations get, which the pool keeps warm.
     :param min_ready: top up until this many `ready` PVCs exist for current_image_tag.
-    :param max_total: cap total `ready` pool PVCs for the current tag (LRU-evict past this).
-    :param warm_job_image: the sandbox image the warm Job boots (== current_image_tag ref).
-    :param warm_golden_expr: a Nix expression the warm Job builds/installs into the overlay
-        (the golden seed). Empty ⇒ a minimal warm (just a valid empty upper).
-    :param overlay_storage: size of each pool PVC (the overlay upper).
-    :param reconcile_interval: seconds between reconcile passes (also the lease renew cadence
-        — must be comfortably < lease_seconds).
-    :param lease_seconds: leader-election Lease duration; renew within this window or lose it.
-    :param lease_name: name of the shared leader-election Lease (same across replicas).
-    :param identity: this replica's lease holder identity — the downward-API pod name.
+    :param max_total: cap on `ready` pool PVCs for the current tag, LRU-evicting past it.
+    :param warm_job_image: the sandbox image the warm Job boots.
+    :param warm_golden_expr: a Nix expression the warm Job builds into the overlay, or empty for a minimal warm.
+    :param overlay_storage: size of each pool PVC.
+    :param pool_storage_class: the pool StorageClass, which must have reclaimPolicy Retain (empty means no PV placement).
+    :param reconcile_interval: seconds between reconcile passes, which must stay well under lease_seconds.
+    :param lease_seconds: leader-election Lease duration the holder must renew within.
+    :param lease_name: name of the leader-election Lease shared across replicas.
+    :param identity: this replica's lease holder identity, the downward-API pod name.
     """
 
     namespace: str = "agent-sandbox"
@@ -35,7 +31,6 @@ class Config:
     warm_job_image: str = ""
     warm_golden_expr: str = ""
     overlay_storage: str = "20Gi"
-    # Pool StorageClass; MUST be reclaimPolicy: Retain. Empty = no PV placement.
     pool_storage_class: str = ""
     runtime_class: str = ""
     reconcile_interval: float = 10.0
@@ -47,13 +42,8 @@ class Config:
     def from_env(cls) -> "Config":
         """Build a Config from environment variables (the in-cluster path)."""
         sandbox_image = os.environ.get("SANDBOX_IMAGE", "")
-        # The pool version key is the sandbox image's TAG. DERIVE it from SANDBOX_IMAGE (the
-        # same ref the provisioner runs imageTagOf() on) so the controller and provisioner
-        # ALWAYS agree — even when the deploy rewrites the image ref (…:latest → …:git-<sha>)
-        # without touching a separately-computed tag env. SANDBOX_IMAGE_TAG is an explicit
-        # override only. (Fixes a deploy tag-mismatch: kubenix computed the tag from
-        # cfg.sandboxImage=…:latest, but the deploy sed rewrote the REF to …:git-<sha>, so
-        # the controller keyed the pool by "latest" while the provisioner claimed by the sha.)
+        # The pool version key is derived from SANDBOX_IMAGE, the same ref the provisioner
+        # keys on, so the two always agree; SANDBOX_IMAGE_TAG is an explicit override only.
         from .k8s import _tag_of
         current_image_tag = os.environ.get("SANDBOX_IMAGE_TAG", "") or _tag_of(sandbox_image)
         return cls(

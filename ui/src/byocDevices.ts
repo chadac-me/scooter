@@ -1,12 +1,9 @@
 /**
- * BYOC device list — the client half of §P's "deregister a laptop" flow.
- *
- * The controller stores only PUBLIC keys and never returns key material, so this module deals in
- * summaries (`id`, `label`, `lastSeen`). Deregistering is a complete revocation: the laptop cannot
- * re-register without a fresh join token, which requires an authenticated session.
- *
- * Kept separate from client.ts because it targets the BYOC CONTROLLER, not the agent-host — the
- * two are different services with different auth surfaces (§L).
+ * BYOC device list: the client half of deregistering a laptop. The controller stores
+ * only public keys and never returns key material, so this module deals in summaries
+ * (`id`, `label`, `lastSeen`); deregistering is a complete revocation, and the laptop
+ * cannot re-register without a fresh join token. Kept separate from client.ts because
+ * it targets the BYOC controller, not the agent-host.
  */
 
 export interface ByocDevice {
@@ -28,25 +25,21 @@ const base = (c: ByocDevicesConfig): string => (c.baseUrl ?? "").replace(/\/$/, 
 export async function loadDevices(config: ByocDevicesConfig = {}): Promise<ByocDevice[]> {
   const doFetch = config.fetchImpl ?? fetch;
   const res = await doFetch(`${base(config)}/byoc/devices`, { credentials: "same-origin" });
-  // 404 = device auth not enabled on this deployment; 401 = anonymous. Both mean "nothing to show"
-  // rather than an error the user can act on, so the section simply stays empty.
+  // 404 (device auth not enabled) and 401 (anonymous) both mean nothing to show, not an error.
   if (res.status === 404 || res.status === 401) return [];
   if (!res.ok) throw new Error(`Failed to load devices (${res.status})`);
-  // A deployment WITHOUT the BYOC controller has no /byoc/* route, so the SPA's catch-all serves
-  // index.html with a 200 — res.ok is true and res.json() then throws the parser's own message
-  // ("Unexpected token '<', \"<!doctype \"..."), which surfaced VERBATIM in the settings UI.
-  // Treat a non-JSON body as "device auth not available here", the same as a 404.
+  // Without the BYOC controller the SPA catch-all serves index.html with a 200, so a non-JSON body means device auth is not available here.
   const ctype = res.headers.get("content-type") ?? "";
   if (!ctype.includes("application/json")) return [];
   try {
     return (await res.json()) as ByocDevice[];
   } catch {
-    // Content-Type claimed JSON but the body was not. Still not something the user can act on.
+    // Content-Type claimed JSON but the body was not.
     return [];
   }
 }
 
-/** Revoke a device. The laptop's key stops working immediately. */
+/** Revoke a device; the laptop's key stops working immediately. */
 export async function deregisterDevice(id: string, config: ByocDevicesConfig = {}): Promise<void> {
   const doFetch = config.fetchImpl ?? fetch;
   const res = await doFetch(`${base(config)}/byoc/devices/${encodeURIComponent(id)}`, {
@@ -56,7 +49,7 @@ export async function deregisterDevice(id: string, config: ByocDevicesConfig = {
   if (!res.ok && res.status !== 204) throw new Error(`Failed to deregister (${res.status})`);
 }
 
-/** "3 minutes ago" — the settings list's only real formatting need. */
+/** "3 minutes ago" formatting for the settings list. */
 export function formatLastSeen(lastSeenSeconds: number, nowMs: number = Date.now()): string {
   const secs = Math.max(0, Math.floor(nowMs / 1000) - lastSeenSeconds);
   if (secs < 60) return "just now";

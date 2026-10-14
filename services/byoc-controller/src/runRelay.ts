@@ -1,17 +1,13 @@
 /**
- * The BYOC run relay — one prompt in, a stream of ACP frames out.
+ * The BYOC run relay: one prompt in, a stream of ACP frames out.
  *
  *   agent-host --POST /byoc/:session/prompt--> [relay] --WS--> container
  *   agent-host <----------- SSE (ACP frames) --[relay] <--WS-- container
  *
- * The agent-host holds NOTHING (§L decision 1): it POSTs and reads a stream, so any replica can
- * serve any conversation and a rollout cannot strand a run. The controller owns the single duplex
- * WS to the container and does exactly two jobs — forward frames, and correlate ids.
- *
- * THE INVARIANT THAT MATTERS: every stream must TERMINATE. One container socket multiplexes many
- * runs, so a lost ack, a mis-correlated id, or a dropped socket must each end the affected stream
- * with a terminal frame. A relay that hangs is worse than one that errors — the agent-host's run
- * would never finish, and the user would sit watching a spinner forever with no RUN_ERROR.
+ * The agent-host holds nothing, so any replica can serve any conversation; the controller
+ * owns the single duplex WS to the container and forwards frames and correlates ids. The
+ * invariant is that every stream terminates: a lost ack, a mis-correlated id or a dropped
+ * socket must each end the affected stream with a terminal frame.
  */
 
 import { randomUUID } from "node:crypto";
@@ -29,47 +25,30 @@ export interface RunRelayConfig {
 }
 
 export interface RunRelay {
-  /** Send a prompt and stream this run's frames back. Rejects (rather than hanging) if the
-   *  container is not reachable. The stream ends on the run's `ack`. */
+  /** Send a prompt and stream this run's frames back, rejecting rather than hanging if the container is not reachable. */
   prompt(sessionId: string, payload: AcpPromptPayload, callerId?: string): AsyncIterable<WireFrame>;
-  /** Send ANY ACP request (initialize / new_session / prompt / cancel / kill_terminals) and stream
-   *  the reply. `prompt` is the special case; the others are how the handshake completes at all.
-   *  Forwarding everything as type:"prompt" made initialize/new_session arrive at the container as
-   *  an EMPTY prompt, so the ACP session was never established and no run could start. */
-  /** `callerId` is the CALLER'S frame id, round-tripped onto every frame yielded back up.
-   *  The agent-host's remoteAcpClient correlates request→ack BY FRAME ID; the relay minting
-   *  its own id and yielding the container's ack unmapped left the caller waiting on an id
-   *  that never arrived — every real BYOC run hung at `initialize` and died
-   *  no_activity_timeout (curl probes, which don't correlate, looked healthy). */
+  /** Send any ACP request and stream the reply, with `callerId` (the caller's frame id) round-tripped onto the ack so the caller's by-id correlation resolves. */
   request(sessionId: string, type: string, payload: unknown, callerId?: string): AsyncIterable<WireFrame>;
-  /** Answer a permission the container is BLOCKED on (§L Q1). Stateless — mirrors the UI's
-   *  existing POST /conversations/:id/permission/:toolCallId. */
+  /** Answer a permission the container is blocked on. */
   answerPermission(sessionId: string, permissionId: string, answer: PermissionAnswer): AnswerResult;
-  /** Return an exec/fs result the AGENT-HOST ran on its own ExecBackend (§L Q2). */
+  /** Return an exec/fs result the agent-host ran on its own ExecBackend. */
   answerExec(sessionId: string, execId: string, payload: ExecResultPayload): AnswerResult;
-  /** Forward a TUNNEL frame from the agent-host down to the container — a response chunk or a
-   *  close for a stream the container opened (MCP over the wire; see remoteProtocol.ts Channel
-   *  C). Unlike prompt(), a tunnel stream is NOT a run: it has no ack and never terminates one,
-   *  so it is never routed through the run bookkeeping. */
+  /** Forward a tunnel frame from the agent-host down to the container; a tunnel stream is not a run and bypasses the run bookkeeping. */
   answerTunnel(sessionId: string, streamId: string, frame: WireFrame): AnswerResult;
-  /** Subscribe to CONTAINER->cloud tunnel frames (the agent-host serves them). These are
-   *  deliberately kept OUT of run streams: a run's stream is the conversation's transcript,
-   *  and MCP traffic is not part of it. Returns unsubscribe. */
+  /** Subscribe to container-to-cloud tunnel frames, which are kept out of run streams; returns unsubscribe. */
   onTunnelFrame(cb: (sessionId: string, frame: WireFrame) => void): () => void;
   /** Feed a raw frame received from a container's socket. */
   onContainerFrame(sessionId: string, raw: string): void;
-  /** The container's socket closed — terminate every run still waiting on it. */
+  /** The container's socket closed, so terminate every run still waiting on it. */
   onContainerGone(sessionId: string): void;
 }
 
 /** One in-flight run: a queue of frames plus whoever is waiting to read the next one. */
 interface PendingRun {
   sessionId: string;
-  /** The ACP session this run drives (from the prompt/cancel payload); undefined for the
-   *  handshake calls, which produce no notifications. */
+  /** The ACP session this run drives; undefined for the handshake calls, which produce no notifications. */
   acpSessionId?: string;
-  /** The caller's frame id — every frame yielded back up whose id is the RELAY's requestId is
-   *  rewritten to this, so the caller's by-id correlation resolves. */
+  /** The caller's frame id, which the ack yielded back up is rewritten to. */
   callerId?: string;
   queue: WireFrame[];
   waiter?: (frame: WireFrame | null) => void;
@@ -78,24 +57,18 @@ interface PendingRun {
 
 export function createRunRelay(config: RunRelayConfig): RunRelay {
   const { registry } = config;
-  // requestId -> the run awaiting frames. Keyed by the id we put ON THE WIRE, which is what makes
-  // concurrent runs on one socket safe: a frame is delivered only to the run whose id it carries.
+  // requestId -> the run awaiting frames, keyed by the id put on the wire so a frame is delivered only to the run whose id it carries.
   const runs = new Map<string, PendingRun>();
-  // Requests the CONTAINER is blocked on, awaiting a reply from above: permission ids (§L Q1) and
-  // exec ids (§L Q2). Kept per-session so a disconnect can abandon them wholesale — a reconnecting
-  // container must never inherit the previous connection's pending work.
+  // Requests the container is blocked on (permission and exec ids), kept per-session so a disconnect can abandon them wholesale.
   const awaiting = new Map<string, { sessionId: string; kind: "permission" | "exec" }>();
-  // Container sessions we have already warned about unattributable frames for (once each).
+  // Container sessions already warned about unattributable frames.
   const warnedLegacy = new Set<string>();
-  // Subscribers for CONTAINER->cloud tunnel frames (the agent-host's MCP service).
+  // Subscribers for container-to-cloud tunnel frames.
   const tunnelCbs = new Set<(sessionId: string, frame: WireFrame) => void>();
 
   const push = (run: PendingRun, frame: WireFrame): void => {
     if (run.done) return;
-    // ROUND-TRIP the caller's id: the ack coming up carries the relay's requestId (what the
-    // container was sent); the caller correlates by the id IT sent. Rewrite at the delivery
-    // boundary so every ack resolves the caller's pending request. Notifications (no id, or a
-    // container-minted id like permission_request) pass through untouched.
+    // The ack carries the relay's requestId, so rewrite it to the id the caller correlates by; notifications pass through untouched.
     if (run.callerId && frame.type === "ack") {
       frame = { ...frame, id: run.callerId };
     }
@@ -108,7 +81,7 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
     }
   };
 
-  /** End a run: deliver a terminal frame, then release any reader with null (ends the iterator). */
+  /** End a run: deliver a terminal frame, then release any reader with null to end the iterator. */
   const finish = (requestId: string, terminal: WireFrame): void => {
     const run = runs.get(requestId);
     if (!run || run.done) return;
@@ -122,8 +95,7 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
     }
   };
 
-  /** Send a reply down to the container for a request it is blocked on. Rejects an unknown or
-   *  already-answered id rather than writing a second ack. */
+  /** Send a reply down to the container for a request it is blocked on, rejecting an unknown or already-answered id. */
   const replyToContainer = (
     sessionId: string,
     id: string,
@@ -131,15 +103,13 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
     frame: WireFrame,
   ): AnswerResult => {
     const entry = awaiting.get(id);
-    // Unknown covers three real cases, all of which must fail cleanly rather than throw: a late
-    // answer after a controller restart (the human-decision window has no timeout), a duplicate
-    // POST from two tabs, and an id from a connection that has since dropped.
+    // Unknown covers a late answer after a restart, a duplicate POST and an id from a dropped connection, all of which must fail cleanly.
     if (!entry || entry.sessionId !== sessionId || entry.kind !== kind) {
       return { ok: false, reason: `unknown ${kind} ${id}` };
     }
     const session = registry.resolveBySession(sessionId);
     if (!session?.socket) return { ok: false, reason: "container not connected" };
-    // Delete BEFORE sending so a concurrent duplicate cannot also pass the check above.
+    // Delete before sending so a concurrent duplicate cannot also pass the check above.
     awaiting.delete(id);
     try {
       session.socket.send(JSON.stringify(frame));
@@ -155,14 +125,10 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
     },
 
     request(sessionId, type, payload, callerId) {
-      // Resolve + validate BEFORE returning the iterable so a dead session fails fast. The check is
-      // against the live SOCKET, never the durable row: a stale "online" would send this prompt
-      // into a socket nobody is listening on and the run would never terminate.
+      // Validate against the live socket before returning the iterable so a dead session fails fast.
       const session = registry.resolveBySession(sessionId);
       const requestId = randomUUID();
-      // The ACP session this run drives, when the request names one (prompt/cancel do; the
-      // handshake calls do not). This is the routing key that makes CONCURRENT conversations
-      // on one container safe — notifications and tool calls deliver to THEIR run only.
+      // The ACP session this run drives, the routing key that delivers notifications and tool calls to their run only.
       const acpSessionId = (payload as { sessionId?: string } | undefined)?.sessionId;
       const run: PendingRun = { sessionId, queue: [], done: false, callerId, acpSessionId };
 
@@ -205,33 +171,23 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
       try {
         frame = JSON.parse(raw) as WireFrame;
       } catch {
-        return; // a malformed frame is dropped, never allowed to kill the socket
+        return; // a malformed frame is dropped rather than killing the socket
       }
-      // TUNNEL frames are their own channel: hand them to subscribers and STOP. Pushing them
-      // into runs would put MCP traffic in the conversation's transcript, and a tunnel close
-      // would look like run output.
+      // Tunnel frames go to their subscribers only, never into a run's transcript.
       if (frame.ch === "tunnel") {
         for (const cb of [...tunnelCbs]) cb(sessionId, frame);
         return;
       }
       if (frame.type === "ack" && frame.id) {
-        // The ack terminates its run — whether it carries a result or an error. Both are "the run
-        // is over"; only a HANG would be a bug.
+        // The ack terminates its run whether it carries a result or an error.
         finish(frame.id, frame);
         return;
       }
-      // A permission_request / exec_* frame means the container is now BLOCKED waiting for us.
-      // Record it so the reply can be routed and so a duplicate reply can be rejected — a second
-      // ack would resolve an already-settled call and desync the protocol.
+      // A permission_request or exec frame means the container is blocked on a reply; record it so the reply routes and a duplicate is rejected.
       if (frame.id && (frame.type === "permission_request" || frame.type.startsWith("exec_") || frame.type.startsWith("fs_"))) {
         awaiting.set(frame.id, { sessionId, kind: frame.type === "permission_request" ? "permission" : "exec" });
       }
-      // Route notifications + tool-call frames to THE run they belong to. The key, in order of
-      // trust: the frame-level sid (stamped by a current container — the only attribution exec
-      // frames have), the notification payload's sessionId (session_update has carried it since
-      // day one), or a permission_request's request.sessionId. Broadcasting instead — the old
-      // behaviour — interleaved conversation A's transcript with B's and had BOTH cloud sides
-      // execute the same tool call.
+      // Route to the run the frame belongs to, keyed by the frame-level sid, then the payload's sessionId, then a permission_request's request.sessionId.
       const payload = frame.payload as
         | { sessionId?: string; request?: { sessionId?: string } }
         | undefined;
@@ -239,15 +195,11 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
       const candidates = [...runs.values()].filter((r) => r.sessionId === sessionId);
       if (key) {
         const matched = candidates.filter((r) => r.acpSessionId === key);
-        // A keyed frame with no matching run (a late chunk after its ack) is dropped — pushing
-        // it anywhere else would put it in the WRONG conversation.
+        // A keyed frame with no matching run is dropped rather than put in the wrong conversation.
         for (const run of matched) push(run, frame);
         return;
       }
-      // LEGACY / unkeyed frame (an old container's exec request, terminal_created). With exactly
-      // one run in flight this is exact — the pre-concurrency world. With more it is ambiguous;
-      // keep the old broadcast (both conversations already share one legacy container's brain)
-      // and say so, once per container session, so the fix is a container-image upgrade away.
+      // An unkeyed frame is exact with one run in flight and ambiguous with more, where it is broadcast with a one-time warning.
       if (candidates.length > 1 && !warnedLegacy.has(sessionId)) {
         warnedLegacy.add(sessionId);
         // eslint-disable-next-line no-console
@@ -266,8 +218,7 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
     answerTunnel(sessionId, streamId, frame) {
       const session = registry.resolveBySession(sessionId);
       if (!session?.socket) {
-        // Fail rather than drop: the agent-host turns this into a close-with-error, so the
-        // container's SDK sees a failing tool call instead of a hanging one.
+        // Fail rather than drop, so the container's SDK sees a failing tool call instead of a hanging one.
         return { ok: false, reason: `container not connected (session ${sessionId})` };
       }
       try {
@@ -288,14 +239,11 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
     },
 
     onContainerGone(sessionId) {
-      // Abandon everything this container was blocked on. Answering into a dead socket would throw,
-      // and leaving the ids around would let a RECONNECTED container receive replies to work the
-      // previous connection started.
+      // Abandon everything this container was blocked on, so a reconnected container cannot receive replies to the previous connection's work.
       for (const [id, entry] of [...awaiting]) {
         if (entry.sessionId === sessionId) awaiting.delete(id);
       }
-      // Terminate every run on this container. Without this the agent-host waits forever on a
-      // socket that will never answer — the exact hang this relay exists to make impossible.
+      // Terminate every run on this container, or the agent-host waits forever.
       for (const [requestId, run] of [...runs]) {
         if (run.sessionId !== sessionId) continue;
         finish(requestId, {

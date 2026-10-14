@@ -1,18 +1,9 @@
-"""The /mcp endpoint end to end — our WIRING, over the real protocol (issue #700).
+"""The /mcp endpoint end to end over the real protocol: the broker's wiring between the
+HTTP request and a contrib's function.
 
-An earlier revision hand-wrote the JSON-RPC layer and tested it directly. fastmcp owns
-the protocol now, so re-testing `initialize` or batching would be testing a dependency.
-What is still ours, and what this file covers, is everything between the HTTP request
-and a contrib's function:
-
-  * auth runs in front and a refusal never reaches a tool;
-  * each provider's server is mounted NAMESPACE-LESS, so tool names stay flat;
-  * the ToolContext carries the VERIFIED conversation, not anything the caller sent;
-  * the attachment gate decides what `tools/list` offers THIS conversation;
-  * a context does not leak from one call to the next.
-
-Driven over HTTP with a real MCP client handshake, because the mount, the ASGI auth
-middleware and the streaming response are exactly the parts a unit test would miss.
+Covers auth running in front, namespace-less mounting (flat tool names), the ToolContext
+carrying the verified conversation, the attachment gate on `tools/list`, and contexts not
+leaking between calls, driven over HTTP with a real MCP client handshake.
 """
 
 from __future__ import annotations
@@ -36,8 +27,7 @@ CONV = "conv-under-test"
 # --- a provider whose tools exercise the context + the gate -----------------------
 
 def _build_provider(*, attached: bool) -> Provider:
-    """A fresh provider per test: tool names are module-global in fastmcp's registry,
-    so reusing one server across tests would make gate state leak between them."""
+    """A fresh provider per test, so gate state cannot leak through fastmcp's global registry."""
     mcp = FastMCP(name="probe")
 
     @mcp.tool
@@ -58,14 +48,7 @@ def _build_provider(*, attached: bool) -> Provider:
 
 
 def _app(provider: Provider, *, authenticate) -> tuple[FastAPI, object]:
-    """Mount the MCP app the way create_app does, and hand back its lifespan.
-
-    Composing the lifespan is load-bearing, not ceremony: fastmcp starts its
-    session-manager task group there, and mounting an ASGI app does NOT run that app's
-    lifespan. Omitting it is how the first version of this test failed with "task group
-    was not initialized" — a runtime failure that would have hit every real tool call,
-    and one no mount-time check can see.
-    """
+    """Mount the MCP app the way create_app does and hand back it, since its lifespan must be composed by the caller."""
     mcp_app = create_mcp_app([provider], authenticate=authenticate, agent_host_url="")
     app = FastAPI()
     app.mount("/mcp", mcp_app)
@@ -93,15 +76,13 @@ class _Mcp:
         self._mcp_app = mcp_app
         self._app = app
         self._stack = AsyncExitStack()
-        # httpx's ASGITransport does not emit lifespan events, so the MCP app's
-        # lifespan is entered explicitly below — the same composition create_app does,
-        # just driven by hand.
+        # httpx's ASGITransport emits no lifespan events, so the MCP app's is entered by hand.
         self._client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://broker"
         )
         self._headers = {
             "content-type": "application/json",
-            # Both, because streamable HTTP may answer with either.
+            # Streamable HTTP may answer with either.
             "accept": "application/json, text/event-stream",
         }
 
@@ -133,12 +114,7 @@ class _Mcp:
 
     @staticmethod
     def _payload(response: httpx.Response) -> dict:
-        """The JSON-RPC payload, from either response shape.
-
-        Streamable HTTP may answer with `application/json` OR an SSE frame, and which
-        one you get is the server's choice — so a test that string-matches the body is
-        testing the framing. Parse it and assert on the structure instead.
-        """
+        """The JSON-RPC payload, from either a JSON body or an SSE frame."""
         body = response.text
         if "text/event-stream" in response.headers.get("content-type", ""):
             data = [
@@ -153,8 +129,6 @@ class _Mcp:
     async def _result(self, method: str, params: dict | None = None) -> dict:
         response = await self._send(method, params)
         payload = self._payload(response)
-        # Surface a JSON-RPC error as a test failure naming it, rather than as a
-        # confusing absence further down.
         assert "error" not in payload, f"{method} failed: {payload['error']}"
         return payload["result"]
 
@@ -167,12 +141,11 @@ class _Mcp:
         return "\n".join(b.get("text", "") for b in blocks)
 
 
-# --- auth sits in FRONT of everything ---------------------------------------------
+# --- auth sits in front of everything ---------------------------------------------
 
 async def test_a_refused_caller_never_reaches_a_tool():
     app, _ = _app(_build_provider(attached=True), authenticate=_denied_auth)
-    # No lifespan needed: auth refuses before the session manager is ever reached,
-    # which is itself the assertion — nothing downstream runs.
+    # No lifespan is needed because auth refuses before the session manager is reached.
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://broker")
     res = await client.post(
         "/mcp/",
@@ -181,37 +154,31 @@ async def test_a_refused_caller_never_reaches_a_tool():
     )
     await client.aclose()
     assert res.status_code == 403
-    # The reason stays generic — a body distinguishing "expired" from "bad signature"
-    # tells an attacker which half to work on.
+    # The reason stays generic.
     assert "invalid conversation token" in res.text
 
 
-# --- the mount keeps names FLAT ---------------------------------------------------
+# --- the mount keeps names flat ---------------------------------------------------
 
 async def test_tool_names_are_flat_not_namespaced():
-    """`mount(server, namespace=None)`. The skills name these tools and
-    ui/src/toolCallView.ts matches on the name, so `probe_probe_conversation` would
-    break both."""
+    """The skills and ui/src/toolCallView.ts match on the flat tool name."""
     async with _Mcp(_app(_build_provider(attached=True), authenticate=_ok_auth)) as mcp:
         names = await mcp.tool_names()
     assert "probe_conversation" in names
     assert not any(n.startswith("probe_probe") for n in names), names
 
 
-# --- the context carries the VERIFIED conversation --------------------------------
+# --- the context carries the verified conversation --------------------------------
 
 async def test_a_tool_sees_the_verified_conversation():
-    """The whole point of #700: the id a tool acts on comes from the credential, and a
-    contrib never assembles its own context."""
+    """The id a tool acts on comes from the credential."""
     async with _Mcp(_app(_build_provider(attached=True), authenticate=_ok_auth)) as mcp:
         out = await mcp.call("probe_conversation")
     assert f"conversation={CONV}" in out
 
 
 async def test_the_context_is_established_per_call_and_does_not_leak():
-    """Two calls on one connection: the second must still see its own context, not a
-    stale one. These run in a worker serving many conversations, so a context left set
-    would be handed to the next call."""
+    """The second of two calls on one connection must still see its own context, not a stale one."""
     async with _Mcp(_app(_build_provider(attached=True), authenticate=_ok_auth)) as mcp:
         first = await mcp.call("probe_conversation")
         second = await mcp.call("probe_conversation")
@@ -228,24 +195,18 @@ async def test_a_gated_tool_is_OFFERED_when_attached():
 
 
 async def test_a_gated_tool_is_ABSENT_when_not_attached():
-    """Absent, not present-and-failing. An ungated reply tool is what sent the agent
-    raw-curling Slack into the root channel."""
+    """Absent, not present-and-failing."""
     async with _Mcp(_app(_build_provider(attached=False), authenticate=_ok_auth)) as mcp:
         names = await mcp.tool_names()
     assert "probe_gated" not in names
-    # The ungated tool is unaffected — the gate filters, it does not empty the list.
+    # The gate filters; it does not empty the list.
     assert "probe_conversation" in names
 
 
-# --- flat names make a name a GLOBAL identity -------------------------------------
+# --- flat names make a name a global identity -------------------------------------
 #
-# Enforced rather than documented because the failure is silent: two contribs that
-# independently pick one name leave mount order to decide which tool the agent talks
-# to, and import order differs between a rebuild and a rollback. A contrib that
-# duplicates a capability avoids the collision by naming the tool for its provider
-# (`brave_web_search`, `kagi_web_search`) — which is also what lets a deployment enable
-# several search providers at once. The scenario below is the mistake that remains:
-# someone ships a second `web_search`. Why: issue #700, review of PR #707.
+# Two contribs that pick one name would leave mount order to decide which tool the agent
+# talks to, so the collision is refused at startup.
 
 def _tool_provider(provider_name: str, tool_name: str) -> Provider:
     mcp = FastMCP(name=provider_name)
@@ -267,7 +228,7 @@ async def test_two_providers_owning_one_tool_name_REFUSE_to_start():
     with pytest.raises(RuntimeError) as excinfo:
         await assert_tool_names_unique(providers)
     message = str(excinfo.value)
-    # Both owners named: the operator has to know WHICH two to choose between.
+    # Both owners are named so the operator knows which two to choose between.
     assert "web_search" in message and "brave" in message and "kagi" in message
 
 
@@ -280,8 +241,7 @@ async def test_distinct_tool_names_across_providers_are_fine():
 
 
 async def test_one_provider_whose_server_is_collected_twice_is_not_a_collision():
-    """A provider may carry its tool server on more than one transport. That is the
-    same owner, not two claimants."""
+    """A provider carrying its tool server on more than one transport is one owner, not two claimants."""
     from broker.mcp.routes import assert_tool_names_unique
 
     provider = _tool_provider("brave", "web_search")
@@ -290,10 +250,7 @@ async def test_one_provider_whose_server_is_collected_twice_is_not_a_collision()
 
 
 async def test_a_GATED_tool_still_counts_toward_uniqueness():
-    """The check reads each server's own registry, not what a conversation would be
-    offered. A gated tool is invisible to `tools/list` for an unattached conversation —
-    if the check saw only that view, two providers could collide on a name that shows
-    up for some conversations and not others."""
+    """The check reads each server's own registry rather than what one conversation would be offered."""
     from broker.mcp.routes import assert_tool_names_unique
 
     async def _closed(_ctx: ToolContext) -> bool:

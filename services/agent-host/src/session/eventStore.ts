@@ -1,9 +1,7 @@
 /**
- * The conversation EVENT LOG. One table, no second copy — the rows ARE the log,
- * so there is nothing to reconcile.
- *
- * NOT a notification bus: onAppend fires in-process after a committed insert.
- * No LISTEN/NOTIFY, no triggers.
+ * The conversation event log: one table whose rows are the log, so there is no second
+ * copy to reconcile. Not a notification bus: onAppend fires in-process after a committed
+ * insert, with no LISTEN/NOTIFY or triggers.
  */
 
 import { and, asc, desc, eq, gte, lt, sql } from "drizzle-orm";
@@ -18,121 +16,79 @@ import type { ChecksummedEvent } from "./manager.js";
 import type { SessionId } from "../types.js";
 
 const log = logger("eventStore");
-// conversations is read ONLY by the append fence — never written here. The event log owns
-// no conversation metadata.
+// conversations is read only by the append fence, never written here.
 const { conversationEvents, conversations } = agent_host;
 
 export interface PgEventStoreConfig {
-  /** Postgres connection string. Ignored when `db` is supplied. */
+  /** Postgres connection string, ignored when `db` is supplied. */
   dsn?: string;
-  /** Override the database handle (tests). Defaults to a hardened pool over `dsn`. */
+  /** Override of the database handle for tests, defaulting to a hardened pool over `dsn`. */
   db?: NodePgDatabase;
-  /** The claim every append presents. Omitted (single-replica, kube-less dev) => appends
-   *  are unconditional, exactly as before. See AppendFence. */
+  /** The claim every append presents; omitted means appends are unconditional. */
   fence?: AppendFence;
 }
 
 /**
- * THE APPEND FENCE. Every insert carries this pod's claim and the row decides, so a
- * superseded pod learns it lost FROM THE WRITE IT WAS ALREADY MAKING — no extra query on
- * a path that runs once per streamed token.
- *
- * Strictly stronger than the cached canWrite() check it backs up, in two ways. It has no
- * staleness window: the fence reads the row in the same statement as the insert, where the
- * cache can be a watch-lag behind. And it covers EVERY writer — canWrite() guards one of
- * the seven appendEvent call sites, while a fence on the statement cannot be forgotten by
- * a new one.
- *
- * The row must exist and must not contradict us.
+ * The append fence. Every insert carries this pod's claim and the row decides, so a
+ * superseded pod learns it lost from the write it was already making, with no extra
+ * query on a path that runs once per streamed token.
+ * The row must name this pod.
  */
 export interface AppendFence {
-  /** This pod's name — the identity the row must not contradict. */
+  /** This pod's name, the identity the row must not contradict. */
   pod: string;
   /** The epoch this pod believes it holds `id` under, or undefined when it has observed no
-   *  assignment. Undefined narrows the fence to pod identity rather than widening it to
-   *  allow-all: presenting an epoch nobody assigned would refuse every append. */
+   *  assignment, which narrows the fence to pod identity. */
   generation(id: SessionId): number | undefined;
 }
 
 /** The event-log half of ConversationStore, backed by conversation_events. */
 export interface PgEventStore {
   /**
-   * Append one event. FIRE-AND-FORGET at the call site (`void append(...)`), so
-   * ordering cannot depend on the caller awaiting.
-   *
-   * `seq` comes from an in-process per-conversation counter on the same write
-   * chain the file store uses, because one pod owns a conversation at a time —
-   * which the statement itself now ENFORCES when a fence is configured, rather
-   * than assuming (see AppendFence). The PK (conversation_id, seq) stays as the
-   * backstop for the unfenced case and for a fence that was wrong.
-   *
-   * MUST NOT use ON CONFLICT DO NOTHING — a PK conflict here means two writers.
-   *
-   * RESOLVES, does not throw, when the fence refuses: losing the claim is an
-   * outcome, not a failure, and every caller `void`s this.
+   * Append one event, fire-and-forget at the call site: `seq` comes from an in-process
+   * per-conversation counter, the PK (conversation_id, seq) backstops against a second
+   * writer (never ON CONFLICT DO NOTHING), and a fence refusal resolves rather than throws.
    */
   appendEvent(id: SessionId, event: AguiEvent): Promise<void>;
 
   /**
-   * Await every append ENQUEUED so far for `id`. Closes the
-   * subagent-completion race: a RUN_FINISHED fires onEvent -> read before the
-   * fire-and-forget insert lands, so the reader sees a log without it.
+   * Await every append enqueued so far for `id`, closing the gap between a fire-and-forget
+   * insert and a reader that follows it.
    */
   flush(id: SessionId): Promise<void>;
 
-  /** Full replay in append order. A CURSOR, not a buffered array — the largest
-   *  real conversation is 6k events and reconnects replay it. */
+  /** Full replay in append order, as a cursor rather than a buffered array. */
   readEvents(id: SessionId): AsyncIterable<AguiEvent>;
 
-  /** Full replay carrying the stored chain. The checksum columns are read, never
-   *  recomputed: jsonb does not preserve key order, so a chain re-derived from
-   *  the column can never match the one the writer computed. */
+  /** Full replay carrying the stored chain; the checksum columns are read, never recomputed,
+   *  because jsonb does not preserve key order. */
   readEventsWithChecksum(id: SessionId): AsyncIterable<ChecksummedEvent>;
 
   /**
-   * The events from the last `runs` runs — a fast first-paint window.
-   *
-   * ORDERED BY seq, NOT by ts. `seq` is the single ordering in this store: it is
-   * assigned in emission order by the one pod that owns the conversation, so it
-   * IS the chronology. The file store had to sort by `ts` first because a log
-   * concatenated runs from separate processes across a restart and append order
-   * could disagree with time; a monotonic per-conversation counter has no such
-   * seam, which is why this store does not inherit that complexity.
-   *
-   * Windowed on RUN_STARTED boundaries, NOT a raw "last N events": the tail must
-   * fold identically to a full replay, and slicing mid-run can cut a
-   * TEXT_MESSAGE_START from its END and render a half-message.
-   *
-   * Two index scans, no window function (measured on a 6k-event conversation):
-   *   1. boundary — ORDER BY seq DESC, filter type=RUN_STARTED, OFFSET runs-1
-   *      LIMIT 1  → Index Scan Backward, reads ~`runs` rows
-   *   2. window   — WHERE seq >= boundary ORDER BY seq  → Index Scan, ~67 rows
-   * That is ~75 rows read instead of all 6,046.
+   * The events from the last `runs` runs, ordered by seq and windowed on RUN_STARTED
+   * boundaries so the tail folds identically to a full replay.
    */
   readEventsTail(id: SessionId, runs: number): Promise<AguiEvent[]>;
 
-  /** The last `limit` events by `seq`, trimmed forward to a boundary so the window
-   *  never starts mid-message. May return fewer than `limit`. */
+  /** The last `limit` events by `seq`, trimmed forward to a boundary so the window never starts
+   *  mid-message. */
   readEventsTailByCount(id: SessionId, limit: number): Promise<AguiEvent[]>;
 
-  /** The `limit` events immediately BEFORE `beforeSeq`, oldest-first, for paging
-   *  older history in. `firstSeq` is the lowest seq returned — pass it back as the
-   *  next `beforeSeq` — and `done` is true once the window reaches the start of the
-   *  log. Unlike the tail readers this does NOT trim to a boundary: the caller is
-   *  stitching onto a window it already holds, so a run split across the seam stays
-   *  whole. */
+  /** The `limit` events immediately before `beforeSeq`, oldest-first, with `firstSeq` to pass back
+   *  as the next `beforeSeq` and `done` once the start of the log is reached; not trimmed to a
+   *  boundary, since the caller stitches onto a window it already holds. */
   readEventsBefore(
     id: SessionId,
     beforeSeq: number,
     limit: number,
   ): Promise<{ events: AguiEvent[]; firstSeq: number; done: boolean }>;
 
-  /** Live durable appends, in-process. The authority the integrity SSE
-   *  broadcasts. Fires only AFTER the row is committed. Returns unsubscribe. */
+  /** Live durable appends, fired in-process only after the row is committed; returns an
+   *  unsubscribe. */
   onAppend(cb: (id: SessionId, event: ChecksummedEvent) => void): () => void;
 
-  /** Durable-append FAILURES. appendEvent is fire-and-forget, so without this a
-   *  failed write to the conversation's ONLY persistence vanishes silently. */
+  /** Durable-append failures, which appendEvent's fire-and-forget callers would otherwise never
+   *  see. */
   onAppendError(cb: (id: SessionId, error: unknown) => void): () => void;
 
   /** Drop a conversation's events (conversation deletion). */
@@ -145,19 +101,15 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
   const ownPool = config.db ? undefined : createPgPool("eventStore", { connectionString: config.dsn!, max: 4 });
   const db: NodePgDatabase = config.db ?? drizzle(ownPool!);
 
-  // Per-conversation write chain. appendEvent is `void`-called for a burst of
-  // events, so concurrent awaits would land in non-deterministic order and
-  // scramble the log — serialize them so seq order == emission order.
+  // Per-conversation write chain, so seq order equals emission order despite void-called appends.
   const chains = new Map<SessionId, Promise<void>>();
-  // seq + rolling checksum, folded in the SAME chain order as the inserts.
-  // Seeded lazily from the table so a restart CONTINUES the chain rather than
-  // reseeding from EMPTY (which would fork every client's verification).
+  // seq and rolling checksum, folded in chain order and seeded lazily from the table so a restart
+  // continues the chain.
   const heads = new Map<SessionId, { seq: number; checksum: string }>();
   const appendListeners: Array<(id: SessionId, e: ChecksummedEvent) => void> = [];
   const errorListeners: Array<(id: SessionId, error: unknown) => void> = [];
 
-  // Refusals per conversation, for log sampling only. A fenced pod streaming a run refuses
-  // once per token, and one line each would bury the reassignment that caused it.
+  // Refusals per conversation, for log sampling only.
   const refusals = new Map<SessionId, number>();
 
   /** The fence predicate; see AppendFence for the semantics. */
@@ -169,8 +121,7 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
               where exists (
                 select 1 from ${conversations}
                  where ${conversations.id} = ${id}
-                   and (${conversations.hostPod} is null
-                        or (${conversations.hostPod} = ${fence.pod}${rightEpoch}))
+                   and ${conversations.hostPod} = ${fence.pod}${rightEpoch}
               )`;
   };
 
@@ -190,15 +141,14 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
   };
 
   const onFenced = async (id: SessionId, presented: number | undefined) => {
-    // The head came from a log this pod no longer drives; the new owner is advancing seq
-    // past it. Drop it so a conversation reassigned BACK re-seeds from the table instead of
-    // colliding on the PK.
+    // The head came from a log this pod no longer drives, so drop it and let a conversation
+    // reassigned back re-seed from the table instead of colliding on the PK.
     heads.delete(id);
     const n = (refusals.get(id) ?? 0) + 1;
     refusals.set(id, n);
     if (n === 1 || n % 100 === 0) {
-      // presented_generation is the epoch the STATEMENT carried, not a fresh read of the
-      // cache: an investigation into a refusal needs what was actually presented.
+      // presented_generation is the epoch the statement carried rather than a fresh read of
+      // the cache, since a refusal is investigated by what was actually presented.
       log.warn("append refused by the conversations row (this pod is not the writer)", {
         conversation_id: id,
         pod: config.fence?.pod,
@@ -227,45 +177,38 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
     appendEvent(id, event) {
       const prev = chains.get(id) ?? Promise.resolve();
       const next = prev
-        .catch(() => {}) // a prior failure must not break the CHAIN (ordering)
+        .catch(() => {}) // a prior failure must not break the chain (ordering)
         .then(async () => {
           try {
             const at = await head(id);
             const prevChecksum = at.checksum;
             const seq = at.seq + 1;
             const checksum = chainNext(prevChecksum, event);
-            // Resolved ONCE, so the statement's predicate and the refusal log cannot
-            // disagree about which epoch was presented.
+            // Resolved once, so the predicate and the refusal log agree on the epoch presented.
             const presented = config.fence?.generation(id);
-            // INSERT ... SELECT, not VALUES, so the fence can ride the statement (see
-            // AppendFence). NO onConflictDoNothing: the PK is a correctness backstop, and
-            // a duplicate (conversation_id, seq) means a second writer.
+            // INSERT ... SELECT so the fence rides the statement; no onConflictDoNothing, since a
+            // duplicate (conversation_id, seq) means a second writer.
             const res = await db.execute(sql`
               insert into ${conversationEvents} (conversation_id, seq, event, checksum, prev_checksum)
               select ${id}::text, ${seq}::bigint, ${JSON.stringify(event)}::jsonb, ${checksum}::text, ${prevChecksum}::text${fenceClause(id, presented)}
             `);
             if ((res.rowCount ?? 0) === 0) {
-              // Zero rows is only reachable under a fence, and it is not an error: the row
-              // says this pod is no longer the writer. Do NOT advance the head or notify
-              // listeners — nothing was committed, and claiming otherwise would hand the
-              // integrity stream a checksum no reader can find.
+              // Zero rows is only reachable under a fence and is not an error, since the row
+              // says this pod is no longer the writer, so neither the head nor the listeners
+              // may see an append that was never committed.
               await onFenced(id, presented);
               return;
             }
             heads.set(id, { seq, checksum });
-            // Clear the refusal count on a committed append, so a LATER reassignment logs
-            // its first refusal immediately instead of landing mid-sample-window. Also what
-            // bounds the map.
+            // Clear the refusal count on a committed append so a later reassignment logs its first
+            // refusal immediately.
             refusals.delete(id);
             for (const cb of appendListeners) cb(id, { event, prevChecksum, checksum });
           } catch (error) {
-            // appendEvent is `void`-called, so nobody sees this rejection. With
-            // no file fallback it is a LOST TURN — surface it, then rethrow for
-            // any caller that did await.
+            // Surface the lost turn, then rethrow for any caller that did await.
             log.errorWith("durable append FAILED (turn lost)", error, { conversation_id: id });
             for (const cb of errorListeners) cb(id, error);
-            // Drop the cached head: after a failure this pod's idea of seq may
-            // be wrong (another writer), so re-seed from the table next time.
+            // Drop the cached head, since another writer may have advanced seq.
             heads.delete(id);
             throw error;
           }
@@ -283,8 +226,7 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
     },
 
     async *readEventsWithChecksum(id) {
-      // checksum/prev_checksum are READ, never recomputed: jsonb does not
-      // preserve key order, so a re-derived chain could not match the writer's.
+      // Read, never recomputed: jsonb does not preserve key order.
       const rows = await db
         .select({
           event: conversationEvents.event,
@@ -301,8 +243,7 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
 
     async readEventsTail(id, runs) {
       if (runs <= 0) return [];
-      // 1. the seq of the RUN_STARTED that begins the last `runs` runs. Index
-      //    Scan Backward, so it reads ~runs rows, not the conversation.
+      // 1. the seq of the RUN_STARTED that begins the last `runs` runs
       const boundary = await db
         .select({ seq: conversationEvents.seq })
         .from(conversationEvents)
@@ -378,25 +319,16 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
   };
 }
 
-/**
- * Backfill one conversation's events from a .jsonl log. Exported so the one-shot
- * migration Job and its tests share the exact chain computation.
- *
- * `lines` must be in FILE order. The chain is folded with the same chainNext the
- * writer used; each line is JSON.parsed and handed to it unmodified — never
- * re-serialized (canonicalize sorts only TOP-LEVEL keys, so nested order comes
- * from the parse, and any other JSON writer would produce a different hash).
- *
- * Returns what it wrote so the Job can VERIFY rather than assume: a backfill
- * that loads 127 of 128 conversations must not report success.
- */
+/** What backfillConversation wrote, so the Job can verify rather than assume. */
 export interface BackfillResult {
   conversationId: SessionId;
   rows: number;
-  /** Chain through the last event — compare against the file's own recomputation. */
+  /** Chain through the last event, to compare against the file's own recomputation. */
   finalChecksum: string;
 }
 
+/** Backfill one conversation's events from a .jsonl log, with `lines` in file order; each line is
+ *  JSON.parsed and handed to chainNext unmodified so the chain matches the writer's. */
 export async function backfillConversation(
   db: NodePgDatabase,
   id: SessionId,
@@ -406,9 +338,8 @@ export async function backfillConversation(
   let seq = 0;
   for (const line of lines) {
     if (!line.trim()) continue;
-    // JSON.parse and hand the object straight to chainNext: canonicalize sorts
-    // only TOP-LEVEL keys, so nested order comes from the parse. Re-serializing
-    // through any other writer would produce a different hash.
+    // Hand the parsed object straight to chainNext: canonicalize sorts only top-level keys, so
+    // re-serializing through another writer would change the hash.
     const event = JSON.parse(line) as AguiEvent;
     const prevChecksum = checksum;
     checksum = chainNext(prevChecksum, event);
@@ -424,23 +355,16 @@ export async function backfillConversation(
   return { conversationId: id, rows: seq, finalChecksum: checksum };
 }
 
-/**
- * Overlay a PgEventStore's event methods onto a base ConversationStore.
- *
- * The event log is the only thing that moved: assets and goose state still live
- * on the state volume, so the base store stays for those. This is a narrow
- * seam, not a Proxy — the event methods are named explicitly so adding one to
- * ConversationStore is a compile error here rather than a silent fall-through
- * to the file implementation the migration was meant to replace.
- */
-/** Drop leading events that cannot open a message — the client's fold discards a
- *  window that starts mid-item. */
+/** Drop leading events that cannot open a message, since the client's fold discards a window that starts mid-item. */
 export function trimToBoundary(events: AguiEvent[]): AguiEvent[] {
   const OPENS = new Set(["RUN_STARTED", "TEXT_MESSAGE_START", "TOOL_CALL_START", "SYSTEM_MESSAGE"]);
   const i = events.findIndex((e) => OPENS.has(e.type as string));
   return i <= 0 ? (i === 0 ? events : []) : events.slice(i);
 }
 
+/** Overlay a PgEventStore's event methods onto a base ConversationStore, which keeps assets and
+ *  goose state; the methods are named explicitly so adding one to ConversationStore is a compile
+ *  error here. */
 export function withPgEvents<T extends object>(base: T, events: PgEventStore): T {
   return {
     ...base,
@@ -453,8 +377,7 @@ export function withPgEvents<T extends object>(base: T, events: PgEventStore): T
     readEventsBefore: events.readEventsBefore.bind(events),
     onAppend: events.onAppend.bind(events),
     onAppendError: events.onAppendError.bind(events),
-    // Deliberately NOT overridden: removeConversation must drop BOTH the rows
-    // and the on-volume assets, so the base store's version runs and the caller
-    // is responsible for the event rows (see index.ts).
+    // removeConversation is deliberately not overridden: the base store drops the on-volume assets
+    // and the caller drops the event rows.
   } as T;
 }

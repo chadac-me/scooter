@@ -1,47 +1,29 @@
 { config, lib, ... }:
 
-# Per-conversation resources: a COLD Sandbox carrying a unique ServiceAccount
-# and two PVCs. This is the durable handle for a conversation.
-#
-# Design stage: this file documents the SHAPE the agent-host renders at runtime
-# (the agent-host creates these per conversation via the kube API), and provides
-# a `mkConversation` function the agent-host's provisioner mirrors.
-#
-# WHY cold + not warm-pooled (verified against agent-sandbox source):
-#   - A SandboxClaim cannot override the SA; per-conversation SA must be in the
-#     podTemplate of a directly-created Sandbox.
-#   - Claim-level env/volumeClaimTemplates force a cold start anyway; we need
-#     both per-conversation PVCs.
-#   - Kept suspended (not deleted) -> resume recreates the pod from the same
-#     template -> same SA + same PVCs -> broker re-validates same identity.
+# Per-conversation resources: a cold Sandbox carrying a unique ServiceAccount
+# and two PVCs, the durable handle for a conversation. The agent-host creates
+# these at runtime via the kube API; `mkConversation` is the shape its
+# provisioner mirrors. A suspended Sandbox resumes from the same template, so
+# the broker sees the same SA and PVCs.
 
 let
   inherit (lib) mkOption types;
   cfg = config.scooter;
 
-  # Shape of one conversation's resources. `id` = conversationId.
+  # Shape of one conversation's resources, keyed by conversationId.
   mkConversation = { id, sandboxImage ? cfg.sandboxImage, brokerAudience ? "agent-broker", overlayStore ? false, overlayStorage ? "20Gi"
-    # Default sandbox size: the preset marked `default = true` in cfg.sandboxSizes.
-    # Requests == limits (Guaranteed QoS) so one runaway sandbox is hard-capped and
-    # can't starve its neighbours. This is the Nix-rendered contract for a directly-
-    # created Sandbox; the broker's PLATFORM_DEFAULT (resources.py) mirrors the
-    # fallback used when a deployment configures no presets at all.
-    # This lands in a k8s container `resources` block verbatim, so a GPU renders under
-    # its extended-resource name (`nvidia.com/gpu`) on BOTH sides — k8s rejects a GPU
-    # request that differs from its limit. The broker's render_resources does the same
-    # for the runtime path.
+    # The default size preset rendered with requests == limits (Guaranteed QoS), including a GPU under its extended-resource name on both sides.
   , sandboxResources ? let
       defaultPreset =
         if cfg.defaultSandboxSizeName == null
-        # No presets configured: mirror the broker's PLATFORM_DEFAULT literally, so the
-        # two paths that can create a Sandbox agree on the size.
+        # Mirrors the broker's PLATFORM_DEFAULT so both Sandbox-creating paths agree.
         then { cpu = "2"; memory = "4Gi"; gpu = null; }
         else cfg.sandboxSizes.${cfg.defaultSandboxSizeName};
       side = { cpu = defaultPreset.cpu; memory = defaultPreset.memory; }
         // lib.optionalAttrs (defaultPreset.gpu != null) { "nvidia.com/gpu" = toString defaultPreset.gpu; };
     in { requests = side; limits = side; }
   }: {
-    # ServiceAccount sandbox-${id}  (unique per conversation; broker identity)
+    # Unique per conversation; the broker identity.
     serviceAccount = {
       apiVersion = "v1";
       kind = "ServiceAccount";
@@ -54,48 +36,38 @@ let
       kind = "Sandbox";
       metadata = { name = "conv-${id}"; namespace = cfg.namespace; };
       spec = {
-        operatingMode = "Running"; # set "Suspended" to hibernate; keep object alive
+        operatingMode = "Running"; # "Suspended" hibernates while keeping the object alive.
         podTemplate.spec = {
           serviceAccountName = "sandbox-${id}";
-          # automountServiceAccountToken default false -> project explicitly:
+          # The broker token is projected explicitly below.
           automountServiceAccountToken = false;
           containers = [{
             name = "sandbox";
             image = sandboxImage;
-            # Mirror the platform pullPolicy (the agent-host provisioner reads
-            # SANDBOX_PULL_POLICY): "Always" for a registry, "IfNotPresent"/"Never"
-            # for a side-loaded local cluster where "Always" fails ImagePullBackOff.
+            # Mirrors the platform pullPolicy the agent-host provisioner reads from SANDBOX_PULL_POLICY.
             imagePullPolicy = cfg.pullPolicy;
             resources = sandboxResources;
             ports = [{ containerPort = 8888; }];
-            # The sandbox is the NixOS systemd-PID-1 image: systemd needs a
-            # privileged context (writable cgroup + CAP_SYS_ADMIN). Mirrors the
-            # agent-host k8sProvisioner (systemdImage=true, always). Tighten post-PoC.
+            # systemd as PID 1 needs a writable cgroup and CAP_SYS_ADMIN.
             securityContext.privileged = true;
             volumeMounts = [
               { name = "workspace"; mountPath = "/workspace"; }
               { name = "broker-token"; mountPath = "/var/run/secrets/broker"; readOnly = true; }
-              # systemd writes to /run + /tmp; back them with tmpfs (emptyDir).
+              # systemd writes to /run and /tmp, backed by tmpfs.
               { name = "run"; mountPath = "/run"; }
               { name = "tmp"; mountPath = "/tmp"; }
             ] ++ lib.optionals overlayStore [
-              # The local-overlay store's writable upper (disk-backed PVC). The
-              # overlay-store image mounts the overlay onto /nix/store using this as
-              # the upperdir; runtime nix builds (re-converge) land here + persist
-              # across suspend/resume. Disk-backed PVC, never tmpfs.
+              # The local-overlay store's writable upper, a disk-backed PVC where runtime nix builds persist across suspend/resume.
               { name = "scooter-rw"; mountPath = "/nix/.scooter-rw"; }
             ] ++ cfg.sandboxPod.extraVolumeMounts
             ++ lib.optionals (cfg.deployTools.configFiles or { } != { }) [
-              # Deployment config files as a flat read-only dir (filename -> contents).
-              # File-based so multi-line config survives the CRD controller.
+              # Deployment config files as a flat read-only dir, so multi-line config survives the CRD controller.
               { name = "deploy-config"; mountPath = "/etc/agent-sandbox/config"; readOnly = true; }
             ];
             env = [
               { name = "BROKER_URL"; value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080"; }
               { name = "BROKER_TOKEN_PATH"; value = "/var/run/secrets/broker/token"; }
-              # git config --global + exec'd git commands must share $HOME so the
-              # broker credential helper is configured for both (image has no
-              # /etc/passwd -> HOME would be "/"). Pin to the writable workspace.
+              # `git config --global` and exec'd git commands must share a writable $HOME for the broker credential helper.
               { name = "HOME"; value = "/workspace"; }
             ] ++ cfg.sandboxPod.extraEnv;
           }];
@@ -104,7 +76,7 @@ let
               name = "broker-token";
               projected.sources = [{ serviceAccountToken = { audience = brokerAudience; path = "token"; }; }];
             }
-            # tmpfs for systemd's /run + /tmp (mirrors the provisioner).
+            # tmpfs for systemd's /run and /tmp.
             { name = "run"; emptyDir.medium = "Memory"; }
             { name = "tmp"; emptyDir.medium = "Memory"; }
           ] ++ cfg.sandboxPod.extraVolumes
@@ -112,8 +84,7 @@ let
             { name = "deploy-config"; configMap.name = "deploy-config-files"; }
           ];
         };
-        # Workspace PVC (body). Conversation-state PVC is mounted by the
-        # agent-host, NOT here (it lives outside the sandbox).
+        # The workspace PVC; the conversation-state PVC is mounted by the agent-host, not here.
         volumeClaimTemplates = [{
           metadata.name = "workspace";
           spec = {
@@ -121,17 +92,13 @@ let
             resources.requests.storage = "10Gi";
           };
         }] ++ lib.optionals overlayStore [{
-          # The overlay-store upper PVC (disk-backed; persists runtime builds across
-          # suspend/resume). Only when the overlay-store image is in use.
+          # The overlay-store upper PVC, only when the overlay-store image is in use.
           metadata.name = "scooter-rw";
           spec = {
             accessModes = [ "ReadWriteOnce" ];
             resources.requests.storage = overlayStorage;
           };
         }];
-        # NetworkPolicy: default-deny blocks RFC1918 -> add an egress allow to the
-        # in-cluster broker (post-PoC, when broker lands). networkPolicyManagement
-        # may need to be tuned or set Unmanaged.
       };
     };
   };

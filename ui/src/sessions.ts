@@ -1,12 +1,7 @@
 /**
- * Conversation (session) store — the source of truth for the left sidebar.
- *
- * Holds the list of conversations with titles and the current selection. Titles
- * are derived from the first user message by default, but an agent can override
- * a title (setTitle) — e.g. from an AG-UI custom/state event — so "the agent
- * assigns titles" is supported without depending on a specific agent yet.
- *
- * A tiny zustand-free store (useSyncExternalStore) to avoid extra wiring.
+ * Conversation (session) store, the source of truth for the left sidebar. It holds the
+ * list of conversations with titles and the current selection, backed by a small
+ * useSyncExternalStore store with localStorage as the optimistic cache and the server as truth.
  */
 
 import { useSyncExternalStore } from "react";
@@ -16,55 +11,31 @@ import { Conversation } from "./conversation.js";
 import { contribLinkProviders } from "./contribManifest.js";
 
 export interface Session {
-  /** STABLE identity. Never changes for the life of the conversation — including at the
-   *  moment the server assigns a real id. React keys, selection and the runtime mount on
-   *  THIS. For a server-known conversation it IS the conversation id; for one the user has
-   *  only just started it is a local placeholder that never leaves the UI.
-   *
-   *  Use `serverId` (or the Conversation object, see conversationFor) to address the
-   *  server — `id` may be a placeholder the server has never heard of. */
+  /** Stable local key that React, selection and the runtime mount on; it may be a placeholder the server has never seen, so address the server with `serverId`. */
   id: string;
-  /** The SERVER's conversation id (the AG-UI threadId), or undefined before creation. */
+  /** The server's conversation id (the AG-UI threadId), or undefined before creation. */
   serverId?: string;
   title: string;
   createdAt: number;
-  /** Last user activity timestamp (ms epoch). Used for sidebar sorting. */
+  /** Last user activity timestamp (ms epoch), used for sidebar sorting. */
   lastActivityAt: number;
-  /** Per-conversation model (undefined = host default). Sent on the next prompt
-   *  via the X-Agent-Model header; a change mid-conversation switches the model. */
+  /** Per-conversation model sent on the next prompt via the X-Agent-Model header (undefined = host default). */
   model?: string;
-  /** Distinct linked-resource providers ("github"|"slack"|…) for the sidebar
-   *  icons. Server-sourced (GET /conversations); [] / undefined when none. */
+  /** Distinct linked-resource providers for the sidebar icons, server-sourced. */
   sources?: string[];
-  /** Compact linked-resource summary (source/type/title/url). Server-sourced; drives
-   *  the "show link name instead of title" toggle, keyword search over link names, and
-   *  the provider filter. [] / undefined when none. */
+  /** Compact linked-resource summary, server-sourced, driving the label mode, keyword search and provider filter. */
   links?: SessionLink[];
-  /** Creating user (server-sourced). undefined = unowned/public. Drives the
-   *  Mine/All view filter. */
+  /** Creating user, server-sourced; undefined means unowned. */
   owner?: string;
-  /** True once the SERVER has created this conversation (POST /conversations). A session
-   *  seeded locally — freshState() at module load, deleteSession()'s replacement — has a
-   *  client-chosen id the server has never seen, and prompting it is refused. Undefined is
-   *  treated as "not yet created": ensureCurrentCreated() swaps in the server's id on the
-   *  first send. Server-sourced sessions (GET /conversations) are created by definition. */
+  /** True once the server has created this conversation; undefined is treated as not yet created. */
   serverCreated?: boolean;
-  /** The spawning conversation, when this is a SUBAGENT (server-sourced).
-   *  undefined = a top-level conversation. Drives sidebar nesting + subagent
-   *  grouping. */
+  /** The spawning conversation when this is a subagent, server-sourced. */
   parentId?: string;
-  /** The conversation's sandbox lifecycle state (server-sourced, live via the
-   *  /conversations/events stream): "running" (pod up), "suspended" (idle → pod
-   *  dropped, PVCs kept), "failed" (the sandbox was force-deleted after the
-   *  zombie-repair escalation gave up — terminal, no pod), "ended". Drives the
-   *  sidebar dot + the Sandbox status tab + Start button. */
+  /** The conversation's sandbox lifecycle state, server-sourced and live via the /conversations/events stream. */
   status?: "running" | "suspended" | "failed" | "ended";
-  /** The user renamed this conversation (server-sourced): the title is user-set and
-   *  the agent's <title> no longer overrides it. When true, the server title is
-   *  authoritative (mergeFromServer stops preferring a stale local title). */
+  /** The user renamed this conversation, so the server title is authoritative and the agent's title never overrides it. */
   userTitled?: boolean;
-  /** The user starred this conversation (server-sourced). Drives the sidebar star
-   *  toggle + a stronger delete confirm. */
+  /** The user starred this conversation, server-sourced. */
   starred?: boolean;
 }
 
@@ -76,78 +47,55 @@ export interface SessionLink {
   title?: string;
 }
 
-const DEFAULT_TITLE = "New chat";
+/** The placeholder title, until something names the conversation. */
+export const DEFAULT_TITLE = "New chat";
 const STORAGE_KEY = "kubenix-agent.sessions.v1";
 
 /** Sidebar view filter: the caller's own conversations or all of them. */
 export type Scope = "mine" | "all";
 
-/** The known link providers — offered as icon filter chips AND as the "Show:"
- *  label-mode options. The app's own, then whatever the deployment's contribs
- *  declare, so disabling a contrib removes its chip rather than leaving a dead
- *  one. Open set, hence `string` and not a union.
- *
- *  A FUNCTION, not a const: the contrib half is fetched at runtime
- *  (contribManifest.ts), so a list captured at module load would never carry a
- *  contrib. Why: PR #601. */
+/** The known link providers (the app's own plus the deployment's contribs), computed per call because the contrib manifest is fetched at runtime. */
 export function linkProviders(): readonly string[] {
   return ["github", "slack", ...contribLinkProviders()];
 }
 export type LinkProvider = string;
 
-/** What a sidebar row displays: the conversation title, or the linked resource's
- *  name for a specific provider (falling back to the title when the row has no link
- *  of that provider). The "Show:" dropdown selects this. */
+/** What a sidebar row displays: the conversation title, or a specific provider's linked-resource name with the title as fallback. */
 export type LabelMode = "title" | LinkProvider;
 
 type State = {
   sessions: Session[];
   currentId: string;
-  /** The caller's id (from /whoami), for the Mine filter. "" until loaded. */
+  /** The caller's id from /whoami, for the Mine filter ("" until loaded). */
   currentUser: string;
-  /** The caller's email (from /whoami), for display. null when unknown/anonymous. */
+  /** The caller's email from /whoami, null when unknown or anonymous. */
   currentUserEmail: string | null;
-  /** True when the caller is anonymous (no ingress identity — auth off / dev). */
+  /** True when the caller has no ingress identity. */
   currentUserAnonymous: boolean;
   /** Sidebar Mine/All toggle (default Mine). */
   scope: Scope;
-  /** Keyword search over the title + linked-resource names (empty = no search). */
+  /** Keyword search over the title and linked-resource names (empty = no search). */
   query: string;
-  /** Selected provider filter chips; empty = no provider filter (show all). A
-   *  session matches if it links to ANY selected provider. */
+  /** Selected provider filter chips; a session matches if it links to any of them, and empty means no filter. */
   providerFilter: LinkProvider[];
-  /** What rows display — the title, or a provider's linked-resource name. Persisted. */
+  /** What rows display, persisted. */
   labelMode: LabelMode;
-  /** A deep-link target (from ?thread=<id>) to select AS SOON AS it's known — the
-   *  conversation may not be in the list yet (it arrives via the poll/stream for a
-   *  webhook-created thread the user has never opened). Cleared once selected. */
+  /** A deep-link target (from ?thread=<id>) to select as soon as it appears in the list, cleared once selected. */
   pendingSelect?: string;
-  /** The conversation whose title the user is CURRENTLY renaming (the open inline
-   *  input in the sidebar). Transient, never persisted. While set, mergeFromServer
-   *  leaves this row's title/userTitled/identity untouched and keeps its object
-   *  reference stable — so a background merge (10s poll + SSE) can't mutate the row,
-   *  re-render it, and detach the open rename input mid-edit (the CI flake). Cleared
-   *  when the rename commits/cancels. */
+  /** The conversation whose title is being renamed inline, during which mergeFromServer does not run; transient. */
   editingId?: string;
 };
 
 /** A brand-new, untouched conversation (default title, no messages yet). */
 const isPristine = (s: Session) => s.title === DEFAULT_TITLE;
 
-/** Has the SERVER ever created this conversation? A session seeded locally (newSession /
- *  freshState / deleteSession's replacement) is NOT server-backed until its first send
- *  adopts a server id — until then it exists only in this tab. `serverCreated` alone
- *  covers rows persisted by builds that predate `serverId`. */
+/** Whether the server has ever created this conversation. */
 const isServerBacked = (s: Session): boolean => s.serverId !== undefined || s.serverCreated === true;
 
-/** The id the SERVER knows this conversation by. Match anything server-owned (list
- *  membership, a subagent's `parentId`) against THIS, never `id` — `id` is a local
- *  key that for a chat started in this tab is never the server's. Why: PR #568. */
+/** The id the server knows this conversation by, which is what anything server-owned (list membership, a subagent's `parentId`) must be matched against. */
 export const serverKeyOf = (s: Pick<Session, "id" | "serverId">): string => s.serverId ?? s.id;
 
-/** Do two Session objects carry the same rendered state? Used to REUSE the existing
- *  object reference across a merge when nothing changed, so React.memo skips the row.
- *  Scalars compared directly; sources/links compared by content (they're small). */
+/** Whether two Session objects carry the same rendered state, so a merge can reuse the existing reference and React.memo skips the row. */
 const sameSession = (a: Session, b: Session): boolean => {
   if (
     a.id !== b.id ||
@@ -168,13 +116,12 @@ const sameSession = (a: Session, b: Session): boolean => {
   return lnA.every((l, i) => l.url === lnB[i].url && l.title === lnB[i].title && l.source === lnB[i].source);
 };
 
-/** Sidebar order: STARRED conversations first (favoriting pins them to the top),
- *  then most-recently-active first within each group. Stable for equal keys. */
+/** Sidebar order: starred conversations first, then most recently active first within each group. */
 export const byStarredThenRecent = (a: Session, b: Session): number => {
   const sa = a.starred ? 1 : 0;
   const sb = b.starred ? 1 : 0;
-  if (sa !== sb) return sb - sa; // starred (1) sorts before unstarred (0)
-  return b.lastActivityAt - a.lastActivityAt; // then most-recently-active first
+  if (sa !== sb) return sb - sa;
+  return b.lastActivityAt - a.lastActivityAt;
 };
 
 const freshState = (): State => {
@@ -193,40 +140,29 @@ const freshState = (): State => {
   };
 };
 
-/** Load persisted sessions from user data (localStorage), so the sidebar
- *  survives a refresh even before the server responds. Falls back to a single
- *  fresh conversation. The server's conversations are merged in on top (see
- *  mergeFromServer) — localStorage is the optimistic cache, the server is truth. */
+/** Load persisted sessions from localStorage so the sidebar survives a refresh, falling back to a single fresh conversation. */
 const loadState = (): State => {
   try {
     const raw = globalThis.localStorage?.getItem(STORAGE_KEY);
     if (!raw) return freshState();
     const parsed = JSON.parse(raw) as State;
     if (!parsed?.sessions?.length || !parsed.currentId) return freshState();
-    // Drop anything malformed; keep only well-formed sessions.
     const sessions = parsed.sessions.filter((s) => s && typeof s.id === "string");
     if (!sessions.length) return freshState();
     const currentId = sessions.some((s) => s.id === parsed.currentId)
       ? parsed.currentId
       : sessions[0].id;
-    // currentUser is NOT persisted (it's re-fetched via /whoami on load); scope
-    // persists so the toggle choice survives a refresh.
+    // currentUser is re-fetched via /whoami on load rather than persisted.
     return {
       sessions, currentId, currentUser: "", currentUserEmail: null,
       currentUserAnonymous: true, scope: parsed.scope === "all" ? "all" : "mine",
-      // Search + provider filter are transient (a stale filter hiding every chat
-      // after a refresh would baffle); the label mode persists like scope.
+      // Search and provider filter are transient; the label mode persists like scope.
       query: "", providerFilter: [],
-      // Any string is accepted rather than checked against linkProviders(): this
-      // module initializes BEFORE the runtime manifest lands, so a contrib mode
-      // would be rejected as unknown. An unrecognized mode already degrades to
-      // the conversation title (sessionLabel). Why: PR #601.
+      // Any string is accepted because this module initializes before the contrib manifest lands, and an unknown mode degrades to the title.
       labelMode: typeof parsed.labelMode === "string" ? (parsed.labelMode as LabelMode) : "title",
     };
   } catch (e) {
-    // Finding #26: corrupt persisted state -> start fresh (recoverable), but log
-    // it so a user silently losing their session list is diagnosable rather than
-    // invisible.
+    // Corrupt persisted state starts fresh, logged so the loss is diagnosable.
     console.warn("[sessions] persisted state unreadable; starting fresh:", e);
     return freshState();
   }
@@ -238,18 +174,13 @@ const persist = (s: State) => {
   try {
     globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(s));
   } catch {
-    /* user data unavailable (private mode / SSR) — non-fatal */
+    /* localStorage unavailable (private mode / SSR) */
   }
 };
 
-/** How a new conversation gets its id. The SERVER owns conversation ids — a client-chosen
- *  one would become an event-log key and a k8s resource name — so the app injects a minter
- *  that calls POST /conversations. Defaults to crypto.randomUUID() so the store stays a pure,
- *  synchronously-testable module and works before the app has wired a backend. */
+/** How a new conversation gets its id: the app injects a minter that calls POST /conversations, and the UUID default keeps the store testable without a backend. */
 let mintId: () => Promise<string | null> = async () => {
-  // LOUD. This default exists so the store stays synchronously testable, but if it ever
-  // runs in the app the client invents an id the server never issued — which then reaches
-  // the URL and the stream, and the conversation cannot be found. Silent for years; say so.
+  // In the app this default would invent an id the server never issued, so warn loudly.
   console.warn("[sessions] mintId FELL BACK to a client UUID — setConversationMinter was not installed");
   return crypto.randomUUID();
 };
@@ -259,30 +190,21 @@ export const setConversationMinter = (fn: () => Promise<string | null>) => {
   mintId = fn;
 };
 
-/** How conversations reach the server. Injected once at app start (main/RuntimeProvider)
- *  rather than read from a module global here — the store should not know the transport,
- *  and a test should not have to stub one. */
+/** How conversations reach the server, injected once at app start. */
 let agentHostConfig: AgentHostConfig = { baseUrl: "" };
 export const setAgentHostConfig = (cfg: AgentHostConfig) => {
   agentHostConfig = cfg;
 };
 
-/** The Conversation object per session, keyed by the session's STABLE key. It owns the
- *  identity — whether the server has assigned an id yet, and what each operation means
- *  before it has. The Session record stays the render model; this is the behavior. */
+/** The Conversation object per session, keyed by the session's stable key; the Session record is the render model and this is the behavior. */
 const conversations = new Map<string, Conversation>();
 
-/** The Conversation for a session, created on first use. A session already known to the
- *  server is `existing` (its key IS its id); one the user only just started is `pending`
- *  and has no server id until its first send. */
+/** The Conversation for a session, created on first use as `pending` until it has a server id. */
 export const conversationFor = (
   session: Pick<Session, "id" | "serverCreated" | "serverId">,
 ): Conversation => {
   const found = conversations.get(session.id);
-  // The map is module state, so a page RELOAD rebuilds every Conversation from the
-  // persisted session. Rebuild from `serverId` — the key may be a local placeholder that
-  // outlived creation, and addressing the server with it is exactly the bug this whole
-  // change removes.
+  // Rebuild when the persisted `serverId` has moved on, since the key may be a local placeholder that outlived creation.
   if (found && found.serverId() === session.serverId) return found;
   const create = () => mintId();
   const onCreated = (key: string, id: string) => adoptServerId(key, id);
@@ -299,15 +221,13 @@ export const conversationFor = (
   return c;
 };
 
-/** The CURRENT conversation. The one object the UI should be reaching for. */
+/** The current conversation. */
 export const currentConversation = (): Conversation | undefined => {
   const cur = state.sessions.find((s) => s.id === state.currentId);
   return cur ? conversationFor(cur) : undefined;
 };
 
-/** Record the server's id on the session whose key this is. The session's `id` — its
- *  stable key — deliberately does NOT change: it is what React, selection and the runtime
- *  are keyed on, and changing it mid-run is what tore down an in-flight run. */
+/** Record the server's id on the session whose key this is, leaving the stable key itself unchanged. */
 const adoptServerId = (key: string, serverId: string): void => {
   const cur = state.sessions.find((s) => s.id === key);
   if (!cur) return;
@@ -336,16 +256,7 @@ export const sessionStore = {
 
   current: () => state.sessions.find((s) => s.id === state.currentId)!,
 
-  /** Start a new conversation and select it IMMEDIATELY.
-   *
-   *  The id is local until the first send: asking the server for one here would leave the
-   *  UI showing the PREVIOUS conversation across a network round-trip, so a fast typist
-   *  (and the e2e specs, which click and send in the same tick) would send into the wrong
-   *  thread. ensureCurrentCreated() swaps in the server's id on the first prompt, which is
-   *  the only moment the id has to be real. It also means an unused "New chat" never costs
-   *  a server-side conversation.
-   *
-   *  Synchronous, and returns the local id. */
+  /** Start a new conversation with a local id and select it synchronously; ensureCurrentCreated() obtains the server id on the first prompt. */
   newSession(): string {
     const id = crypto.randomUUID();
     const now = Date.now();
@@ -360,16 +271,15 @@ export const sessionStore = {
     return id;
   },
 
-  /** Ensure the CURRENT conversation exists server-side, replacing its locally-seeded id
-   *  with the server's if it was never created. freshState() and deleteSession() seed a
-   *  conversation synchronously (they run at module load / in a sync handler and the UI
-   *  needs an id to render), so that id is client-chosen until the first send. Call this
-   *  before prompting. Returns the id to prompt, or null if creation failed. */
-  /** Ensure the CURRENT conversation exists server-side, returning its SERVER id (or null
-   *  if creation failed). Delegates to the Conversation object, which is idempotent and
-   *  shares one in-flight create. Note what it does NOT do: change the session's `id`.
-   *  That id is the stable key everything is mounted on, and swapping it mid-run tore down
-   *  the run in flight. */
+  /** Open a new conversation, reusing an untouched one if present. */
+  startFresh(): string {
+    const spare = state.sessions.find((s) => isPristine(s) && !isServerBacked(s));
+    if (!spare) return this.newSession();
+    if (state.currentId !== spare.id) setState({ ...state, currentId: spare.id });
+    return spare.id;
+  },
+
+  /** Ensure the current conversation exists server-side and return its server id (null if creation failed), without changing the session's stable key. */
   async ensureCurrentCreated(): Promise<string | null> {
     return (await currentConversation()?.ensureCreated()) ?? null;
   },
@@ -378,13 +288,7 @@ export const sessionStore = {
     if (state.sessions.some((s) => s.id === id)) setState({ ...state, currentId: id });
   },
 
-  /**
-   * Select a conversation by id, even one not yet in the list. For the ?thread=
-   * deep-link: a webhook-created conversation the user has never opened isn't in
-   * localStorage — it arrives via the /conversations poll/stream. If it's already
-   * known, select it now; otherwise stash it as pendingSelect and mergeFromServer
-   * selects it the moment it appears. A no-op if already current.
-   */
+  /** Select a conversation by id now, or stash it as pendingSelect for mergeFromServer to select when it appears. */
   requestSelect(id: string) {
     if (!id || state.currentId === id) return;
     if (state.sessions.some((s) => s.id === id)) {
@@ -394,149 +298,72 @@ export const sessionStore = {
     }
   },
 
-  /**
-   * Merge conversations loaded from the agent-host into the list. Called on
-   * startup so the sidebar survives a refresh and every conversation is listed
-   * (not just ones created in this tab). Dedups by id, sorts newest-first, and
-   * preserves the current selection. If the only local session is the untouched
-   * initial "New chat" and the server has real conversations, select the newest
-   * server one so a refresh lands on a real conversation.
-   */
+  /** Merge conversations loaded from the agent-host into the list, deduping by server id, sorting and keeping the current selection. */
   mergeFromServer(
     convs: Array<{ id: string; title?: string; createdAt?: number; lastActivityAt?: number; model?: string; sources?: string[]; links?: SessionLink[]; owner?: string; status?: Session["status"]; parentId?: string; userTitled?: boolean; starred?: boolean }>,
-    // Whether this batch is an AUTHORITATIVE full-list read (the 10s poll or the SSE connect
-    // snapshot) vs. a single-row SSE `upsert`. Only the former owns `sources`/`links`: link
-    // add/remove does NOT fire the conversations_changed trigger, so an upsert (fired by an
-    // INSERT/title/owner change) carries a links re-read that is merely incidental — and the
-    // router always serializes `sources: []` for a link-less row. Folding that []-sources
-    // upsert with `?? existing` would CLOBBER the poll-populated sources (`[] ?? x === []`),
-    // erasing the sidebar provider icon (the order-dependent e2e flake). So a non-authoritative
-    // upsert keeps the existing sources/links and lets the poll/snapshot own them. Why: PR #452.
-    // It ALSO gates the prune below: only a full-list read can say a row is GONE. Why: PR #568.
+    // Only an authoritative full-list read (the poll or the SSE connect snapshot) owns `sources`/`links` and can say a row is gone; a single-row upsert keeps the existing ones.
     opts?: { sourcesAuthoritative?: boolean },
   ) {
     const authoritative = opts?.sourcesAuthoritative ?? true;
     if (convs.length === 0) return;
-    // RENAME IN PROGRESS: freeze the WHOLE sidebar. While the user has an inline rename
-    // input open (editingId set) the background merge (10s poll + SSE upsert) must not
-    // run at all — not even to update OTHER rows — because any setState here re-renders
-    // <Sidebar> and its reconciliation can detach the open input or swallow the click
-    // that's opening it (the CI rename flake, in two modes: input detaches mid-edit /
-    // input never appears). A rename takes a couple seconds; deferring the merge until
-    // it commits/cancels (clearEditing, which triggers no re-merge itself — the next
-    // 10s poll / SSE frame reconciles) is imperceptible and makes the flake impossible.
-    // Per-row locking wasn't enough: it kept the editing row's data stable but the
-    // merge still re-rendered the sidebar, and that reconciliation was the disruptor.
+    // While an inline rename input is open, the merge must not re-render the sidebar at all, since reconciliation can detach the input.
     if (state.editingId !== undefined) {
-      // ...but ONLY while that row is still rendered. The input lives on the row, so once
-      // the row is gone nothing can clear the lock and the freeze is permanent — the
-      // sidebar stops reconciling for the rest of the session. Why: PR #611.
+      // The lock only holds while the editing row is still rendered, because nothing else could clear it once the row is gone.
       if (filteredSessions(state).some((s) => s.id === state.editingId)) return;
       setState({ ...state, editingId: undefined });
     }
     const serverIds = new Set(convs.map((c) => c.id));
-    // Index by the SERVER id, which is what `convs` is keyed by. A conversation created on
-    // its first send keeps its local key, so indexing by `s.id` would miss it and insert a
-    // SECOND row for the same conversation — every row rendering twice.
+    // Index by the server id, which is what `convs` is keyed by.
     const byId = new Map<string, Session>();
     for (const s of state.sessions) byId.set(s.serverId ?? s.id, s);
     for (const c of convs) {
       const existing = byId.get(c.id);
-      // Title precedence: a real server title wins; but a local non-default
-      // title (e.g. derived from the first message) must NOT be clobbered by the
-      // server's "New chat" placeholder — the server often hasn't learned the
-      // title yet. So only take the server title when it's non-default. EXCEPTION:
-      // when the server says the title is USER-set (userTitled), it's authoritative —
-      // a user rename must win over any stale local title immediately.
+      // A user-set server title wins outright, a non-default server title next, and the server's "New chat" placeholder never clobbers a local title.
       const userTitled = c.userTitled ?? existing?.userTitled ?? false;
       const serverTitle = c.title && c.title !== DEFAULT_TITLE ? c.title : undefined;
       const localTitle =
         existing && existing.title !== DEFAULT_TITLE ? existing.title : undefined;
       const title = userTitled && c.title
-        ? c.title // user-set title from the server wins outright
+        ? c.title
         : serverTitle ?? localTitle ?? c.title ?? existing?.title ?? DEFAULT_TITLE;
       const merged: Session = {
-        // PRESERVE the existing stable key. For a conversation created on its first send
-        // the key is local and the server id differs; overwriting the key here would be
-        // the same mid-run remount this design removes. New rows key by the server id,
-        // which for them IS their identity.
+        // The existing stable key is preserved, since a conversation created on its first send keys by a local id.
         id: existing?.id ?? c.id,
         title,
         userTitled,
-        // It came FROM the server, so the server has it — prompting it is safe and
-        // ensureCurrentCreated() must not mint a second id for it. For these the stable
-        // key and the server id are the same string by construction.
         serverCreated: true,
         serverId: c.id,
-        // Starred is server-owned; take the server's value.
         starred: c.starred ?? existing?.starred,
         createdAt: c.createdAt ?? existing?.createdAt ?? Date.now(),
         lastActivityAt: c.lastActivityAt ?? existing?.lastActivityAt ?? Date.now(),
-        // A locally-chosen model (not yet persisted server-side on first prompt)
-        // wins; otherwise take the server's persisted model.
+        // A locally chosen model not yet persisted server-side wins.
         model: existing?.model ?? c.model,
-        // Link sources are server-owned (the webhooks push links), but only the poll +
-        // connect-snapshot carry them authoritatively — a single-row upsert must not clobber
-        // them (see the sourcesAuthoritative note on the signature). Why: PR #452.
         sources: authoritative ? (c.sources ?? existing?.sources) : existing?.sources,
         links: authoritative ? (c.links ?? existing?.links) : existing?.links,
-        // Owner is server-owned (stamped at creation); take the server's value.
         owner: c.owner ?? existing?.owner,
-        // Sandbox lifecycle state is server-owned + live (idle-suspend / resume);
-        // always take the server's value so the status tab reflects reality.
         status: c.status ?? existing?.status,
-        // The spawning conversation, when this is a subagent (server-owned).
         parentId: c.parentId ?? existing?.parentId,
       };
-      // REFERENCE STABILITY: if nothing about this conversation actually changed,
-      // keep the EXISTING object (same reference). The 10s merge poll (+ SSE) runs
-      // constantly; without this every poll builds fresh objects → every SessionRow
-      // re-renders → an in-progress interaction (an open rename, a hover) gets
-      // disrupted (the sidebar flake family). Reusing the reference lets React.memo
-      // skip the unchanged rows entirely.
+      // Keep the existing reference when nothing changed so React.memo skips the row.
       byId.set(c.id, existing && sameSession(existing, merged) ? existing : merged);
     }
 
-    // Reconcile the local list against the server's:
-    //
-    //  - Keep anything the server still lists.
-    //  - Drop a SUBAGENT (parentId set) the server no longer lists — subagents are
-    //    always server-created, so its absence means it ENDED (the completion
-    //    watcher end()s a finished subagent). Without this it lingered in the
-    //    sidebar after finishing (the reported bug): an ended subagent has a real
-    //    title, so the pristine check below wouldn't drop it.
-    //  - For a local top-level conversation not on the server: keep it unless it's
-    //    an untouched pristine "New chat" placeholder (a phantom extra row once the
-    //    server has real convs) — EXCEPT never drop the CURRENTLY-SELECTED pristine
-    //    one (the user just clicked "New chat" and is about to type; the server
-    //    won't know it until the first /agui POST, so a poll must not yank it).
+    // Reconcile against the server's list: keep what it lists, and prune rows it no longer does except the current selection.
     let sessions = [...byId.values()].filter((s) => {
       if (serverIds.has(serverKeyOf(s))) return true;
-      // Absence is only evidence in a FULL-list read; a one-row upsert implies nothing
-      // about rows it never mentioned. Why: PR #568.
+      // Absence is only evidence in a full-list read.
       if (!authoritative) return true;
-      if (s.parentId) return false; // an ended subagent — prune it
+      if (s.parentId) return false; // an ended subagent
       if (s.id === state.currentId) return true;
-      // A row the server never created has no history and no sandbox: it can only shadow
-      // the real conversation it was meant to become. A title doesn't redeem it. Exempt:
-      // the CURRENT selection, which may be unsent and typed into. Why: PR #611.
+      // A row the server never created can only shadow the real conversation it was meant to become.
       if (!isServerBacked(s)) return false;
       return !isPristine(s);
     });
-    // Never end up with zero rows (e.g. server has convs but all local were
-    // pristine and got dropped — the server ones remain, which is fine).
+    // Never end up with zero rows.
     if (sessions.length === 0) sessions = [...byId.values()];
     sessions.sort(byStarredThenRecent);
 
-    // SELECTION-NEUTRAL: never change currentId here. The merge runs on a
-    // background poll, so reassigning the selection would fight an in-flight
-    // user switchTo()/newSession() (a read-modify-write race that dropped the
-    // just-selected thread's view). Selection is owned by switchTo/newSession.
-    // Only keep currentId valid if it vanished entirely from the list.
-    //
-    // THE ONE EXCEPTION: a pending deep-link (?thread=<id> via requestSelect).
-    // That's an explicit user intent waiting for the conversation to arrive, not a
-    // background reassign — honor it the moment the target shows up, then clear it.
+    // The selection is owned by switchTo/newSession, so the merge only repairs a vanished currentId and honors a pending deep-link.
     let pendingSelect = state.pendingSelect;
     let currentId = sessions.some((s) => s.id === state.currentId)
       ? state.currentId
@@ -546,11 +373,7 @@ export const sessionStore = {
       pendingSelect = undefined;
     }
 
-    // No-op if nothing actually changed (same rows, order and selection) — the poll runs
-    // every few seconds and would otherwise re-render on every tick.
-    // Compare via sameSession, NOT a hand-listed subset of fields: any field left out of
-    // this check is a field whose updates get silently discarded (that dropped every
-    // status-only change, freezing the sidebar dots). Why: PR #568.
+    // No-op when nothing changed, compared via sameSession so no field's updates are silently discarded.
     const unchanged =
       pendingSelect === state.pendingSelect &&
       currentId === state.currentId &&
@@ -575,8 +398,7 @@ export const sessionStore = {
     setState({ ...state, sessions: remaining, currentId });
   },
 
-  /** Derive a title from the first user message if still default. No-op (no
-   *  re-render) if the title is already set — avoids render loops. */
+  /** Derive a title from the first user message if the title is still the default. */
   titleFromFirstMessage(id: string, text: string) {
     const s = state.sessions.find((x) => x.id === id);
     if (!s || s.title !== DEFAULT_TITLE) return;
@@ -585,8 +407,7 @@ export const sessionStore = {
     this.setTitle(id, title);
   },
 
-  /** Agent-assigned title (overrides the derived one). No-op if unchanged. A
-   *  user-renamed conversation is LOCKED — the agent's title never overrides it. */
+  /** Set the agent-assigned title, unless the user renamed the conversation. */
   setTitle(id: string, title: string) {
     const s = state.sessions.find((x) => x.id === id);
     if (!s || s.userTitled || s.title === title) return;
@@ -596,26 +417,20 @@ export const sessionStore = {
     });
   },
 
-  /** Mark a conversation as being renamed (the sidebar's inline input is open). While
-   *  set, mergeFromServer leaves this row untouched (title/identity/reference), so a
-   *  background poll/SSE can't re-render it and detach the open input mid-edit. No-op
-   *  if already the editing row. */
+  /** Mark a conversation as being renamed inline, which pauses mergeFromServer. */
   setEditing(id: string) {
     if (state.editingId === id) return;
     setState({ ...state, editingId: id });
   },
 
-  /** Clear the rename lock (the inline input committed or cancelled). The next merge
-   *  then applies any server-truth that arrived while editing. No-op if not editing
-   *  the given id (a stale clear from a row that isn't the current one). */
+  /** Clear the rename lock, ignoring a stale clear for a row that is not the editing one. */
   clearEditing(id?: string) {
     if (state.editingId === undefined) return;
     if (id !== undefined && state.editingId !== id) return;
     setState({ ...state, editingId: undefined });
   },
 
-  /** User rename: optimistically set the title AND lock it (userTitled) so the
-   *  agent's <title> can't override it. The caller persists via renameConversation. */
+  /** Optimistically set a user-chosen title and lock it against agent titles; the caller persists via renameConversation. */
   renameSession(id: string, title: string) {
     const s = state.sessions.find((x) => x.id === id);
     if (!s) return;
@@ -625,9 +440,7 @@ export const sessionStore = {
     });
   },
 
-  /** Optimistically set the star flag. The caller persists via setConversationStarred.
-   *  Re-sorts so a newly-starred conversation jumps to the top immediately (not only
-   *  on the next server merge) — and an un-starred one drops back into recency order. */
+  /** Optimistically set the star flag and re-sort; the caller persists via setConversationStarred. */
   setStarred(id: string, starred: boolean) {
     const s = state.sessions.find((x) => x.id === id);
     if (!s || s.starred === starred) return;
@@ -636,8 +449,7 @@ export const sessionStore = {
     setState({ ...state, sessions });
   },
 
-  /** Set a conversation's model (the picker). No-op if unchanged. The next
-   *  prompt carries it via the X-Agent-Model header (see RuntimeProvider). */
+  /** Set a conversation's model, which the next prompt carries via the X-Agent-Model header. */
   setModel(id: string, model: string) {
     const s = state.sessions.find((x) => x.id === id);
     if (!s || s.model === model) return;
@@ -647,8 +459,7 @@ export const sessionStore = {
     });
   },
 
-  /** Record the caller's identity (from /whoami): the id drives the Mine filter,
-   *  the email + anonymous flag drive the header user badge. */
+  /** Record the caller's identity from /whoami. */
   setCurrentUser(user: { id: string; email?: string | null; anonymous?: boolean }) {
     const email = user.email ?? null;
     const anonymous = user.anonymous ?? false;
@@ -690,7 +501,7 @@ export const sessionStore = {
   },
 };
 
-/** The first linked resource of a session (any provider). undefined when unlinked. */
+/** The first linked resource of a session, or undefined when unlinked. */
 export function primaryLink(s: Session): SessionLink | undefined {
   return s.links && s.links.length > 0 ? s.links[0] : undefined;
 }
@@ -700,17 +511,14 @@ export function linkForProvider(s: Session, provider: LinkProvider): SessionLink
   return (s.links ?? []).find((l) => l.source === provider);
 }
 
-/** A human name for a link: its title, else "<source> <type>" (e.g. "github
- *  pull_request"), else the source. */
+/** A human name for a link: its title, else "<source> <type>", else the source. */
 export function linkName(l: SessionLink): string {
   if (l.title) return l.title;
   const type = l.resourceType ? ` ${l.resourceType.replace(/_/g, " ")}` : "";
   return `${l.source}${type}`.trim();
 }
 
-/** The label shown for a session row, honoring the "Show:" mode: "title" always
- *  shows the conversation title; a provider mode shows THAT provider's linked-resource
- *  name for rows that have such a link, falling back to the title otherwise. */
+/** The label shown for a session row under the given label mode, falling back to the title. */
 export function sessionLabel(s: Session, mode: LabelMode): string {
   if (mode !== "title") {
     const l = linkForProvider(s, mode);
@@ -719,33 +527,21 @@ export function sessionLabel(s: Session, mode: LabelMode): string {
   return s.title;
 }
 
-/** Filter a conversation list by the current Mine/All scope. "Mine" shows
- *  STRICTLY the caller's own conversations; "All" shows everything. For an
- *  ANONYMOUS caller (auth off / no ingress identity — the id is the literal
- *  "anonymous", which is TRUTHY, so guard on the flag not the string) or before
- *  /whoami resolves, Mine shows everything (dev-friendly + no empty-list flash).
- *  An unowned conversation (owner == null: legacy / an unresolved webhook) is
- *  All-only for a KNOWN user — mirrors the server's visibleFilter so Mine truly
- *  distinguishes. */
+/** Filter by the Mine/All scope, where Mine shows only the caller's own conversations once a non-anonymous identity is known and everything before that. */
 export function visibleSessions(state: State): Session[] {
   const known = !!state.currentUser && !state.currentUserAnonymous;
   if (state.scope === "all" || !known) return state.sessions;
   return state.sessions.filter((s) => s.owner === state.currentUser);
 }
 
-/** Does a session pass the selected provider filter? No chips selected -> yes. A
- *  session passes if it links to ANY selected provider. Providers are derived from
- *  the links (falling back to the server's `sources` set) so it works even before
- *  `sources` is populated. */
+/** Whether a session links to any selected provider (no chips selected passes everything). */
 function matchesProviders(s: Session, providers: LinkProvider[]): boolean {
   if (providers.length === 0) return true;
   const srcs = new Set([...(s.sources ?? []), ...(s.links ?? []).map((l) => l.source)]);
   return providers.some((p) => srcs.has(p));
 }
 
-/** Does a session match the keyword query? Matches the title AND any linked
- *  resource's name/url (so searching a PR number or repo finds the chat). Empty
- *  query -> yes. Case-insensitive. */
+/** Whether the title or any linked resource's name or url contains the query, case-insensitively. */
 function matchesQuery(s: Session, q: string): boolean {
   const needle = q.trim().toLowerCase();
   if (!needle) return true;
@@ -757,41 +553,29 @@ function matchesQuery(s: Session, q: string): boolean {
   );
 }
 
-/** The sidebar list after ALL filters: Mine/All scope, provider chips, and the
- *  keyword search. This is what the sidebar renders. */
+/** The sidebar list after the scope, provider and keyword filters. */
 export function filteredSessions(state: State): Session[] {
   return visibleSessions(state).filter(
     (s) => matchesProviders(s, state.providerFilter) && matchesQuery(s, state.query),
   );
 }
 
-/** A sidebar row + its nesting depth (0 = top-level, 1 = a subagent under it).
- *  `childCount` is set on a COLLAPSED parent (its subagents hidden) so the row can
- *  show a "▸ N subagents" affordance; 0 when expanded or childless. */
+/** A sidebar row with its nesting depth (0 = top-level, 1 = subagent) and, on a collapsed parent, the number of hidden subagents. */
 export interface SidebarRow {
   session: Session;
   depth: number;
   childCount: number;
 }
 
-/** Order a flat session list as a hierarchy for the sidebar: each parent is
- *  immediately followed by its subagents (depth 1). A child whose parent is NOT in
- *  the list (e.g. filtered out) renders as a top-level row so it's never lost.
- *  Preserves the input order among siblings. Multi-level trees flatten to depth-1
- *  under the nearest present ancestor (one indent level — the UI stays simple).
- *
- *  AUTO-COLLAPSE: when `activeId` is given, a parent's subagents are shown only
- *  when that parent OR one of its subagents is the active conversation; otherwise
- *  the children are hidden and the parent carries `childCount` (so the UI can show
- *  "▸ N"). With no activeId, every parent is expanded. */
+/** Order a flat session list as a hierarchy with each parent followed by its subagents, a parentless child as a top-level row, and, when `activeId` is given, only the active branch's subagents expanded. */
 export function nestSubagents(sessions: Session[], activeId?: string): SidebarRow[] {
-  // Index by SERVER id: `parentId` is server-owned, `id` is not. Why: PR #568.
+  // Index by server id, because `parentId` is server-owned.
   const byServerId = new Map<string, Session>();
   for (const s of sessions) byServerId.set(serverKeyOf(s), s);
   const childrenOf = new Map<string, Session[]>();
   const tops: Session[] = [];
   for (const s of sessions) {
-    // A subagent whose parent IS in the list nests under it; otherwise it's a top.
+    // A subagent whose parent is in the list nests under it.
     const parent = s.parentId ? byServerId.get(s.parentId) : undefined;
     if (parent && parent !== s) {
       (childrenOf.get(parent.id) ?? childrenOf.set(parent.id, []).get(parent.id)!).push(s);
@@ -802,8 +586,7 @@ export function nestSubagents(sessions: Session[], activeId?: string): SidebarRo
   const rows: SidebarRow[] = [];
   for (const top of tops) {
     const children = childrenOf.get(top.id) ?? [];
-    // Expand this parent's subagents iff no activeId (show-all) OR the active
-    // conversation is this parent or one of its children.
+    // Expand iff there is no activeId or the active conversation is this parent or one of its children.
     const onActiveBranch =
       activeId === undefined || activeId === top.id || children.some((ch) => ch.id === activeId);
     const expand = onActiveBranch || children.length === 0;
@@ -813,11 +596,7 @@ export function nestSubagents(sessions: Session[], activeId?: string): SidebarRo
   return rows;
 }
 
-/** Split the sidebar's rows into the Starred / Recent sections, preserving order within
- *  each. Routing is per CONVERSATION (serverKeyOf, starred if ANY row of it is), not per
- *  row, and a conversation held twice renders once — `starred` is a per-row flag, so
- *  routing by row put a double-held conversation in BOTH sections. Subagent rows follow
- *  their parent's section; a dropped duplicate parent takes its children. Why: PR #611. */
+/** Split the rows into the Starred and Recent sections per conversation (starred if any row of it is), rendering a conversation held twice once, with subagents following their parent. */
 export function splitSections(rows: SidebarRow[]): { starred: SidebarRow[]; recent: SidebarRow[] } {
   const starredKeys = new Set<string>();
   for (const r of rows) if (r.session.starred) starredKeys.add(serverKeyOf(r.session));
@@ -825,7 +604,7 @@ export function splitSections(rows: SidebarRow[]): { starred: SidebarRow[]; rece
   const starred: SidebarRow[] = [];
   const recent: SidebarRow[] = [];
   const seen = new Set<string>();
-  // undefined = the current parent was a duplicate, so its children are dropped too.
+  // undefined means the current parent was a duplicate, so its children are dropped too.
   let bucket: SidebarRow[] | undefined = recent;
   for (const r of rows) {
     const key = serverKeyOf(r.session);
@@ -840,14 +619,11 @@ export function splitSections(rows: SidebarRow[]): { starred: SidebarRow[]; rece
 }
 
 export function useSessions(): State {
-  // getServerSnapshot = get: the store is a plain in-memory snapshot, safe to read
-  // during SSR (used by RightPanel's renderToStaticMarkup unit tests) — without it
-  // useSyncExternalStore warns + reverts to client rendering, breaking SSR renders.
+  // The in-memory snapshot doubles as getServerSnapshot so SSR renders work.
   return useSyncExternalStore(sessionStore.subscribe, sessionStore.get, sessionStore.get);
 }
 
-/** The signed-in caller (from /whoami), for the header user badge. `id` is the
- *  ingress identity; `anonymous` is true when auth is off / no identity header. */
+/** The signed-in caller from /whoami, for the header user badge. */
 export function useCurrentUser(): { id: string; email: string | null; anonymous: boolean } {
   const s = useSessions();
   return { id: s.currentUser, email: s.currentUserEmail, anonymous: s.currentUserAnonymous };

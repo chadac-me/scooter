@@ -1,16 +1,4 @@
-"""The real authenticate() body, executed.
-
-Every other test in this suite replaces this dependency via
-app.dependency_overrides[authenticate], which is right for testing a route but
-means the function deciding WHO MAY TALK TO THE BROKER AT ALL has never run
-under test. That is how PR #584 could delete
-`sandbox_control_service_accounts` from BrokerSettings and leave the read in
-this function: pydantic raises AttributeError for a field that isn't declared,
-so the line throws for every caller, and no test executed the line.
-
-These call authenticate() directly with a faked TokenReview, so the settings
-reads happen for real.
-"""
+"""The real authenticate() body, executed directly with a faked TokenReview so its settings reads happen for real."""
 
 from __future__ import annotations
 

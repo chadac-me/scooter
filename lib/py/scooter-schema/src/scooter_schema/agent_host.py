@@ -61,7 +61,8 @@ class Conversations(Base):
     __table_args__ = (
         PrimaryKeyConstraint('id', name='conversations_pkey'),
         Index('conversations_by_activity', 'last_activity_at'),
-        Index('conversations_by_owner', 'owner')
+        Index('conversations_by_owner', 'owner'),
+        Index('conversations_by_sandbox_ref', 'sandbox_ref')
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)

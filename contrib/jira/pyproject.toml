@@ -8,13 +8,13 @@ version = "0.0.0"
 license = "MIT"
 description = "Jira integration for Scooter — broker provider (Atlassian OAuth proxy) and webhooks handler"
 requires-python = ">=3.11"
-# Depends on the extension SURFACES, never on the broker/webhooks apps. Why: PR #567.
+# Depends on the extension surfaces, never on the broker or webhooks apps.
 dependencies = [
   "fastapi",
   "httpx",
 ]
 
-# One EXTRA per service, so `pip install` obeys the same split the Nix build does.
+# One extra per service, so `pip install` obeys the same split the Nix build does.
 [project.optional-dependencies]
 broker = ["scooter-broker-lib", "scooter-lib"]
 webhooks = ["scooter-webhooks-lib", "scooter-lib"]

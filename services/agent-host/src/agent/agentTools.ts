@@ -1,11 +1,7 @@
 /**
- * `web_fetch` — the one agent tool the agent-host still serves, and the SSRF guard below
- * is why it is a tool rather than a curl the agent runs itself. Registered alongside
- * `modify_environment` on the per-conversation MCP endpoint (see mcpServer.ts).
- *
- * Keep failures verbatim: a non-2xx maps to an isError result carrying the real status,
- * because a silently-swallowed failure is one the agent retries. Why this did not move
- * to a contrib with the other tools: PR #707.
+ * `web_fetch`, the one agent tool the agent-host serves itself; the SSRF guard is why
+ * it is a tool rather than a curl the agent runs. A non-2xx maps to an isError result
+ * carrying the real status, since a silently swallowed failure is one the agent retries.
  */
 
 import { z } from "zod";
@@ -20,37 +16,28 @@ export interface ToolResult {
   isError?: boolean;
 }
 
-/** The external resource a conversation maps to, as recorded by the webhooks
- *  service in Postgres (conversation_map). The FALLBACK source of the target when
- *  a conversation's link has no structured `ref` (e.g. it was created before ref
- *  existed). `resourceId` is source-specific — and the resource's URL is accepted for
- *  every one of them, since that is the shape the agent-host API stores (#563):
- *    slack:  "<channel>:<thread_ts>"
- *    github: "<owner>/<repo>#<number>"
- *    gitlab: "<repo>!<iid>" (MR) or "<repo>#<iid>" (issue) */
+/** The external resource a conversation maps to, as recorded by the webhooks service in conversation_map; `resourceId` is source-specific (slack "<channel>:<thread_ts>", github "<owner>/<repo>#<number>", gitlab "<repo>!<iid>" or "<repo>#<iid>") or the resource's URL. */
 export interface ResourceMapping {
   source: string;
   resourceType: string;
   resourceId: string;
-  /** Slack keeps the channel/ts as their own columns too — prefer these if set. */
+  /** Slack keeps the channel/ts as their own columns too; prefer these if set. */
   slackChannel?: string;
   slackTs?: string;
 }
 
-/** Deps for `web_fetch`. It hits an arbitrary URL directly and never touches the
- *  broker, so it must not be gated on the broker being wired — a deployment with no
- *  broker still gets a URL fetcher. */
+/** Deps for `web_fetch`, which never touches the broker. */
 export interface WebFetchDeps {
-  /** How to fetch a URL (injectable for tests). */
+  /** Injectable fetch for tests. */
   fetchImpl?: typeof fetch;
 }
 
-// --- The shared error-echo mapper — the load-bearing "never hide" rule ---------
+// --- Result helpers ---------
 
 const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const err = (text: string): ToolResult => ({ isError: true, content: [{ type: "text", text }] });
 
-/** Fetch a URL's main text content. SSRF-guarded (refuses internal/metadata IPs). */
+/** Fetch a URL's main text content, refusing internal/metadata addresses. */
 export async function handleWebFetch(
   deps: WebFetchDeps,
   args: { url: string },
@@ -62,7 +49,7 @@ export async function handleWebFetch(
   let res: Response;
   try {
     res = await doFetch(args.url, {
-      redirect: "error", // a redirect could bounce to an internal host — refuse it
+      redirect: "error", // a redirect could bounce to an internal host
       signal: AbortSignal.timeout(15_000),
       headers: { "User-Agent": "scooter-agent/1.0" },
     });
@@ -72,7 +59,7 @@ export async function handleWebFetch(
   if (!res.ok) return err(`web_fetch FAILED (HTTP ${res.status}) for ${args.url}.`);
   const MAX = 200_000; // cap the returned content
   const text = (await res.text()).slice(0, MAX);
-  // Crude de-HTML: strip tags/scripts so the agent gets readable text.
+  // Strip tags/scripts so the agent gets readable text.
   const stripped = text
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
@@ -82,10 +69,9 @@ export async function handleWebFetch(
   return ok(stripped || "(empty response)");
 }
 
-// --- SSRF guard (strict: static block-list + DNS-resolve check) ----------------
+// --- SSRF guard (static block-list + DNS-resolve check) ----------------
 
-/** Reject internal / loopback / link-local / cloud-metadata / cluster addresses,
- *  AND resolve the hostname to catch DNS-rebinding to an internal IP. */
+/** Reject internal, loopback, link-local, cloud-metadata and cluster addresses, resolving the hostname to catch DNS-rebinding. */
 async function ssrfCheck(rawUrl: string): Promise<{ ok: true } | { ok: false; reason: string }> {
   let u: URL;
   try {
@@ -141,11 +127,7 @@ function isBlockedIp(ip: string): boolean {
 
 // --- Registration --------------------------------------------------------------
 
-/** Register `web_fetch`. It needs no broker and no credential, so buildServer
- *  registers it unconditionally — enabling AWS or broker-routed sandboxes is NOT a
- *  prerequisite for a URL fetcher. Named for the one tool it registers: `web_search`
- *  used to ride along here, which is what let a keyless search backend look like
- *  platform furniture rather than an integration (issue #700). */
+/** Register `web_fetch`, which needs no broker and no credential. */
 export function registerWebFetch(server: McpServer, deps: WebFetchDeps): void {
   server.registerTool(
     "web_fetch",
@@ -159,25 +141,3 @@ export function registerWebFetch(server: McpServer, deps: WebFetchDeps): void {
     async (args) => (await handleWebFetch(deps, args)) as never,
   );
 }
-
-/* THE PROVIDER REPLY TOOLS USED TO BE REGISTERED HERE.
- *
- * slack_respond / slack_react / get_slack_context / github_comment / gitlab_comment /
- * jira_comment now live in the contribs that own them and are served by the broker's
- * /mcp — see contrib/slack/scooter_contrib_slack/mcp_tools.py and friends. A tool now
- * ships iff its integration is enabled: previously enabling or disabling
- * contrib/github did nothing to the agent's tool surface, and contrib/gitlab even
- * declared `ui.tools.gitlab_comment` for a tool it neither owned nor gated.
- *
- * Two things went with them and are deliberately NOT reimplemented here: target
- * inference from the conversation's links (now scooter_broker_lib/links.py + refs.py)
- * and the attachment gate (now each contrib's `@gate`). Both are ports with the
- * incident-driven rules intact — oldest link first, completeness per link.
- *
- * `web_search` followed them in phase 3: it needs a SEARCH KEY, which makes it an
- * integration's tool and not the platform's — contrib/{brave,kagi,duckduckgo} own it
- * now, and a deployment with neither has no search tool rather than one that answers
- * every query with an empty result set (PR #698).
- *
- * What remains is registerWebFetch, which needs no credential at all. Why: issue #700.
- */

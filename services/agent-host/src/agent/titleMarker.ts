@@ -1,38 +1,28 @@
 /**
- * Title-marker extraction from a streaming assistant message.
- *
- * The agent is instructed (via a skill) to begin a new conversation by emitting
- * a title marker:  <title>Concise task title</title>
- *
- * The bridge feeds assistant text deltas through this extractor, which:
- *   - detects a complete <title>…</title> (even split across deltas),
- *   - reports the title once (so the bridge can call setTitle),
- *   - and STRIPS the marker from the text shown to the user.
- *
- * It's a small stateful scanner: it buffers only the minimum needed to recognise
- * a (possibly partial) opening tag at the tail of the stream, so normal text
- * passes through with near-zero latency and the marker never leaks to the UI.
+ * Title-marker extraction from a streaming assistant message. The agent begins a
+ * new conversation with `<title>Concise task title</title>`; this stateful scanner
+ * detects the marker even when split across deltas, reports the title once, and
+ * strips it from the text shown to the user, buffering only a possible partial tag
+ * at the tail so normal text passes through with near-zero latency.
  */
 
 const OPEN = "<title>";
 const CLOSE = "</title>";
 
 export interface TitleExtractor {
-  /** Feed a text delta; returns the text to display (marker removed) and, once a
-   *  complete marker has been seen, the extracted title (reported exactly once). */
+  /** Feed a text delta, returning the text to display and, exactly once, the extracted title. */
   push(delta: string): { text: string; title?: string };
 }
 
 export function createTitleExtractor(): TitleExtractor {
-  // Pending tail that might be the start of an OPEN tag we haven't completed yet.
+  // Pending tail that might be the start of a tag not yet completed.
   let pending = "";
-  // Once we're inside a <title>…, accumulate until CLOSE.
+  // Inside a <title>…, accumulate until CLOSE.
   let inTitle = false;
   let titleBuf = "";
   let reported = false;
 
-  /** Longest suffix of `s` that is a proper prefix of `tag` (so we can hold back
-   *  a partial tag spanning deltas). Returns its length. */
+  /** Length of the longest suffix of `s` that is a proper prefix of `tag`. */
   const partialTagSuffix = (s: string, tag: string): number => {
     const max = Math.min(s.length, tag.length - 1);
     for (let n = max; n > 0; n--) {
@@ -52,8 +42,7 @@ export function createTitleExtractor(): TitleExtractor {
         if (inTitle) {
           const close = buf.indexOf(CLOSE);
           if (close === -1) {
-            // Still inside the title; keep buffering, but hold back a partial
-            // CLOSE tag at the tail.
+            // Still inside the title, so keep buffering but hold back a partial CLOSE tag.
             const hold = partialTagSuffix(buf, CLOSE);
             titleBuf += buf.slice(0, buf.length - hold);
             pending = buf.slice(buf.length - hold);
@@ -73,7 +62,7 @@ export function createTitleExtractor(): TitleExtractor {
 
         const open = buf.indexOf(OPEN);
         if (open === -1) {
-          // No opening tag; emit everything except a possible partial OPEN tail.
+          // No opening tag, so emit everything except a possible partial OPEN tail.
           const hold = partialTagSuffix(buf, OPEN);
           out += buf.slice(0, buf.length - hold);
           pending = buf.slice(buf.length - hold);

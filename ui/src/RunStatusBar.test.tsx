@@ -1,11 +1,9 @@
 /**
- * UI unit test — the Stop button gives IMMEDIATE feedback (the Stop-no-feedback bug).
+ * The Stop button gives immediate feedback.
  *
- * The run's terminal event round-trips through the integrity stream, so without
- * optimistic state the button looks dead between click and that round-trip. The
- * bar reads `cancelState` from context: "stopping" disables the button + shows
- * "Stopping…"; "failed" (the cancel POST errored, or nothing confirmed the stop)
- * shows a re-enabled "Retry stop" so the user is never left in limbo.
+ * The run's terminal event round-trips through the integrity stream, so the bar
+ * reads `cancelState` from context: "stopping" disables the button and shows
+ * "Stopping…"; "failed" shows a re-enabled "Retry stop".
  */
 
 import { describe, it, expect } from "vitest";
@@ -50,9 +48,7 @@ describe("RunStatusBar Stop feedback", () => {
     expect(render({ isRunning: false, runError: null })).toBe("");
   });
 
-  // React renders a boolean `disabled` attribute as the bare `disabled=""` on the
-  // element; the className carries literal "disabled:" Tailwind variants, so match
-  // the attribute form specifically rather than the substring.
+  // The className carries literal "disabled:" Tailwind variants, so match the attribute form rather than the substring.
   const buttonDisabled = (html: string) => /<button[^>]*\sdisabled(=""|\s|>)/.test(html);
 
   it("idle-running: dot + a 'Working…' label + an ENABLED Stop button", () => {
@@ -61,13 +57,13 @@ describe("RunStatusBar Stop feedback", () => {
     expect(buttonDisabled(html)).toBe(false);
     expect(html).toContain('data-testid="thinking-indicator"');
     expect(html).toContain('aria-label="Scooter is working"');
-    // The label says it's working (no active tool name → generic "Working…").
+    // No active tool name gives the generic "Working…" label.
     expect(html).toContain("Working…");
   });
 
   it("shows the ACTIVE TOOL + elapsed time so a long silent call is visibly working", () => {
     const html = render({ activeTool: "bash", runStartedAt: Date.now() - 125_000 });
-    // "Running bash… 2m 5s" — names the tool and how long it's been going.
+    // Names the tool and how long it has been running.
     expect(html).toMatch(/Running bash…\s*2m/);
   });
 
@@ -76,7 +72,7 @@ describe("RunStatusBar Stop feedback", () => {
     expect(buttonDisabled(html)).toBe(true);
     expect(html).toContain('aria-busy="true"');
     expect(html).toContain("Stopping…");
-    // Must NOT still say plain "Stop" as if nothing happened.
+    // The plain "Stop" label must be gone.
     expect(html).not.toContain(">Stop<");
   });
 
@@ -93,7 +89,7 @@ describe("RunStatusBar Stop feedback", () => {
     expect(html).toContain('data-testid="run-error-bar"');
     expect(html).toContain('role="alert"');
     expect(html).toContain("The agent could not start this run: 409");
-    // Not the working/stop UI — this is a terminal error state.
+    // A terminal error state, not the working/stop UI.
     expect(html).not.toContain("Scooter is working");
   });
 

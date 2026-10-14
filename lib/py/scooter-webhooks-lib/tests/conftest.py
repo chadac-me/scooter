@@ -1,10 +1,4 @@
-"""Bind the agent-host client the way a service does at startup.
-
-The client is GIVEN its configuration (PR #575) rather than reading env, so every
-test supplies a stub config — which is the point: these tests now cover the wiring
-a deployment actually uses, and a test that forgets it fails loudly rather than
-silently reading someone else's settings.
-"""
+"""Bind the agent-host client with a stub config the way a service does at startup."""
 
 from __future__ import annotations
 

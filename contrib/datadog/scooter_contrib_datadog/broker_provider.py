@@ -1,8 +1,7 @@
-"""Datadog provider module — two-key header auth, http-proxy only.
+"""Datadog provider: two-key header auth over http-proxy only.
 
-Proxies /datadog/* -> https://api.<site> with DD-API-KEY + DD-APPLICATION-KEY
-injected, so the agent can query metrics/logs/monitors without seeing the keys.
-Enabled iff BOTH keys are configured. The site is region-specific (config).
+Proxies /datadog/* to https://api.<site> with both keys injected; enabled iff
+both keys are configured.
 """
 
 from __future__ import annotations
@@ -17,8 +16,7 @@ from .datadog_keys import DatadogKeysSource
 
 @register_provider
 def datadog() -> Provider:
-    # Read at BUILD time, like every provider factory — the broker calls this
-    # once per create_app(), after refreshing the environment.
+    # Read at build time, like every provider factory.
     settings = DatadogSettings()
     site = (settings.datadog_site or "datadoghq.com").strip().lstrip(".")
     return Provider(

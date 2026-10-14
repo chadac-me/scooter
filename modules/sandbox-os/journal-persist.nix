@@ -1,25 +1,8 @@
-# The sandbox's systemd journal, on the workspace PVC instead of the container's
-# writable layer.
-#
-# systemd PID 1 reopens its own stdio on /dev/null early in startup and logs to the
-# journal instead, so `kubectl logs` on a sandbox shows stage-2 output and then
-# NOTHING -- on a healthy boot and a crashed one alike. The journal is therefore the
-# only record of what systemd did. By default it lives at /var/log/journal in the
-# container's overlay layer (same st_dev as /), which a container restart destroys
-# along with the dead rootfs: the evidence disappears at exactly the moment it is
-# needed. Why: PR #703.
-#
-# Bound pre-systemd, in the activation script, NOT via fileSystems/a mount unit. A
-# mount unit lands after local-fs.target, so journald would spend early boot writing
-# to /run (tmpfs) and only reach disk at systemd-journal-flush -- losing precisely
-# the early-boot crash this exists to capture. Binding before systemd starts means
-# journald, with Storage=persistent, writes to the PVC from its first record.
-#
-# Read a retained boot with `journalctl -D <path>` (NOT --merge, which is rejected
-# alongside --list-boots/-b).
-#
-# A bind mount, not a symlink: tmpfiles ships `z /var/log/journal` and `a+` ACL rules
-# (systemd.conf, journal-nocow.conf) that refuse to follow a symlink.
+# The sandbox's systemd journal, bind-mounted onto the workspace PVC so it survives
+# a container restart. The journal is the only record of what systemd did, since
+# PID 1 logs nothing to stdio. The bind happens in the activation script, before
+# systemd starts, so journald writes to the PVC from its first record; read a
+# retained boot with `journalctl -D <path>`.
 
 { config, lib, pkgs, ... }:
 
@@ -58,8 +41,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # persistent, not auto: write to disk from the first record rather than waiting
-    # for the flush that an early-boot crash never reaches.
+    # persistent, not auto, so the first record reaches disk before any flush.
     services.journald.settings.Journal = {
       Storage = "persistent";
       SystemMaxUse = cfg.maxUse;
@@ -72,10 +54,8 @@ in
         jdir="${cfg.path}"
         pvc="$(dirname "$(dirname "$jdir")")"
 
-        # Report, never fail the boot: a sandbox that logs to the container layer is
-        # degraded, one that does not boot is broken.
-        # Idempotent: activation re-runs on every `scooter-rebuild switch`, and a
-        # second bind would stack another mount over the first on each switch.
+        # Report rather than fail the boot, and skip when already bound since
+        # activation re-runs on every `scooter-rebuild switch`.
         if ${pkgs.util-linux}/bin/mountpoint -q /var/log/journal 2>/dev/null; then
           echo "sandbox-journal: /var/log/journal already bound -- nothing to do"
         elif ! ${pkgs.util-linux}/bin/mountpoint -q "$pvc" 2>/dev/null; then
@@ -83,8 +63,7 @@ in
         else
           ${pkgs.coreutils}/bin/mkdir -p "$jdir"
 
-          # Keep the newest N boots. Oldest-first by mtime; the current boot's dir
-          # does not exist yet, so N is entirely prior boots.
+          # Keep the newest N prior boots (the current boot's dir does not exist yet).
           keep=${toString cfg.keepBoots}
           n=$(${pkgs.coreutils}/bin/ls -1 "$jdir" 2>/dev/null | ${pkgs.coreutils}/bin/wc -l)
           if [ "$n" -gt "$keep" ]; then

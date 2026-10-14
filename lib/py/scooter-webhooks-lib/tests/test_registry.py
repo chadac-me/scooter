@@ -1,14 +1,7 @@
-"""The handler registry MECHANISM, with the built-in scan as a parameter.
+"""The handler registry mechanism, with the packages to scan as a parameter.
 
-The webhooks app's own tests assert that its five built-in handlers are found
-and mounted. These assert the machinery underneath, which is what moved here:
-`discover_webhooks` used to do `from . import handlers`, hardcoding the app
-package. It now takes the packages to scan, so a contrib-only caller passes
-nothing and is still discovered through the entry-point group.
-
-Mirrors scooter_broker_lib's test_registry — deliberately, since the two
-registries are the same contract and drift between them is the bug worth
-catching.
+Mirrors scooter_broker_lib's test_registry, since the two registries are the same
+contract and drift between them is the bug worth catching.
 """
 
 from __future__ import annotations
@@ -32,7 +25,7 @@ from scooter_webhooks_lib.registry import (
 
 @pytest.fixture(autouse=True)
 def _isolated_registry():
-    """@register_webhook writes to module state; don't leak it across tests."""
+    """@register_webhook writes to module state, so isolate it per test."""
     saved = dict(registry._REGISTRY)
     registry._REGISTRY.clear()
     yield
@@ -42,8 +35,7 @@ def _isolated_registry():
 
 @pytest.fixture(autouse=True)
 def _no_entry_points(monkeypatch, request):
-    """Real installed entry points would make these tests depend on what else is
-    in the environment. The entry-point path gets its own test below."""
+    """Stub the entry-point scan so the environment's installed packages do not leak in."""
     if "uses_entry_points" in request.keywords:
         return
     monkeypatch.setattr(registry, "_load_entrypoint_handlers", lambda: None)
@@ -66,11 +58,7 @@ def {factory}() -> WebhookHandler:
 
 
 def _package(name: str, modules: dict[str, str]):
-    """Build an importable throwaway package on disk.
-
-    A real package, not a mock: the scan walks __path__ with pkgutil and imports
-    by name, so a stub that does not do both proves nothing.
-    """
+    """Build an importable throwaway package on disk, since the scan walks __path__ with pkgutil."""
     root = pathlib.Path(tempfile.mkdtemp())
     pkg_dir = root / name
     pkg_dir.mkdir()
@@ -93,8 +81,6 @@ def test_scans_the_packages_it_is_given():
 
 
 def test_scans_nothing_when_given_nothing():
-    # A contrib-only service has no in-tree handlers; that must not be an error,
-    # and it must not fall back to some hardcoded package.
     assert discover_webhooks() == []
 
 
@@ -122,8 +108,6 @@ def test_a_discovered_handler_carries_its_router():
 
 
 def test_a_disabled_handler_is_left_out():
-    # Built-in handlers self-gate in-route; `enabled` is the mount-time knob a
-    # third-party handler may prefer instead.
     pkg = _package(
         "scooter_test_handlers_e",
         {
@@ -135,9 +119,7 @@ def test_a_disabled_handler_is_left_out():
 
 
 def test_a_factory_that_raises_is_skipped_loudly(caplog):
-    # One bad handler must not take down the whole service — but it is then
-    # ABSENT (its routes 404), which reads exactly like "disabled" unless the log
-    # says otherwise.
+    # A bad handler is absent (its routes 404), which reads like "disabled" unless the log says otherwise.
     @register_webhook
     def exploding() -> WebhookHandler:
         raise RuntimeError("bad config")
@@ -163,8 +145,7 @@ def test_register_webhook_keys_on_the_factory_name():
 
 
 def test_entry_point_group_is_named_once():
-    # The contribs' pyproject files spell this group out; a drifted constant here
-    # would silently stop discovering every contrib.
+    # The contribs' pyproject files spell this group out.
     assert ENTRY_POINT_GROUP == "scooter_webhooks.handlers"
 
 
@@ -183,8 +164,7 @@ def test_a_broken_entry_point_does_not_stop_the_others(monkeypatch, caplog):
             def from_entry_point() -> WebhookHandler:
                 return WebhookHandler(name="from-ep", router=APIRouter())
 
-    # _load_entrypoint_handlers imports entry_points INSIDE the function, so
-    # swapping the module in sys.modules is enough — no import-order games.
+    # _load_entrypoint_handlers imports entry_points inside the function, so swapping the module in sys.modules is enough.
     eps = [_Ep("broken", True), _Ep("good", False)]
     monkeypatch.setitem(
         sys.modules,

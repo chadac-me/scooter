@@ -1,4 +1,4 @@
-"""Jira provider module — Atlassian OAuth, http-proxy only."""
+"""Jira provider: Atlassian OAuth over http-proxy and the agent tool."""
 
 from __future__ import annotations
 
@@ -14,8 +14,7 @@ from scooter_broker_lib.transports.mcp_tools import McpTools
 
 def _jira_issue_link(r: dict) -> Link | None:
     settings = JiraSettings()
-    # Create-issue response: {id, key, self}. The API `self` URL isn't a nice
-    # human link; prefer the site's /browse/{KEY} when the site URL is configured.
+    # The create-issue response carries {id, key, self}; the site's /browse/{KEY} is preferred when configured.
     key = r.get("key")
     if not key:
         return None
@@ -24,7 +23,7 @@ def _jira_issue_link(r: dict) -> Link | None:
     return Link(source="jira", resource_type="issue", url=url, title=key)
 
 
-# create-issue = POST /rest/api/{2,3}/issue  (bulk = /issue/bulk, excluded)
+# create-issue is POST /rest/api/{2,3}/issue; /issue/bulk is excluded.
 _JIRA_LINK_RULES = [
     rule("POST", r"^rest/api/[23]/issue/?$", _jira_issue_link),
 ]
@@ -32,7 +31,7 @@ _JIRA_LINK_RULES = [
 
 @register_provider
 def jira() -> Provider:
-    # Read at BUILD time, like every provider factory (#573).
+    # Read at build time, like every provider factory.
     settings = JiraSettings()
     cloud_id = settings.atlassian_cloud_id
     upstream = f"https://api.atlassian.com/ex/jira/{cloud_id}"
@@ -49,7 +48,6 @@ def jira() -> Provider:
                 link_rules=_JIRA_LINK_RULES,
                 agent_host_url=settings.agent_host_url,
             ),
-            # The agent tool (jira_comment), moved out of the agent-host by #700.
             McpTools(server=jira_mcp_server(), upstream=upstream),
         ],
         enabled=bool(settings.atlassian_client_id and cloud_id),

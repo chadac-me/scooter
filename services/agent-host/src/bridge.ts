@@ -1,13 +1,9 @@
 /**
  * ACP <-> AG-UI bridge — the core of the agent-host.
  *
- * Maps ACP session/update notifications to AG-UI events (docs/DESIGN.md §4c)
- * and routes ACP client methods (terminal/*, fs/*, session/request_permission)
- * to the ExecBackend (agent-sandbox SDK) / permission UI.
- *
- * Note: this interface is UNCHANGED by the agent-outside inversion — only the
- * ExecBackend implementation flipped (local-OS -> agent-sandbox SDK), a sign
- * the seam is in the right place.
+ * Maps ACP session/update notifications to AG-UI events and routes ACP client
+ * methods (terminal/*, fs/*, session/request_permission) to the ExecBackend and
+ * the permission UI.
  */
 
 import { skillPayloads } from "./agent/skills.js";
@@ -37,26 +33,20 @@ import { formatError, logger } from "./log.js";
 
 const log = logger("bridge");
 
-/** Where user-attached binary files (UI uploads, Slack pdf/zip/…) are materialized
- *  inside the sandbox. The bridge writes the bytes here and then appends a note to
- *  the prompt listing the saved paths, so the agent knows where to read each file
- *  — one place does the weaving for every entrypoint (UI + webhooks). */
+/** Where user-attached binary files are materialized inside the sandbox; the prompt
+ *  gets a note listing the saved paths. */
 export const UPLOADS_DIR = "/workspace/uploads";
 
-/** Sanitize an attachment filename to a safe basename (no path traversal / dir
- *  separators) so a hostile `name` can't escape UPLOADS_DIR. */
+/** Sanitize an attachment filename to a safe basename so a hostile `name` cannot escape UPLOADS_DIR. */
 export function safeUploadName(name: string): string {
   const base = name.split(/[\\/]/).pop() || "file";
-  // Drop leading dots that could hide it / strip anything odd to a conservative set.
+  // Drop leading dots and anything outside a conservative character set.
   const cleaned = base.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
   return cleaned || "file";
 }
 
-/** Write one binary file attachment (base64) into the sandbox at
- *  UPLOADS_DIR/<name>. Streams the base64 over stdin to `base64 -d` (writeBinaryFile)
- *  so it is NOT capped by the ~128KB single-argv limit an inline `printf | base64 -d`
- *  hits. Returns the sandbox path written. Throws so the caller can log + skip
- *  (best-effort — a bad upload must not fail the turn). */
+/** Write one base64 file attachment into the sandbox at UPLOADS_DIR/<name> and return
+ *  the path, throwing so the caller can log and skip a bad upload. */
 async function writeUploadedFile(exec: ExecBackend, file: { name: string; data: string }): Promise<string> {
   const name = safeUploadName(file.name);
   const path = `${UPLOADS_DIR}/${name}`;
@@ -64,16 +54,13 @@ async function writeUploadedFile(exec: ExecBackend, file: { name: string; data: 
   return path;
 }
 
-/** The note appended to the prompt listing where uploaded files were saved. Kept
- *  identical in wording to what the Slack path used to weave (so the agent's
- *  experience is unchanged), now emitted for every entrypoint. */
+/** The note appended to the prompt listing where uploaded files were saved. */
 export function buildFileNote(paths: string[]): string {
   return "The following file attachment(s) have been saved into your sandbox:\n" + paths.map((p) => `- ${p}`).join("\n");
 }
 
-/** An AG-UI interrupt: a point where the run pauses for a user response (a
- *  permission/option choice). Matches @ag-ui/core's Interrupt. `metadata.options`
- *  carries the choices the UI renders. */
+/** An AG-UI interrupt: a point where the run pauses for a user response, with the
+ *  choices the UI renders in `metadata.options`. */
 export interface AguiInterrupt {
   id: string;
   /** "confirmation" | "input_required" | "tool_call" | custom. */
@@ -88,53 +75,36 @@ export type AguiRunOutcome =
   | { type: "success" }
   | { type: "interrupt"; interrupts: AguiInterrupt[] };
 
-// AG-UI event union (subset used here; full set per AG-UI spec). Every persisted
-// event also carries an optional `ts` (epoch ms, stamped at emit time) — an
-// explicit chronological ordering key. It's absent on synthetic/test events and
-// ignored by the @ag-ui client (which folds by type + id).
+// AG-UI event union (the subset used here); `ts` is the emit-time epoch-ms ordering
+// key, absent on synthetic events.
 export type AguiEvent = AguiEventBase & { ts?: number };
 
 type AguiEventBase =
-  // RUN_STARTED and RUN_FINISHED both REQUIRE threadId per the AG-UI schema —
-  // the @ag-ui/client validates incoming events and rejects a missing threadId.
-  // `host`/`gen` identify WHO started the run, so a later reader can tell a run this
-  // pod is still executing from one stranded by a previous host. Without them
-  // hasDanglingRun cannot distinguish the two, and revive-on-assign nudged a
-  // conversation's own live first run. Optional: events persisted before this
-  // existed have neither, and are treated as foreign (the old behaviour).
+  // RUN_STARTED and RUN_FINISHED require threadId per the AG-UI schema; `host`/`gen`
+  // identify which pod and generation started the run, so a reader can tell a live
+  // run from one stranded by a previous host.
   | { type: "RUN_STARTED"; threadId: ThreadId; runId: RunId; host?: string; gen?: number }
   | {
       type: "RUN_FINISHED";
       threadId: ThreadId;
       runId: RunId;
       result?: unknown;
-      /** When present with outcome "interrupt", the run paused awaiting a user
-       *  response (a permission/option choice). assistant-ui surfaces these as
-       *  pending interrupts; the user's answer resumes via the next run's
-       *  RunAgentInput.resume[]. */
+      /** With type "interrupt", the run paused awaiting a user response, resumed via
+       *  the next run's RunAgentInput.resume[]. */
       outcome?: AguiRunOutcome;
-      /** The run was stopped by the user (a "stop" click) or a priority
-       *  force-interrupt — a clean end, NOT an error. The UI shows "you stopped
-       *  this turn." */
+      /** The run was stopped by the user or a priority force-interrupt: a clean end,
+       *  not an error. */
       cancelled?: boolean;
-      /** Synthesized by the ADOPTING pod for a run whose real terminal was lost —
-       *  the previous owner was fenced mid-run, so its RUN_FINISHED never reached
-       *  the log. Marks the run closed so the UI stops reading it as in-flight;
-       *  the work itself was not completed. */
+      /** Synthesized by the adopting pod for a run whose owner was fenced mid-run, so
+       *  the UI stops reading it as in-flight. */
       interrupted?: boolean;
     }
   | { type: "RUN_ERROR"; message: string; code?: string }
-  // Emitted when a run failed TRANSIENTLY (agent process died / no-activity / ACP threw) and the pump
-  // is about to AUTO-RETRY the same batch after `delayMs`. `attempt`/`max` drive the UI's "retrying
-  // (n/N)…" banner. NOT persisted as a terminal — a following RUN_STARTED clears it (success) or, on
-  // exhaustion, the final RUN_ERROR replaces it. See the pump's retry loop.
+  // Emitted when a run failed transiently and the pump is about to retry the same batch after
+  // `delayMs`; not a terminal event.
   | { type: "RUN_RETRYING"; threadId: ThreadId; attempt: number; max: number; delayMs: number; code?: string }
-  // PERSISTED CANCEL INTENT. A user Stop emits this BEFORE the kill takes effect, so
-  // the intent survives the pod: if the host dies mid-cancel (a scale-down/rollout
-  // races the Stop), the next owner's dangling-run check finds the marker and
-  // TERMINATES the run (RUN_FINISHED cancelled) instead of resume-nudging work the
-  // user already stopped. Persist-only for the UI (@ag-ui folds by type and ignores
-  // it); load-bearing for reviveFromMirror.
+  // A user Stop persists this before the kill takes effect, so a later owner's
+  // dangling-run check terminates the run instead of resuming it.
   | { type: "CANCEL_REQUESTED"; threadId: ThreadId; runId: RunId }
   | { type: "TEXT_MESSAGE_START"; messageId: string; role: "assistant" | "user" }
   | { type: "TEXT_MESSAGE_CONTENT"; messageId: string; delta: string }
@@ -143,62 +113,38 @@ type AguiEventBase =
   | { type: "TOOL_CALL_ARGS"; toolCallId: string; delta: string }
   | { type: "TOOL_CALL_END"; toolCallId: string }
   | { type: "TOOL_CALL_RESULT"; toolCallId: string; messageId: string; content: string }
-  // AG-UI reasoning sequence: START -> MESSAGE_START -> MESSAGE_CONTENT(s) ->
-  // MESSAGE_END -> END. The client rejects MESSAGE_CONTENT without MESSAGE_START.
+  // AG-UI reasoning sequence: START -> MESSAGE_START -> MESSAGE_CONTENT(s) -> MESSAGE_END -> END.
   | { type: "REASONING_START"; messageId: string }
   | { type: "REASONING_MESSAGE_START"; messageId: string; role: "reasoning" }
   | { type: "REASONING_MESSAGE_CONTENT"; messageId: string; delta: string }
   | { type: "REASONING_MESSAGE_END"; messageId: string }
   | { type: "REASONING_END"; messageId: string }
-  // Emitted once a permission/option request is answered (or cancelled) so a
-  // reattaching/late UI (history replay) knows the request is settled and which
-  // option was chosen. The REQUEST itself rides RUN_FINISHED's interrupt outcome
-  // (assistant-ui's native interrupt mechanism), not a bespoke event.
+  // Emitted once a permission/option request is answered or cancelled, so a replaying
+  // UI knows it is settled and which option was chosen.
   | { type: "PERMISSION_RESOLVED"; toolCallId: string; optionId: string | null }
-  // A SNAPSHOT of the run queue's pending items, emitted whenever the queue
-  // changes (a prompt enqueued behind an active run, or drained as it starts to
-  // run). Persist-only + broadcast: the @ag-ui client folds by type+id and ignores
-  // this bespoke event, so it never corrupts the message stream — but it rides the
-  // SAME single-source (integrity) path the UI reattaches to, so queued messages
-  // survive a refresh + show across tabs (the old queued-message-vanishes bug: the
-  // queue lived only in client memory). Latest-wins: the UI renders the items from
-  // the most recent QUEUE_UPDATED; an empty `items` means the queue drained.
+  // A latest-wins snapshot of the run queue's pending items, persisted and broadcast
+  // so queued messages survive a refresh.
   | { type: "QUEUE_UPDATED"; items: Array<{ id: string; text: string; priority: number }> }
-  // Image REFERENCES attached to a user message (multimodal). Carries only the
-  // assetId + mimeType + fetch url — NEVER the base64 bytes — so the event log stays
-  // compact + checksum-stable; the UI renders each via its url on replay. Bespoke
-  // like QUEUE_UPDATED: the @ag-ui client folds by type and ignores it, so it never
-  // corrupts the message stream; the UI reads it explicitly (keyed to the user
-  // messageId it follows). Persist + broadcast, so it survives a refresh.
+  // Image references (assetId + url, never bytes) attached to a user message, keyed to
+  // the messageId they follow.
   | {
       type: "MESSAGE_IMAGES";
       messageId: string;
       images: Array<{ assetId: string; mimeType: string; url: string }>;
     }
-  // Context-window fill after a turn (used / total tokens) → the UI's context-fill
-  // bar. Bespoke like QUEUE_UPDATED: the @ag-ui client folds by type and ignores it,
-  // so it never touches the message stream; the UI reads it explicitly. Persist +
-  // broadcast, so the latest value survives a refresh.
+  // Context-window fill after a turn, for the UI's context-fill bar.
   | { type: "CONTEXT_USAGE"; usedTokens: number; contextWindow: number }
-  // A COMPACTION boundary: the older turns before this marker were summarized (recap
-  // in `summary`); the recent turns after it are kept verbatim. It IS the compaction
-  // point — loadHistory (index.ts) seeds a revived session from [summary + events
-  // after the latest marker], so the agent continues on the compacted context.
-  // Rendered inline by the UI as a "Compacted earlier messages" divider. Bespoke;
-  // persisted like QUEUE_UPDATED (the @ag-ui client ignores it).
+  // A compaction boundary: the turns before it are summarized in `summary`, and
+  // loadHistory seeds a revived session from the summary plus the events after the
+  // latest marker.
   | { type: "COMPACTION_MARKER"; summary: string; summarizedTurns: number; keptRuns: number }
-  // A SYSTEM message: content injected by the PLATFORM (webhook event, scheduler
-  // fire, background-job completion, broker error, restart/model-switch nudge), NOT
-  // typed by a human. Persisted INSTEAD of a role:user message so the UI can hide /
-  // collapse it (they're noise for the human, though the agent still received them).
-  // `source` tags the origin (slack/github/scheduler/background/broker/nudge/…) for
-  // an icon/label. Bespoke like QUEUE_UPDATED — the @ag-ui client ignores it, so it
-  // never enters the user/assistant message stream.
+  // A platform-injected message (webhook, scheduler, background job, broker, nudge)
+  // persisted instead of a role:user message so the UI can collapse it; `source`
+  // tags the origin.
   | { type: "SYSTEM_MESSAGE"; messageId: string; source: string; text: string };
 
-/** The standard decoration prepended to a SYSTEM message so the agent knows it's a
- *  platform event (not a human turn) and shouldn't reply to the user about it. One
- *  format for every source, replacing the ad-hoc "[System: …]" prefixes. */
+/** The decoration prepended to a system message so the agent treats it as a platform
+ *  event rather than a human turn. */
 export function decorateSystemMessage(source: string, text: string): string {
   return (
     `[System message${source ? ` from ${source}` : ""} — this is an automated platform ` +
@@ -207,10 +153,8 @@ export function decorateSystemMessage(source: string, text: string): string {
   );
 }
 
-/** Rewrite a raw agent/API error into a clearer user-facing message for the known
- *  cases. Today: CONTEXT OVERFLOW (the conversation exceeded the model's context
- *  window and auto-compaction couldn't recover) → a plain "start a new chat" nudge
- *  instead of a cryptic provider string. Anything unrecognized passes through. */
+/** Rewrite a known raw agent/API error (context overflow) into a clearer user-facing
+ *  message; anything unrecognized passes through. */
 export function clarifyRunError(raw: string): string {
   const m = raw.toLowerCase();
   const contextOverflow =
@@ -227,10 +171,8 @@ export function clarifyRunError(raw: string): string {
 /** Longest provider diagnostic we paste into a user-facing RUN_ERROR. */
 const DIAGNOSTIC_MAX = 300;
 
-/** Pick the line from an agent subprocess's stderr tail that explains a run which
- *  produced nothing. `[ede_diagnostic]` (the CLI's stalled-permission-prompt
- *  signature — see claude-sdk-provider/src/toolPolicy.ts) wins over a generic error
- *  line even when a later line also matches. Why: PR #565. */
+/** Pick the stderr line that explains a run which produced nothing, preferring
+ *  `[ede_diagnostic]` (the stalled-permission-prompt signature) over a generic error line. */
 export function providerDiagnostic(lines: readonly string[] | undefined): string | undefined {
   if (!lines?.length) return undefined;
   const clean = lines.map((l) => l.trim()).filter(Boolean);
@@ -241,10 +183,8 @@ export function providerDiagnostic(lines: readonly string[] | undefined): string
   return pick.length > DIAGNOSTIC_MAX ? `${pick.slice(0, DIAGNOSTIC_MAX)}…` : pick;
 }
 
-/** The user-facing text for a dead-on-arrival run (no ACP activity before the
- *  deadline). `no_activity_timeout` has SEVERAL causes, so this must name the
- *  candidates rather than assert one — asserting credentials cost hours of a real
- *  outage's diagnosis while the token was fine. Why: PR #565. */
+/** The user-facing text for a dead-on-arrival run, naming the candidate causes since
+ *  `no_activity_timeout` has several. */
 export function deadOnArrivalMessage(diagnostic?: string): string {
   return (
     "The agent didn't respond — it started but produced nothing. This has several " +
@@ -257,17 +197,15 @@ export function deadOnArrivalMessage(diagnostic?: string): string {
   );
 }
 
-/** An image attached to a user prompt — a reference the bridge resolves to base64
- *  (from the AssetStore) when it builds the ACP image content block. */
+/** An image attached to a user prompt, resolved to base64 from the AssetStore when the
+ *  ACP image block is built. */
 export interface PromptImage {
   assetId: string;
   mimeType: string;
 }
 
-/** A binary file attached to a user prompt (Slack pdf/zip/…). Unlike images, files
- *  are NOT sent as ACP content blocks — the bridge MATERIALIZES the bytes into the
- *  sandbox at /workspace/uploads/<name> via the exec client, and the agent reads them
- *  from disk (the message text, woven webhooks-side, references the saved paths). */
+/** A binary file attached to a user prompt, materialized into the sandbox at
+ *  /workspace/uploads/<name> rather than sent as an ACP content block. */
 export interface PromptFile {
   name: string;
   /** base64-encoded bytes. */
@@ -279,42 +217,26 @@ export interface PromptFile {
 export interface PromptInput {
   threadId: ThreadId;
   text: string;
-  /** Images the user attached (UI upload / Slack). Empty/undefined = text-only
-   *  (the unchanged hot path). Resolved to ACP image blocks when the run prompts. */
+  /** Images the user attached, resolved to ACP image blocks when the run prompts. */
   images?: PromptImage[];
-  /** Binary file attachments (Slack). Empty/undefined = none (the unchanged path).
-   *  Written to /workspace/uploads/<name> in the sandbox when the run prompts. */
+  /** Binary file attachments, written to /workspace/uploads/<name> in the sandbox when the run prompts. */
   files?: PromptFile[];
-  /** SYSTEM message source — set when this prompt is injected by the PLATFORM, not
-   *  typed by a human (a webhook event, a scheduler fire, a background-job completion,
-   *  a broker error, a restart/model-switch nudge). When set: (1) the agent receives
-   *  a standard "[system message from <source> — no need to reply to the user]"
-   *  decoration ahead of the text, and (2) the turn is persisted as a SYSTEM_MESSAGE
-   *  event (not a role:user message), so the UI can hide/collapse it. Undefined = a
-   *  normal human user message (the unchanged path). */
+  /** Set when the platform injected this prompt: the agent receives a system-message
+   *  decoration and the turn persists as a SYSTEM_MESSAGE event. */
   source?: string;
 }
 
-/** How a priority item PREEMPTS the running turn (graduated interrupt levels).
- *  Applies only to a priority prompt (priority > 0); a normal prompt always waits.
- *   - "timeout"   : the default — wait priorityInterruptMs, then cancel (kills the
- *                   in-flight tool call). What an @scooter mention uses.
- *   - "thinking"  : preempt idle text generation, but let an IN-FLIGHT TOOL CALL
- *                   finish first — cancel fires at the next tool-call boundary (or
- *                   immediately if none is running). What the run_background
- *                   completion-watcher wants (don't kill a build to announce a job).
- *   - "tool-call" : the most aggressive — cancel NOW, killing any running tool
- *                   call. What an explicit user Stop does. */
+/** How a priority prompt preempts the running turn: "timeout" waits priorityInterruptMs
+ *  then cancels, "thinking" cancels at the next tool-call boundary, and "tool-call"
+ *  cancels immediately. */
 export type InterruptPolicy = "timeout" | "thinking" | "tool-call";
 
 /** Per-prompt options for the bridge's run queue. */
 export interface PromptOptions {
-  /** Higher runs sooner among queued items. A PRIORITY prompt (>0, e.g. an
-   *  @scooter mention) may also force-interrupt the running turn — a normal prompt
-   *  (0) only waits its turn. Default 0. */
+  /** Higher runs sooner among queued items, and a priority prompt (>0) may also
+   *  force-interrupt the running turn (default 0). */
   priority?: number;
-  /** How a priority prompt preempts the running turn. Default "timeout" (the
-   *  historical behavior). Ignored for a normal (priority 0) prompt. */
+  /** How a priority prompt preempts the running turn (default "timeout"). */
   interrupt?: InterruptPolicy;
 }
 
@@ -322,9 +244,8 @@ export interface PromptOptions {
 export const PRIORITY_NORMAL = 0;
 export const PRIORITY_INTERRUPT = 10;
 
-/** The identity of the human answering an external interrupt (e.g. approving an
- *  AWS request). Sent to the broker, which authorizes the configured claim
- *  (email/id/name). Anonymous when no ingress identity. */
+/** The identity of the human answering an external interrupt, sent to the broker for
+ *  authorization. */
 export interface ApproverIdentity {
   id: string;
   email?: string;
@@ -345,267 +266,140 @@ export interface SessionBridge {
 
   start(): Promise<void>;
   prompt(input: PromptInput, opts?: PromptOptions): Promise<RunId>;
-  /** Cancel the RUNNING turn (a user "stop" or a priority force-interrupt): tell
-   *  goose to stop (ACP session/cancel), KILL its active tool call (a running
-   *  shell), and end the run cleanly (RUN_FINISHED marked cancelled). `runId` is
-   *  optional — omitted cancels whatever run is currently active. A no-op if
-   *  nothing is running. Queued prompts are NOT dropped; the next runs after. */
-  /** `userInitiated` marks a real Stop press, which gets a grace window for a terminal
-   *  that has not spawned yet. Internal preemption must NOT set it. */
+  /** Cancel the running turn (omitted `runId` means whatever is active), ending it as a
+   *  cancelled RUN_FINISHED without dropping queued prompts; `userInitiated` marks a real
+   *  Stop press, which gets a grace window for a terminal that has not spawned yet. */
   cancel(runId?: RunId, userInitiated?: boolean): Promise<void>;
   stop(): Promise<void>;
-  /** Snapshot of the run queue (for observability / the force-interrupt timer):
-   *  whether a run is active, how long it's been going, and the queued backlog. */
+  /** Snapshot of the run queue for observability and the force-interrupt timer. */
   queueState(): { running: boolean; currentRunMs: number; queued: number; maxQueuedPriority: number };
 
-  /** Remove every QUEUED (not-yet-running) item and return it, so the caller can
-   *  PERSIST it across a bridge teardown. Used by suspend: the run queue lives in
-   *  this bridge's closure and the bridge is dropped on suspend, so anything still
-   *  queued would otherwise be destroyed (the message the user sent silently never
-   *  runs). Each drained item's prompt() promise is REJECTED — it will not run on
-   *  THIS bridge; revive re-enqueues the persisted copies on the new one. Also
-   *  emits a clearing QUEUE_UPDATED so the durable log's last word is "empty"
-   *  (else a reattaching UI folds a phantom queued row nothing will drain). */
+  /** Remove every queued item and return it for persistence across a bridge teardown,
+   *  rejecting each drained prompt() and emitting a clearing QUEUE_UPDATED. */
   drainQueue(): Array<{ text: string; priority: number }>;
 
-  /** True when a PRIORITY_INTERRUPT item is waiting on the queue — the signal for
-   *  tool-call BACK-PRESSURE: a provider's pre-tool gate (SDK canUseTool / goose
-   *  approve-mode request_permission) denies the NEXT tool while this is true, so
-   *  the run quiesces to a boundary and the queued priority item (e.g. a subagent
-   *  result) can inject instead of waiting for the whole run. A normal queued
-   *  prompt does NOT trigger this (it waits its turn). See
-   *  todo/docs/SUBAGENT_BACKPRESSURE.md. */
+  /** True when a PRIORITY_INTERRUPT item is waiting, which tells a provider's pre-tool
+   *  gate to deny the next tool so the run quiesces to a boundary. */
   shouldYieldToQueue(): boolean;
 
-  /** TRANSCRIPT RECORDER: record one RAW agent-input frame (goose ACP update /
-   *  claude SDK message) under the current run, so the recorded transcript
-   *  correlates real input with the AG-UI output the bridge produces. The ACP/SDK
-   *  client calls this (late-bound, like shouldYield). No-op when recording off. */
+  /** Record one raw agent-input frame under the current run for the transcript recorder
+   *  (a no-op when recording is off). */
   recordRawInput(data: unknown): void;
 
-  /** Answer a pending permission/option request (resolves the blocked agent run,
-   *  or fires the external onAnswer for a raiseInterrupt). optionId must be one
-   *  of the offered options; an unknown/empty id cancels. `approver` is the
-   *  identity of the human answering (for an external/AWS interrupt the broker
-   *  authorizes them); ignored for a blocked goose run. Returns true if a matching
-   *  pending request was found. */
+  /** Answer a pending permission/option request, returning true if one matched; an
+   *  unknown optionId cancels, and `approver` identifies the answering human for an
+   *  external interrupt. */
   answerPermission(toolCallId: string, optionId: string, approver?: ApproverIdentity): boolean;
 
-  /** Raise an AG-UI interrupt NOT tied to a goose run (e.g. a broker AWS
-   *  permission request). Emits the interrupt to the UI; when the user answers
-   *  (via answerPermission / the UI resume), `onAnswer(optionId|null, approver?)`
-   *  fires with the answering user's identity. `id` is the interrupt/answer key. */
+  /** Raise an AG-UI interrupt not tied to an agent run; `onAnswer` fires with the chosen
+   *  optionId (or null) and the answering user's identity. */
   raiseInterrupt(args: {
     id: string;
     message: string;
     options: Array<{ optionId: string; name: string; kind: string }>;
     onAnswer: (optionId: string | null, approver?: ApproverIdentity) => void;
-    /** Extra metadata merged into the emitted interrupt (alongside `options`),
-     *  e.g. `{ aws: true }` so the UI knows to run a per-viewer can-approve check. */
+    /** Extra metadata merged into the emitted interrupt alongside `options`. */
     metadata?: Record<string, unknown>;
   }): void;
 
   /** Subscribe to the AG-UI event stream broadcast to the UI (live). */
   onEvent(cb: (event: AguiEvent) => void): () => void;
-  /** Subscribe to events that should be PERSISTED but not broadcast live (e.g.
-   *  the user's own prompt — the UI already shows it, so re-broadcasting would
-   *  duplicate it; we still need it in the durable log for history replay). The
-   *  store subscribes here too. */
+  /** Subscribe to events that are persisted but not broadcast live, such as the user's
+   *  own prompt. */
   onPersist(cb: (event: AguiEvent) => void): () => void;
-  /** Subscribe to an agent-assigned title. The agent emits a <title>…</title>
-   *  marker (its first action) in its message stream; the bridge extracts it,
-   *  strips it from the displayed text, and fires this once per title. */
+  /** Subscribe to the agent-assigned title, extracted from a <title>…</title> marker in
+   *  the message stream. */
   onTitle(cb: (title: string) => void): () => void;
 }
 
 export interface BridgeDeps {
   config: SessionConfig;
   exec: ExecBackend;
-  /** This pod's name (POD_NAME), stamped onto RUN_STARTED so a reader can tell a run
-   *  started HERE from one stranded by another host. Unset single-replica. */
+  /** This pod's name, stamped onto RUN_STARTED so a reader can tell a run started here
+   *  from one stranded by another host. */
   selfPod?: string;
-  /** The generation this pod owns the conversation at, stamped alongside `selfPod`.
-   *  Resolved per RUN, not per bridge: a conversation reassigned away and back mid-session
-   *  must stamp the epoch the run actually started under, so the run left by the earlier
-   *  assignment stops reading as ours. Still undefined before the first assignment is
-   *  observed, which isOwnRun treats as "no epoch claimed" and falls back to the host
-   *  name. */
+  /** The generation this pod owns the conversation at, resolved per run so a mid-session
+   *  reassignment stamps the epoch the run actually started under. */
   generation?: () => number | undefined;
-  /** The conversation's chosen model (per-conversation override; undefined = deployment
-   *  default). Combined with `modelCatalog` + each provider's `modelTag` to pick the model a
-   *  RUN actually gets: the choice when the run's provider offers it, else that provider's
-   *  default — never a model id from the wrong provider's namespace. */
+  /** The conversation's chosen model, applied to a run only when that run's provider
+   *  offers it (else the provider's default). */
   model?: string;
-  /** The deployment's model catalog (GET /models). Needed for the per-provider resolution
-   *  above; absent = every provider gets the conversation model as-is (legacy). */
+  /** The conversation's explicitly picked provider; outranks priority. */
+  pickedProvider?: string;
+  /** The deployment's model catalog (GET /models), needed for per-provider resolution; absent
+   *  means every provider gets the conversation model as-is. */
   modelCatalog?: ModelCatalog;
-  /**
-   * The ACP client, or an async factory that creates one on first start().
-   * Tests inject a ready in-process fake; production passes a factory that
-   * spawns `goose acp` lazily (so the connection isn't established until the
-   * first prompt). A factory avoids the brittle sync/async adapter shims.
-   *
-   * Single-provider shorthand: internally wrapped into a one-entry AcpProvider registry
-   * (always-eligible) so the bridge's per-run resolution path is uniform. Most tests use this.
-   * Mutually exclusive with `acpProviders`.
-   */
+  /** The ACP client, or an async factory that creates one on first start(), wrapped into a
+   *  one-entry provider registry; mutually exclusive with `acpProviders`. */
   acpClient?: AcpClient | (() => Promise<AcpClient>);
 
-  /**
-   * MULTI-PROVIDER path: a capability-tagged registry resolved PER RUN (pickAcpProvider). The
-   * bridge picks the provider for each run from its RunContext (owner + source), so a conversation
-   * can use a personalized brain for a human trigger and the cloud brain for a scheduled one. When
-   * set, takes precedence over `acpClient`. makeBridge (index.ts) passes this. See acp/provider.ts.
-   */
+  /** A capability-tagged provider registry resolved per run from its RunContext (owner +
+   *  source); takes precedence over `acpClient`. */
   acpProviders?: readonly AcpProvider[];
 
-  /**
-   * The MCP servers to offer a new session, resolved FRESH per run — sandbox-declared
-   * servers change under a live conversation whenever the agent runs `scooter-rebuild`.
-   * Absent = use the static `config.mcpServers` (every existing test, and any deployment
-   * without the sandbox registry).
-   *
-   * The result is fingerprinted, and a change DROPS the cached agent session so the next
-   * one is created against the current set. That is not an optimization: auto-assigned
-   * ports can be REUSED by a different server across a rebuild, so a session holding the
-   * old URL would reach the wrong server while believing it is the right one — a silent
-   * mis-wire. See modules/sandbox-os/mcp-servers.nix and PR #521.
-   */
+  /** The MCP servers to offer a new session, resolved fresh per run and fingerprinted so a
+   *  changed set drops the cached agent session (absent = the static `config.mcpServers`). */
   resolveMcpServers?: (conversationId: string) => Promise<OfferedMcpServer[]>;
 
-  /**
-   * The conversation OWNER (Scooter user), if known — part of the per-run RunContext an
-   * owner-bound provider (e.g. the remote personalized agent) selects on. Optional; the ported
-   * Increment-1 providers don't use it.
-   */
+  /** The conversation owner, part of the per-run RunContext an owner-bound provider selects on. */
   owner?: string;
 
-  /**
-   * Optional run-completion hook for metrics. Called once per run (after the
-   * run resolves, success or error) with its goose ACP session id, wall-clock
-   * duration, and outcome. The host wires this to the metrics sink; absent in
-   * tests / when metrics are off. Must not throw (fire-and-forget).
-   */
+  /** Run-completion hook for metrics, called once per run with the ACP session id, duration
+   *  and outcome; must not throw. */
   onRunComplete?: (info: { acpSessionId?: string; durationMs: number; outcome: "ok" | "error" }) => void;
 
-  /**
-   * Optional history provider for REVIVE reinjection. A revived conversation
-   * spawns a fresh ACP session with no memory of prior turns, so on this bridge's
-   * FIRST prompt we prepend a transcript of the persisted log (built via
-   * buildHistoryPreamble) ahead of the user's message. Returns the persisted
-   * AG-UI events for this conversation (BEFORE the current turn is appended).
-   * Absent in tests / when there's nothing to inject → no prepend.
-   */
+  /** Returns the persisted AG-UI events (before the current turn) so a fresh session's first
+   *  prompt is prefixed with a transcript of prior turns. */
   loadHistory?: () => Promise<AguiEvent[]>;
 
-  /**
-   * Resolve an attached image's bytes (from the AssetStore) so the run can build
-   * the ACP image content block goose sees. Absent → image parts are ignored (the
-   * text-only path is unchanged). Returns null for an unknown/unreadable asset.
-   */
+  /** Resolve an attached image's bytes from the AssetStore, or null for an unknown asset;
+   *  absent, image parts are ignored. */
   readAsset?: (assetId: string) => Promise<{ data: Buffer; mimeType: string } | null>;
 
-  /**
-   * Force-interrupt timeout (ms). When a queued PRIORITY prompt (an @scooter
-   * mention) has waited longer than this while a run is active, the queue cancels
-   * the running turn so the priority item can take over. 0 (default) disables it —
-   * a priority item then only jumps the queue order, never force-cancels.
-   */
+  /** How long (ms) a queued priority prompt waits while a run is active before the running
+   *  turn is cancelled (0, the default, disables it). */
   priorityInterruptMs?: number;
 
-  /**
-   * Watchdog for a run that goes DEAD ON ARRIVAL: after RUN_STARTED we arm a timer,
-   * and if the agent emits NO ACP activity (not a single session/update) within this
-   * many ms, we conclude it's wedged — the observed failure was the agent hanging on
-   * a model-provider credential error (e.g. an STS assume-role denial for Bedrock),
-   * producing zero events and never returning from the prompt, so the conversation
-   * sat "running" forever. On timeout we cancel the stuck run and emit RUN_ERROR so
-   * the UI unfreezes and
-   * shows why. The FIRST ACP update disarms it — a legitimately long-thinking run
-   * that has started streaming is never touched (this only catches silence from the
-   * start). Default 60_000; 0 disables.
-   */
+  /** Dead-on-arrival watchdog: a run that emits no ACP activity within this many ms is
+   *  cancelled with a RUN_ERROR, and the first update disarms it (default 60_000; 0 disables). */
   firstActivityTimeoutMs?: number;
 
-  /**
-   * LIVENESS watchdog for a run that wedges mid-stream. This does NOT guess from
-   * silence — silence is normal (a long `sleep 600` / build / test run emits no ACP
-   * updates for minutes, and the ExecBackend's own commandTimeoutMs already bounds a
-   * genuinely hung command). Instead, while a run is active it periodically PROBES a
-   * DEFINITIVE health signal — `acpClient.isAlive()` — and only force-terminates when
-   * the agent PROCESS has died (crashed/exited) without emitting a terminal event:
-   * an unambiguous wedge. Everything else (a tool in flight, a paused permission
-   * request, an alive-but-idle agent) is left alone — the run keeps waiting, the
-   * user's Stop still works, and the UI idle-watchdog heals the client view. This
-   * guarantees a DEAD agent can't leave the pump blocked forever, without ever
-   * killing a healthy long-running task. `livenessProbeMs` is the probe cadence.
-   * Default 30_000; 0 disables.
-   */
+  /** Liveness probe cadence for a run in flight: the run is force-terminated only when
+   *  `acpClient.isAlive()` reports the agent process dead, never on silence alone
+   *  (default 30_000; 0 disables). */
   livenessProbeMs?: number;
-  /** AUTO-RETRY a TRANSIENTLY-failed run (agent process death / no-activity / ACP throw): the pump
-   *  re-drives the same batch up to `deathRetryMax` times with `deathRetryBaseMs`·2ⁿ backoff (capped
-   *  at `deathRetryCapMs`), emitting RUN_RETRYING between tries, then gives up (the RUN_ERROR stands).
-   *  The rest of the queue is NEVER cleared. Defaults 5 / 500ms / 30_000ms; small values in tests. */
+  /** Auto-retry budget for a transiently failed run: up to `deathRetryMax` tries with
+   *  `deathRetryBaseMs`·2ⁿ backoff capped at `deathRetryCapMs` (defaults 5 / 500ms / 30_000ms). */
   deathRetryMax?: number;
   deathRetryBaseMs?: number;
   deathRetryCapMs?: number;
 
-  /** TRANSCRIPT RECORDER (test-harness). When enabled, the bridge records the RAW
-   *  agent input (goose ACP frames / claude SDK messages) AND its own emitted
-   *  AG-UI events, correlated by runId, so tests can REPLAY real behavior instead
-   *  of hand-authored fakes. Off by default (no-op recorder). `provider` labels
-   *  which agent produced the input. See todo/docs/AGENT_TRANSCRIPT_HARNESS.md. */
+  /** Transcript recorder for the test harness, recording raw agent input and emitted AG-UI
+   *  events correlated by runId; `provider` labels the agent. */
   recorder?: Recorder;
   provider?: "goose" | "claude";
 }
 
-// Event ids (runId, messageId, sessionId, …) MUST be globally unique across the
-// WHOLE life of a conversation's log — including across agent-host RESTARTS. They
-// used to be module-global counters (run-1, msg-1, …) that reset to 0 on every
-// process start, so a revived conversation re-minted run-1/msg-1/user-1 that
-// COLLIDED with ids already in its persisted log. The UI folds by messageId and
-// keys runs by runId, so colliding ids merged unrelated turns (doubled tool-call
-// args, scrambled run order, history that won't render while a new run is live).
-// A UUID per id makes collision impossible regardless of restarts. The readable
-// prefix is kept for debugging; nothing parses the id as a number (order comes
-// from the append-only log, not the id value).
+// Event ids must stay unique across agent-host restarts, so each is a UUID with a
+// readable prefix.
 const nextId = (prefix: string) => `${prefix}-${randomUUID()}`;
 
 export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   const sessionId = nextId("sess");
   const listeners = new Set<(event: AguiEvent) => void>();
   let acpSessionId: string | undefined;
-  /** The provider serving the CURRENT run — part of the reinjection key: session ids come from
-   *  independent providers (goose mints its own, the SDK its own, a fake both), so two
-   *  providers can coincide on an id; provider+session is the true session identity. */
+  /** The provider serving the current run; provider+session is the true session identity
+   *  since providers mint ids independently. */
   let currentProviderId = "";
-  /** The established session THIS run resolved to — carries its own historySeeded flag. */
+  /** The established session this run resolved to, carrying its own historySeeded flag. */
   let currentReady: { historySeeded: boolean } | undefined;
   let started = false;
-  // Revive history reinjection, PER ESTABLISHED SESSION. This was a bridge-scoped one-shot
-  // flag, which assumed one session per bridge lifetime — true for goose, false everywhere BYO
-  // lives: a mid-conversation provider switch, a container restart, or a container that has
-  // never seen this conversation each create a NEW session on the same bridge, and the flag
-  // being spent left that session's brain BLANK (the reported "restoring a BYOC conversation
-  // doesn't restore it"). The seeded state lives ON each readySessions entry (object identity),
-  // not in a provider:sessionId keyed set: a re-established session after a container restart
-  // can mint a COLLIDING session id, and a keyed set would then skip the seeding exactly when
-  // it matters most.
-  // Serialize runs: a bridge has ONE goose session + ONE RunState. A second
-  // prompt arriving while a run is in flight (e.g. the webhook POSTs /agui while
-  // the agent is mid-run) must QUEUE, not clobber currentRun — otherwise the
-  // first run's open text message never gets its END and RUN_FINISHED is emitted
-  // while it's still open (the @ag-ui client rejects that, and the reply is lost).
-  // The run queue. A bridge has ONE goose session, so runs are serialized — but
-  // via an INSPECTABLE queue (not an opaque promise chain), so we can order by
-  // priority, see the backlog, and force-interrupt the current run when a priority
-  // item waits too long. The invariant is unchanged: each run fully completes (its
-  // text closed + RUN_FINISHED emitted) BEFORE the next RUN_STARTED — a second run
-  // whose RUN_FINISHED fired while the first's message was still open corrupts the
-  // @ag-ui stream. `pump()` guarantees that by awaiting each runPrompt fully.
+  // The run queue: a bridge has one agent session, so runs are serialized through an
+  // inspectable queue that orders by priority and can force-interrupt the current run,
+  // and each run fully completes (text closed, RUN_FINISHED emitted) before the next
+  // RUN_STARTED.
   interface QueueItem {
-    /** Stable id for this queued item, so the QUEUE_UPDATED snapshot is diffable
-     *  by the UI (it can keep a queued bubble stable across snapshots). */
+    /** Stable id so the UI can keep a queued bubble stable across QUEUE_UPDATED snapshots. */
     id: string;
     input: PromptInput;
     priority: number;
@@ -617,11 +411,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   }
   const queue: QueueItem[] = [];
 
-  // Broadcast + persist a snapshot of what's currently QUEUED (waiting behind the
-  // active run), so a refreshing/reattaching UI re-derives the queue from the log
-  // instead of losing it (it used to be client-only). Called on every enqueue and
-  // whenever the pump pulls items out to run. Ordered highest-priority-then-FIFO,
-  // matching the drain order the user will see them run in.
+  // Broadcast and persist a snapshot of the queued items, ordered highest-priority then
+  // FIFO, on every enqueue and drain.
   const emitQueueSnapshot = () => {
     const items = [...queue]
       .sort((a, b) => b.priority - a.priority || a.enqueuedAt - b.enqueuedAt)
@@ -629,35 +420,25 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     emit({ type: "QUEUE_UPDATED", items });
   };
   let pumping = false;
-  // The batch the pump is CURRENTLY running. The pump splices items OUT of `queue`
-  // before running them, so an in-flight message is in NEITHER `queue` nor anywhere
-  // else — drainQueue() would miss it and the user's message would be lost on a
-  // mid-run suspend (exactly the reported case). Tracked here so drainQueue can
-  // preserve it too. Cleared when the batch settles.
+  // The batch the pump is currently running, which is no longer in `queue` but must still
+  // survive a suspend via drainQueue().
   let runningBatch: QueueItem[] = [];
   // The run currently receiving ACP updates (set during runPrompt()).
   let currentRun: RunState | undefined;
-  // terminalId -> the command goose asked to run in it (from terminal/create).
-  // Consumed by the tool_call_update that hands off the terminal, to surface the
-  // command as the tool call's args. Bridge-lifetime (terminalIds are unique per
-  // spawn); pruned on lookup so it doesn't grow unbounded across a long session.
+  // terminalId -> the command goose asked to run in it, consumed by the tool_call_update
+  // that hands off the terminal.
   const terminalCommands = new Map<string, string>();
   const priorityInterruptMs = deps.priorityInterruptMs ?? 0;
   const firstActivityTimeoutMs = deps.firstActivityTimeoutMs ?? 60_000;
   const livenessProbeMs = deps.livenessProbeMs ?? 30_000;
-  // AUTO-RETRY of a transiently-failed run (agent process death / no-activity / ACP throw). The pump
-  // re-drives the SAME batch up to RETRY_MAX times with exponential backoff (RETRY_BASE·2ⁿ, capped),
-  // then gives up (the last RUN_ERROR stands). Overridable for tests (small delays). See the pump.
+  // Auto-retry budget for a transiently failed run (see deathRetry* in BridgeDeps).
   const RETRY_MAX = deps.deathRetryMax ?? 5;
   const RETRY_BASE_MS = deps.deathRetryBaseMs ?? 500;
   const RETRY_CAP_MS = deps.deathRetryCapMs ?? 30_000;
   // Set by stop(): abandon an in-progress backoff so a torn-down bridge doesn't keep retrying.
   let closed = false;
-  // Resolved on first start(); a ready client or the result of the factory.
-  // ACP PROVIDER REGISTRY. Either the explicit multi-provider list (makeBridge) or a single
-  // always-eligible provider wrapping the legacy `acpClient` shorthand (tests + single-provider
-  // deploys). Selection is per-run (pickAcpProvider); today one provider is eligible so the choice
-  // is stable — behavior-identical to the old single-client bridge.
+  // The provider registry: the explicit list, or a single always-eligible provider wrapping
+  // `acpClient`.
   const acpProviders: readonly AcpProvider[] =
     deps.acpProviders ??
     [
@@ -673,16 +454,12 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       },
     ];
 
-  // One READY (initialize+newSession+hooks-wired) client per provider id, plus the client serving
-  // the CURRENT run. `acpClient`/`acpSessionId` track the ACTIVE run's client so the run loop,
-  // cancel(), and the liveness probe operate on it (unchanged shape; now sourced per-run).
+  // One ready client per provider id, plus the client and session serving the current run.
   const readySessions = new Map<string, Promise<{ client: AcpClient; acpSessionId: string; historySeeded: boolean; mcpFingerprint: string }>>();
   let acpClient: AcpClient | undefined;
 
-  // A wedged run's cause usually arrives AFTER the watchdog gave up (the abandoned
-  // stream rejects late), by which point the client has been dropped and its own tail
-  // goes with it. So the diagnostic is kept HERE, per conversation, where the next
-  // attempt's message can still reach it. Why: PR #565.
+  // A wedged run's cause usually arrives after the watchdog gave up and the client was
+  // dropped, so recent diagnostics are kept per conversation.
   const runDiagnostics: string[] = [];
   const RUN_DIAGNOSTICS_MAX = 5;
   const noteRunDiagnostic = (line: string): void => {
@@ -691,9 +468,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     if (runDiagnostics.length > RUN_DIAGNOSTICS_MAX) runDiagnostics.shift();
   };
 
-  /** Drop the cached ready-session so the next attempt re-initializes a fresh one.
-   *  A wedged session fails IDENTICALLY on every retry, so retrying through it just
-   *  burns the budget. */
+  /** Drop the cached ready-session so the next attempt re-initializes a fresh one, since a
+   *  wedged session fails identically on every retry. */
   const dropCachedSession = (why: string) => {
     if (!currentProviderId) return;
     log.warn("dropping the cached agent session; the next attempt re-initializes", {
@@ -703,12 +479,9 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     readySessions.delete(currentProviderId);
   };
 
-  // Permission/option requests awaiting a user answer. Two kinds:
-  //  - goose tool-permission: the ACP requestPermission call blocks on `resolve`.
-  //  - EXTERNAL (e.g. a broker AWS request): no blocked goose run; `onExternal`
-  //    is invoked with the chosen optionId so the caller (agent-host) can act
-  //    (approve/deny the broker request). Keyed by toolCallId; validOptions
-  //    guards a stale/garbage id.
+  // Permission/option requests awaiting a user answer, keyed by toolCallId: a goose
+  // tool-permission blocks on `resolve`, while an external one (a broker AWS request)
+  // fires `onExternal` with the chosen optionId.
   interface Pending {
     resolve: (optionId: string | null) => void;
     validOptions: Set<string>;
@@ -719,36 +492,27 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   const persistListeners = new Set<(event: AguiEvent) => void>();
   const titleListeners = new Set<(title: string) => void>();
 
-  // Extracts a <title>…</title> marker from the assistant's streamed text. One
-  // per bridge (per conversation): the agent emits the marker as its first
-  // action, and we only report the first title (the extractor self-guards).
+  // Extracts a <title>…</title> marker from the assistant's streamed text, reporting only
+  // the first title.
   const titleExtractor = createTitleExtractor();
   const emitTitle = (title: string) => {
     if (title) for (const cb of titleListeners) cb(title);
   };
 
-  // Stamp a wall-clock timestamp (epoch ms) on every event BEFORE it forks to the
-  // live-broadcast and persist paths, so both copies are byte-identical (the
-  // integrity self-heal compares their checksums — a ts on only one side would
-  // read as a false gap). `ts` is an explicit chronological ordering key that
-  // survives persistence, so the log / tail window can order by real time instead
-  // of trusting append order alone. The @ag-ui client folds by type+id and ignores
-  // this extra field. Stamped once here; never re-stamped on replay.
+  // Stamp `ts` once, before the event forks to the broadcast and persist paths, so both
+  // copies are byte-identical for the integrity checksum.
   const stamp = <E extends AguiEvent>(event: E): E => {
     const e = ("ts" in event ? event : { ...event, ts: Date.now() }) as E;
-    // Stamp run ORIGIN on RUN_STARTED (same rationale as `ts`: an extra field the
-    // @ag-ui client ignores, but which survives persistence). This is what lets
-    // hasDanglingRun tell "my in-flight run" from "a run a dead pod left behind".
+    // Stamp the run's origin on RUN_STARTED so hasDanglingRun can tell this pod's in-flight
+    // run from one a dead pod left behind.
     if (e.type === "RUN_STARTED" && deps.selfPod && !("host" in e)) {
       return { ...e, host: deps.selfPod, gen: deps.generation?.() } as E;
     }
     return e;
   };
 
-  // TRANSCRIPT RECORDER: correlate every recorded entry with THIS conversation +
-  // the current run. `recordAguiOut` taps emitted AG-UI events; `recordRawInput`
-  // is handed to the ACP/SDK client so it records the RAW agent input under the
-  // same runId. All no-ops when no recorder is configured.
+  // Transcript recorder taps: `recordAguiOut` records emitted AG-UI events and
+  // `recordRawInput` records the raw agent input under the same runId.
   const recorder = deps.recorder;
   const recProvider = deps.provider ?? "goose";
   const recordAguiOut = (event: AguiEvent) => {
@@ -761,30 +525,28 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   };
 
   const emit = (event: AguiEvent) => {
-    // Broadcast subscribers (UI) AND persist subscribers (store) both see live
-    // events.
+    // Broadcast subscribers (UI) and persist subscribers (store) both see live events.
     const e = stamp(event);
     recordAguiOut(e);
     for (const cb of listeners) cb(e);
     for (const cb of persistListeners) cb(e);
   };
 
-  // Persist-only: the store records it, but the UI does NOT (avoids duplicating
-  // something the UI already renders, like the user's own prompt).
+  // Persist-only: the store records it but the UI does not, since it already renders the
+  // user's own prompt.
   const persist = (event: AguiEvent) => {
     const e = stamp(event);
     for (const cb of persistListeners) cb(e);
   };
 
-  // Flush pending stream notifications (a macrotask) so late session/update
-  // events are handled before we finish a run.
+  // Flush pending stream notifications (a macrotask) so late session/update events are
+  // handled before a run finishes.
   const drain = () => new Promise<void>((r) => setTimeout(r, 0));
 
   // Per-run mutable mapping state for translating ACP updates -> AG-UI events.
   interface RunState {
     runId: RunId;
-    /** The thread this run belongs to (needed for RUN_STARTED/FINISHED events,
-     *  which the @ag-ui client validates require a threadId). */
+    /** The thread this run belongs to, required on RUN_STARTED/FINISHED. */
     threadId: ThreadId;
     // The currently-open assistant text message, if any.
     openText?: string;
@@ -792,60 +554,39 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     openReasoning?: string;
     // tool_call_id -> the messageId we attribute its result to.
     toolMessage: Map<string, string>;
-    // tool_call_ids for which we've already emitted TOOL_CALL_ARGS, so a later
-    // tool_call_update carrying rawInput doesn't double-emit the args.
+    // tool_call_ids whose TOOL_CALL_ARGS were already emitted, so a later rawInput doesn't
+    // double-emit.
     argsEmitted: Set<string>;
-    // Set once the run is finishing: late updates are ignored so we never
-    // reopen a message after RUN_FINISHED.
+    // Set once the run is finishing, so late updates never reopen a message after RUN_FINISHED.
     ended?: boolean;
-    // Set by cancel(): the run was stopped by a user / force-interrupt, so it
-    // ends with a RUN_FINISHED marked { cancelled: true } (not an error).
+    // Set by cancel(): the run ends with a RUN_FINISHED marked cancelled, not an error.
     cancelled?: boolean;
-    // When the run actually began executing (RUN_STARTED) — for the queue's
-    // force-interrupt age check.
+    // When the run began executing, for the queue's force-interrupt age check.
     startedAt?: number;
-    // Count of tool calls STARTED but whose result hasn't arrived yet. The
-    // "thinking" interrupt policy defers its cancel while this is > 0 (don't kill
-    // an in-flight tool call to preempt idle thinking) and fires at the boundary
-    // when it drops to 0.
+    // Tool calls started but not yet finished; the "thinking" interrupt policy defers its
+    // cancel while this is > 0.
     inFlightTools: number;
-    // Set when a "thinking"-policy interrupt wanted to cancel but a tool call was
-    // in flight: fire the cancel the moment inFlightTools hits 0.
+    // Set when a "thinking" interrupt deferred behind an in-flight tool call, so the cancel
+    // fires when inFlightTools hits 0.
     cancelWhenToolsIdle?: boolean;
-    // tool_call_ids whose LAST update handed off a live TERMINAL HANDLE
-    // (content: [{terminalId, type:"terminal"}]) — goose marks the update
-    // status="completed" the instant the terminal is created, but the COMMAND is
-    // still running async in that terminal; the real finish is a LATER update. We
-    // must not emit a TOOL_CALL_RESULT (which folds a result onto the part and makes
-    // the UI show the tool as done) until that later update — otherwise a long
-    // command (sleep 30) shows no running state. See handleUpdate.
+    // tool_call_ids whose last update handed off a live terminal handle, meaning the command
+    // is still running and the real finish is a later update.
     terminalPending: Set<string>;
-    // The dead-on-arrival watchdog (see firstActivityTimeoutMs): armed at
-    // RUN_STARTED, disarmed by the FIRST ACP update. `sawActivity` guards against a
-    // late update re-firing anything once the run is alive.
+    // The dead-on-arrival watchdog, armed at RUN_STARTED and disarmed by the first ACP update.
     sawActivity?: boolean;
     activityTimer?: ReturnType<typeof setTimeout>;
-    // The mid-stream LIVENESS watchdog (see livenessProbeMs): a rearming timer that
-    // probes acpClient.isAlive() and terminates the run ONLY if the agent process
-    // has died without a terminal event. Silence alone never fires it.
+    // The liveness watchdog timer, which terminates the run only if the agent process died.
     livenessTimer?: ReturnType<typeof setTimeout>;
-    // Set once a terminal event (RUN_FINISHED/RUN_ERROR) has been emitted for this
-    // run — by the watchdog OR the normal path — so the other path can't emit a
-    // SECOND terminal (which would corrupt the @ag-ui stream).
+    // Set once a terminal event has been emitted for this run, so no path emits a second one.
     terminated?: boolean;
-    // Set true when the run ended with a TRANSIENT/RECOVERABLE failure that the pump
-    // should AUTO-RETRY: the agent PROCESS died (agent_process_died), started but went
-    // silent (no_activity_timeout, usually a transient credential/model blip), or the
-    // ACP call threw (init/session/stream failure). NOT set for a clean finish, a user
-    // cancel, or a genuine model-reported error ("agent reported an error") — those are
-    // real terminal states, not crashes to retry.
+    // Set when the run ended with a transient failure the pump should auto-retry (process
+    // death, no activity, an ACP throw), never for a clean finish, a cancel or a
+    // model-reported error.
     retryable?: boolean;
   }
 
-  /** A tool_call_update's content is JUST a live terminal HANDLE
-   *  ([{terminalId, type:"terminal"}]) — goose created the terminal and considers
-   *  the tool call structurally "completed", but the command runs async in it; the
-   *  actual finish arrives on a LATER update. Such an update is NOT the real result. */
+  /** True when a tool_call_update's content is just a live terminal handle, meaning the
+   *  command is still running and this is not the real result. */
   const isTerminalHandoff = (content: unknown): boolean => {
     if (!Array.isArray(content) || content.length === 0) return false;
     return content.every((c) => {
@@ -862,8 +603,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           .filter((t): t is string => typeof t === "string")
       : [];
 
-  // goose's shell tool is usually invoked as `<shell> -c "<script>"` — collapse that
-  // to just the script (what the user cares about); otherwise join command + args.
+  // Collapse `<shell> -c "<script>"` to the script; otherwise join command and args.
   const formatCommand = (command: string, args: string[]): string => {
     if ((command === "sh" || command === "bash" || command.endsWith("/sh") || command.endsWith("/bash")) && args[0] === "-c" && args[1] !== undefined) {
       return args[1];
@@ -884,10 +624,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       st.openReasoning = undefined;
     }
   };
-  // Emit TOOL_CALL_ARGS exactly ONCE per tool call, from whichever ACP update
-  // first carries a non-empty rawInput (the initial tool_call OR a later
-  // tool_call_update — goose often uses the latter). Guards against a null/empty
-  // rawInput and against double-emitting the args.
+  // Emit TOOL_CALL_ARGS exactly once per tool call, from whichever update first carries a
+  // non-empty rawInput.
   const emitArgsOnce = (st: RunState, toolCallId: string, rawInput: unknown) => {
     if (st.argsEmitted.has(toolCallId)) return;
     if (rawInput === undefined || rawInput === null) return;
@@ -899,9 +637,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
 
   const handleUpdate = (st: RunState, u: SessionUpdate) => {
     if (st.ended) return; // never reopen a message after the run is finishing
-    // First ACP activity — the run is ALIVE, so disarm the dead-on-arrival
-    // watchdog. (Guarded by st.ended above: an update arriving after the watchdog
-    // already fired is ignored, not treated as a late revival.)
+    // The first ACP activity disarms the dead-on-arrival watchdog.
     if (!st.sawActivity) {
       st.sawActivity = true;
       if (st.activityTimer) {
@@ -913,9 +649,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       case "agent_message_chunk": {
         // Reasoning and text are distinct streams; close reasoning first.
         closeOpenReasoning(st);
-        // Run the chunk through the title extractor: an agent-emitted
-        // <title>…</title> marker is pulled out (-> onTitle) and stripped from
-        // the text the user sees.
+        // Pull an agent-emitted <title>…</title> marker out of the chunk and strip it from
+        // the displayed text.
         const { text, title } = titleExtractor.push(blockText(u.content));
         if (title !== undefined) emitTitle(title);
         if (text.length === 0) break; // marker-only chunk -> nothing to show
@@ -965,38 +700,22 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         break;
       }
       case "tool_call_update": {
-        // The args (the shell command / the slack text) often arrive HERE, not on
-        // the initial tool_call — goose sends the tool_call with no rawInput and
-        // fills it in on this update. Emit them now if we haven't yet, so the UI
-        // can show WHAT was requested (not just the result).
+        // goose often sends the args on this update rather than the initial tool_call, so
+        // emit them now if not yet emitted.
         emitArgsOnce(st, u.toolCallId, u.rawInput);
-        // Deciding when a tool call is REALLY finished, from goose's shell shape
-        // (captured live):
-        //   tool_call(Shell)
-        //   update{completed, no content}                    ← speculative, NOT done
-        //   update{completed, content:[{terminalId,…}]}      ← command STARTED in a terminal
-        //   … (command runs; sleep 30 blocks here) …
-        //   update{completed, no content}                    ← the REAL finish
-        // goose marks EVERY update status="completed", and the empty ones bracket the
-        // real work, so `status==="completed"` alone is not "done". We emit the
-        // TOOL_CALL_RESULT (which folds a result onto the part → UI shows the tool as
-        // finished) only on a genuine finish; until then the part stays result-less so
-        // the UI shows a running spinner (e.g. across a `sleep 30`).
+        // goose marks every shell update status="completed" and the empty ones bracket the
+        // real work, so the TOOL_CALL_RESULT is emitted only on a genuine finish and the part
+        // stays result-less (a running spinner) until then.
         const status = (u as { status?: string }).status;
-        // The structured result rides `content` (goose) OR `rawOutput` (the claude-sdk
-        // provider — its adapter maps a tool_result's content to rawOutput). Either is
-        // "real content" that finishes the tool + carries a result to the UI; without
-        // the rawOutput fallback, EVERY claude MCP tool result was dropped (no
-        // TOOL_CALL_RESULT), so e.g. a marimo_embed island never reached the chat.
+        // The structured result rides `content` (goose) or `rawOutput` (the claude-sdk provider).
         const resultContent = u.content !== undefined ? u.content : u.rawOutput;
         const hasRealContent = resultContent !== undefined && !isTerminalHandoff(resultContent);
-        // A TERMINAL HANDOFF means the command is now running async in that terminal.
-        // Remember it and DON'T finish — the real finish is a later update.
+        // A terminal handoff means the command is now running async in that terminal, so
+        // don't finish yet.
         if (isTerminalHandoff(u.content)) {
           st.terminalPending.add(u.toolCallId);
-          // Surface the command that ran (goose put it in terminal/create, not in
-          // the tool_call's rawInput) as this tool call's args, so the UI shows
-          // `$ <command>` instead of an empty shell card. Look it up by terminalId.
+          // Surface the command goose put in terminal/create as this tool call's args, so
+          // the UI shows `$ <command>`.
           for (const tid of handoffTerminalIds(u.content)) {
             const cmd = terminalCommands.get(tid);
             if (cmd !== undefined) {
@@ -1008,17 +727,15 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           break;
         }
         const terminalWasPending = st.terminalPending.has(u.toolCallId);
-        // The tool is finished when EITHER: it produced real (non-terminal) content,
-        // OR it completed/failed AFTER a terminal was handed off (the post-terminal
-        // update). A bare completed/failed with NO content and NO prior terminal is
-        // goose's SPECULATIVE marker — skip it, or we'd finish the tool before it ran.
+        // The tool is finished when it produced real content, or completed/failed after a
+        // terminal handoff; a bare completed with neither is goose's speculative marker.
         const isFinish = hasRealContent || ((status === "completed" || status === "failed") && terminalWasPending);
         if (!isFinish) break;
         st.terminalPending.delete(u.toolCallId);
         if (st.inFlightTools > 0) {
           st.inFlightTools--;
-          // A "thinking" interrupt that deferred while a tool call ran fires now
-          // that the tool boundary is reached (and no other tool call is in flight).
+          // A "thinking" interrupt deferred behind this tool call fires now that no tool is
+          // in flight.
           if (st.cancelWhenToolsIdle && st.inFlightTools === 0) {
             st.cancelWhenToolsIdle = false;
             void self.cancel().catch(() => {});
@@ -1034,22 +751,15 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         break;
       }
       case "context_usage": {
-        // Context-window fill after the turn — forward it as its own event for the
-        // UI's fill bar. Persisted, so the latest value survives a refresh.
+        // Forward the context-window fill as its own persisted event for the UI's fill bar.
         emit({ type: "CONTEXT_USAGE", usedTokens: u.usedTokens, contextWindow: u.contextWindow });
         break;
       }
     }
   };
 
-  // The actual run, executed serially via the prompt() chain above. One run at a
-  // time per bridge — see the runChain comment.
-  // Combine a batch of queued user messages into the single text sent to goose.
-  // When the user fired several messages while a run was in flight, they all
-  // queued; sending them as ONE turn (instead of one-at-a-time) means the agent
-  // reads the whole burst at once — it never answers message 1, then re-reads a
-  // now-stale message 2 and gets confused. A single message is passed through
-  // verbatim; a burst is joined so each is a distinct, ordered block.
+  // Combine a batch of queued messages into one turn so the agent reads the whole burst at
+  // once; a single message passes through verbatim.
   const combineTexts = (texts: string[]): string =>
     texts.length === 1
       ? texts[0]
@@ -1059,9 +769,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   const runPrompt = async (
     input: PromptInput,
     batch: PromptInput[] = [input],
-    // A RETRY re-drives the same batch; the user's message is already in the log from
-    // the first attempt. Re-persisting it wrote the same prompt 6 times on a run that
-    // wedged and retried 5 times, inflating the very history the next attempt reads.
+    // A retry re-drives the same batch, and its messages are already in the log.
     alreadyPersisted = false,
   ): Promise<{ runId: RunId; retryable: boolean }> => {
     const runId = nextId("run");
@@ -1071,26 +779,19 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     currentRun = st; // visible to cancel() from the moment the run begins
     let outcome: "ok" | "error" = "ok";
 
-    // Emit RUN_STARTED before any awaiting so the UI sees the run begin even if
-    // agent startup is slow or fails (e.g. goose needs a model provider).
+    // Emit RUN_STARTED before any await so the UI sees the run begin even if agent startup
+    // is slow or fails.
     emit({ type: "RUN_STARTED", threadId: input.threadId, runId });
 
-    // Resolved by either watchdog below so the prompt() await can GIVE UP. An agent
-    // stalled inside a model call services neither session/cancel nor a terminal kill,
-    // so prompt() may never settle — and awaiting it unraced holds the pump, which is
-    // what performs the retry `st.retryable` promises. Why: PR #720.
+    // Resolved by either watchdog so the prompt() await can give up, since a stalled agent
+    // may never settle it and the pump is what performs the retry.
     let signalWedged: () => void = () => {};
     const wedged = new Promise<void>((resolve) => {
       signalWedged = resolve;
     });
 
-    // DEAD-ON-ARRIVAL watchdog: if the agent emits no ACP activity within
-    // firstActivityTimeoutMs, treat the run as wedged and surface a RUN_ERROR so the
-    // conversation unfreezes (observed: goose hung on a model-provider credential
-    // failure, emitted nothing, and never returned from prompt()). Disarmed by the
-    // first update in handleUpdate. We mark the run ended + cancel goose so the stuck
-    // subprocess unblocks; the prompt()'s own resolution/rejection is then ignored
-    // (st.ended guards it, and the finally clears everything).
+    // Dead-on-arrival watchdog: no ACP activity within firstActivityTimeoutMs ends the run
+    // with a RUN_ERROR and cancels the agent so the stuck subprocess unblocks.
     if (firstActivityTimeoutMs > 0) {
       st.activityTimer = setTimeout(() => {
         if (st.sawActivity || st.ended) return;
@@ -1099,13 +800,10 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         closeOpenText(st);
         closeOpenReasoning(st);
         outcome = "error";
-        // LOUD: the RUN_ERROR below tells the USER to check these logs, so this must be
-        // in them. Without it a wedged-then-retried run leaves no trace at all — the
-        // only evidence is a "prompt: sending" with no matching "returned".
-        // Read the provider's stderr BEFORE we kill the process. It is the process's
-        // tail, so it may predate this run — hence "last diagnostic". Why: PR #565.
+        // Logged loudly because the RUN_ERROR tells the user to check these logs; the
+        // provider's stderr is read before the process is killed.
         const diagnostic = providerDiagnostic([
-          ...runDiagnostics, // carried over from earlier attempts (see noteRunDiagnostic)
+          ...runDiagnostics, // carried over from earlier attempts
           ...(acpClient?.recentDiagnostics?.() ?? []),
         ]);
         log.warn("run wedged: no ACP activity before the deadline (dead on arrival)", {
@@ -1119,40 +817,32 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           message: deadOnArrivalMessage(diagnostic),
           code: "no_activity_timeout",
         });
-        st.retryable = true; // transient (credential/model blip) — the pump auto-retries with backoff
-        // The SESSION is suspect, not just this prompt: a session that produced nothing
-        // produces nothing on the retry too (observed: 5 identical dead-on-arrival runs
-        // through one cached session after a cancel left it wedged). Force a fresh one.
+        st.retryable = true; // transient — the pump auto-retries with backoff
+        // The session itself is suspect, so force a fresh one.
         dropCachedSession("no ACP activity before the deadline");
         // Unblock the wedged goose so the next prompt gets a fresh run.
         void self.cancel(runId).catch(() => {});
-        // Then stop waiting on it regardless: the cancel above is best-effort (an agent
-        // stalled in a model call has no terminal to kill and never answers session/cancel).
+        // Stop waiting regardless, since the cancel above is best-effort.
         signalWedged();
       }, firstActivityTimeoutMs);
     }
 
-    // LIVENESS watchdog: a rearming probe that force-terminates a run ONLY when the
-    // agent PROCESS has died (crashed/exited) without emitting a terminal event — an
-    // unambiguous wedge that would otherwise block the pump's queue forever. It does
-    // NOT guess from silence: a long tool call is silent but healthy (the agent is
-    // alive; the ExecBackend commandTimeoutMs already bounds a hung command). So a
-    // tool in flight, a paused permission request, or an alive-but-idle agent all
-    // just re-arm. The DOA watchdog (firstActivityTimeoutMs) covers "never started".
+    // Liveness watchdog: force-terminates a run only when the agent process has died without
+    // a terminal event, so silence (a long tool call, a paused permission request) just
+    // re-arms.
     if (livenessProbeMs > 0) {
       const armLiveness = () => {
         st.livenessTimer = setTimeout(() => {
           if (st.ended || st.terminated) return;
-          // DEFINITIVE health signal: is the agent process still alive? If it is
-          // (or we can't tell — no client yet), keep watching; silence is fine.
+          // Keep watching while the agent process is alive or there is no client to ask.
           if (!acpClient || acpClient.isAlive()) return armLiveness();
-          // The agent DIED without a terminal event — the run is genuinely wedged.
+          // The agent died without a terminal event.
           st.ended = true;
           st.terminated = true; // this watchdog owns the terminal event now
           closeOpenText(st);
           closeOpenReasoning(st);
           outcome = "error";
-          // LOUD, same reason as the DOA watchdog: the user is told to check these logs.
+          // Logged loudly because the user is told to check these logs.
           log.warn("run wedged: the agent process died without a terminal event", {
             run_id: st.runId,
             saw_activity: st.sawActivity,
@@ -1180,24 +870,14 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       armLiveness();
     }
 
-    // Message ids persisted for THIS turn — the reinjection below reads the log AFTER the
-    // session is resolved (it cannot know which session runs until then), which is after the
-    // current turn is persisted; excluding these ids keeps the preamble strictly PRIOR turns,
-    // so the message being sent is never folded into its own history.
+    // Message ids persisted for this turn, excluded from the history preamble so the message
+    // being sent is never folded into its own history.
     const thisTurnIds = new Set<string>();
 
-    // Persist the user's prompt(s) as messages so the conversation history is
-    // complete — switching to / reviving a conversation must replay the user
-    // turns too. PERSIST-ONLY: the live UI already renders the message the user
-    // just sent, so broadcasting it would echo a duplicate. NOTE: persist the RAW
-    // texts (not the history-prefixed / batch-joined prompt), so the transcript is
-    // never folded back into itself on the next revive. A batched turn persists
-    // EACH original message as its own user message — history stays faithful even
-    // though goose received them combined as one prompt.
+    // Persist each raw user message (not the batch-joined prompt) persist-only, since the
+    // live UI already renders what the user sent.
     for (const b of alreadyPersisted ? [] : batch) {
-      // A PLATFORM-injected message persists as a SYSTEM_MESSAGE (hideable in the UI),
-      // NOT a role:user turn — the human didn't type it. The agent still receives the
-      // (decorated) text below. A normal human message persists as user text.
+      // A platform-injected message persists as a SYSTEM_MESSAGE rather than a role:user turn.
       if (b.source) {
         const sysId = nextId("sys");
         thisTurnIds.add(sysId);
@@ -1209,9 +889,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       persist({ type: "TEXT_MESSAGE_START", messageId: userMsgId, role: "user" });
       persist({ type: "TEXT_MESSAGE_CONTENT", messageId: userMsgId, delta: b.text });
       persist({ type: "TEXT_MESSAGE_END", messageId: userMsgId });
-      // Attach the message's images as REFERENCES (assetId + url, not bytes) so a
-      // refresh re-renders them under this user message. The url is the fixed
-      // assets-route shape (same as AssetStore.urlFor); the UI fetches it.
+      // Attach the message's images as references (assetId + url, not bytes) so a refresh
+      // re-renders them.
       if (b.images && b.images.length) {
         persist({
           type: "MESSAGE_IMAGES",
@@ -1227,16 +906,11 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
 
     try {
       if (!started) await self.start();
-      // PER-RUN provider selection: resolve the provider for THIS run's context (owner + trigger
-      // source) and point acpClient/acpSessionId at its ready client. Under Increment-1 config a
-      // single provider is eligible, so this returns the same client every run (behavior-
-      // identical). Increment 2's remote provider makes this vary by source (human vs scheduled).
+      // Resolve the provider for this run's context and point acpClient/acpSessionId at its
+      // ready client.
       await resolveForRun(runContextFor(input));
       debug("[bridge] prompt: sending to goose, session=%s", acpSessionId);
-      // PER-SESSION reinjection (see injectedSessions above): if the session THIS run resolved
-      // to has never been seeded with this conversation's transcript, seed it now — that is
-      // what lets a BYO container that has never seen the conversation resume it, fed over the
-      // same wire as everything else. Strictly prior turns (thisTurnIds excluded).
+      // Seed the session with the conversation's prior turns if it has never been seeded.
       let historyPreamble = "";
       if (deps.loadHistory && currentReady && !currentReady.historySeeded) {
         currentReady.historySeeded = true;
@@ -1249,20 +923,14 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           debug("[bridge] loadHistory failed (continuing without reinjection): %s", err);
         }
       }
-      // Prepend the history preamble as a separate text block on the first prompt
-      // of a revived session (empty → omitted). The user text is the COMBINED batch
-      // (a burst of queued messages sent as one turn), so the agent reads them all
-      // at once instead of one-at-a-time.
-      // Decorate SYSTEM-sourced items so the agent knows they're platform events (not
-      // the user), then combine the burst into one prompt. Human items pass through.
+      // Decorate system-sourced items, combine the burst into one prompt, and prepend the
+      // history preamble as a separate block when present.
       const combined = combineTexts(batch.map((b) => (b.source ? decorateSystemMessage(b.source, b.text) : b.text)));
       const textBlocks: ContentBlock[] = historyPreamble
         ? [{ type: "text", text: historyPreamble }, { type: "text", text: combined }]
         : [{ type: "text", text: combined }];
-      // Resolve attached images to ACP image blocks (base64), appended after the
-      // text so the model sees them with the message. Missing/unreadable assets are
-      // skipped (best-effort — a dropped image must not fail the turn). No images
-      // (or no readAsset dep) → the text-only prompt is unchanged.
+      // Resolve attached images to base64 ACP image blocks after the text, skipping
+      // unreadable assets.
       const imageBlocks: ContentBlock[] = [];
       const images = batch.flatMap((b) => b.images ?? []);
       if (images.length && deps.readAsset) {
@@ -1271,10 +939,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           if (bytes) imageBlocks.push({ type: "image", data: bytes.data.toString("base64"), mimeType: bytes.mimeType });
         }
       }
-      // Materialize any binary file attachments (UI uploads, Slack pdf/zip/…) into the
-      // sandbox at /workspace/uploads/<name> so the agent can read them from disk.
-      // Best-effort: a failed write is logged and skipped — it must not kill the turn.
-      // No files → the path is unchanged.
+      // Materialize binary file attachments into the sandbox, logging and skipping a failed
+      // write.
       const files = batch.flatMap((b) => b.files ?? []);
       const savedFilePaths: string[] = [];
       for (const f of files) {
@@ -1284,59 +950,46 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           debug("[bridge] failed to write uploaded file %s (continuing): %s", f.name, err);
         }
       }
-      // Tell the agent where the files landed: one note text block after the user
-      // text (before any images) listing each saved path. Prompt-only (not persisted)
-      // — it's guidance, not user content. Only successfully-written files are listed.
-      // Every entrypoint (UI, Slack webhooks) gets the note from HERE, so it stays in
-      // one place and can't drift from where the bytes were actually written.
+      // A prompt-only note (not persisted) telling the agent where the files landed.
       const fileNoteBlocks: ContentBlock[] =
         savedFilePaths.length > 0 ? [{ type: "text", text: buildFileNote(savedFilePaths) }] : [];
       const promptBlocks = [...textBlocks, ...fileNoteBlocks, ...imageBlocks];
-        // The turn boundary, structured. A turn that produces neither a reply NOR an
-        // error left no trace at all on a real cluster — debug() only surfaces behind a
-        // flag, so the whole prompt path was silent. These two lines bracket the one
-        // call that can hang, and say which provider actually took the run.
+        // These two log lines bracket the one call that can hang and say which provider took
+        // the run.
         log.info("acp prompt: sending", {
           run_id: st.runId,
           blocks: promptBlocks.length,
           has_session: acpSessionId !== undefined,
         });
-      // RACED against the watchdogs (see `wedged`): a rejection still lands in the catch
-      // below, and Promise.race marks the loser handled, so an abandoned prompt() that
-      // rejects later cannot surface as an unhandled rejection.
+      // Raced against the watchdogs: a rejection still lands in the catch below, and
+      // Promise.race marks the loser handled.
       const promptCall = acpClient!.prompt({ sessionId: acpSessionId!, prompt: promptBlocks });
       const raced = await Promise.race([
         promptCall.then((r) => ({ abandoned: false as const, stopReason: r.stopReason })),
         wedged.then(() => ({ abandoned: true as const })),
       ]);
       if (raced.abandoned) {
-        // Still record the abandoned call's eventual rejection: it settles after we return,
-        // and it is often the ONLY account of why the run produced nothing. Why: PR #565.
+        // Record the abandoned call's eventual rejection, often the only account of why the
+        // run produced nothing.
         promptCall.catch((err) => noteRunDiagnostic(err instanceof Error ? err.message : String(err)));
-        // A watchdog already emitted this run's terminal event and set `retryable`. Return
-        // (rather than keep awaiting) so the pump can re-drive the batch on the fresh session
-        // the watchdog forced; `finally` clears currentRun, unblocking the queue. A late
-        // resolution of the abandoned call is inert — st.ended/st.terminated guard every emit.
+        // A watchdog already emitted this run's terminal event and set `retryable`, so return
+        // and let the pump re-drive the batch.
         return { runId, retryable: st.retryable === true };
       }
       const { stopReason } = raced;
       debug("[bridge] prompt: stopReason=%s", stopReason);
         log.info("acp prompt: returned", { run_id: st.runId, stop_reason: stopReason });
-      // The ACP prompt response can resolve before the final session/update
-      // notifications have been dispatched. Drain a macrotask so trailing
-      // text/reasoning chunks are processed (their messages opened) BEFORE we
-      // close them and emit RUN_FINISHED — the AG-UI client rejects RUN_FINISHED
-      // while a message is still open.
+      // The ACP response can resolve before the final session/update notifications dispatch,
+      // so drain a macrotask before closing messages and emitting RUN_FINISHED.
       await drain();
       st.ended = true; // stop routing further late updates into this run
       closeOpenText(st);
       closeOpenReasoning(st);
-      // If the dead-on-arrival watchdog already terminated this run (goose finally
-      // returned AFTER we gave up), don't emit a second terminal event.
+      // A watchdog may already have terminated this run; never emit a second terminal event.
       if (!st.terminated) {
         st.terminated = true;
         if (st.cancelled || stopReason === "cancelled") {
-          // Stopped by the user / a force-interrupt — a CLEAN end, not an error.
+          // A clean end, not an error.
           emit({ type: "RUN_FINISHED", threadId: input.threadId, runId, cancelled: true });
         } else if (stopReason === "error") {
           outcome = "error";
@@ -1349,29 +1002,23 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       st.ended = true;
       closeOpenText(st);
       closeOpenReasoning(st);
-      // Record it even when the watchdog already terminated this run — that is the
-      // wedge case, and this rejection is the only account of WHY. PR #565.
+      // Record it even when the watchdog already terminated the run, since this rejection is
+      // the only account of why.
       noteRunDiagnostic(err instanceof Error ? err.message : String(err));
-      // The watchdog's self.cancel() makes the pending prompt() reject here — but the
-      // watchdog already emitted RUN_ERROR, so skip a duplicate terminal.
+      // The watchdog's own cancel makes the pending prompt() reject here, and it already
+      // emitted the terminal event.
       if (!st.terminated) {
         st.terminated = true;
         if (st.cancelled) {
-          // A cancel that made the ACP prompt reject (e.g. session/cancel aborted
-          // the call) is still a clean user stop — don't surface it as an error.
+          // A cancel that made the ACP prompt reject is still a clean user stop.
           emit({ type: "RUN_FINISHED", threadId: input.threadId, runId, cancelled: true });
         } else {
           outcome = "error";
           const raw = err instanceof Error ? err.message : String(err);
           emit({ type: "RUN_ERROR", message: clarifyRunError(raw) });
           st.retryable = true; // the ACP call threw (init/session/stream) — transient; pump retries
-          // A DEAD REMOTE SESSION (the BYO container restarted; its per-session clients are
-          // gone) is not transient for the CACHED session — every retry through it fails
-          // identically, and before the container refused unknown sessions it silently served
-          // them from a blank client (the "agent has no context" amnesia). Drop this
-          // provider's cached ready-session so the pump's next attempt re-initializes on the
-          // CURRENT container instance — and, because that mints a new session key, the
-          // history reinjection fires again.
+          // A dead remote session fails identically on every retry, so drop the cached session
+          // and let the next attempt re-initialize (and re-seed history).
           if (/unknown session/i.test(raw) && currentProviderId) {
             debug("[bridge] remote session invalid (%s) — dropping cached session for %s", raw, currentProviderId);
             readySessions.delete(currentProviderId);
@@ -1399,23 +1046,15 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     return { runId, retryable: st.retryable === true };
   };
 
-  // Force-interrupt: while a run is active, if the highest-priority QUEUED item is
-  // a priority item that has waited past the timeout, cancel the running turn so it
-  // can take over. Armed only when priorityInterruptMs > 0 and a priority item is
-  // waiting; re-checked each pump tick + on a timer.
+  // Force-interrupt: cancel the running turn once the highest-priority queued item has
+  // waited past the timeout.
   let interruptTimer: ReturnType<typeof setTimeout> | undefined;
   const clearInterruptTimer = () => {
     if (interruptTimer) { clearTimeout(interruptTimer); interruptTimer = undefined; }
   };
-  // Apply the waiting priority item's interrupt policy against the running turn:
-  //   - "tool-call": cancel NOW (cancel() kills the in-flight tool call).
-  //   - "thinking" : cancel now IF no tool call is in flight; else defer to the
-  //                  next tool-call boundary (cancelWhenToolsIdle) — AND arm the
-  //                  timeout fallback, so a tool that NEVER yields (a real
-  //                  `sleep 3600`, not a short poll) still gets hard-cancelled after
-  //                  priorityInterruptMs rather than deferring forever.
-  //   - "timeout"  : arm the timer; cancel after priorityInterruptMs still waiting.
-  // Re-evaluated on each enqueue + pump tick. A no-op with no run / no priority item.
+  // Apply the waiting priority item's interrupt policy: "tool-call" cancels now, "thinking"
+  // cancels at the next tool-call boundary with the timeout as a fallback, and "timeout"
+  // arms the timer.
   const armTimeoutFallback = (head: QueueItem) => {
     if (priorityInterruptMs <= 0) return; // fallback disabled
     const remaining = Math.max(0, priorityInterruptMs - (Date.now() - head.enqueuedAt));
@@ -1444,7 +1083,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       }
       return;
     }
-    // "timeout": the historical behavior. Disabled when priorityInterruptMs <= 0.
+    // "timeout": arm the timer (disabled when priorityInterruptMs <= 0).
     armTimeoutFallback(head);
   };
 
@@ -1456,50 +1095,34 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     );
   };
 
-  // Drain the queue one run at a time (the single goose session), highest priority
-  // first. Preserves the "one run fully completes before the next RUN_STARTED"
-  // invariant by awaiting each runPrompt fully.
+  // Drain the queue one run at a time, highest priority first, awaiting each run fully.
   const pump = async () => {
     if (pumping) return;
     pumping = true;
     try {
       while (queue.length > 0) {
         const item = topPriorityItem()!;
-        // BATCH: coalesce every OTHER queued item of the SAME priority tier into
-        // this run, in FIFO (enqueue) order. When the user fired a burst of
-        // messages while a run was in flight, they all queued at the same tier;
-        // sending them as ONE turn means the agent reads the whole burst at once
-        // instead of answering the first then re-reading a stale later one. Only
-        // same-tier items batch — a priority @mention never merges with normal
-        // messages (it may need to force-interrupt on its own terms). The picked
-        // item leads (it's the highest-priority / earliest); its tier-mates follow.
+        // Coalesce every other queued item of the same priority tier into this run in FIFO
+        // order, so a burst is read as one turn; a priority item never merges with normal
+        // messages.
         const batch = [item, ...queue.filter((q) => q !== item && q.priority === item.priority)]
           .sort((a, b) => a.enqueuedAt - b.enqueuedAt);
         for (const b of batch) queue.splice(queue.indexOf(b), 1);
         runningBatch = batch; // in-flight: not in `queue`, but must survive a suspend
-        // The batch just left the queue to run — surface the shrunk queue (the
-        // running batch will render as normal user messages via runPrompt's
-        // persist). An empty queue emits items:[] so the UI clears its queued list.
+        // Surface the shrunk queue; an empty queue emits items:[] so the UI clears its list.
         emitQueueSnapshot();
         clearInterruptTimer(); // the batch is now running, not waiting
         try {
-          // AUTO-RETRY on transient death: the agent process can crash / go silent / fail to
-          // init mid-run (agent_process_died, no_activity_timeout, an ACP throw). Rather than
-          // strand the user's prompt on a dead-end error, re-drive THIS batch with exponential
-          // backoff. Crucially this only re-runs the failed batch — the REST OF THE QUEUE is
-          // untouched (items queued behind it survive and run after). A genuine model error
-          // ("agent reported an error") or a user cancel is NOT retryable → we stop immediately.
+          // Re-drive this batch with exponential backoff on a transient failure, leaving the
+          // rest of the queue untouched.
           const inputs = batch.map((b) => b.input);
           let res = await runPrompt(batch[0].input, inputs);
-          // Count runs PERFORMED, and distinguish a closed bridge from a spent budget: the
-          // break below leaves `retryable` set, so both used to report "exhausting retries"
-          // at RETRY_MAX — reading as 5 failed attempts when only 1 ran. Why: PR #722.
+          // Count runs performed, and distinguish a closed bridge from a spent budget.
           let attempts = 1;
           let abandoned = false;
           for (let attempt = 1; res.retryable && attempt <= RETRY_MAX; attempt++) {
             const delayMs = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_CAP_MS);
-            // A run that fails and silently succeeds on retry looks to the user like
-            // "it failed once" with nothing to point at afterwards.
+            // Logged so a run that fails and then succeeds on retry leaves a trace.
             log.warn("retrying a wedged run", { attempt, max: RETRY_MAX, delay_ms: delayMs });
             emit({ type: "RUN_RETRYING", threadId: batch[0].input.threadId, attempt, max: RETRY_MAX, delayMs });
             await new Promise((r) => setTimeout(r, delayMs));
@@ -1526,8 +1149,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         } finally {
           runningBatch = [];
         }
-        // A new priority item may have queued during that run — re-evaluate its
-        // preemption against the (next) run.
+        // A priority item may have queued during that run; re-evaluate preemption against
+        // the next run.
         applyPreemption();
       }
     } finally {
@@ -1537,22 +1160,23 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   };
 
   // --- ACP client resolution (per-run provider selection) ---------------------------------
-  // The RunContext for a run: this conversation + its owner + the run's trigger source. The
-  // ported Increment-1 providers ignore owner/source (single eligible provider), so selection is
-  // stable; Increment 2's remote provider keys on them.
+  // The RunContext for a run: this conversation, its owner, and the run's trigger source.
   const defaultRunContext = (): RunContext => ({
     conversationId: sessionId,
     owner: deps.owner,
+    model: deps.model,
+    provider: deps.pickedProvider,
   });
   const runContextFor = (input: PromptInput): RunContext => ({
     conversationId: sessionId,
     owner: deps.owner,
     source: input.source,
+    model: deps.model,
+    provider: deps.pickedProvider,
   });
 
-  // Lazily ready ONE client per provider: initialize → newSession → wire the update/terminal/
-  // permission hooks ONCE (the same lifecycle the old single-client start() ran). Cached by
-  // provider id; a failed init drops the cache entry so the next run retries.
+  // Lazily ready one client per provider (initialize, newSession, hooks wired once), cached
+  // by provider id; a failed init drops the entry.
   const readyProvider = (provider: AcpProvider): Promise<{ client: AcpClient; acpSessionId: string; historySeeded: boolean; mcpFingerprint: string }> => {
     let ready = readySessions.get(provider.id);
     if (ready) return ready;
@@ -1563,59 +1187,48 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
       });
-      // The model THIS provider's session runs: the conversation's choice when this provider
-      // offers it, else the provider's own default. Sending the raw choice regardless handed a
-      // Bedrock id to the BYO container (which ignored it entirely) — the provider dimension
-      // makes the substitution explicit instead of silent nonsense.
+      // The model this provider's session runs: the conversation's choice when the provider
+      // offers it, else the provider's default.
       const model =
         deps.modelCatalog
           ? deps.model && modelAllowedFor(deps.modelCatalog, deps.model, provider.modelTag)
             ? deps.model
             : defaultFor(deps.modelCatalog, provider.modelTag)
           : deps.model;
-      // A provider that cannot reach the bridge's default MCP endpoint supplies its own set —
-      // the BYO container gets tunnel NAMES it proxies locally, since the default is a
-      // loopback URL only in-cluster agents can reach.
-      // A provider with its own set wins (the BYO tunnel names). Otherwise prefer the
-      // per-run resolver, which includes sandbox-declared servers; `config.mcpServers`
-      // is the static fallback for deployments/tests without the registry.
+      // A provider with its own MCP set (the BYO tunnel names) wins; otherwise the per-run
+      // resolver, falling back to the static `config.mcpServers`.
       const resolved = provider.mcpServersFor
         ? provider.mcpServersFor(sessionId)
         : ((await deps.resolveMcpServers?.(sessionId)) ?? (deps.config.mcpServers as OfferedMcpServer[] | undefined));
       const mcpServers = resolved;
-      // Remember WHAT this session was created with, so a later run can tell whether the
-      // sandbox's set has moved under it (resolveForRun).
+      // Remember what this session was created with, so a later run can tell whether the
+      // sandbox's set changed.
       const mcpFingerprint = fingerprintOffered((resolved ?? []) as OfferedMcpServer[]);
       const { sessionId: sid } = await client.newSession({
         cwd: deps.config.cwd,
         mcpServers,
         model,
-        // A BYO container cannot read this pod's filesystem, so the skills travel
-        // as DATA and it writes its own .claude/skills. The in-pod providers read
-        // the directory directly and ignore this.
+        // A BYO container cannot read this pod's filesystem, so the skills travel as data
+        // and it writes its own .claude/skills, while in-pod providers ignore this.
         skills: provider.kind === "claude" && provider.id !== "sdk-claude"
           ? skillPayloads(deps.config.skillsDir)
           : undefined,
       });
       debug("[bridge] readyProvider(%s): newSession -> %s", provider.id, sid);
-      // Subscribe ONCE per client and route updates to the current run (handleUpdate keys on
-      // currentRun; only the in-flight run's provider emits at a time).
+      // Subscribe once per client and route updates to the current run.
       client.onSessionUpdate((sid, u) => {
-        // FILTER BY SESSION. For goose this is always our own sid. For a BYO remote agent, all
-        // of an owner's conversations share ONE wire; the relay routes by session, but this is
-        // the defense-in-depth: an update for a session we are not driving must never be
-        // applied to our run — that interleaves another conversation's transcript into ours.
-        // An update with NO sid (older stacks) keeps the old behaviour.
+        // Filter by session, since a BYO owner's conversations share one wire and another
+        // session's update must never land in this run.
         if (sid && acpSessionId && sid !== acpSessionId) return;
         if (currentRun) handleUpdate(currentRun, u);
       });
-      // goose's shell tool carries the COMMAND in terminal/create, not the tool_call rawInput —
-      // stash it by terminalId so the tool_call_update can show `$ <command>`.
+      // goose's shell tool carries the command in terminal/create, so stash it by terminalId
+      // for the tool_call_update.
       client.onTerminalCreated((terminalId, command, args) => {
         terminalCommands.set(terminalId, formatCommand(command, args));
       });
-      // The agent asks the user to choose (ACP session/request_permission): emit a PERMISSION
-      // interrupt + BLOCK the agent until answerPermission() resolves.
+      // The agent asks the user to choose: emit a permission interrupt and block until
+      // answerPermission() resolves.
       client.onPermissionRequest(async (req) => {
         const run = currentRun;
         if (run) {
@@ -1646,7 +1259,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           });
         });
         pendingPermissions.delete(req.toolCallId);
-        // PERSIST-ONLY record for history replay (not a live AG-UI event).
+        // Persist-only record for history replay.
         persist({ type: "PERMISSION_RESOLVED", toolCallId: req.toolCallId, optionId });
         if (run) {
           emit({ type: "RUN_STARTED", threadId: run.threadId, runId: run.runId });
@@ -1661,16 +1274,10 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     return ready;
   };
 
-  /** Drop a cached session whose MCP set no longer matches the sandbox's.
-   *
-   *  Auto-assigned ports can be REUSED by a different server across a `scooter-rebuild`, so a
-   *  session created with `sandbox:alpha -> :9700` can end up talking to a DIFFERENT server on
-   *  :9700 while still calling it alpha. That mis-wires silently, which is worse than a dead
-   *  port. Re-resolving per run and comparing the fingerprint is what makes the renumbering in
-   *  modules/sandbox-os/mcp-servers.nix safe; see PR #521.
-   *
-   *  Best-effort by design: a resolver failure (pod asleep, exec blip) must NOT block the run.
-   *  Keeping the existing session is the safe direction — it is the set we last confirmed. */
+  /** Drop a cached session whose MCP set no longer matches the sandbox's, since a
+   *  `scooter-rebuild` can hand an auto-assigned port to a different server and the old
+   *  session would silently talk to the wrong one; a resolver failure keeps the existing
+   *  session rather than blocking the run. */
   const dropSessionIfMcpChanged = async (providerId: string): Promise<void> => {
     if (!deps.resolveMcpServers) return;
     const cached = readySessions.get(providerId);
@@ -1679,9 +1286,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     try {
       settled = await cached;
     } catch (err) {
-      // Not an error path worth warning about — readyProvider's own `ready.catch` already
-      // dropped this entry, so the next run rebuilds. Traced at debug so a confusing
-      // "why did it not rebuild" investigation can see we took this branch.
+      // readyProvider's own `ready.catch` already dropped this entry, so the next run rebuilds.
       debug("[bridge] dropSessionIfMcpChanged: cached session had failed (%s)", formatError(err));
       return;
     }
@@ -1701,17 +1306,13 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       provider: providerId,
     });
     readySessions.delete(providerId);
-    // Close the old client so its transport/process does not linger — a rebuild that leaked
-    // the previous goose on every `scooter-rebuild` would accumulate them for the life of the
-    // conversation. Best-effort: failing to close must not prevent the rebuild, which is the
-    // whole point of this path.
+    // Close the old client so its process does not linger, without letting a failed close
+    // abort the rebuild.
     try {
       await settled.client.close();
     } catch (err) {
-      // Swallowed ONLY in the sense that it does not abort the rebuild — never silently.
-      // A close that keeps failing leaks one agent process per `scooter-rebuild`, which
-      // presents later as unexplained memory/PID growth in the pod with nothing tying it
-      // back to here. This line is the tie-back.
+      // A close that keeps failing leaks one agent process per `scooter-rebuild`, so it is
+      // logged rather than swallowed.
       log.warn("failed to close the superseded agent client; rebuilding anyway", {
         conversation_id: sessionId,
         provider: providerId,
@@ -1720,8 +1321,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     }
   };
 
-  // Resolve the provider for a run + set acpClient/acpSessionId to its ready client. Throws if no
-  // provider is eligible (a registry must include an always-eligible floor).
+  // Resolve the provider for a run and point acpClient/acpSessionId at its ready client,
+  // throwing if none is eligible.
   const resolveForRun = async (ctx: RunContext): Promise<void> => {
     const provider = await pickAcpProvider(acpProviders, ctx);
     if (!provider) {
@@ -1742,29 +1343,23 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
 
     async start() {
       if (started) return;
-      // Warm the provider eligible for a default (interactive, human) context. The run loop
-      // re-resolves per run; this just establishes the first session so start() keeps its
-      // "connection ready" contract. resolveForRun sets acpClient/acpSessionId.
+      // Establish the first session for a default (interactive) context; the run loop
+      // re-resolves per run.
       await resolveForRun(defaultRunContext());
       started = true;
     },
 
     prompt(input: PromptInput, opts?: PromptOptions): Promise<RunId> {
-      // Enqueue and let the pump drain one run at a time on this bridge's single
-      // goose session — highest priority first, FIFO within a tier. Each run fully
-      // completes (its text closed + RUN_FINISHED emitted) before the next
-      // RUN_STARTED (the concurrent-run corruption guard). A priority prompt jumps
-      // ahead of queued normal prompts AND can PREEMPT the running turn per its
-      // interrupt policy (timeout / thinking / tool-call).
+      // Enqueue and let the pump drain one run at a time, highest priority first and FIFO
+      // within a tier; a priority prompt may also preempt the running turn per its
+      // interrupt policy.
       const priority = opts?.priority ?? PRIORITY_NORMAL;
       const interrupt: InterruptPolicy = opts?.interrupt ?? "timeout";
       const p = new Promise<RunId>((resolve, reject) => {
         queue.push({ id: nextId("queue"), input, priority, interrupt, enqueuedAt: Date.now(), resolve, reject });
       });
-      // Surface the (now longer) queue so a message waiting behind an active run
-      // shows up durably — and doesn't vanish on refresh. When nothing is running,
-      // pump() drains it immediately and emits the empty snapshot on the way out,
-      // so a normal single prompt just flashes through.
+      // Surface the longer queue so a waiting message shows up durably; with nothing
+      // running, pump() drains it immediately.
       emitQueueSnapshot();
       if (priority >= PRIORITY_INTERRUPT) applyPreemption();
       void pump();
@@ -1772,34 +1367,26 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     },
 
     async cancel(_runId?: RunId, userInitiated = false) {
-      // Stop the RUNNING turn: mark it cancelled (so it ends as RUN_FINISHED
-      // cancelled, not an error), KILL its active tool call (a running shell), then
-      // tell goose to stop (session/cancel unblocks the prompt). A no-op if nothing
-      // is running. Queued prompts stay queued — the next runs after.
+      // Mark the running turn cancelled, kill its active tool call, then tell the agent to
+      // stop; queued prompts stay queued.
       const run = currentRun;
       if (!run || !acpClient) return;
-      // Bind the client + session HERE, not at the awaits below: a watchdog's cancel can
-      // still be in flight when the pump's retry has already resolved a fresh session, and
-      // cancelling THAT one would kill the replacement run. Why: PR #720.
+      // Bind the client and session now, since a watchdog's cancel can still be in flight
+      // after the pump's retry resolved a fresh session.
       const client = acpClient;
       const cancelSessionId = acpSessionId;
       run.cancelled = true;
-      // USER stops persist their intent (see CANCEL_REQUESTED in the event union).
-      // Internal cancels (model switch, priority preemption) do NOT: they cancel in
-      // order to immediately continue, and a persisted intent would make a
-      // reassignment terminate the very run their nudge starts... the marker names
-      // THIS runId, so only the run being stopped can match it later.
+      // Only a user Stop persists its intent; the marker names this runId, so only the run
+      // being stopped can match it later.
       if (userInitiated) emit({ type: "CANCEL_REQUESTED", threadId: run.threadId, runId: run.runId });
       try {
-        // This is what actually ends the run: killing the shell makes the prompt
-        // return. session/cancel alone does not (the fake agent ignores it).
-        // Only a USER stop gets the pending-spawn grace window. Preemption must leave the
-        // next terminal alone: it belongs to the run that did the preempting.
+        // Killing the shell is what makes the prompt return, and only a user Stop gets the
+        // pending-spawn grace window.
         await client.killActiveTerminals(userInitiated);
       } catch (e) {
-        // Was `catch {}` — a swallowed failure here presents as a dead Stop button.
+        // Logged rather than swallowed, since a silent failure here presents as a dead Stop
+        // button; session/cancel below still stops the agent.
         log.warn("killActiveTerminals failed", { error: formatError(e) });
-        /* best-effort — session/cancel below still stops goose */
       }
       if (cancelSessionId) await client.cancel(cancelSessionId);
     },
@@ -1821,51 +1408,33 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     recordRawInput,
 
     drainQueue() {
-      // Include the batch the pump is CURRENTLY running: it was spliced out of `queue`
-      // to run, so on a mid-run suspend it is in-flight and invisible to `queue` alone.
-      // Its run is about to be killed with the pod (runPrompt throws → the item rejects),
-      // so without capturing it here the user's message is destroyed — the very case
-      // this preservation exists for. Running items lead (they were picked first).
+      // Include the batch the pump is currently running, since it was spliced out of `queue`
+      // and would otherwise be lost on a mid-run suspend.
       const inFlight = runningBatch;
       runningBatch = [];
       const waiting = queue.splice(0, queue.length);
       if (waiting.length === 0 && inFlight.length === 0) return [];
-      // The log's final word on the queue must be "empty" — see the interface doc.
+      // The log's final word on the queue must be "empty".
       emitQueueSnapshot();
-      // REJECT only the items that never STARTED. An in-flight item is a run that is
-      // already executing: its promise settles through the pump's own resolve/reject
-      // when runPrompt returns (or throws as the pod goes away). Rejecting it here
-      // too would turn a NORMAL turn into a RUN_ERROR — a suspend that lands just as
-      // a run is finishing (waitForReply returns on the reply TEXT, before the run
-      // terminates) would report "the conversation was suspended before this queued
-      // message could run" for a message that in fact ran and answered.
+      // Reject only the items that never started; an in-flight item settles through the
+      // pump's own resolve/reject.
       for (const item of waiting) {
         item.reject(
           new Error("the conversation was suspended before this queued message could run"),
         );
       }
-      // Preserve BOTH for replay: the in-flight item may be cut short mid-run by the
-      // teardown, so its text is re-enqueued on revive (idempotent from the user's
-      // point of view — a turn that already completed simply re-asks).
+      // Preserve both for replay; the in-flight item is re-enqueued on revive, so a completed
+      // turn simply re-asks.
       return [...inFlight, ...waiting].map((q) => ({ text: q.input.text, priority: q.priority }));
     },
 
     async stop() {
       closed = true; // abandon any in-progress death-retry backoff
       clearInterruptTimer();
-      // DRAIN THE QUEUE. A suspend (or model switch / rollout) tears the bridge down
-      // via stop() and then DROPS it (manager.suspend: `entry.bridge = undefined`),
-      // and revive() builds a brand-new bridge with a fresh empty queue — so anything
-      // still queued here can never run on this bridge. Left alone that produced two
-      // bugs: the queued prompt() promises leaked (an awaiting caller hung forever),
-      // and the last persisted QUEUE_UPDATED still LISTED the items, so a reattaching
-      // UI folded a phantom queued row nothing would ever drain.
-      // manager.suspend() calls drainQueue() FIRST to persist the items (so revive
-      // re-runs them); this call is the belt-and-braces path for every OTHER stop()
-      // caller (model switch, end, shutdown) so a teardown never leaks or leaves a
-      // stale snapshot behind.
+      // Drain the queue so a teardown neither leaks queued prompt() promises nor leaves a
+      // stale QUEUE_UPDATED behind; manager.suspend() drains first to persist the items.
       self.drainQueue();
-      // Close EVERY started provider client (there may be more than one after provider switches).
+      // Close every started provider client.
       const settled = await Promise.allSettled([...readySessions.values()]);
       readySessions.clear();
       acpClient = undefined;
@@ -1894,8 +1463,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       // An unknown optionId cancels rather than forwarding a garbage selection.
       const chosen = pending.validOptions.has(optionId) ? optionId : null;
       if (pending.onExternal) {
-        // External interrupt (e.g. broker AWS request): no blocked goose run —
-        // fire the callback (with the answering user's identity) + clean up +
+        // An external interrupt has no blocked agent run: fire the callback, clean up, and
         // record the resolution for replay.
         pendingPermissions.delete(toolCallId);
         persist({ type: "PERMISSION_RESOLVED", toolCallId, optionId: chosen });
@@ -1911,9 +1479,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         validOptions: new Set(options.map((o) => o.optionId)),
         onExternal: onAnswer,
       });
-      // Emit the interrupt on the conversation stream (not tied to a run). The UI
-      // surfaces it via assistant-ui's pending interrupts; answerPermission(id, …)
-      // resolves it. threadId == sessionId for a bridge.
+      // Emit the interrupt on the conversation stream, not tied to a run; threadId ==
+      // sessionId for a bridge.
       emit({
         type: "RUN_FINISHED",
         threadId: sessionId,

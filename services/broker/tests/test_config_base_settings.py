@@ -1,8 +1,4 @@
-"""Inheriting from scooter_lib must not change broker behaviour.
-
-`agent_host_url == ""` is the auto-linking OFF switch; a real default here would
-turn it on wherever the variable is unset.
-"""
+"""Inheriting from scooter_lib must not change broker behaviour, and in particular `agent_host_url` must stay empty by default since that is the auto-linking off switch."""
 
 from __future__ import annotations
 
@@ -22,8 +18,6 @@ def test_broker_settings_carries_the_shared_agent_host_fields():
 
 
 def test_agent_host_url_is_still_empty_by_default():
-    # The disable switch. If this ever comes back non-empty, the broker starts
-    # POSTing links to an address that may not exist, in local/dev included.
     assert BrokerSettings().agent_host_url == ""
 
 

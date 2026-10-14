@@ -1,14 +1,8 @@
-"""authenticate_mcp — the two-token path, executed for real (issue #700).
+"""authenticate_mcp, the two-token path, executed for real with a faked TokenReview.
 
-This is the function that decides WHICH CONVERSATION a tool call acts for, so the
-negative cases are the point. It is tested the way test_auth_identity.py tests
-`authenticate`, and for the reason stated there: overriding the dependency is right
-for testing a route, but leaves the function that decides who may talk to the broker
-never actually running.
-
-The property every test here circles: a caller cannot choose its own conversation.
-The id comes either from a signature we made, or from the SA name the API server
-vouched for — never from anything the caller is free to write.
+The property every test here circles: a caller cannot choose its own conversation, since
+the id comes from a signature the platform made or from the SA name the API server
+vouched for.
 """
 
 from __future__ import annotations
@@ -90,8 +84,7 @@ async def test_control_plane_acts_for_the_conversation_in_its_token(_as):
 
 
 async def test_control_plane_WITHOUT_a_conversation_token_is_refused(_as):
-    """No conversation is defaulted. There is no safe one to pick, and an endpoint
-    that picks one is the hole this replaces."""
+    """No conversation is defaulted, since there is no safe one to pick."""
     _as(AGENT_HOST)
     with pytest.raises(HTTPException) as e:
         await auth_mod.authenticate_mcp(_request())
@@ -116,8 +109,7 @@ async def test_control_plane_with_an_unusable_conversation_token_is_refused(_as,
 
 
 async def test_the_refusal_does_not_say_WHY(_as):
-    """A 403 body distinguishing "expired" from "bad signature" tells an attacker
-    which half to work on. The reason goes to our log instead."""
+    """The reason goes to the log, not the 403 body."""
     _as(AGENT_HOST)
     with pytest.raises(HTTPException) as e:
         await auth_mod.authenticate_mcp(_request(_conv_token("conv-7", secret="wrong")))
@@ -125,9 +117,7 @@ async def test_the_refusal_does_not_say_WHY(_as):
 
 
 async def test_a_non_allowlisted_sa_cannot_use_a_conversation_token(_as):
-    """THE escalation test. A valid conversation token is not enough on its own — the
-    caller must also be an allowlisted control-plane SA. Here a sandbox-shaped SA for
-    conv-a presents a perfectly good token for conv-b and must not become conv-b."""
+    """A valid conversation token is not enough on its own: a sandbox SA for conv-a presenting a good token for conv-b must not become conv-b."""
     _as("system:serviceaccount:agent-sandbox:sandbox-conv-a")
     with pytest.raises(HTTPException) as e:
         await auth_mod.authenticate_mcp(_request(_conv_token("conv-b")))
@@ -136,8 +126,7 @@ async def test_a_non_allowlisted_sa_cannot_use_a_conversation_token(_as):
 
 
 async def test_the_approver_list_does_NOT_grant_mcp_access(_as, monkeypatch):
-    """The two authorizations are separate on purpose. An SA that may relay a human's
-    approve/deny must not thereby be able to act as any conversation."""
+    """An SA that may relay a human's approve/deny must not thereby act as any conversation."""
     monkeypatch.setattr(auth_mod.settings, "mcp_caller_service_accounts", "")
     monkeypatch.setattr(auth_mod.settings, "approver_service_accounts", AGENT_HOST)
     _as(AGENT_HOST)
@@ -158,8 +147,7 @@ async def test_fails_closed_when_no_conv_token_secret_is_configured(_as, monkeyp
 # --- the sandbox path -------------------------------------------------------------
 
 async def test_a_sandbox_sa_resolves_from_its_own_name(_as):
-    """No conversation token needed: the SA name already binds it to one
-    conversation, and it cannot obtain another conversation's SA token."""
+    """No conversation token is needed, since the SA name already binds it to one conversation."""
     _as("system:serviceaccount:agent-sandbox:sandbox-conv-9")
     identity = await auth_mod.authenticate_mcp(_request())
     assert identity.conversation_id == "conv-9"

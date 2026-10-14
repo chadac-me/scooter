@@ -1,16 +1,9 @@
 /**
- * Tier 1 contract — the consumer Sandbox-manifest overlay.
- *
- * The overlay is a recursive PATCH deep-merged onto the generated Sandbox so a
- * deployment can change the pod manifest (nodeSelector, tolerations, extra env) WITHOUT
- * patching Scooter. These tests are the SPEC:
- *   - deepMerge: objects recurse, scalars replace, arrays strategic-merge by `name`
- *   - reassertProtected: Scooter's identity/auth/storage survive a HOSTILE overlay
- *   - parseOverlay: YAML/JSON payload -> object; empty -> {}; malformed -> OverlayError
- *
- * Ported case-for-case from the broker's test_sandbox_overlay.py, which was the spec
- * while provisioning briefly lived there. A deployment's nodeSelector rides on this, so
- * "the overlay silently did nothing" is a scheduling incident, not a cosmetic bug.
+ * The consumer Sandbox-manifest overlay, a recursive patch deep-merged onto the
+ * generated Sandbox so a deployment can change the pod manifest without patching
+ * Scooter. deepMerge recurses objects, replaces scalars and strategic-merges arrays by
+ * `name`; reassertProtected keeps Scooter's identity, auth and storage wiring intact
+ * under a hostile overlay; parseOverlay turns YAML or JSON into an object.
  */
 
 import { describe, it, expect } from "vitest";
@@ -134,8 +127,8 @@ describe("reassertProtected — a hostile overlay cannot break Scooter's wiring"
               {
                 name: "sandbox",
                 env: [
-                  { name: "CONVERSATION_ID", value: "spoofed" }, // protected -> restored
-                  { name: "MY_TOOL", value: "ok" }, // added -> kept
+                  { name: "CONVERSATION_ID", value: "spoofed" },
+                  { name: "MY_TOOL", value: "ok" },
                 ],
               },
             ],
@@ -144,8 +137,8 @@ describe("reassertProtected — a hostile overlay cannot break Scooter's wiring"
       },
     }) as Obj;
     const env = envOf(reassertProtected(base, merged));
-    expect(env.CONVERSATION_ID).toBe("c1"); // Scooter's value wins
-    expect(env.MY_TOOL).toBe("ok"); // the consumer addition survives
+    expect(env.CONVERSATION_ID).toBe("c1");
+    expect(env.MY_TOOL).toBe("ok");
   });
 });
 
@@ -194,7 +187,7 @@ describe("sandboxManifest(overlay)", () => {
     const ps = m.spec.podTemplate.spec;
     expect(ps.nodeSelector).toEqual({ "scooter.io/pool": "sandbox" });
     expect(ps.tolerations[0].key).toBe("sandbox");
-    expect(ps.serviceAccountName).toBe("sandbox-c1"); // Scooter's structure intact
+    expect(ps.serviceAccountName).toBe("sandbox-c1");
   });
 
   it("patches ONE env var by name, leaving the base env in place", () => {
@@ -207,7 +200,7 @@ describe("sandboxManifest(overlay)", () => {
     });
     const env = envOf(m);
     expect(env.MY_TOOL_URL).toBe("http://tool.ns.svc:8080");
-    expect(env.BROKER_URL).toMatch(/^http:\/\/agent-broker/); // base env preserved
+    expect(env.BROKER_URL).toMatch(/^http:\/\/agent-broker/);
   });
 
   it("cannot break protected fields end to end", () => {

@@ -1,14 +1,8 @@
 /**
- * Tier 1 contract — the bridge REBUILDS its agent session when the sandbox's MCP
- * server set changes, and leaves it alone when it doesn't.
- *
- * This is the guard that makes port auto-assignment in
- * modules/sandbox-os/mcp-servers.nix safe. A `scooter-rebuild` can hand a port to a
- * DIFFERENT server (add a name that sorts first and everything shifts up one), so a
- * session still holding `sandbox:alpha -> :9700` would talk to the new occupant of
- * :9700 while still calling it alpha. That mis-wires SILENTLY — strictly worse than
- * a dead port, which at least fails loudly. Re-resolving per run and comparing the
- * fingerprint is what prevents it. See PR #521 review.
+ * The bridge rebuilds its agent session when the sandbox's MCP server set changes and
+ * leaves it alone when it does not. Port auto-assignment in
+ * modules/sandbox-os/mcp-servers.nix can hand a port to a different server on a
+ * `scooter-rebuild`, so the set is re-resolved per run and compared by fingerprint.
  */
 
 import { describe, it, expect } from "vitest";
@@ -35,9 +29,7 @@ const server = (name: string, port: number): OfferedMcpServer => ({
   headers: [],
 });
 
-/** A provider whose every created client records the mcpServers it was given at
- *  newSession. A fresh fake agent per createClient, so a rebuild is observable as a
- *  genuinely new client rather than a re-used one. */
+/** A provider whose clients record the mcpServers given at newSession, with a fresh fake agent per createClient so a rebuild is observable. */
 function recordingProvider(exec: ReturnType<typeof createSandboxExecBackend>) {
   const sessions: OfferedMcpServer[][] = [];
   let clients = 0;
@@ -75,7 +67,7 @@ describe("bridge — sandbox MCP servers change under a live conversation", () =
   it("rebuilds the session when a server's port is reassigned", async () => {
     const exec = createSandboxExecBackend(createFakeSandboxApi());
     const rec = recordingProvider(exec);
-    // The sandbox's set, as the registry would resolve it. Mutable: a rebuild moves it.
+    // The sandbox's set as the registry would resolve it; a rebuild moves it.
     let offered = [server("alpha", 9700)];
 
     const bridge = createSessionBridge({
@@ -89,8 +81,7 @@ describe("bridge — sandbox MCP servers change under a live conversation", () =
     expect(rec.sessions()).toHaveLength(1);
     expect(rec.sessions()[0][0].url).toContain("9700");
 
-    // A rebuild adds a server sorting before alpha, so alpha is renumbered to 9701 and
-    // :9700 now belongs to something else entirely.
+    // A rebuild adds a server sorting before alpha, so alpha is renumbered to 9701.
     offered = [server("aardvark", 9700), server("alpha", 9701)];
 
     await bridge.prompt({ threadId: "t1", text: "two" });
@@ -104,8 +95,6 @@ describe("bridge — sandbox MCP servers change under a live conversation", () =
   });
 
   it("does NOT rebuild when the set is unchanged", async () => {
-    // Rebuilding on every message would drop the agent's session (and re-seed history)
-    // constantly — the cost of getting this wrong in the other direction.
     const exec = createSandboxExecBackend(createFakeSandboxApi());
     const rec = recordingProvider(exec);
     const offered = [server("alpha", 9700)];
@@ -114,8 +103,7 @@ describe("bridge — sandbox MCP servers change under a live conversation", () =
       config: BRIDGE_CONFIG,
       exec,
       acpProviders: [rec.provider],
-      // A NEW array each call with equal contents — the comparison must be by value,
-      // not identity, or it would rebuild every single run.
+      // A new array each call with equal contents, so the comparison must be by value.
       resolveMcpServers: async () => offered.map((s) => ({ ...s })),
     });
 
@@ -129,8 +117,7 @@ describe("bridge — sandbox MCP servers change under a live conversation", () =
   });
 
   it("keeps the current session when the resolver fails", async () => {
-    // The pod may be asleep or exec may blip. Failing toward "keep the session we have"
-    // is right: the alternative is tearing down a working agent over a transient read.
+    // The pod may be asleep or exec may blip.
     const exec = createSandboxExecBackend(createFakeSandboxApi());
     const rec = recordingProvider(exec);
     let fail = false;
@@ -155,7 +142,6 @@ describe("bridge — sandbox MCP servers change under a live conversation", () =
   });
 
   it("leaves the static config path untouched when no resolver is configured", async () => {
-    // Every existing deployment/test takes this path; it must not start re-resolving.
     const exec = createSandboxExecBackend(createFakeSandboxApi());
     const rec = recordingProvider(exec);
 

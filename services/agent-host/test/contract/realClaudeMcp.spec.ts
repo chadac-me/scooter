@@ -1,31 +1,9 @@
 /**
- * Tier 3 — the REAL `claude` CLI against the REAL scooter-env MCP endpoint.
- *
- * WHY HERE AND NOT IN THE PROVIDER: claude-sdk-provider does not depend on agent-host,
- * and the MCP endpoint lives in agent-host. The dependency runs agent-host -> provider,
- * so this is the only side that can wire both halves.
- *
- * WHAT THIS CLOSES: realClaude.spec.ts (provider) says of itself — "that involved
- * scooter-env MCP tools over the BYOC tunnel, a shape this local harness cannot
- * construct". It can now: createMcpEndpoint is plain HTTP with every wiring optional, so
- * binding it on localhost with only `jobs` gives the real tool surface with no cluster,
- * no broker, and no tunnel.
- *
- * WHAT IT PROVES: that the MCP tools are reachable and ANSWERABLE end to end — the model
- * calls run_background/check_background over HTTP, the endpoint dispatches to a real
- * JobManager, and results come back. The class of bug it guards is WIRING: a tool that is
- * exposed but unanswerable stalls the turn holding a permission nobody can resolve, which
- * no unit test sees (see the PR #413 id-collision bug, and the earlier unwired-builtin
- * hang).
- *
- * WHAT IT DOES NOT PROVE: concurrency. The id collision in #413 needs two IN-FLIGHT calls
- * to one tool; a scripted turn does not reliably produce that. That bug is unit-tested in
- * sdkClient.spec.ts, which is the right level for it.
- *
- * Gated — needs credentials and makes real model calls:
- *   RUN_REAL_CLAUDE=1 npx vitest run --project agent-host realClaudeMcp
- *
- * Auth: CLAUDE_CODE_OAUTH_TOKEN, or an existing `claude` login on this machine.
+ * The real `claude` CLI against the real scooter-env MCP endpoint, bound on
+ * localhost with only `jobs` wired. It proves the MCP tools are reachable and
+ * answerable end to end; an exposed but unanswerable tool stalls the turn on a
+ * permission nobody can resolve. The model test is gated on RUN_REAL_CLAUDE=1 and
+ * authenticates via CLAUDE_CODE_OAUTH_TOKEN or an existing `claude` login.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -41,8 +19,7 @@ import type { JobManager, JobStatus, JobRecord } from "../../src/session/jobMana
 const run = process.env.RUN_REAL_CLAUDE === "1";
 const TIMEOUT = 180_000;
 
-/** A JobManager backed by real child processes — no sandbox, no cluster. Enough for the
- *  endpoint to dispatch against something that genuinely runs and finishes. */
+/** A JobManager backed by real child processes, so the endpoint dispatches against something that runs and finishes. */
 function localJobs(): JobManager {
   const jobs = new Map<string, JobStatus>();
   let seq = 0;
@@ -85,18 +62,15 @@ function localJobs(): JobManager {
   } as unknown as JobManager;
 }
 
-/** Bind the REAL MCP endpoint on a loopback port. Returns its per-conversation URL. */
 const HARNESS_SECRET = "realclaude-harness-conv-secret";
 
+/** Bind the real MCP endpoint on a loopback port and return its per-conversation URL. */
 async function serveMcp(deps: Partial<Parameters<typeof createMcpEndpoint>[0]> = {}): Promise<{
   url: string;
   authHeaders: Record<string, string>;
   close: () => Promise<void>;
 }> {
-  // Listen FIRST so the endpoint is built once, with the real port in its baseUrl —
-  // building a second instance just to compute the URL would leave the served endpoint
-  // and the advertised one able to drift apart (they did, in an earlier cut of this file:
-  // a broken wiring on the URL-only copy still "passed").
+  // Listen first so the endpoint is built once, with the real port in its baseUrl.
   let handle: (req: IncomingMessage, res: ServerResponse, body: unknown) => Promise<void>;
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -118,8 +92,7 @@ async function serveMcp(deps: Partial<Parameters<typeof createMcpEndpoint>[0]> =
   const endpoint = createMcpEndpoint({
     baseUrl: `http://127.0.0.1:${port}`,
     jobs: localJobs(),
-    // The endpoint takes its conversation from a signed token, so the harness has to
-    // mint one like the real caller does. `?conv=` is gone. Why: issue #700.
+    // The endpoint takes its conversation from a signed token, so the harness mints one like the real caller.
     convTokenSecret: HARNESS_SECRET,
     ...deps,
   });
@@ -133,8 +106,7 @@ async function serveMcp(deps: Partial<Parameters<typeof createMcpEndpoint>[0]> =
   };
 }
 
-/** A throwaway CLAUDE_CONFIG_DIR carrying ONLY credentials — no pre-approved tools, so
- *  the permission flow behaves as it does in-cluster (see realClaude.spec.ts). */
+/** A throwaway CLAUDE_CONFIG_DIR carrying only credentials, so the permission flow behaves as it does in-cluster. */
 function cleanConfigDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "scooter-mcp-claude-"));
   const creds = join(homedir(), ".claude", ".credentials.json");
@@ -147,8 +119,7 @@ afterAll(async () => {
   for (const close of servers) await close();
 });
 
-// This one needs NO credentials and burns no tokens: it proves the harness itself wires
-// up. Ungated, so a broken harness fails loudly instead of hiding behind the gate.
+// Ungated and credential-free: proves the harness itself wires up.
 describe("the scooter-env MCP endpoint answers over HTTP", () => {
   it("serves tools/list with the background-job tools", async () => {
     const mcp = await serveMcp();
@@ -203,9 +174,7 @@ describe.skipIf(!run)("REAL claude + REAL scooter-env MCP endpoint", () => {
       await client.initialize({ protocolVersion: 1 } as never);
       const { sessionId } = await client.newSession({ cwd: "/tmp", mcpServers: [] } as never);
 
-      // A turn that CANNOT be answered from the model's own knowledge — it has to reach
-      // the endpoint. If the tools are exposed-but-unanswerable the turn stalls here
-      // instead of returning, which is the wiring failure this test exists to catch.
+      // A turn that cannot be answered from the model's own knowledge, so it has to reach the endpoint.
       const res = await client.prompt({
         sessionId,
         prompt: [
@@ -226,9 +195,7 @@ describe.skipIf(!run)("REAL claude + REAL scooter-env MCP endpoint", () => {
 
 describe("the harness itself is load-bearing", () => {
   it("an endpoint with NO jobs wiring does NOT advertise the job tools", async () => {
-    // Guards the guard: an earlier cut built two endpoints (one served, one only for the
-    // URL), so breaking the wiring still passed. If this ever goes green with the tools
-    // present, the harness is testing a different endpoint than it serves.
+    // If this goes green with the tools present, the harness is testing a different endpoint than it serves.
     const mcp = await serveMcp({ jobs: undefined });
     servers.push(mcp.close);
     const res = await fetch(mcp.url, {

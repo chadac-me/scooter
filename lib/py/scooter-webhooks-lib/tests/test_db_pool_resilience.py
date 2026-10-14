@@ -1,15 +1,7 @@
-"""The conversation-mapping engine must survive a postgres restart / failover / idle-timeout.
+"""The conversation-mapping engine must survive a postgres restart, failover or idle-timeout.
 
-Without `pool_pre_ping` the pool hands out a connection the server has already closed and the
-request dies with asyncpg "connection is closed" on the next transaction — the service then stays
-broken until it is itself restarted. `pool_recycle` retires connections proactively before common
-idle-timeout windows rather than waiting to be bitten.
-
-This check travelled here with the engine it guards (PR #567). It resolves the module through the
-IMPORT rather than a repo-relative path: each package's nix build sandbox contains only its own
-source, so a path reaching across that boundary finds nothing — which is exactly how this check
-broke when store.py moved, and what the per-service split it already carried was working around.
-The broker carries the same check for its three stores.
+The module is resolved through the import rather than a repo-relative path, since
+each package's nix build sandbox contains only its own source.
 """
 
 from __future__ import annotations

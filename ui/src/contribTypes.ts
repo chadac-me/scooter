@@ -1,16 +1,10 @@
 /**
- * The shapes a contrib's UI metadata must satisfy.
- *
- * Hand-written and imported by BOTH sides: contribManifest.ts (which validates a
- * fetched document row by row against these) and the app modules that merge it
- * in. Separate from sourceIcon.tsx only to keep that import acyclic.
- *
- * The brand mark is SVG DATA, not a react-icons component: the manifest is
- * fetched at runtime, and a component named by a string could only be resolved
- * by bundling a whole react-icons pack. Why: PR #601.
- *
- * See contrib/ui-manifest.nix for what generates the manifest, and contrib/
- * submodule.nix (`ui`) for the options a contrib actually writes.
+ * The shapes a contrib's UI metadata must satisfy, imported by both contribManifest.ts
+ * (which validates a fetched document row by row against them) and the app modules
+ * that merge the result in. The brand mark is SVG data rather than a react-icons
+ * component because the manifest is fetched at runtime. Kept apart from sourceIcon.tsx
+ * so that import stays acyclic. contrib/ui-manifest.nix generates the manifest and
+ * contrib/submodule.nix (`ui`) holds the options a contrib writes.
  */
 
 /** A brand mark as raw data: one SVG path, drawn in the source's color. */
@@ -41,14 +35,9 @@ export interface ContribToolCard {
 }
 
 /**
- * How a contrib's approval interrupt is GATED in the UI.
- *
- * Only the presentation half lives here. The browser is deliberately not told where
- * the contrib's verbs are on the broker — that travels to the agent-host, which does
- * the relaying. A UI that knew the broker path would be a UI that could be pointed at
- * one. This half is build-time metadata (contrib/ui-manifest.nix); where the verbs
- * live on the broker is deployment config the agent-host reads, so neither fact is
- * stated twice. Why: PR #651.
+ * How a contrib's approval interrupt is gated in the UI. Only the presentation half
+ * lives here: where the contrib's verbs live on the broker is deployment config the
+ * agent-host reads, and the browser is never told it.
  */
 export interface ContribApproval {
   /** Which option id is greyed for a viewer the host says may not use it. */
@@ -59,11 +48,8 @@ export interface ContribApproval {
   blockedHint: string;
 }
 
-/**
- * The whole `/contrib/manifest.json` document, NORMALIZED: the loader fills every
- * absent key with an empty value, so consumers never branch on undefined. Any of
- * the keys may be missing from the served document.
- */
+/** The whole `/contrib/manifest.json` document, normalized: the loader fills every
+ *  absent key with an empty value, so consumers never branch on undefined. */
 export interface ContribManifest {
   /** Brand row per contrib name. */
   sources: Record<string, ContribSource>;

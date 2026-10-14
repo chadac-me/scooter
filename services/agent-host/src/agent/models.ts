@@ -1,43 +1,31 @@
 /**
- * Model catalog — the set of models a conversation may run on, each with an
- * optional deployment HINT guiding when to use it (fast/cheap vs slow/powerful).
- * The agent picks its own model via the list_models / switch_model MCP tools;
- * customers steer that choice through the hints in their kubenix config.
- *
- * Source of truth: the AGENT_MODELS_JSON env var, a JSON array rendered by
- * modules/platform.nix from `agent.availableModels.<id> = { enable; hint; default; }`.
- * We derive the flat `default` id + `available` id list from it so resolveModel /
- * GET /models keep working. Backward-compat: a legacy comma-sep
- * AGENT_AVAILABLE_MODELS + GOOSE_MODEL still yields a catalog (no hints).
+ * Model catalog: the set of models a conversation may run on, each with an optional
+ * deployment hint guiding when to use it, which the agent picks between via the
+ * list_models / switch_model MCP tools. The source of truth is the AGENT_MODELS_JSON
+ * env var rendered by modules/platform.nix; a comma-separated AGENT_AVAILABLE_MODELS
+ * plus GOOSE_MODEL also yields a catalog without hints.
  */
 
 /** One offered model. */
 export interface ModelInfo {
   id: string;
-  /** Deployment guidance shown to the agent (list_models). "" = none. */
+  /** Deployment guidance shown to the agent by list_models; "" means none. */
   hint: string;
-  /** The default model — used when a conversation hasn't picked one. Exactly one. */
+  /** The one default model, used when a conversation has not picked one. */
   default: boolean;
-  /** Which PROVIDERS offer this model ("goose", "claude-code", "byoc"). Model ids are
-   *  provider-specific namespaces — a Bedrock id means nothing to a subscription-backed
-   *  provider and vice versa — so a run must only be handed models its provider can serve.
-   *  Empty = offered on every provider (the pre-provider-dimension behaviour). */
+  /** Which providers ("goose", "claude-code", "byoc") offer this model, since ids are provider-specific namespaces; empty means every provider. */
   providers: string[];
-  /** The providers this model is THE default for (each provider group in the kubenix
-   *  catalog marks its own default). */
+  /** The providers this model is the default for. */
   defaultFor: string[];
 }
 
 export interface ModelCatalog {
   models: ModelInfo[];
-  /** The default model id (the one with default:true), or undefined if none. */
+  /** The default model id, or undefined if none. */
   defaultId?: string;
 }
 
-/**
- * Build the catalog from the environment. Prefers AGENT_MODELS_JSON (the rich
- * form); falls back to the legacy GOOSE_MODEL + AGENT_AVAILABLE_MODELS.
- */
+/** Build the catalog from the environment, preferring AGENT_MODELS_JSON over GOOSE_MODEL + AGENT_AVAILABLE_MODELS. */
 export function catalogFromEnv(env: NodeJS.ProcessEnv = process.env): ModelCatalog {
   const json = env.AGENT_MODELS_JSON;
   if (json && json.trim()) {
@@ -58,10 +46,10 @@ export function catalogFromEnv(env: NodeJS.ProcessEnv = process.env): ModelCatal
       }
       return withDefault(models);
     } catch {
-      // fall through to the legacy form
+      // Fall through to the env-list form.
     }
   }
-  // Legacy: GOOSE_MODEL is the default; AGENT_AVAILABLE_MODELS the (hint-less) list.
+  // GOOSE_MODEL is the default and AGENT_AVAILABLE_MODELS the hint-less list.
   const legacyDefault = env.GOOSE_MODEL?.trim() || undefined;
   const ids = (env.AGENT_AVAILABLE_MODELS ?? "")
     .split(",")
@@ -72,8 +60,7 @@ export function catalogFromEnv(env: NodeJS.ProcessEnv = process.env): ModelCatal
   return withDefault(models, legacyDefault);
 }
 
-/** Ensure exactly one default is marked: honor an explicit default:true, else the
- *  hinted `fallback` id, else the first model. */
+/** Ensure exactly one default is marked: an explicit default:true, else `fallback`, else the first model. */
 function withDefault(models: ModelInfo[], fallback?: string): ModelCatalog {
   if (models.length === 0) return { models: [], defaultId: fallback };
   let def = models.find((m) => m.default);
@@ -89,23 +76,18 @@ export function availableIds(cat: ModelCatalog): string[] {
   return cat.models.map((m) => m.id);
 }
 
-/**
- * Resolve a requested model against the catalog. Returns the requested model iff
- * it's offered; otherwise the default. Undefined only when the catalog is empty.
- */
+/** The requested model if it is offered, otherwise the default (undefined only when the catalog is empty). */
 export function resolveModel(requested: string | undefined, cat: ModelCatalog): string | undefined {
   if (requested && cat.models.some((m) => m.id === requested)) return requested;
   return cat.defaultId;
 }
 
-/** Is `id` an offered model? (switch_model validates with this.) */
+/** Whether `id` is an offered model. */
 export function isOffered(cat: ModelCatalog, id: string): boolean {
   return cat.models.some((m) => m.id === id);
 }
 
-
-/** May a run on the provider tagged `tag` use model `id`? Untagged models are universal; an
- *  untagged RUN (a provider predating the dimension) accepts any catalog model. */
+/** Whether a run on the provider tagged `tag` may use model `id`; untagged models and untagged runs accept anything in the catalog. */
 export function modelAllowedFor(catalog: ModelCatalog, id: string, tag: string | undefined): boolean {
   const m = catalog.models.find((x) => x.id === id);
   if (!m) return false;
@@ -113,9 +95,7 @@ export function modelAllowedFor(catalog: ModelCatalog, id: string, tag: string |
   return m.providers.includes(tag);
 }
 
-/** The model a run on provider `tag` should use absent a valid choice: the model that
- *  provider's catalog group marked default, else the global default when the provider offers
- *  it, else the first model the provider does offer. */
+/** The model a run on provider `tag` should use absent a valid choice: the provider's own default, else the global default if offered, else the first model the provider offers. */
 export function defaultFor(catalog: ModelCatalog, tag: string | undefined): string | undefined {
   if (tag) {
     const flagged = catalog.models.find((m) => m.defaultFor.includes(tag));

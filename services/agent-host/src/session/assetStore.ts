@@ -1,16 +1,11 @@
 /**
- * AssetStore — durable storage for a conversation's uploaded images (and, later,
- * other media). Images arrive base64 from an entrypoint (UI upload, Slack); we
- * store the BYTES once here and hand back a small `assetId`. Everything downstream
- * (the event log, the AG-UI stream, the ACP prompt reference) carries only the id
- * — never the base64 — so the log stays compact + checksum-stable. The bridge
- * reads the bytes back at the ACP boundary to build the image content block; the
- * UI fetches them via GET /conversations/:id/assets/:assetId for replay.
- *
- * Pluggable + configurable: a PVC backend ships first
- * (bytes on the conversation-state volume, alongside events.jsonl); an S3 backend
- * can implement the same interface later (sharding-clean). Size cap + a MIME
- * allow-list (images only) are enforced on put().
+ * AssetStore: durable storage for a conversation's uploaded images. Images arrive base64
+ * from an entrypoint (UI upload, Slack); the bytes are stored once and everything
+ * downstream (the event log, the AG-UI stream, the ACP prompt reference) carries only a
+ * small `assetId`, so the log stays compact and checksum-stable. The bridge reads the
+ * bytes back at the ACP boundary and the UI fetches them via
+ * GET /conversations/:id/assets/:assetId. A size cap and an image MIME allow-list are
+ * enforced on put().
  */
 
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
@@ -20,10 +15,10 @@ import { createHash } from "node:crypto";
 
 import type { SessionId } from "../types.js";
 
-/** Image MIME types we accept. Other types are rejected on put(). */
+/** Image MIME types accepted on put(). */
 export const ALLOWED_IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
-/** Default per-image byte cap (~5MB). Deployment-configurable (ASSET_MAX_BYTES). */
+/** Default per-image byte cap (~5MB), deployment-configurable via ASSET_MAX_BYTES. */
 export const DEFAULT_ASSET_MAX_BYTES = 5 * 1024 * 1024;
 
 export interface StoredAsset {
@@ -38,15 +33,14 @@ export interface AssetBytes {
   mimeType: string;
 }
 
-/** The reason a put() was rejected (the caller maps these to 413 / 415 / an error). */
+/** The reason a put() was rejected, mapped by the caller to 413 / 415 / an error. */
 export type AssetReject = "too-large" | "unsupported-type" | "empty";
 
 export interface AssetStore {
-  /** Store image bytes for a conversation; returns a reference (assetId + url).
-   *  Rejects (throws AssetError) when over the size cap, an unsupported MIME, or empty. */
+  /** Store image bytes for a conversation and return a reference; throws AssetError when over the
+   *  size cap, an unsupported MIME, or empty. */
   put(conversationId: SessionId, bytes: AssetBytes): Promise<StoredAsset>;
-  /** Read an asset's bytes back (for the ACP image block + the replay route). null
-   *  if unknown. */
+  /** Read an asset's bytes back, or null if unknown. */
   read(conversationId: SessionId, assetId: string): Promise<AssetBytes | null>;
   /** Drop all of a conversation's assets (called on destroy). */
   clear(conversationId: SessionId): Promise<void>;
@@ -62,15 +56,15 @@ export class AssetError extends Error {
 }
 
 export interface PvcAssetStoreOpts {
-  /** Root dir (the conversation-state PVC — same as the fileStore root). */
+  /** Root dir (the conversation-state PVC, the same as the fileStore root). */
   root: string;
-  /** Per-image byte cap. Default DEFAULT_ASSET_MAX_BYTES. */
+  /** Per-image byte cap; default DEFAULT_ASSET_MAX_BYTES. */
   maxBytes?: number;
-  /** Allowed MIME types. Default ALLOWED_IMAGE_MIME. */
+  /** Allowed MIME types; default ALLOWED_IMAGE_MIME. */
   allowedMime?: Set<string>;
 }
 
-/** file extension for a stored blob, from its MIME (for a tidy on-disk name). */
+/** File extension for a stored blob, from its MIME. */
 function extFor(mime: string): string {
   return ({ "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" })[mime] ?? "bin";
 }
@@ -79,7 +73,7 @@ export function createPvcAssetStore(opts: PvcAssetStoreOpts): AssetStore {
   const maxBytes = opts.maxBytes ?? DEFAULT_ASSET_MAX_BYTES;
   const allowed = opts.allowedMime ?? ALLOWED_IMAGE_MIME;
   const dir = (id: SessionId) => join(opts.root, id, "assets");
-  // assetId -> the on-disk filename (assetId encodes the ext, so no index needed).
+  // assetId encodes the ext, so no index is needed.
   const fileFor = (id: SessionId, assetId: string) => join(dir(id), assetId);
 
   const urlFor = (id: SessionId, assetId: string) =>
@@ -96,7 +90,7 @@ export function createPvcAssetStore(opts: PvcAssetStoreOpts): AssetStore {
       if (data.length > maxBytes) {
         throw new AssetError("too-large", `image is ${data.length} bytes (max ${maxBytes})`);
       }
-      // Content-addressed id (dedupes identical uploads) + the ext for a tidy name.
+      // Content-addressed id, so identical uploads dedupe.
       const hash = createHash("sha256").update(data).digest("hex").slice(0, 32);
       const assetId = `${hash}.${extFor(mimeType)}`;
       await mkdir(dir(conversationId), { recursive: true });
@@ -105,7 +99,7 @@ export function createPvcAssetStore(opts: PvcAssetStoreOpts): AssetStore {
     },
 
     async read(conversationId, assetId) {
-      // Guard against path traversal — an assetId is a bare hash.ext, no separators.
+      // Guard against path traversal: an assetId is a bare hash.ext.
       if (assetId.includes("/") || assetId.includes("..")) return null;
       const path = fileFor(conversationId, assetId);
       if (!existsSync(path)) return null;

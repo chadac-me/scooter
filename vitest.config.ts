@@ -3,23 +3,17 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 /**
- * Three non-E2E projects:
- *   - agent-host : Tier 1 contract tests (fast, no cluster). `npm test`.
- *   - ui         : UI unit tests (client lib + pure view-model logic). Fast, no
- *                  browser. A broken import (e.g. a dropped react-icons icon)
- *                  fails here instead of only at `tsc` / not at all.
- *   - cluster    : Tier 2 against a real cluster. `npm run test:cluster`
- *                  (each spec self-skips unless RUN_CLUSTER_TESTS=1).
- * Tier 3 (Playwright) is configured separately in playwright.config.ts.
+ * The vitest projects: agent-host contract tests, the UI unit tests, the per-service unit
+ * suites, and the cluster integration tests (each spec self-skips unless
+ * RUN_CLUSTER_TESTS=1). Tier 3 (Playwright) is configured separately in
+ * playwright.config.ts.
  */
 export default defineConfig({
   test: {
-    // Always print per-test names + pass/fail (so a single run shows exactly
-    // what failed — no need to re-run with --reporter=verbose).
+    // Print per-test names and pass/fail so a single run shows exactly what failed.
     reporters: process.env.CI ? ["default"] : ["verbose"],
-    // Test order randomization to surface ordering-dependent flakes.
-    // Enable with TEST_RANDOMIZE=1; set a specific seed with TEST_SEED=<number>.
-    // A fixed seed makes flake reproduction deterministic.
+    // TEST_RANDOMIZE=1 shuffles test order to surface ordering-dependent flakes, and
+    // TEST_SEED=<number> pins the seed.
     sequence: {
       shuffle: process.env.TEST_RANDOMIZE === "1",
       seed: process.env.TEST_SEED ? parseInt(process.env.TEST_SEED, 10) : Date.now(),
@@ -33,9 +27,8 @@ export default defineConfig({
         },
       },
       {
-        // @scooter/schema — the GENERATED Drizzle schema. Its units guard the two
-        // hand-written pieces: the ownership manifest stays in sync with the
-        // schemas (ownership.spec) and the runtime db guard (guard.spec).
+        // @scooter/schema, the generated Drizzle schema; its units guard the hand-written
+        // ownership manifest and the runtime db guard.
         test: {
           name: "scooter-schema",
           include: ["lib/ts/scooter-schema/src/**/*.spec.ts"],
@@ -43,9 +36,8 @@ export default defineConfig({
         },
       },
       {
-        // The BYO-Claude container (runs on the USER'S machine). Its wire handling is contract-
-        // tested against the frames the controller actually emits — the two ends previously
-        // disagreed on the permission payload shape while both suites passed.
+        // The BYO-Claude container, whose wire handling is contract-tested against the frames
+        // the controller emits.
         test: {
           name: "remote-agent",
           include: ["services/remote-agent/test/**/*.spec.ts"],
@@ -53,8 +45,8 @@ export default defineConfig({
         },
       },
       {
-        // The BYOC controller — holds the bring-your-own-Claude container sockets so ANY
-        // agent-host replica can drive them (todo/docs/BYO_CLAUDE_REMOTE_AGENT.md §L).
+        // The BYOC controller, which holds the bring-your-own-Claude container sockets so any
+        // agent-host replica can drive them.
         test: {
           name: "byoc-controller",
           include: ["services/byoc-controller/test/**/*.spec.ts"],
@@ -62,9 +54,8 @@ export default defineConfig({
         },
       },
       {
-        // The isolated Claude Agent SDK provider (zod v4, kept out of agent-host's
-        // tree). Its pure units — the SDK→AG-UI adapter + sandbox MCP tool handlers
-        // — are contract-tested here alongside co-located *.spec.ts.
+        // The isolated Claude Agent SDK provider; its SDK→AG-UI adapter and sandbox MCP tool
+        // handlers are contract-tested here.
         test: {
           name: "claude-sdk-provider",
           include: ["services/claude-sdk-provider/src/**/*.spec.ts"],
@@ -72,9 +63,7 @@ export default defineConfig({
         },
       },
       {
-        // The isolated marimo MCP server (marimo protocol client + notebook tools).
-        // The fragile /api/kernel/* surface is pinned + tested here against a fake
-        // marimo http.Server (co-located *.spec.ts).
+        // The isolated marimo MCP server, tested against a fake marimo http.Server.
         test: {
           name: "marimo-mcp",
           include: ["services/marimo-mcp/src/**/*.spec.ts"],
@@ -82,19 +71,16 @@ export default defineConfig({
         },
       },
       {
-        // CI helper scripts. `scripts/flake-focus-report.mjs` decides whether a
-        // flake-focus run actually proved the flake fixed — a verdict posted on
-        // the PR, so its edge cases (pattern matched nothing, another spec failed
-        // under contention) need units; they are unreachable from the CI job.
+        // CI helper scripts, whose verdict logic is unreachable from the CI job itself;
+        // the shard planner is one of them.
         test: {
           name: "ci-scripts",
-          include: ["scripts/**/*.spec.mjs"],
+          include: ["scripts/**/*.spec.mjs", "test/e2e/support/**/*.spec.mjs"],
           environment: "node",
         },
       },
       {
-        // Match ui/vite.config.ts's "@" -> ui/ alias so tests can import the
-        // assistant-ui components (e.g. @/components/assistant-ui/...) the app uses.
+        // Match ui/vite.config.ts's "@" -> ui/ alias so tests can import the app's components.
         resolve: {
           alias: { "@": fileURLToPath(new URL("./ui/", import.meta.url)) },
         },
@@ -111,8 +97,7 @@ export default defineConfig({
           environment: "node",
           testTimeout: 240_000,
           hookTimeout: 240_000,
-          // Cluster specs share one namespace's resources — run them
-          // sequentially to avoid cross-spec races.
+          // Cluster specs share one namespace's resources, so run them sequentially.
           fileParallelism: false,
         },
       },

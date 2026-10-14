@@ -1,21 +1,9 @@
-"""Slack's AGENT TOOLS — reply in the thread, react to a message, read the context.
+"""Slack's agent tools: reply in the thread, react to a message, read the context.
 
-Moved here from the agent-host (services/agent-host/src/agent/agentTools.ts) by issue
-#700. They were hardcoded there, so enabling or disabling `contrib/slack` did nothing
-to the agent's tool surface — and the broker, which actually holds the Slack token,
-never learned which conversation a tool call was for, so a resource the agent created
-through a tool was never auto-linked.
-
-WHY THESE EXIST AT ALL, kept from the original: the agent used to hand-run
-`curl -sf $BROKER_URL/slack/chat.postMessage` from the sandbox, which fails SILENTLY
-on error — so the agent retried and posted DUPLICATE messages — and cannot see Slack's
-`{"ok": false}`, which arrives with HTTP 200. These are thin typed wrappers over the
-same call with two guarantees: the channel and thread are inferred, and errors are
-never hidden.
-
-ALL THREE ARE ATTACHMENT-GATED. An ungated reply tool is what led the agent to
-raw-curl Slack into the ROOT CHANNEL — visible to everyone instead of the thread. A
-conversation with no Slack thread does not see these tools at all.
+Thin typed wrappers over the broker's Slack calls with two guarantees: the channel
+and thread are inferred from the conversation's links, and errors (including Slack's
+`{"ok": false}` on HTTP 200) are never hidden. All three are attachment-gated, so a
+conversation with no Slack thread does not see them.
 """
 
 from __future__ import annotations
@@ -31,14 +19,7 @@ SOURCE = "slack"
 
 
 def _target_from_link(link: dict) -> dict | None:
-    """The channel (and thread, when known) a Slack link points at.
-
-    A Slack id has ONE spelling — `channel:thread_ts` — and no URL form a webhook ever
-    arrives as (contrib/slack/resources.py), so the `ref` is the only source here.
-    The channel alone is a complete target: a thread_ts is optional, and posting
-    without one is a channel message, which is what a conversation attached to a
-    channel rather than a thread should do.
-    """
+    """The channel (and thread, when known) a Slack link's `ref` points at; the channel alone is a complete target."""
     ref = ref_of(link)
     channel = ref.get("channel")
     if not channel:
@@ -47,12 +28,7 @@ def _target_from_link(link: dict) -> dict | None:
 
 
 async def slack_target(ctx: ToolContext) -> dict | None:
-    """The Slack thread this conversation is attached to, or None.
-
-    THE single source of truth for "is Slack attached, and what does it point at?" —
-    used by both the gate and the handlers, so a tool is offered iff its handler could
-    actually resolve a target.
-    """
+    """The Slack thread this conversation is attached to, or None; shared by the gate and the handlers."""
     return first_target(await ctx.links.list(), SOURCE, _target_from_link)
 
 
@@ -76,7 +52,6 @@ async def slack_respond(
     """
     target = await slack_target(ctx)
     if target is None:
-        # Unreachable while the gate holds, but stay honest rather than post somewhere.
         return ToolResult.error("This conversation isn't attached to a Slack thread.")
     ts = thread_ts or target.get("thread_ts")
     response = await ctx.upstream.request(
@@ -87,8 +62,7 @@ async def slack_respond(
     return ToolResult.from_upstream(
         response,
         success_text="Posted to the Slack thread.",
-        # Slack answers HTTP 200 with {"ok": false} on logical failure, so without this
-        # a message that never posted reads as success.
+        # Slack answers HTTP 200 with {"ok": false} on logical failure.
         ok_field_check=True,
     )
 
@@ -114,7 +88,7 @@ async def slack_react(emoji: str, message_ts: str, ctx: ToolContext = ToolContex
             "slack_react needs the `message_ts` of the message to react to — the "
             'timestamp shown in the Slack notification as "message_ts: …".'
         )
-    # reactions.add wants the name WITHOUT the surrounding colons.
+    # reactions.add wants the name without the surrounding colons.
     name = emoji.replace(":", "").strip()
     response = await ctx.upstream.request(
         "POST", "reactions.add", json={"channel": target["channel"], "timestamp": ts, "name": name}
@@ -123,9 +97,7 @@ async def slack_react(emoji: str, message_ts: str, ctx: ToolContext = ToolContex
         response,
         success_text=f"Reacted with :{name}:.",
         ok_field_check=True,
-        # `already_reacted` means the emoji is already there, so the goal is met. The
-        # webhooks handler adds 👀 before dispatch, so the agent's own ack-react hits
-        # this constantly; reporting it as an error wasted a turn every time.
+        # `already_reacted` means the emoji is already there, so the goal is met.
         idempotent_errors=("already_reacted",),
     )
 

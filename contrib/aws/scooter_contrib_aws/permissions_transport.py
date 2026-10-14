@@ -1,25 +1,9 @@
-"""aws-permissions transport — dynamic, approval-gated AWS access.
+"""aws-permissions transport: dynamic, approval-gated AWS access.
 
-Mounts under /{provider}/aws/*. Every route authenticates via the SA token
-(Depends(authed) -> Identity); conversation_id comes from the identity, NEVER the
-body — so cross-conversation isolation + caller identity are free.
-
-Agent-facing:
-  GET    /aws/accounts                 discovery
-  POST   /aws/request                  request a scoped permission
-  POST   /aws/escalate                 request more (parent_request_id)
-  GET    /aws/{request_id}             status + creds when active [isolated]
-  POST   /aws/{request_id}/refresh     fresh STS creds within the role TTL
-  DELETE /aws/{request_id}             self-revoke
-Approver-facing (admin seam):
-  POST   /aws/{request_id}/approve     pending -> active (provision)
-  POST   /aws/{request_id}/deny        pending -> denied
-  GET    /aws/audit                    audit query
-
-The PermissionService does the work; these are thin adapters. The service is set
-on the transport by the provider that builds both (set_service). is_admin is a
-deployer-configured seam (default: any authenticated caller — the in-conversation
-flow trusts the conversation user; tighten via config for a real boundary).
+Thin adapters over the PermissionService, mounted under /{provider}/aws/*. Every
+route authenticates via the SA token and takes conversation_id from the identity,
+never the body, so cross-conversation isolation is free; the approver routes are
+additionally gated by `is_admin`.
 """
 
 from __future__ import annotations
@@ -49,9 +33,7 @@ def _request_view(req: PermissionRequest, creds: StsCredentials | None = None) -
         "approved_by": req.approved_by,
         "expires_at": req.expires_at,
         "parent_request_id": req.parent_request_id,
-        # The rendered prose for the approval window. Carried on the VIEW so the
-        # agent-host re-raise after a rollout words the window exactly as the
-        # original did — it replays from this list, not from the notify payload.
+        # The approval-window prose, carried on the view so the agent-host's re-raise after a rollout words it the same.
         "message": approval_message(req),
     }
     if creds is not None:
@@ -68,9 +50,9 @@ def _request_view(req: PermissionRequest, creds: StsCredentials | None = None) -
 @dataclass
 class AwsPermissions(Transport):
     name: str = "aws-permissions"
-    # Injected by the provider (build-time). is_admin gates approve/deny/audit.
+    # Injected by the provider via set_service.
     service: PermissionService | None = field(default=None)
-    is_admin: Any = field(default=None)  # (Identity) -> bool; None => allow
+    is_admin: Any = field(default=None)  # (Identity) -> bool gating approve/deny/audit; None allows
 
     def set_service(self, service: PermissionService, is_admin=None) -> None:
         self.service = service
@@ -111,8 +93,7 @@ class AwsPermissions(Transport):
             except RequestError as e:
                 raise HTTPException(status_code=400, detail={"errors": e.reasons})
             except Exception as e:
-                # Never leak a bare 500: surface the real exception so the agent can
-                # act on it (e.g. an IAM/STS failure the request path didn't wrap).
+                # Surface the real exception so the agent can act on it.
                 logger.exception(
                     "aws request failed unexpectedly",
                     extra={
@@ -141,7 +122,7 @@ class AwsPermissions(Transport):
             return _request_view(req)
 
         # --- agent: list own requests (isolated) ---------------------------
-        # Registered BEFORE /aws/{request_id} so "requests" isn't captured as an id.
+        # Registered before /aws/{request_id} so "requests" is not captured as an id.
         @router.get("/aws/requests")
         async def list_requests(identity: Identity = Depends(authed), target_account: str | None = None):
             reqs = await _svc().list_for_conversation(identity.conversation_id)
@@ -149,14 +130,8 @@ class AwsPermissions(Transport):
                 reqs = [r for r in reqs if r.target_account == target_account]
             return {"requests": [_request_view(r) for r in reqs]}
 
-        # --- approver/agent-host: pending requests for a NAMED conversation ---
-        # Registered BEFORE /aws/{request_id} so "pending" isn't captured as an id
-        # (the "not found" the naive ordering caused). Admin-gated (the agent-host
-        # SA), and takes an EXPLICIT conversation_id — unlike /aws/requests, which
-        # derives it from the CALLER's identity (a sandbox SA). The agent-host calls
-        # this on revive() to re-raise approval interrupts a pod rollout dropped: the
-        # interrupt's answer-routing is in-memory, so a restart loses it — but the
-        # request still sits PENDING in the broker DB (the source of truth).
+        # --- approver/agent-host: pending requests for a named conversation ---
+        # Admin-gated and keyed by an explicit conversation_id; the agent-host calls it on revive to re-raise the approval interrupts a rollout dropped.
         @router.get("/aws/pending")
         async def pending(
             identity: Identity = Depends(authed), conversation_id: str = "",
@@ -193,14 +168,7 @@ class AwsPermissions(Transport):
             return _request_view(req)
 
         # --- approver (admin seam) -----------------------------------------
-        # The `approver` in the body may be a full identity dict {id, email, name}
-        # (the agent-host sends the answering user's identity) or a plain string
-        # (legacy / dev). The service resolves the configured claim (email/id/name).
-        # Read-only: may the VIEWING user approve this request? Powers the UI's
-        # greyed-out Approve button. Per-viewer (the interrupt is raised once but
-        # seen by many), so the agent-host passes the current user's identity as
-        # `approver` (dict or string, resolved the same as approve/deny). No admin
-        # gate: anyone may ASK — the answer itself is the authorization signal.
+        # The body's `approver` is an identity dict or a plain string, resolved by the service; can-approve has no admin gate because the answer is itself the authorization signal.
         @router.post("/aws/{request_id}/can-approve")
         async def can_approve(request_id: str, identity: Identity = Depends(authed), body: dict = Body(default={})):
             approver = _svc().resolve_approver(body.get("approver"), fallback=identity.conversation_id)

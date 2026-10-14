@@ -1,9 +1,7 @@
-{ lib, python3Packages, ... }:
+{ lib, python3Packages, postgresql_16, ... }:
 
-# The Conversation CRD controller (Python). Leader-elected reconcile loop that assigns
-# each Conversation CR a hostPod (an agent-host replica) + reassigns on pod death. No
-# request routing here (a later PR); this only records ownership. See
-# todo/docs/CONVERSATION_CRD_PR1.md.
+# The Conversation CRD controller (Python): a leader-elected reconcile loop that
+# assigns each Conversation CR a hostPod and reassigns on pod death.
 
 python3Packages.buildPythonApplication {
   pname = "conversation-controller";
@@ -20,7 +18,9 @@ python3Packages.buildPythonApplication {
 
   nativeCheckInputs = with python3Packages; [
     pytestCheckHook
-  ];
+  ] ++ [ postgresql_16 ];
+  # Rows tests use a real Postgres and the real migrations.
+  env.AGENT_HOST_MIGRATIONS = "${../../lib/sql/agent_host/migrations}";
   pythonImportsCheck = [ "conversation_controller.app" ];
 
   meta.description = "Scooter Conversation CRD controller (hostPod assignment)";

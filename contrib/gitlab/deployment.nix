@@ -1,4 +1,4 @@
-# gitlab's DEPLOYMENT half. Gated on contribs.gitlab.enable; why: #599, #711.
+# gitlab's deployment half, gated on contribs.gitlab.enable.
 { config, lib, ... }:
 
 let

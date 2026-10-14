@@ -1,12 +1,8 @@
-"""Leader election via a coordination.k8s.io/v1 Lease, so the controller Deployment can
-run >1 replica for availability while only ONE reconciles. Minimal hand-rolled election
-(the python client has no built-in leaderelection): try to acquire/renew the Lease; hold
-it iff we're the current holder and it hasn't expired.
+"""Leader election via a coordination.k8s.io/v1 Lease, so the controller can run several
+replicas while only one reconciles.
 
-Correctness is best-effort fencing at the CONTROLLER layer (two leaders briefly would at
-worst double-patch the same status idempotently — assignment is convergent). The
-load-bearing single-writer guarantee for the LOG is the CR's hostPod/generation, not this
-Lease; this just avoids two controllers fighting."""
+The Lease is best-effort fencing: two brief leaders would at worst apply the same
+idempotent actions twice."""
 
 from __future__ import annotations
 
@@ -29,14 +25,10 @@ def _now() -> datetime:
 class LeaderElector:
     """Hand-rolled leader election over a single coordination.k8s.io/v1 Lease.
 
-    :param namespace: k8s namespace the Lease lives in (the controller's own namespace).
-    :param lease_name: name of the Lease object all replicas contend for — the SAME name
-        across replicas is what makes them elect ONE leader.
-    :param identity: this replica's holder identity written into the Lease (the pod name
-        via the downward API). The current holder == leader.
-    :param lease_seconds: lease duration. A holder must renew within this window or the
-        Lease is considered expired and another replica may take it. Renew cadence is the
-        caller's reconcile interval, which must be comfortably < this.
+    :param namespace: the k8s namespace the Lease lives in.
+    :param lease_name: name of the Lease all replicas contend for.
+    :param identity: this replica's holder identity written into the Lease.
+    :param lease_seconds: lease duration a holder must renew within, or another replica may take it.
     """
 
     namespace: str
@@ -45,8 +37,7 @@ class LeaderElector:
     lease_seconds: int = 15
 
     def try_acquire_or_renew(self) -> bool:
-        """Return True iff WE hold the lease after this call. Acquires if free/expired,
-        renews if we already hold it, else False (someone else leads)."""
+        """Acquire a free or expired Lease or renew a held one, returning True iff this replica holds it afterwards."""
         _, _, _, coord = _apis()
         try:
             lease = coord.read_namespaced_lease(self.lease_name, self.namespace)
@@ -85,7 +76,7 @@ class LeaderElector:
             )
             return True
         except client.ApiException as e:
-            if e.status == 409:  # someone created it first
+            if e.status == 409:
                 return False
             raise
 
@@ -106,6 +97,6 @@ class LeaderElector:
                 )
             return True
         except client.ApiException as e:
-            if e.status == 409:  # lost a race — not the leader this tick
+            if e.status == 409:
                 return False
             raise

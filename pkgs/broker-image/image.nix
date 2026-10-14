@@ -1,7 +1,6 @@
 { pkgs, lib, n2c, broker, ... }:
 
-# OCI image for the credential broker. Thin layered image: the broker Python
-# app (with its closure) + cacert, entrypoint = the agent-broker binary.
+# OCI image for the credential broker.
 
 let
   image = n2c.buildImage {

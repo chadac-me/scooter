@@ -1,4 +1,4 @@
-# jira's DEPLOYMENT half. Gated on contribs.jira.enable; why: #599, #711.
+# jira's deployment half, gated on contribs.jira.enable.
 { config, lib, ... }:
 
 let

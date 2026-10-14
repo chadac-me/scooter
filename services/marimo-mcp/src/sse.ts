@@ -1,10 +1,7 @@
 /**
- * A minimal SSE (Server-Sent Events) line parser for marimo's execute stream, and
- * the fold from its frames to an ExecuteResult. Pure + synchronous over the full
- * body text — the execute streams are small (a cell's output), so we don't need an
- * incremental reader; the client buffers the response and folds once.
- *
- * marimo's frames (verified against marimo-pair execute-code.sh):
+ * A minimal SSE line parser for marimo's execute stream and the fold from its frames to
+ * an ExecuteResult, pure and synchronous over the full body text since execute streams
+ * are small. marimo's frames:
  *   event: stdout\n data: {"data":"..."}\n\n
  *   event: stderr\n data: {"data":"..."}\n\n
  *   event: done\n   data: {"success":bool,"output":{"data":"..."}}\n\n
@@ -12,16 +9,14 @@
 
 import type { ExecuteEvent, ExecuteResult } from "./types.js";
 
-/** Parse a raw SSE body into its typed frames. Tolerant of CRLF (SSE permits it),
- *  blank record separators, and unknown event types (ignored). A `data:` line whose
- *  JSON doesn't parse is skipped rather than throwing (best-effort). */
+/** Parse a raw SSE body into its typed frames, tolerating CRLF, ignoring unknown event types and skipping a `data:` line whose JSON does not parse. */
 export function parseSseEvents(body: string): ExecuteEvent[] {
   const out: ExecuteEvent[] = [];
   let event = "";
   for (const rawLine of body.split("\n")) {
-    const line = rawLine.replace(/\r$/, ""); // strip a trailing CR (CRLF)
+    const line = rawLine.replace(/\r$/, ""); // strip a trailing CR
     if (line === "") {
-      event = ""; // record separator — reset the current event
+      event = ""; // record separator
       continue;
     }
     if (line.startsWith("event:")) {
@@ -34,7 +29,7 @@ export function parseSseEvents(body: string): ExecuteEvent[] {
       try {
         json = JSON.parse(payload);
       } catch {
-        continue; // not JSON — skip (an error body isn't a real data frame)
+        continue; // not a real data frame
       }
       const o = (json ?? {}) as Record<string, unknown>;
       if (event === "stdout") out.push({ event: "stdout", data: String(o.data ?? "") });
@@ -43,7 +38,7 @@ export function parseSseEvents(body: string): ExecuteEvent[] {
         const output = (o.output ?? {}) as Record<string, unknown>;
         out.push({
           event: "done",
-          success: o.success !== false, // absent/true => success; only explicit false fails
+          success: o.success !== false, // only an explicit false fails
           output: String(output.data ?? ""),
         });
       }
@@ -52,8 +47,7 @@ export function parseSseEvents(body: string): ExecuteEvent[] {
   return out;
 }
 
-/** Fold the frames into a single result. Returns null if there was no `done` frame
- *  (the caller treats that as an incomplete stream — the code never ran to a result). */
+/** Fold the frames into a single result, null if there was no `done` frame. */
 export function foldExecute(events: ExecuteEvent[]): ExecuteResult | null {
   let stdout = "";
   let stderr = "";

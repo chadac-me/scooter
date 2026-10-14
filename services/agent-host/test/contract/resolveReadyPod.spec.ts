@@ -1,11 +1,7 @@
 /**
- * Tier 1 contract — pollForReadyPod's idle-suspend SELF-HEAL.
- *
- * Regression for scooter-bug-dangling-run-revive-leaves-sandbox-suspended: after a mid-run reassign +
- * idle-suspend, the Sandbox is operatingMode=Suspended (pod deleted) while a live bridge keeps issuing
- * tool calls — every exec failed "no ready pod" because nothing resumed the sandbox (every resume site
- * was gated on a MISSING bridge, and the bridge wasn't missing — only the pod was). The exec path now
- * self-heals: when the pod-readiness poll finds NO pod, it resumes the sandbox once and re-polls.
+ * pollForReadyPod's idle-suspend self-heal: a live bridge can keep issuing tool calls
+ * against a Sandbox that was suspended underneath it, so when the readiness poll finds
+ * no pod it resumes the sandbox once and re-polls.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -23,15 +19,15 @@ const noSleep = async () => {};
 describe("pollForReadyPod — idle-suspend self-heal", () => {
   it("resumes the sandbox (ensureRunning) ONCE when no pod exists, then returns the recreated pod", async () => {
     let resumed = false;
-    // No pod until the sandbox is resumed — models a Suspended sandbox (controller deleted the pod).
+    // No pod until the sandbox is resumed, as with a Suspended sandbox.
     const listCandidates = vi.fn(async () => (resumed ? [readyPod()] : []));
     const ensureRunning = vi.fn(async () => {
-      resumed = true; // resume → the controller recreates the pod → the next poll finds it
+      resumed = true;
     });
 
     const pod = await pollForReadyPod(REF, { listCandidates, ensureRunning, sleep: noSleep });
 
-    expect(ensureRunning).toHaveBeenCalledOnce(); // the fix: it resumed instead of timing out
+    expect(ensureRunning).toHaveBeenCalledOnce();
     expect(pod.metadata?.name).toBe("conv-qis9hm-abc");
   });
 
@@ -49,10 +45,10 @@ describe("pollForReadyPod — idle-suspend self-heal", () => {
   it("fires ensureRunning AT MOST once even if the pod is slow to come back", async () => {
     let polls = 0;
     const ensureRunning = vi.fn(async () => {});
-    // Stay empty for a few polls after the resume, then finally return the pod.
+    // Empty for a few polls after the resume, then the pod appears.
     const listCandidates = vi.fn(async () => (++polls >= 4 ? [readyPod()] : []));
     const pod = await pollForReadyPod(REF, { listCandidates, ensureRunning, sleep: noSleep });
-    expect(ensureRunning).toHaveBeenCalledOnce(); // once, not once-per-empty-poll
+    expect(ensureRunning).toHaveBeenCalledOnce();
     expect(pod.metadata?.name).toBe("conv-qis9hm-abc");
   });
 
@@ -64,14 +60,12 @@ describe("pollForReadyPod — idle-suspend self-heal", () => {
 });
 
 describe("pollForReadyPod — the deadline warn is de-duped per sandbox", () => {
-  // Every sweep re-probes a wedged sandbox, so an un-de-duped warn is one per
-  // conversation per sweep, forever (~50k/24h from 2 sandboxes in production).
+  // Every sweep re-probes a wedged sandbox, so an un-de-duped warn repeats per conversation per sweep forever.
   const notReady = () => [
     { metadata: { name: "conv-qis9hm-abc" }, status: { phase: "Running", containerStatuses: [{ ready: false }] } },
   ];
 
-  /** One deadline-expiring poll; reports which level logged. Spies the CONSOLE because
-   *  logger() returns a fresh literal per call, so spying an instance misses the real one. */
+  /** One deadline-expiring poll, reporting which level logged; spies the console because logger() returns a fresh literal per call. */
   async function pollLevel(ref: SandboxRef = REF) {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const out = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -86,9 +80,9 @@ describe("pollForReadyPod — the deadline warn is de-duped per sandbox", () => 
   }
 
   beforeEach(async () => {
-    process.env.DEBUG = "1"; // else the suppressed line is filtered and reads as "none"
+    process.env.DEBUG = "1"; // otherwise the suppressed line is filtered and reads as "none"
     const log = await import("../../src/log.js");
-    log.reconfigureLogging(); // minLevel is captured at import
+    log.reconfigureLogging();
     log.forgetWarned();
   });
 

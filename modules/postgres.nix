@@ -1,24 +1,11 @@
-# Shared Postgres — the platform's durable store, ALWAYS on.
+# Shared Postgres, the platform's durable store.
 #
-# Multiple services persist to Postgres now (webhooks conversation-map, scheduler
-# tasks, the AWS broker's permission/size store, optionally OpenFGA), so a shared
-# `agent-shared-db` is an essential dependency — not a webhooks add-on. This module
-# owns it.
-#
-# Two modes:
-#   - IN-CLUSTER (default): a single-replica Postgres pod backed by a PVC, plus a
-#     Service `agent-shared-db`. Hosts multiple logical databases, one per consumer.
-#   - EXTERNAL (RDS etc.): set `external.host` and it SKIPS the pod/PVC/Service; the
-#     consumers point at that host instead. The only thing this module still emits is
-#     the per-consumer provisioning Job (it runs against the external server too).
-#
-# Per-consumer isolation (least privilege): each consumer gets its OWN database and
-# its OWN role that OWNS only that database. Passwords are AUTO-GENERATED in-cluster
-# by the init Job and written to per-consumer Secrets (`agent-pg-<consumer>`, key
-# `password`) — never committed, never hand-managed. Consumers read their own secret.
-#
-# The consumer set is assembled by platform.nix from which features are enabled and
-# fed in via `scooter.postgres.consumers`. Each entry: { db; user; }.
+# In-cluster mode (the default) runs a single-replica Postgres pod on a PVC behind
+# the `agent-shared-db` Service; setting `external.host` skips the pod and points
+# the consumers at that server instead. Either way a provisioning Job gives each
+# consumer its own database and owner role, with passwords generated into
+# `agent-pg-<consumer>` Secrets. platform.nix assembles the consumer set via
+# `scooter.postgres.consumers`.
 
 { config, lib, kubenix, ... }:
 
@@ -28,15 +15,11 @@ let
   ns = cfg.namespace;
 
   inCluster = pcfg.external == null;
-  # The server host consumers connect to: the in-cluster Service, or the external one.
+  # The host consumers connect to.
   host = if inCluster then "agent-shared-db.${ns}.svc.cluster.local" else pcfg.external.host;
   port = if inCluster then 5432 else pcfg.external.port;
 
-  # The ADMIN (superuser) credentials the init Job uses to CREATE ROLE/DATABASE.
-  #  - in-cluster: the postgres superuser we bootstrap (POSTGRES_USER/PASSWORD), whose
-  #    password is auto-generated into `agent-pg-admin`.
-  #  - external: the deployer supplies external.passwordSecret + external.user (an RDS
-  #    master user with CREATEDB/CREATEROLE).
+  # The admin credentials the init Job uses for CREATE ROLE/DATABASE.
   adminUser = if inCluster then "postgres" else pcfg.external.user;
   adminSecret =
     if inCluster
@@ -46,33 +29,22 @@ let
   consumers = pcfg.consumers;
   consumerNames = builtins.attrNames consumers;
 
-  # READERS are login roles granted SELECT-only on ANOTHER consumer's database (they own no
-  # database of their own). Each gets an agent-pg-<key> secret like a consumer, but instead of
-  # CREATE DATABASE it gets CONNECT + USAGE + SELECT on `db` and is pinned read-only at the
-  # server. Assembled by platform.nix (e.g. the conversation-router reading agent_host).
+  # Readers are login roles granted SELECT on another consumer's database, pinned
+  # read-only at the server.
   readers = pcfg.readers;
   readerNames = builtins.attrNames readers;
   # Both consumers and readers need a generated password secret.
   secretNames = consumerNames ++ readerNames;
 
-  # No single common image ships BOTH kubectl and psql, so the provisioning Job is
-  # two containers sharing an emptyDir (/shared):
-  #   1. initContainer `secrets` (kubectl image): for each consumer, reuse an existing
-  #      agent-pg-<name> Secret or generate one, and write the password to
-  #      /shared/<name>.pw. Re-runnable — an existing secret is never rotated.
-  #   2. container `sql` (postgres image, has psql/pg_isready): read /shared/<name>.pw
-  #      and idempotently CREATE ROLE + CREATE DATABASE (owned by the role).
+  # The provisioning Job is a kubectl initContainer that writes each password to
+  # /shared/<name>.pw and a psql container that creates the roles and databases.
 
   # -- initContainer: kubectl only (create/reuse the per-consumer secrets) ----------
   secretsScript = ''
     set -eu
     mkdir -p /shared
   '' + lib.optionalString inCluster ''
-    # Wait for the superuser secret the Postgres pod's initContainer creates. The `sql`
-    # container's PGPASSWORD reads agent-pg-admin via secretKeyRef, so gate it here (in
-    # this initContainer) rather than let it thrash in CreateContainerConfigError until
-    # the secret appears. Skipped for external Postgres (its admin secret is deployer-
-    # provided and already present). Why: PR #463.
+    # The `sql` container's PGPASSWORD secretKeyRef needs this secret to exist.
     echo "waiting for agent-pg-admin secret ..."
     for i in $(seq 1 150); do
       if kubectl -n "${ns}" get secret agent-pg-admin >/dev/null 2>&1; then break; fi
@@ -104,54 +76,48 @@ let
     let c = consumers.${name}; in ''
     # ---- consumer ${name}: db=${c.db} user=${c.user} ----
     PW=$(cat "/shared/${name}.pw")
-    # Idempotent role: create if missing, else (re)set its password to the secret's.
+    # Create the role if missing, else reset its password to the secret's.
     psql -v ON_ERROR_STOP=1 -v pw="$PW" <<'SQL'
     SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', '${c.user}', :'pw')
       WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${c.user}') \gexec
     SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${c.user}', :'pw')
       WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = '${c.user}') \gexec
     SQL
-    # Idempotent database owned by the role (CREATE DATABASE can't run in a txn/DO,
-    # so gate it with a shell check).
+    # CREATE DATABASE cannot run inside a transaction, so gate it in the shell.
     if [ "$(psql -tAc "SELECT 1 FROM pg_database WHERE datname='${c.db}'")" != "1" ]; then
       psql -v ON_ERROR_STOP=1 -c 'CREATE DATABASE "${c.db}" OWNER "${c.user}"'
       echo "[${name}] created database ${c.db}"
     fi
   '') consumerNames
-  # READERS come AFTER consumers: a reader grants on a database the consumer loop above just
-  # created, so the db + its owner role must already exist here.
+  # Readers grant on databases the consumer loop above creates, so they come after it.
   + lib.concatMapStrings (name:
     let r = readers.${name}; in ''
     # ---- reader ${name}: role=${r.user} SELECT on ${toString (builtins.length r.grants)} db(s) (+ any writeTables) ----
     PW=$(cat "/shared/${name}.pw")
-    # Idempotent LOGIN role, same create-or-reset-password shape as a consumer.
+    # Create the role if missing, else reset its password to the secret's.
     psql -v ON_ERROR_STOP=1 -v pw="$PW" <<'SQL'
     SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', '${r.user}', :'pw')
       WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${r.user}') \gexec
     SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${r.user}', :'pw')
       WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = '${r.user}') \gexec
     SQL
-    # Read-only DEFAULT at the SERVER (client sets it too) — the load-bearing guard for the read/
-    # LISTEN path. A writeTables role keeps it; only its write pool overrides it. Why: PR #475.
+    # Server-side read-only default; only a writeTables pool overrides it.
     psql -v ON_ERROR_STOP=1 -c 'ALTER ROLE "${r.user}" SET default_transaction_read_only = on'
   '' + lib.concatMapStrings (g: ''
-    # Least privilege on ${g.db}: CONNECT + USAGE + SELECT on EXACTLY the named tables. NOT
-    # `ON ALL TABLES` and NO `ALTER DEFAULT PRIVILEGES` — the reader must not gain another
-    # table's rows (e.g. conversation_events, the full transcripts) just because it shares a
-    # database, and a table added by a later migration is opt-in (extend `tables` + owners.toml)
-    # rather than silently readable. writeTables (below) are the sole exception.
+    # Grants are per named table so a later migration's table is opt-in, never
+    # silently readable.
     psql -v ON_ERROR_STOP=1 -c 'GRANT CONNECT ON DATABASE "${g.db}" TO "${r.user}"'
     psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT USAGE ON SCHEMA public TO "${r.user}"'
   '' + lib.concatMapStrings (t: ''
     psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT SELECT ON TABLE public."${t}" TO "${r.user}"'
   '') g.tables + lib.concatMapStrings (t: ''
-    # A WRITER of this table (owners.toml): SELECT + INSERT/UPDATE/DELETE, still table-scoped.
+    # A writer of this table per owners.toml.
     psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."${t}" TO "${r.user}"'
   '') g.writeTables + ''
     echo "[${name}] granted SELECT on ${g.db}.{${lib.concatStringsSep "," g.tables}}${lib.optionalString (g.writeTables != []) " + read-write on {${lib.concatStringsSep "," g.writeTables}}"} to ${r.user}"
   '') r.grants) readerNames;
 
-  # Stable identity for selectors/logs, independent of the hashed name below.
+  # Stable identity for selectors and logs, independent of the hashed name.
   initJobLabels = {
     "app.kubernetes.io/name" = "agent-postgres-init";
     "app.kubernetes.io/component" = "provisioning";
@@ -159,23 +125,21 @@ let
 
   initJobSpec = {
     backoffLimit = 6;
-    # Nothing prunes under a plain `kubectl apply`, so reap the superseded Job a day
-    # later — long enough to read its logs after a bad deploy.
+    # Reap a superseded Job after a day, leaving time to read its logs.
     ttlSecondsAfterFinished = 86400;
     template = {
       metadata.labels = initJobLabels;
       spec = {
         serviceAccountName = "agent-postgres-init";
         restartPolicy = "OnFailure";
-        # 1) kubectl: create/reuse the per-consumer secrets, drop the passwords
-        #    onto a shared emptyDir for the psql step to read.
+        # kubectl step: create or reuse the secrets and drop the passwords on /shared.
         initContainers = [{
           name = "secrets";
           image = pcfg.kubectlImage;
           command = [ "/bin/sh" "-c" secretsScript ];
           volumeMounts = [{ name = "shared"; mountPath = "/shared"; }];
         }];
-        # 2) psql (postgres image has the client): create roles + databases.
+        # psql step: create the roles and databases.
         containers.sql = {
           name = "sql";
           image = pcfg.image;
@@ -190,10 +154,8 @@ let
     };
   };
 
-  # Hashed for the same reason as the migration Job (modules/db-migrate.nix): a Job's
-  # spec.template is immutable. THIS spec changes whenever a feature adds a consumer or
-  # reader, so a fixed name would fail the very deploy that enables the feature — and
-  # leave the databases the migrator waits on unprovisioned. Why: PR #542.
+  # A Job's spec.template is immutable, so the name hashes the spec and a new
+  # consumer or reader gets a new Job.
   initJobName = kubenix.lib.k8s.mkNameHash { name = "agent-postgres-init"; data = initJobSpec; };
 in
 {
@@ -205,9 +167,7 @@ in
     };
     kubectlImage = mkOption {
       type = types.str;
-      # Needs kubectl AND a shell + coreutils (sh/tr/base64/head) — so NOT the
-      # distroless registry.k8s.io/kubectl (kubectl binary only) and NOT bitnami/
-      # kubectl (public tags retired in 2025). alpine/k8s bundles all of it.
+      # Needs kubectl plus a shell and coreutils (tr/base64/head).
       default = "alpine/k8s:1.30.0";
       description = "Image for the provisioning Job's secret-creating initContainer (needs kubectl + a shell + coreutils).";
     };
@@ -253,7 +213,7 @@ in
         };
       });
     };
-    # Populated by platform.nix from the enabled features — NOT set by deployers.
+    # Populated by platform.nix from the enabled features.
     consumers = mkOption {
       internal = true;
       default = { };
@@ -265,7 +225,7 @@ in
         };
       });
     };
-    # READ-ONLY roles granted SELECT on another consumer's database. Populated by platform.nix.
+    # Populated by platform.nix.
     readers = mkOption {
       internal = true;
       default = { };
@@ -299,7 +259,7 @@ in
         };
       });
     };
-    # Read-only outputs other modules consume (so they don't re-derive the host).
+    # Read-only outputs for other modules.
     host = mkOption { internal = true; readOnly = true; type = types.str; default = host; };
     port = mkOption { internal = true; readOnly = true; type = types.int; default = port; };
     sslmode = mkOption {
@@ -315,7 +275,7 @@ in
         serviceAccounts.agent-postgres-init = {
           metadata = { name = "agent-postgres-init"; namespace = ns; };
         };
-        # The Job creates per-consumer Secrets → needs create/get on secrets.
+        # The Job creates the per-consumer Secrets.
         roles.agent-postgres-init = {
           metadata = { name = "agent-postgres-init"; namespace = ns; };
           rules = [{
@@ -330,7 +290,7 @@ in
           subjects = [{ kind = "ServiceAccount"; name = "agent-postgres-init"; namespace = ns; }];
         };
 
-        # The Nix attr name stays fixed; metadata.name is the hashed one (see initJobName).
+        # The Nix attr name stays fixed; metadata.name is the hashed one.
         jobs.agent-postgres-init = {
           metadata = {
             name = initJobName;
@@ -344,13 +304,8 @@ in
 
       # -- The in-cluster Postgres server (skipped when external) --------------------
       (lib.mkIf inCluster {
-        # The superuser password lives in agent-pg-admin, generated by an initContainer
-        # ON the Postgres pod (below) — NOT a standalone Job. A separate Job raced the
-        # Deployment: the pod could schedule first, fail CreateContainerConfigError
-        # ("secret agent-pg-admin not found"), and back off past the rollout timeout.
-        # An initContainer runs to completion before the postgres container starts, so
-        # the secretKeyRef always resolves. These RBAC objects grant that initContainer
-        # get+create on secrets. Why: PR #463.
+        # RBAC for the initContainer on the Postgres pod that generates the
+        # agent-pg-admin superuser secret.
         serviceAccounts.agent-pg-admin-init = {
           metadata = { name = "agent-pg-admin-init"; namespace = ns; };
         };
@@ -377,16 +332,14 @@ in
           metadata = { name = "agent-shared-db"; namespace = ns; };
           spec = {
             replicas = 1;
-            strategy.type = "Recreate"; # single RWO PVC — old pod must release it first
+            strategy.type = "Recreate"; # the old pod must release the RWO PVC first
             selector.matchLabels.app = "agent-shared-db";
             template = {
               metadata.labels.app = "agent-shared-db";
               spec = {
                 serviceAccountName = "agent-pg-admin-init";
-                # Create the superuser secret BEFORE postgres starts. initContainers run
-                # to completion first, so POSTGRES_PASSWORD's secretKeyRef can never be
-                # missing — this replaces the standalone Job that raced the Deployment.
-                # Idempotent: reuses an existing secret. Why: PR #463.
+                # Creates the superuser secret before postgres starts, so the
+                # POSTGRES_PASSWORD secretKeyRef always resolves.
                 initContainers = [{
                   name = "ensure-admin-secret";
                   image = pcfg.kubectlImage;
@@ -409,44 +362,21 @@ in
                   };
                   ports = [{ containerPort = 5432; name = "pg"; }];
                   env = [
-                    # A neutral bootstrap db/user; per-consumer dbs are created by the
-                    # provisioning Job. The superuser is `postgres` with the generated pw.
+                    # A neutral bootstrap db and superuser; consumer dbs come from the Job.
                     { name = "POSTGRES_DB"; value = "postgres"; }
                     { name = "POSTGRES_USER"; value = "postgres"; }
                     { name = "POSTGRES_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-admin"; key = "password"; }; }
                     { name = "PGDATA"; value = "/var/lib/postgresql/data/pgdata"; }
                   ];
                   volumeMounts = [{ name = "data"; mountPath = "/var/lib/postgresql/data"; }];
-                  # POLL FAST, so readiness tracks the database instead of the
-                  # probe schedule. MEASURED on postgres:16-alpine:
-                  #   fresh PGDATA (initdb runs):  pg_isready succeeds at 9s
-                  #   warm PGDATA (already init):  pg_isready succeeds at 1s
-                  #
-                  # At 10s/10s the first probe lands at 10s, so a warm database
-                  # ready at 1s still waited 10s. At 2s/2s it is marked ready at
-                  # 2s. On a FRESH volume both settings report at 10s and this
-                  # changes nothing -- which is today's CI case, since the PVC is
-                  # new each run. The win arrives if the DB volume is ever
-                  # persisted alongside the store.
-                  #
-                  # Everything downstream waits on this: agent-postgres-init for
-                  # roles, agent-db-migrate for schema, every service for both.
-                  #
-                  # 2s/2s costs nothing -- a local exec, not a network call --
-                  # and failureThreshold defaults to 3, so a premature success
-                  # that flips back simply makes the deployment wait again.
-                  # (Checked for that flap on a fresh PGDATA: none observed;
-                  # the initdb temporary server is not externally reachable.)
+                  # Polls fast so readiness tracks the database rather than the
+                  # probe schedule; everything downstream waits on it.
                   readinessProbe = {
                     exec.command = [ "pg_isready" "-U" "postgres" "-d" "postgres" ];
                     timeoutSeconds = 5; initialDelaySeconds = 2; periodSeconds = 2;
                   };
-                  # LIVENESS STAYS CONSERVATIVE. Readiness only gates traffic;
-                  # liveness RESTARTS the container, and restarting Postgres
-                  # mid-initdb on a cold volume turns a slow start into a crash
-                  # loop. The initial delay keeps the watchdog clear of that
-                  # window; only the poll interval tightens, so a genuinely
-                  # wedged database is still caught in ~15s + 6 failures.
+                  # Liveness stays conservative because a restart mid-initdb on a
+                  # cold volume turns a slow start into a crash loop.
                   livenessProbe = {
                     exec.command = [ "pg_isready" "-U" "postgres" "-d" "postgres" ];
                     timeoutSeconds = 5; initialDelaySeconds = 15; periodSeconds = 5; failureThreshold = 6;

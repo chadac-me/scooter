@@ -1,9 +1,4 @@
-"""Unit test for the deployment-default module tarball (GET /modules/default.tar.gz).
-
-Proves: the endpoint serves a gzipped tar of the `.nix` files in the configured
-default-modules dir, UNAUTHENTICATED (the pod fetches it at boot). An unset/empty
-dir -> an empty tarball (200, no entries), so the pod boots on baseline.
-"""
+"""The deployment-default module tarball at GET /modules/default.tar.gz."""
 
 from __future__ import annotations
 
@@ -37,7 +32,7 @@ def _entries(body: bytes) -> dict[str, str]:
 def test_tarball_has_each_default_nix_file(monkeypatch, tmp_path):
     (tmp_path / "alpha.nix").write_text('{ ... }: { environment.etc."a".text = "a"; }')
     (tmp_path / "beta.nix").write_text('{ ... }: { environment.etc."b".text = "b"; }')
-    # A non-.nix file MUST be ignored.
+    # A non-.nix file is ignored.
     (tmp_path / "README.md").write_text("ignore me")
     monkeypatch.setenv("SANDBOX_DEFAULT_MODULES_DIR", str(tmp_path))
 
@@ -66,7 +61,6 @@ def test_missing_dir_is_empty_tarball(monkeypatch, tmp_path):
 
 
 def test_endpoint_is_unauthenticated(monkeypatch, tmp_path):
-    # No auth header at all -> still 200 (the pod fetches at boot, pre-identity).
     (tmp_path / "only.nix").write_text("{ ... }: { }")
     monkeypatch.setenv("SANDBOX_DEFAULT_MODULES_DIR", str(tmp_path))
     resp = _client().get("/modules/default.tar.gz")

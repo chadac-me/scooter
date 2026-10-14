@@ -1,19 +1,6 @@
 /**
- * Tier 1 — the LOCAL_STATE_PATH rename and its back-compat window.
- *
- * WHY THIS EXISTS. `STATE_PATH` was a lie with consequences. It reads as *the* state, its config
- * doc claimed "Durable conversation state ... On a PVC so it survives agent-host restarts", and
- * index.ts called it the "hot-path authority" — while the deployed volume is an **emptyDir**. The
- * code followed the name: hydrate() reads this store to answer "which conversations exist?", which
- * it cannot answer after a restart. Every pod therefore booted with zero conversations, so
- * sweepIdle() iterated an empty map and reclaimed nothing, forever — 21 sandboxes holding 42
- * requested cores on a 24-core node, deadlocking every rollout. See
- * docs/CONVERSATION_STATE_MODEL.md.
- *
- * The rename is the cheap half of the fix: with `STATE_PATH`, hydrate() reading local state looks
- * correct; as `LOCAL_STATE_PATH` the same line reads as obviously wrong. These tests pin the new
- * name AND the transitional fallback, because dropping the old one outright would break any pod
- * whose manifest predates the rollout.
+ * LOCAL_STATE_PATH names the ephemeral local store (an emptyDir), with STATE_PATH honoured
+ * as a transitional fallback so a pod whose manifest predates the rename keeps working.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -43,8 +30,7 @@ describe("LOCAL_STATE_PATH", () => {
   });
 
   it("still honors the old STATE_PATH so a pre-rename manifest keeps working", () => {
-    // A rollout replaces pods one at a time: an old manifest can still be setting STATE_PATH when
-    // the new image starts. Ignoring it would silently relocate the store mid-rollout.
+    // A rollout replaces pods one at a time, so an old manifest can still set STATE_PATH when the new image starts.
     process.env.STATE_PATH = "/tmp/legacy";
     expect(configFromEnv().localStatePath).toBe("/tmp/legacy");
   });

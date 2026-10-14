@@ -1,9 +1,7 @@
 /**
- * Tiny method+path router over node:http — no framework dependency.
- *
- * Routes use `:param` segments. Handlers get parsed params + the parsed JSON
- * body (for non-GET). A handler returns a JsonResult to send JSON, or handles
- * the response itself (e.g. SSE) and returns undefined.
+ * Tiny method+path router over node:http. Routes use `:param` segments; a handler
+ * gets parsed params and a lazy JSON body, and returns a JsonResult to send JSON or
+ * handles the response itself (e.g. SSE) and returns undefined.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -14,9 +12,7 @@ import {
 } from "../auth/identity.js";
 import { withConversation } from "../log.js";
 
-/** How the router resolves the caller's identity per request. Async so a resolver
- *  can enrich via a store (identityStore.ts). Defaults to the env-configured
- *  resolver (header by default; alb-oidc when AUTH_MODE=alb-oidc), no store. */
+/** How the router resolves the caller's identity per request, defaulting to the env-configured resolver with no store. */
 export type ResolveUser = (req: IncomingMessage) => Promise<UserContext> | UserContext;
 
 function defaultResolveUser(): ResolveUser {
@@ -30,8 +26,7 @@ export interface Ctx {
   params: Record<string, string>;
   query: URLSearchParams;
   body: <T = unknown>() => Promise<T>;
-  /** The caller's identity, extracted from the trusted ingress header (or
-   *  anonymous when none). Used for conversation ownership / view-filtering. */
+  /** The caller's identity from the trusted ingress, or anonymous when none. */
   user: UserContext;
 }
 
@@ -50,7 +45,7 @@ export interface Router {
   post(path: string, handler: Handler): Router;
   patch(path: string, handler: Handler): Router;
   del(path: string, handler: Handler): Router;
-  /** Returns true if a route matched + was dispatched. */
+  /** Returns true if a route matched and was dispatched. */
   handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
 }
 
@@ -118,10 +113,8 @@ export function createRouter(resolveUser: ResolveUser = defaultResolveUser()): R
             return (cachedBody ? JSON.parse(cachedBody) : {}) as T;
           },
         };
-        // Bind the conversation id for the WHOLE management surface in one place. Every
-        // /conversations/:id route (27 of them — suspend, resume, cancel, compact, rename,
-        // links, …) logs it without any of them being edited, and a route that has no
-        // conversation id simply binds nothing. Mirrors what onPrompt does for /agui.
+        // Bind the conversation id for every /conversations/:id route in one place, so
+        // their log lines carry it without being edited.
         const convId = params.id;
         const result = convId
           ? await withConversation(convId, () => route.handler(ctx))

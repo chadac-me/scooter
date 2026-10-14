@@ -29,6 +29,7 @@ export const conversations = pgTable("conversations", {
 }, (table) => [
 	index("conversations_by_activity").using("btree", table.lastActivityAt.desc().nullsFirst().op("int8_ops")),
 	index("conversations_by_owner").using("btree", table.owner.asc().nullsLast().op("text_ops")),
+	index("conversations_by_sandbox_ref").using("btree", table.sandboxRef.asc().nullsLast().op("text_ops")),
 ]);
 
 export const conversationJobs = pgTable("conversation_jobs", {

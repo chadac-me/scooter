@@ -1,4 +1,4 @@
-# airtable's DEPLOYMENT half. Gated on contribs.airtable.enable; why: #599, #711.
+# airtable's deployment half, gated on contribs.airtable.enable.
 { config, lib, ... }:
 
 let

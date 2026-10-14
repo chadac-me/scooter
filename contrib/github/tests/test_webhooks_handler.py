@@ -1,10 +1,4 @@
-"""The github handler, exercised through the real extension seam.
-
-Moved out of the webhooks app's suite with the handler (PR #591). The app no
-longer knows github exists, so what proves the integration is the entry points
-plus the registries: discovery finds the handler, its route mounts, its gating
-answers, and its owner lookup and resource shapes arm when it is imported.
-"""
+"""The github handler through the real extension seam: discovery finds it, its route mounts, its gating answers, and its owner lookup and resource shapes arm on import."""
 
 from __future__ import annotations
 
@@ -20,7 +14,7 @@ from scooter_contrib_github import webhooks_handler as gh
 
 @pytest.fixture
 def client():
-    """A minimal app with only this contrib's router mounted — no webhooks app."""
+    """A minimal app with only this contrib's router mounted."""
     app = FastAPI()
     app.include_router(gh.router)
     return TestClient(app)
@@ -45,7 +39,7 @@ def test_webhooks_discovers_github_via_entrypoint():
 
 
 def test_github_webhook_disabled(client):
-    """Off toggle answers `disabled` in-route rather than unmounting."""
+    """The off toggle answers `disabled` in-route rather than unmounting."""
     with patch.object(gh, "settings") as mock_settings:
         mock_settings.github_enabled = False
         resp = client.post(
@@ -69,12 +63,7 @@ def test_github_webhook_invalid_signature(client):
 
 
 def test_importing_the_handler_arms_the_owner_lookup_and_shapes():
-    """The registration hazard, contrib-side.
-
-    identity/resources register by import side effect and nothing else imports
-    them, so losing either line from webhooks_handler.py would silently stop owner
-    resolution and make a URL-form link stop matching the short form (issue #563).
-    """
+    """identity/resources register by import side effect and nothing else imports them."""
     from scooter_webhooks_lib import identity, resources
 
     assert "github" in identity.registered_providers()

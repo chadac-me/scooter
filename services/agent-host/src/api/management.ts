@@ -1,21 +1,8 @@
 /**
- * Management API — REST surface for managing conversations.
- *
- * Wraps the SessionManager with conversation CRUD + lifecycle + history. The
- * AG-UI streaming endpoint (POST /agui) stays the assistant-ui transport; this
- * adds the management routes around it on the same node:http server.
- *
- *   GET    /conversations                  list
- *   POST   /conversations                  create {threadId?, title?}
- *   GET    /conversations/:id              get + status
- *   DELETE /conversations/:id              end (destroy sandbox)
- *   POST   /conversations/:id/suspend
- *   POST   /conversations/:id/resume
- *   POST   /conversations/:id/messages     prompt {text}
- *   GET    /conversations/:id/events       SSE stream
- *   GET    /conversations/:id/history      the event log
- *   GET    /conversations/:id/messages     older messages, paged back by seq
- *   POST   /conversations/:id/permission/:toolCallId  {optionId}
+ * Management API: the REST surface around the SessionManager (conversation CRUD,
+ * lifecycle, history, approvals, sandbox services). The AG-UI streaming endpoint
+ * (POST /agui) stays the assistant-ui transport; these routes sit next to it on
+ * the same node:http server.
  */
 
 import { randomUUID } from "node:crypto";
@@ -50,9 +37,7 @@ import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
 const log = logger("agent-host");
 const remoteAgentLog = logger("remote-agent");
 
-/** Public (JSON-safe) view of a conversation — omits the in-memory bridge.
- *  Exposes activity metadata (lastActivityAt, idleMs, ageMs) so the UI and any
- *  external lifecycle manager can reason about idleness. */
+/** Public JSON-safe view of a conversation (omits the in-memory bridge). */
 function view(c: Conversation, now = Date.now()) {
   return {
     id: c.id,
@@ -65,13 +50,10 @@ function view(c: Conversation, now = Date.now()) {
     ageMs: Math.max(0, now - c.createdAt),
     model: c.model,
     owner: c.owner,
-    // The spawning conversation, when this is a subagent (undefined = top-level).
-    // The UI nests children under their parent + shows subagent chips.
+    // The spawning conversation when this is a subagent; undefined means top-level.
     parentId: c.parentId,
-    // The title is user-set (renamed) — the UI shows it as pinned and the agent's
-    // <title> no longer overrides it.
+    // Set by a user rename; the agent's <title> does not override it.
     userTitled: c.userTitled ?? false,
-    // Starred by the user (UI highlight + future retention exemption).
     starred: c.starred ?? false,
     sandbox: { name: c.sandbox.name, namespace: c.sandbox.namespace },
   };
@@ -80,26 +62,12 @@ function view(c: Conversation, now = Date.now()) {
 export interface ManagementDeps {
   sessions: SessionManager;
   store: ConversationStore;
-  /** Who serves this conversation's LIVE stream. "elsewhere" => another pod owns it, so
-   *  this pod's integrity stream would replay history and then sit silent forever (live
-   *  appends land on the OWNER's local store). Streams opened before the controller
-   *  assigned an owner land on a random pod ~half the time and stayed there — the
-   *  Tier-2 "no tool card / Working… forever" coin-flip. Optional: absent =
-   *  single-replica, everything is "mine". */
+  /** Which pod serves this conversation's live stream; absent means single-replica, where everything is "mine". */
   streamOwnership?: (id: string) => Promise<"mine" | "elsewhere" | "unknown">;
   server: AguiServer;
-  /** Answer a pending tool permission (wired to the bridge in index.ts). `approver`
-   *  is the identity of the human answering (for an AWS interrupt, the broker
-   *  authorizes them). */
+  /** Answer a pending tool permission as `approver`, the identity of the human answering. */
   answerPermission: (sessionId: string, toolCallId: string, optionId: string, approver?: ApproverIdentity) => Promise<void>;
-  /** Relay the user's answer to the contrib's broker half (POSTs to
-   *  `<brokerPrefix>/{requestId}/{optionId}`). `approver` is the identity of the human
-   *  who answered — the broker authorizes the configured claim (email/id/name) via
-   *  OpenFGA. Optional (unwired = no relay).
-   *
-   *  The VERB is the optionId, not a boolean: a contrib offering something other than
-   *  approve/deny keeps working, and the platform never decides what a choice MEANS.
-   *  Throws on a dropped answer so the caller can surface it. Why: PR #651. */
+  /** Relay the user's answer (the optionId is the verb) to the contrib's broker half as `approver`; throws on a dropped answer. */
   resolveApproval?: (
     sessionId: string,
     contrib: string,
@@ -107,137 +75,91 @@ export interface ManagementDeps {
     optionId: string,
     approver: ApproverIdentity,
   ) => Promise<void>;
-  /** Read-only: may `approver` (the VIEWING user) act on this request? Powers the UI's
-   *  greyed-out option. Per-viewer — the interrupt is raised once server-side but seen
-   *  by many users. Fails closed (false) broker-side. Optional (defaults to allowed
-   *  when unwired / no broker). */
+  /** Whether `approver` (the viewing user) may act on this request; fails closed broker-side and defaults to allowed when unwired. */
   canApproveRequest?: (
     sessionId: string,
     contrib: string,
     requestId: string,
     approver: ApproverIdentity,
   ) => Promise<boolean>;
-  /** Model catalog for per-conversation selection: the host default + the set
-   *  offered to clients (+ optional per-model hints). Empty list = only the
-   *  default is selectable. */
+  /** Model catalog for per-conversation selection; an empty `available` list means only the default is selectable. */
   models?: {
     default?: string;
     available: string[];
     hints?: Record<string, string>;
-    /** model id -> provider tags offering it ([] = every provider). */
+    /** Model id to the provider tags offering it ([] = every provider). */
     providers?: Record<string, string[]>;
+    /** Model id to the provider tags this model is the default for, so the UI can label
+     *  "(default)" per provider group. */
+    defaultFor?: Record<string, string[]>;
   };
-  /** Raw handler for the agent-self-modify MCP endpoint (goose's
-   *  modify_environment tool). It writes the response itself (the MCP transport
-   *  streams), so it takes req/res directly. Optional (self-modify off). */
+  /** Raw handler for the agent-self-modify MCP endpoint, which writes the response itself. */
   mcpHandler?: (req: IncomingMessage, res: ServerResponse, body: unknown) => Promise<void>;
-  /** The broker-MCP proxy handler (agent/brokerMcpProxy.ts). Absent when the broker
-   *  or the conversation-token secret is not configured — then the contrib tools are
-   *  simply not offered. Why: issue #700. */
-  /** The webhooks conversation_map lookup, served at GET /conversations/:id/resource-map
-   *  for the broker's provider tools. Absent when no webhooks DSN is configured — then
-   *  the tools rely on the conversation's links alone. Why: issue #700. */
+  /** The webhooks conversation_map lookup served at GET /conversations/:id/resource-map; absent when no webhooks DSN is configured. */
   resourceLookup?: { lookup(conversationId: string, source: string): Promise<unknown | undefined> };
+  /** The broker-MCP proxy handler; absent when the broker or the conversation-token secret is not configured. */
   brokerMcpHandler?: (req: IncomingMessage, res: ServerResponse, body: unknown) => Promise<void>;
-  /** How to resolve the caller's identity per request (provider-agnostic; may be
-   *  store-enriched). Defaults to the env-configured resolver (header/alb-oidc). */
+  /** Resolves the caller's identity per request; defaults to the env-configured resolver. */
   resolveUser?: ResolveUser;
-  /** In-pod web-service registry (list/start), powering the UI Services panel.
-   *  Optional — absent in fake/local mode (no pods), where the routes report none. */
+  /** In-pod web-service registry powering the UI Services panel; absent in fake/local mode. */
   webServices?: WebServiceRegistry;
-  /** In-pod module registry (search/attach registry modules via scooter-rebuild),
-   *  powering the Sandbox tab's module search/install + the settings module list.
-   *  Optional — absent in fake/local mode. */
+  /** In-pod module registry (search/attach via scooter-rebuild); absent in fake/local mode. */
   moduleRegistry?: ModuleRegistry;
-  /** The identity store (user_identity), for the email→Scooter-user reverse lookup
-   *  that maps an invoking external (github/gitlab/slack) user to their internal
-   *  user. Optional — absent = the lookup route reports no match. */
+  /** Identity store for the email-to-user reverse lookup; absent means the lookup route reports no match. */
   identityStore?: IdentityStore;
-  /** Image/media asset store (uploaded images). Powers GET
-   *  /conversations/:id/assets/:assetId (replay). Optional — absent = images off. */
+  /** Uploaded-image store behind GET /conversations/:id/assets/:assetId; absent means images are off. */
   assets?: AssetStore;
-  /** Scheduler client (to the scheduler service), for the UI settings page's
-   *  scheduled-tasks CRUD. The routes proxy to it scoped to the CALLER (x-auth-user
-   *  = ctx.user.id), so a user only ever manages their own tasks. Optional — absent
-   *  (no SCHEDULER_URL) = the routes report the scheduler isn't configured. */
+  /** Scheduler client for the settings page's scheduled-tasks CRUD, always scoped to the caller; absent means the routes report it unconfigured. */
   scheduler?: SchedulerClient;
-  /** Manually compact a conversation (summarize older turns → continue on
-   *  summary+recent). Wired in index.ts with the summarizer creds/model. Returns a
-   *  result (or null if too short to compact); throws on summarizer failure — the
-   *  route then leaves the conversation unchanged. Optional (absent = compaction off,
-   *  e.g. fake/local mode or no OAuth token). */
+  /** Summarize older turns and continue on summary+recent; null when too short to compact, throws on summarizer failure. */
   compact?: (conversationId: string) => Promise<{ summarizedTurns: number; keptRuns: number } | null>;
-  /** The current sandbox resource request/limits (cpu/memory/gpu) for a conversation,
-   *  so the Sandbox tab can show the user what the pod is allotted. Wired only on the
-   *  broker path (the broker owns + applies sizing); absent = the route reports none. */
+  /** The conversation's current sandbox resource requests/limits; wired only on the broker path. */
   sandboxResources?: (conversationId: string) => Promise<SandboxResources | undefined>;
-  /** List the static shares (broker /shares) a conversation has published, for the
-   *  right-panel Shares tab. Wired only on the broker path (the browser has no sandbox
-   *  SA token, so the agent-host relays the query under its own control/approver SA,
-   *  passing the conversation's short-id); absent = the tab reports none. */
+  /** The static shares a conversation has published, relayed to the broker under the host's own SA; wired only on the broker path. */
   listShares?: (conversationId: string) => Promise<ConversationShares>;
-  /** The available named sandbox size presets (name → {cpu, memory}) and the default
-   *  preset name, from GET /sandbox-sizes. Used by the UI dropdown and the agent to
-   *  discover available sizes. Wired only on the broker path; absent = no presets. */
+  /** The named sandbox size presets and the default preset name; wired only on the broker path. */
   sandboxSizes?: () => Promise<{ sizes: Record<string, SandboxSizePreset>; default: string | null }>;
-  /** Record a named size preset for a conversation (the Sandbox tab's dropdown).
-   *  Rejects an unknown preset name. Wired only on the broker path; absent = the
-   *  route reports 501 and the UI renders the dropdown read-only. */
+  /** Record a named size preset for a conversation, rejecting unknown names; absent means the route reports 501. */
   setSandboxSize?: (conversationId: string, size: string) => Promise<void>;
-  /** Bring-your-own-Claude (Increment 2): powers the Settings "Connect your Claude agent"
-   *  section — mint an owner-bound join token + the copyable docker one-liner, and report whether
-   *  the caller's agent is currently connected (for the live badge). Optional — absent when BYO
-   *  isn't enabled (REMOTE_AGENT_JOIN_SECRET unset), so the UI hides the section. */
+  /** Bring-your-own-Claude support for the Settings "Connect your Claude agent" section; absent when REMOTE_AGENT_JOIN_SECRET is unset, so the UI hides it. */
   remoteAgent?: {
-    /** Mint a fresh short-lived join token for `owner` + the full `docker run …` one-liner. */
-    /** Async: the session is minted on the CONTROLLER before the URL can be built (§L). */
+    /** Mint a fresh owner-bound join token plus the docker one-liner; async because the session is minted on the controller. */
     mint(owner: string): Promise<{ token: string; dockerCommand: string; wsUrl: string }>;
-    /** Connected + the owner's most recent REJECTED connection attempt (for the Settings UI). */
+    /** Whether the owner's agent is connected, plus their most recent rejected connection attempt. */
     status(owner: string): Promise<{ connected: boolean; lastAuthFailure: { reason: string; at: string } | null }>;
-    /** Is this owner's remote agent connected right now? Durable (DB, cross-replica) when a DB is
-     *  wired, else the local live registry — hence async. */
+    /** Whether this owner's remote agent is connected right now (durable via the DB when one is wired). */
     isConnected(owner: string): Promise<boolean>;
   };
 }
 
 /**
- * One pending approval, as a contrib's broker half describes it. The platform's
- * whole vocabulary for "a human must say yes to something".
- *
- * `message` arrives ALREADY RENDERED. The platform used to build the prose itself
- * from aws's fields (`target_account`, `risk_level`, `policy_summary`), which meant
- * the agent-host knew what an AWS account was and a second integration with a
- * different notion of risk could not be described at all. Rendering belongs to the
- * side that knows what it is asking for. Why: PR #651.
- *
+ * One pending approval, as a contrib's broker half describes it. `message` arrives
+ * already rendered by the contrib, the side that knows what it is asking for.
  * snake_case because it is the broker's wire shape, passed through verbatim.
  */
 export interface ApprovalRequest {
   request_id: string;
-  /** What the human reads. Rendered by the contrib; opaque here. */
+  /** What the human reads; rendered by the contrib, opaque here. */
   message?: string;
-  /** Optional override of the Approve/Deny pair (same shape raiseInterrupt takes). */
+  /** Optional override of the Approve/Deny pair (the shape raiseInterrupt takes). */
   options?: Array<{ optionId: string; name: string; kind: string }>;
 }
 
-/** Where a contrib's approval verbs live on the broker, from APPROVAL_CONTRIBS_JSON.
- *  Rendered by modules/platform.nix from the contrib's own declaration. */
+/** Where a contrib's approval verbs live on the broker, from APPROVAL_CONTRIBS_JSON. */
 export interface ApprovalContrib {
-  /** Prefix the verbs hang off, e.g. "/aws/aws" — `/{id}/approve|deny|can-approve`. */
+  /** Prefix the verbs hang off, e.g. "/aws/aws" for `/{id}/approve|deny|can-approve`. */
   brokerPrefix: string;
-  /** Where to list still-pending requests for a conversation. null = no re-raise. */
+  /** Where to list still-pending requests for a conversation; null means no re-raise. */
   pendingPath?: string | null;
 }
 
-/** The default verbs. A contrib may override per request, but this pair is what an
- *  approval means to the UI's gating (see `gatedOption` in the contrib manifest). */
+/** The default verbs, the pair the UI's gating (`gatedOption` in the contrib manifest) understands. */
 export const DEFAULT_APPROVAL_OPTIONS: ReadonlyArray<{ optionId: string; name: string; kind: string }> = [
   { optionId: "approve", name: "Approve", kind: "allow_once" },
   { optionId: "deny", name: "Deny", kind: "reject_once" },
 ];
 
-/** One published static share, as the broker's /shares summary returns it (snake_case
- *  passed through verbatim). The UI maps these to its camelCase view type. */
+/** One published static share as the broker's /shares summary returns it (snake_case passed through). */
 export interface ShareSummary {
   uuid: string;
   url: string;
@@ -248,21 +170,15 @@ export interface ShareSummary {
   updated_at?: string;
 }
 
-/** A conversation's static shares, plus whether the broker's shares feature is even on
- *  (`configured:false` => the UI hides the tab rather than showing a permanently-empty one). */
+/** A conversation's static shares plus whether the broker's shares feature is on at all. */
 export interface ConversationShares {
   configured: boolean;
   shares: ShareSummary[];
 }
 
-/** List a conversation's static shares from the broker (powers the right-panel Shares tab).
- *
- *  Same id-space rule as fetchPendingApprovals: `brokerConversationId` MUST be the sandbox
- *  SHORT-id (the broker owns shares by `conversation_id` = the short-id from the SA name), NOT the
- *  full thread UUID — callers pass `shortId(threadId)`. The agent-host calls this under its own
- *  control/approver SA and passes conversation_id explicitly (the browser has no sandbox token).
- *  A 404/501 (shares feature off, or no broker) reports `configured:false`; any other error is a
- *  quiet empty (best-effort — the tab just shows its empty state). */
+/** List a conversation's static shares from the broker, keyed by the sandbox short-id
+ *  (`shortId(threadId)`) rather than the thread UUID, reporting `configured:false` on
+ *  404/501 and an empty list on any other error. */
 export async function fetchConversationShares(
   brokerUrl: string,
   brokerConversationId: string,
@@ -276,7 +192,7 @@ export async function fetchConversationShares(
     { method: "GET", headers: authHeaders },
   );
   if (!res.ok) {
-    // 404/501 = shares feature not enabled on the broker -> unconfigured (hide the tab).
+    // 404/501 means the shares feature is not enabled on the broker.
     if (res.status === 404 || res.status === 501) return { configured: false, shares: [] };
     onWarn?.(res.status);
     return { configured: true, shares: [] };
@@ -285,13 +201,8 @@ export async function fetchConversationShares(
   return { configured: true, shares: (body.shares ?? []).filter((s) => s.uuid) };
 }
 
-/** Query the broker for a conversation's still-PENDING AWS requests (used by the revive re-raise).
- *
- *  CRITICAL id-space note: `brokerConversationId` MUST be the sandbox SHORT-id (the broker keys AWS
- *  requests by `sandbox-{shortId}`, extracted from the sandbox SA name), NOT the full thread UUID the
- *  session map uses. Passing the UUID returns an empty list — the bug where, after a rollout / resume /
- *  dangling-run revive, the pending Approve window never reappears. Callers resolve the short-id
- *  (via `shortId(threadId)`) before calling. Returns [] on any non-OK / error (best-effort). */
+/** Query the broker for a conversation's still-pending approval requests, keyed by the
+ *  sandbox short-id (`shortId(threadId)`) rather than the thread UUID; returns [] on any error. */
 export async function fetchPendingApprovals(
   brokerUrl: string,
   pendingPath: string,
@@ -306,8 +217,7 @@ export async function fetchPendingApprovals(
     { method: "GET", headers: authHeaders },
   );
   if (!res.ok) {
-    // 404/501 = the contrib isn't configured on this broker; anything else is worth a
-    // log but not fatal — a failed re-raise must not break the revive it rides on.
+    // 404/501 means the contrib is not configured on this broker; anything else is logged but not fatal.
     if (res.status !== 404 && res.status !== 501) onWarn?.(res.status);
     return [];
   }
@@ -315,13 +225,9 @@ export async function fetchPendingApprovals(
   return (body.requests ?? []).filter((r) => r.request_id);
 }
 
-/** Raise the Approve/Deny interrupt for a contrib's approval request on a
- *  conversation's bridge, wiring the answer back via `resolveApproval`. Shared by
- *  the POST /conversations/:id/approvals/:contrib route (the contrib notifies at
- *  request time) AND the revive re-raise (index.ts onRevived, which rediscovers
- *  PENDING requests after a pod rollout dropped the in-memory interrupt). Keeping
- *  ONE builder means both paths produce an identical interrupt (same
- *  id/options/metadata/answer-routing). */
+/** Raise the Approve/Deny interrupt for a contrib's approval request on a conversation's
+ *  bridge, the one builder shared by the POST approvals route and the revive re-raise so
+ *  both produce an identical interrupt. */
 export function raiseApprovalInterrupt(
   bridge: SessionBridge,
   conversationId: string,
@@ -331,29 +237,18 @@ export function raiseApprovalInterrupt(
 ): void {
   bridge.raiseInterrupt({
     id: req.request_id,
-    // Rendered by the contrib. Empty would leave the user a pair of buttons with
-    // nothing to decide on, so say plainly that the description is missing rather
-    // than showing a blank card.
+    // An empty contrib-rendered message would leave the user a pair of buttons with nothing to decide on.
     message: req.message || `${contrib} is requesting approval (no description provided).`,
     options: [...(req.options ?? DEFAULT_APPROVAL_OPTIONS)],
-    // `contrib` is the NAME, not a boolean: the UI looks up this contrib's row in the
-    // manifest for which option to grey and what to say, so an integration added later
-    // needs no UI change. (It replaced `{ aws: true }`, which could only ever describe
-    // one integration.) requestId == the interrupt id, but carry it explicitly so the
-    // UI needn't assume that.
+    // `contrib` is the name the UI looks up in the manifest for which option to grey; requestId
+    // is carried explicitly so the UI need not assume it equals the interrupt id.
     metadata: { contrib, requestId: req.request_id },
     onAnswer: (optionId, approver) => {
-      // The approver is the HUMAN who answered. Falling back to the conversation id
-      // authorizes something that is not a person — with FGA on no tuple matches it,
-      // so the approval is refused; with FGA off it is recorded as the approver and
-      // the audit trail names nobody. Kept only for anonymous/no-ingress-identity
-      // deployments, where there is no human to name. See PR #649.
+      // The approver is the human who answered; the conversation-id fallback exists only
+      // for anonymous deployments where there is no human to name.
       const approverIdentity = approver ?? { id: conversationId };
-      // A DISMISS (null optionId) relays nothing. The old boolean form collapsed it to
-      // `optionId === "approve"` === false and sent DENY — recording a decision the
-      // user never made, from a click that means "not now". The request stays PENDING
-      // in the broker, which is its source of truth, and the revive re-raise brings the
-      // window back. Why: PR #651.
+      // A dismiss (null optionId) relays nothing: the request stays pending in the broker
+      // and the revive re-raise brings the window back.
       if (optionId === null) {
         log.info("approval dismissed without an answer; leaving it pending", {
           conversation_id: conversationId,
@@ -362,9 +257,8 @@ export function raiseApprovalInterrupt(
         });
         return;
       }
-      // resolveApproval THROWS on a dropped answer (token unreadable / broker 4xx-5xx);
-      // fire-and-forget, so handle the rejection — a swallowed one silently loses the
-      // user's security decision.
+      // resolveApproval throws on a dropped answer, and a swallowed rejection would silently
+      // lose the user's security decision.
       void resolveApproval?.(conversationId, contrib, req.request_id, optionId, approverIdentity).catch(
         (err) => {
           log.errorWith("approval NOT recorded", err, {
@@ -384,9 +278,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
   const models = deps.models ?? { available: [] };
   const r = createRouter(deps.resolveUser);
 
-  // The agent-self-modify MCP endpoint (goose calls modify_environment here). The
-  // MCP StreamableHTTP transport owns the response, so this handler reads the body
-  // and hands req/res to it, then returns void (response already written).
+  // The agent-self-modify MCP endpoint; the StreamableHTTP transport owns the response,
+  // so the handler returns void.
   if (deps.mcpHandler) {
     const mcp = deps.mcpHandler;
     const mcpRoute = async (ctx: { req: IncomingMessage; res: ServerResponse; body: <T>() => Promise<T> }) => {
@@ -397,8 +290,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
     r.get("/mcp", mcpRoute as never); // MCP also uses GET for the SSE stream
   }
 
-  // The broker-MCP proxy (#700): the agent's route to the contrib-contributed tools.
-  // Same shape as /mcp — the transport owns the response, so the handler returns void.
+  // The broker-MCP proxy, the agent's route to the contrib tools, with the same shape as /mcp.
   if (deps.brokerMcpHandler) {
     const proxy = deps.brokerMcpHandler;
     const route = async (ctx: { req: IncomingMessage; res: ServerResponse; body: <T>() => Promise<T> }) => {
@@ -409,34 +301,26 @@ export function createManagementApi(deps: ManagementDeps): Router {
     r.get("/broker-mcp", route as never);
   }
 
-  // Who the caller is, per the trusted ingress identity header (anonymous when
-  // none). The UI uses this to label conversations as "mine" + show the user.
+  // The caller per the trusted ingress identity header (anonymous when none).
   r.get("/whoami", (ctx) => ({
     json: { id: ctx.user.id, email: ctx.user.email ?? null, anonymous: ctx.user.anonymous },
   }));
 
-  // --- Bring-your-own-Claude: connect a personal Claude agent (Increment 2) ------------------
-  // Owner-scoped: a caller manages ONLY their own agent (ctx.user.id). Absent deps.remoteAgent
-  // (BYO not enabled) → 404 so the UI hides the section. Anonymous → 401 (an agent must bind to a
-  // real user for routing + fencing).
+  // --- Bring-your-own-Claude: connect a personal Claude agent ------------------
+  // Owner-scoped (ctx.user.id); 404 when BYO is not enabled so the UI hides the section,
+  // 401 for an anonymous caller since an agent must bind to a real user.
   r.post("/remote-agent/join-token", async (ctx) => {
     if (!deps.remoteAgent) return { status: 404, json: { error: "remote agents not enabled" } };
     if (ctx.user.anonymous) return { status: 401, json: { error: "sign in to connect a Claude agent" } };
-    // mint() round-trips the BYOC controller (POST /byoc/sessions). An unreachable controller
-    // is an EXPECTED, diagnosable condition — the deployment is missing/unhealthy (the observed
-    // case: the agent-pg-byoc Secret absent, so its pod never started) — not an internal error.
-    // Without this catch the throw fell to the agui server's outer handler, which answers with
-    // a RAW stringified error and no content-type: the Settings UI (expecting JSON) showed a
-    // parser artifact, and "the controller is down" surfaced as an anonymous 500.
+    // An unreachable BYOC controller is an expected, diagnosable condition, answered as
+    // JSON here rather than left to the outer handler.
     try {
       const { token, dockerCommand, wsUrl } = await deps.remoteAgent.mint(ctx.user.id);
-      // Return the raw token + the ready-to-copy one-liner (token baked in) + the wss URL.
       return { json: { token, dockerCommand, wsUrl } };
     } catch (err) {
       remoteAgentLog.errorWith("join-token mint failed", err, { user_id: ctx.user.id });
-      // 503 (dependency unavailable), naming the dependency — and deliberately NOT echoing
-      // err.message: this response gets logged/screenshotted, and an error path must never
-      // carry token material or internals. The full error is in the host log above.
+      // Name the dependency without echoing err.message, since an error response must never
+      // carry token material or internals.
       return {
         status: 503,
         json: {
@@ -451,19 +335,14 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.get("/remote-agent/status", async (ctx) => {
     if (!deps.remoteAgent) return { status: 404, json: { error: "remote agents not enabled" } };
     if (ctx.user.anonymous) return { json: { connected: false, owner: null, lastAuthFailure: null } };
-    // status() carries the owner's most recent REJECTED connection attempt alongside the
-    // boolean — a failed container previously looked identical to one never started, on both
-    // ends (the container fast-looped in silence; the UI showed a clean "disconnected").
+    // status() carries the owner's most recent rejected connection attempt so a failed
+    // container does not look like one never started.
     const st = await deps.remoteAgent.status(ctx.user.id);
     return { json: { connected: st.connected, owner: ctx.user.id, lastAuthFailure: st.lastAuthFailure } };
   });
 
-  // Reverse identity lookup: the Scooter user id for an email. The webhooks service
-  // uses this to map an invoking external (github/gitlab/slack) user — resolved to
-  // an email via the provider API — to their internal user, so a webhook-spawned
-  // conversation gets a real owner. Returns { id } on a match, 404 otherwise (no
-  // directory dump — only a single id, and only for an exact email). No store /
-  // no email -> 404.
+  // Reverse identity lookup for the webhooks service: the Scooter user id for an exact
+  // email, 404 otherwise.
   r.get("/users/by-email", async (ctx) => {
     const email = (ctx.query.get("email") ?? "").trim();
     if (!email) return { status: 400, json: { error: "email required" } };
@@ -472,111 +351,80 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: { id: match.id } };
   });
 
-  // The learned Scooter users, for the settings Users page. This is the set of users
-  // who've actually signed in (or been mapped via a webhook) — a learned list, not a
-  // full roster. Unlike /users/by-email (a single targeted lookup), this IS a
-  // directory listing, but it's an authenticated internal tool (same trust model as
-  // the conversation list, which is already public to authenticated callers). Gated
-  // like the scheduler routes: 501 when no identity store is wired, so the UI can hide
-  // the page. `configured` lets the client distinguish "off" from "on but empty".
+  // The learned Scooter users (those who have signed in or been mapped via a webhook) for
+  // the settings Users page; 501 when no identity store is wired so the UI can hide the page.
   r.get("/users", async () => {
     if (!deps.identityStore) return { status: 501, json: { error: "identity store not configured" } };
     const users = await deps.identityStore.list().catch(() => []);
     return { json: { configured: true, users } };
   });
 
-  // The model catalog — a UI populates its selector from this.
+  // The model catalog a UI populates its selector from.
   r.get("/models", () => ({
     json: {
       default: models.default ?? null,
       available: models.available,
       hints: models.hints ?? {},
-      // model id -> the provider tags offering it ([] = every provider). Lets the UI label
-      // which choices apply to the BYO container vs the cloud floor.
+      // Lets the UI label which choices apply to the BYO container vs the cloud floor.
       providers: models.providers ?? {},
+      // Model id to the providers it is the default for, so the UI can mark "(default)" per group.
+      defaultFor: models.defaultFor ?? {},
     },
   }));
 
-  // The conversation-list view-filter (?scope=mine|all) and link enrichment used to live
-  // here, shared by GET /conversations and its events stream. Both routes now live in the
-  // conversation-router (served from Postgres), which reimplements the same predicate
-  // (visible() in list.go) and enrichment (LinksByConversation) against the durable store.
-
-  // CREATE a conversation. The SERVER mints the id — this route accepts no caller-chosen
-  // threadId, which is the whole point: a client-chosen id would become an event-log key
-  // and a k8s resource name.
-  //
-  // In MULTI-REPLICA the conversation-router serves this path instead (it writes the
-  // Conversation CR without consulting host capacity) and never proxies it here. This
-  // route is what SINGLE-REPLICA deployments — and e2e, which runs the agent-host with no
-  // router in front — create through. Both mint server-side, so the UI has one contract.
+  // Create a conversation with a server-minted id (a client-chosen id would become an
+  // event-log key and a k8s resource name); in multi-replica the conversation-router serves
+  // this path itself, so this route serves single-replica deployments and e2e.
   r.post("/conversations", async (ctx) => {
     const body = await ctx.body<{ title?: string; model?: string }>();
-    // Reject an unknown model rather than silently falling back, so a client
-    // mistake is visible.
+    // Reject an unknown model rather than silently falling back.
     if (body.model && body.model !== models.default && !models.available.includes(body.model)) {
       return { status: 400, json: { error: `unknown model: ${body.model}` } };
     }
-    // Stamp the creating user as the owner (for the "my conversations" filter).
+    // Stamp the creating user as the owner.
     const owner = ctx.user.anonymous ? undefined : ctx.user.id;
     const conv = await sessions.start(randomUUID(), body.model, owner);
     if (body.title) sessions.setTitle(conv.id, body.title);
     return { status: 201, json: view(sessions.get(conv.id)!) };
   });
 
-  // GET /conversations and GET /conversations/events are NOT served here. The
-  // conversation LIST and its live events stream are fleet-wide (an agent-host only
-  // knows the conversations it hosts), so the conversation-router answers both from
-  // the durable Postgres store: the JSON list from a snapshot, the events stream from
-  // Postgres LISTEN/NOTIFY (services/conversation-router/{list,events}.go). Keeping a
-  // per-pod version here would only re-expose the single-pod-slice bug the router fixes.
-
-  // No POST /conversations here: creating a conversation is a control-plane write
-  // served by the conversation-router (services/conversation-router/create.go).
-  // This fleet is capacity-bounded, so creating here gated the id on capacity.
+  // GET /conversations and its events stream are fleet-wide, so the conversation-router
+  // serves both from Postgres (services/conversation-router/{list,events}.go).
 
   r.get("/conversations/:id", async (ctx) => {
-    // Hydrate-if-absent (read-only) so a reconnect after a pod move / cleared CR resolves
-    // instead of 404ing. See events.integrity + ROLLOUT_DRAIN_AND_POD_IP.md.
+    // Hydrate-if-absent (read-only) so a reconnect after a pod move resolves instead of 404ing.
     let conv = sessions.get(ctx.params.id);
     if (!conv && (await sessions.ensureReadable(ctx.params.id))) conv = sessions.get(ctx.params.id);
     return conv ? { json: view(conv) } : { status: 404, json: { error: "not found" } };
   });
 
   r.del("/conversations/:id", async (ctx) => {
-    // Hydrate-if-absent so a DELETE routed to a pod that doesn't hold the conversation in
-    // memory still destroys it, instead of 404ing and leaking the sandbox (multi-replica:
-    // the DELETE-404 leak — same class as the read-path 404). Mirrors the GET route.
+    // Hydrate-if-absent so a DELETE routed to a pod not holding the conversation still
+    // destroys it instead of leaking the sandbox.
     let conv = sessions.get(ctx.params.id);
     if (!conv && (await sessions.ensureReadable(ctx.params.id))) conv = sessions.get(ctx.params.id);
     if (!conv) return { status: 404, json: { error: "not found" } };
-    // STARRED = protected from deletion (accidental-delete guard). A star means "keep this";
-    // the caller must unstar first. 409 Conflict (the resource state forbids the delete).
+    // A starred conversation is protected from deletion; the caller must unstar first.
     if (conv.starred) return { status: 409, json: { error: "conversation is starred; unstar before deleting" } };
     await sessions.end(ctx.params.id);
     return { status: 204, json: null };
   });
 
-  // Only the OWNER (or an anonymous / single-user caller, or an unowned conversation)
-  // may rename/star — same inclusion rule as the "mine" view filter. Returns the
-  // conversation if the caller may mutate it, else a 404 (don't reveal ownership) or
-  // 403. Conversations are otherwise public to READ; these are the write boundary.
+  // The write boundary: only the owner, an anonymous single-user caller, or anyone for an
+  // unowned conversation may mutate, the same inclusion rule as the "mine" view filter.
   const mutableFor = (id: string, user: { anonymous: boolean; id: string }) => {
     const conv = sessions.get(id);
     if (!conv) return { conv: undefined as Conversation | undefined, error: 404 as const };
-    // An identified user may mutate their own or an unowned conversation; not someone
-    // else's. Anonymous (no ingress identity) is single-user mode — may mutate any.
+    // Anonymous (no ingress identity) is single-user mode and may mutate any conversation.
     if (!user.anonymous && conv.owner && conv.owner !== user.id) {
       return { conv: undefined, error: 403 as const };
     }
     return { conv, error: undefined };
   };
 
-  // User rename: sets the title AND locks it (userTitled) so the agent's <title> can
-  // no longer overwrite it. A blank/whitespace title is rejected (would orphan the row).
+  // A user rename sets the title and locks it (userTitled) against the agent's <title>.
   r.patch("/conversations/:id/title", async (ctx) => {
-    // Hydrate-if-absent so an idle-conversation title write here doesn't 404 (the single-host/dev
-    // path; in prod the router serves idle writes and only proxies live ones here). Why: PR #475.
+    // Hydrate-if-absent so a title write against an idle conversation does not 404.
     if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
     const { conv, error } = mutableFor(ctx.params.id, ctx.user);
     if (error === 404) return { status: 404, json: { error: "not found" } };
@@ -589,10 +437,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: view(sessions.get(conv!.id)!) };
   });
 
-  // Star / unstar. Body { starred: boolean }.
+  // Star or unstar, with body { starred: boolean }.
   r.patch("/conversations/:id/starred", async (ctx) => {
-    // Hydrate-if-absent so an idle-conversation star write here doesn't 404 (the single-host/dev
-    // path; in prod the router serves idle writes and only proxies live ones here). Why: PR #475.
+    // Hydrate-if-absent so a star write against an idle conversation does not 404.
     if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
     const { conv, error } = mutableFor(ctx.params.id, ctx.user);
     if (error === 404) return { status: 404, json: { error: "not found" } };
@@ -606,8 +453,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   r.post("/conversations/:id/suspend", async (ctx) => {
-    // Hydrate-if-absent so suspend reaches the conversation regardless of which replica
-    // answers (same multi-replica 404 class as DELETE/read).
+    // Hydrate-if-absent so suspend reaches the conversation whichever replica answers.
     if (!sessions.get(ctx.params.id) && (await sessions.ensureReadable(ctx.params.id))) {
       /* hydrated into memory */
     }
@@ -622,30 +468,19 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: view(sessions.get(ctx.params.id)!) };
   });
 
-  // Cluster-internal REVIVE-ON-ASSIGN (seamless rollout). The controller POSTs this on a
-  // conversation's new host right after (re)assigning it, so the host replays history from
-  // the shared mirror BEFORE user traffic arrives. Unlike /resume above, this MUST work when
-  // the conversation is NOT already in memory (that's the whole point — it was just
-  // reassigned here from a drained pod). Idempotent: a no-op if already revived. Fencing:
-  // the `gen` query param is the CR's current generation; if this pod isn't the current
-  // owner (or the push is stale), skip — the ownership guard still gates writes regardless.
-  //
-  // DESIGN STUB — not implemented. Must: (1) verify caller is the controller (SA/secret —
-  // spec Q4); (2) hydrate-from-mirror if absent; (3) fence on `gen`; (4) be safe to call
-  // concurrently / repeatedly. See todo/docs/ROLLOUT_DRAIN_AND_POD_IP.md.
+  // Cluster-internal revive-on-assign: the controller POSTs this on a conversation's new
+  // host right after reassigning it so history replays from the shared mirror before user
+  // traffic arrives, hydrating if absent, idempotent, and fenced on the CR generation in `gen`.
   r.post("/internal/revive/:id", async (ctx) => {
     const gen = Number(new URL(ctx.req.url ?? "", "http://x").searchParams.get("gen") ?? "0");
-    // Hydrate-if-absent + fence (a stale/mis-routed push is a no-op inside reviveFromMirror).
-    // Best-effort from the controller's view; return 202 (accepted) rather than 200 so a
-    // caller can tell it's an async pre-warm, not a synchronous "definitely revived".
+    // 202 rather than 200 so a caller can tell it is an async pre-warm, not a synchronous revive.
     await sessions.reviveFromMirror(ctx.params.id, Number.isFinite(gen) ? gen : 0);
     return { status: 202, json: { revived: ctx.params.id } };
   });
 
-  // Manually COMPACT: summarize older turns, then continue on [summary + recent].
-  // Summarize + persist the marker FIRST (compact() throws on summarizer failure →
-  // 502, conversation untouched); only on success do we revive so the next turn runs
-  // on the compacted context.
+  // Manual compaction: summarize and persist the marker first (a summarizer failure is a
+  // 502 with the conversation untouched), then revive so the next turn runs on the
+  // compacted context.
   r.post("/conversations/:id/compact", async (ctx) => {
     const conv = sessions.get(ctx.params.id);
     if (!conv) return { status: 404, json: { error: "not found" } };
@@ -665,21 +500,18 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.post("/conversations/:id/messages", async (ctx) => {
     const body = await ctx.body<{ text?: string }>();
     if (!body.text) return { status: 400, json: { error: "text required" } };
-    // find-or-start by thread id, then prompt
+    // Find-or-start by thread id, then prompt.
     await sessions.promptByThread(ctx.params.id, body.text);
     return { status: 202, json: { ok: true } };
   });
 
-  // Stop the RUNNING turn — the UI's Stop button. cancel() ends the in-flight run
-  // cleanly (kills the active tool call via the exec seam, ACP session/cancel, and
-  // emits a RUN_FINISHED{cancelled:true}). No-op-OK: a conversation with no live
-  // bridge or nothing running still returns 202 (stopping "nothing" succeeded), so
-  // a stale Stop click never errors. 404 only for a genuinely unknown conversation.
+  // Stop the running turn (the UI's Stop button); a conversation with no live bridge or
+  // nothing running still returns 202 so a stale Stop click never errors.
   r.post("/conversations/:id/cancel", async (ctx) => {
     const conv = sessions.get(ctx.params.id);
     if (!conv) return { status: 404, json: { error: "not found" } };
-    // `bridge?.cancel()` answers 202 even with NO bridge — a silent no-op indistinguishable
-    // from a real stop. Record which happened.
+    // Record whether a bridge existed, since the no-bridge no-op is otherwise
+    // indistinguishable from a real stop.
     log.info("cancel requested", {
       conversation_id: ctx.params.id,
       has_bridge: conv.bridge !== undefined,
@@ -690,10 +522,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   r.get("/conversations/:id/history", async (ctx) => {
-    // Return events + the rolling integrity checksum through the last one, so a
-    // streaming client can verify it has replayed the complete, in-order log
-    // (and reconcile against live events' prevChecksum). Falls back gracefully
-    // for stores without the checksum variant (in-memory test stores).
+    // Return events plus the rolling integrity checksum through the last one so a streaming
+    // client can verify it replayed the complete log; stores without the checksum variant
+    // fall back to chaining.
     const events: AguiEvent[] = [];
     let checksum = EMPTY_CHECKSUM;
     if (store.readEventsWithChecksum) {
@@ -708,11 +539,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: { events, checksum } };
   });
 
-  // Stream an uploaded image back (replay + the thread's own view). Conversation-
-  // scoped: the assetId is only readable under its own conversation id (the store
-  // isolates per conversation + guards path traversal), so an id can't leak an
-  // asset from another conversation. Returns the raw bytes with the right
-  // content-type; the handler writes the response itself (binary, not JSON).
+  // Stream an uploaded image back; the assetId is only readable under its own conversation
+  // id, and the handler writes the binary response itself.
   r.get("/conversations/:id/assets/:assetId", async (ctx) => {
     const res = ctx.res;
     if (!deps.assets) {
@@ -727,15 +555,15 @@ export function createManagementApi(deps: ManagementDeps): Router {
     res.writeHead(200, {
       "Content-Type": asset.mimeType,
       "Content-Length": String(asset.data.length),
-      // Immutable: the assetId is content-addressed, so the bytes never change.
+      // The assetId is content-addressed, so the bytes never change.
       "Cache-Control": "private, max-age=31536000, immutable",
     });
     res.end(asset.data);
   });
 
   r.get("/conversations/:id/tail", async (ctx) => {
-    // A fast first-paint window, bounded by EVENT COUNT (`limit`, default 300).
-    // `runs` still works for callers that want run-aligned windows.
+    // A fast first-paint window bounded by event count (`limit`, default 300), or by `runs`
+    // for run-aligned windows.
     const limitParam = Number(ctx.query.get("limit"));
     const runsParam = Number(ctx.query.get("runs"));
     const wantRuns = Number.isFinite(runsParam) && runsParam > 0;
@@ -747,7 +575,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
       const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 2000) : 300;
       events = await store.readEventsTailByCount(ctx.params.id, limit);
     } else {
-      // Stores without a tail reader (in-memory tests): the logs are tiny.
+      // Stores without a tail reader (in-memory tests) have tiny logs.
       const all: AguiEvent[] = [];
       for await (const e of store.readEvents(ctx.params.id)) all.push(e);
       events = wantRuns ? tailByRuns(all, Math.min(runsParam, 100)) : trimToBoundary(all.slice(-300));
@@ -756,9 +584,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   r.get("/conversations/:id/messages", async (ctx) => {
-    // Older history, paged backwards for the scroll-up load. `before` is the seq the
-    // client currently starts at (from the snapshot's fromSeq, then this response's);
-    // the reply is the window immediately before it, folded to messages.
+    // Older history paged backwards for the scroll-up load: the reply is the window
+    // immediately before seq `before`, folded to messages.
     const before = Number(ctx.query.get("before"));
     const limitParam = Number(ctx.query.get("limit"));
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 5000) : 1200;
@@ -782,8 +609,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
       };
     }
     const { events, firstSeq, done } = await store.readEventsBefore(ctx.params.id, before, limit);
-    // Start the page at a run boundary so a run split across the seam is folded by
-    // exactly one page, not opened by both.
+    // Start the page at a run boundary so a run split across the seam is folded by exactly one page.
     const drop = done ? 0 : alignPageToRun(events);
     return {
       json: {
@@ -795,27 +621,21 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   r.get("/conversations/:id/events", async (ctx) => {
-    // Ensure history is local first (a reconnect may land on a non-owner pod after a
-    // rollout / cleared CR) so onAttach's store.readEvents replays the full log. Read-only.
+    // Make history local first (a reconnect may land on a non-owner pod) so onAttach replays the full log.
     if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
-    // SSE — the server owns the connection; returns void (no JSON result).
+    // SSE: the server owns the connection and returns no JSON result.
     await server.subscribeSSE(ctx.params.id, ctx.res);
   });
 
-  // Integrity stream: replay the full log (each event + its rolling checksum),
-  // then stay open and forward live appends with their checksums. Plain JSON SSE
-  // (NOT the @ag-ui encoder — this carries our integrity envelope, which the
-  // @ag-ui client would reject). The UI uses this to render reliably AND to
-  // self-heal: if a live event's prevChecksum != the checksum it holds, it has a
-  // gap and refetches history. Single ordered stream → no replay-vs-live race.
+  // Integrity stream: replay the full log with rolling checksums as plain JSON SSE (not the
+  // @ag-ui encoder), then forward live appends, so the client detects a gap via
+  // prevChecksum and refetches history.
   r.get("/conversations/:id/events.integrity", async (ctx) => {
     const id = ctx.params.id;
     const { res } = ctx;
-    // Make history readable on THIS pod first: after a rollout (or a cleared CR) the owner
-    // pod may have moved, so a reconnecting UI lands on a pod that doesn't have the
-    // conversation in memory. ensureReadable pulls it from the mirror (read-only, no sandbox
-    // spin-up). Only 404 if it's genuinely unknown ANYWHERE — so the client stops
-    // reconnecting for a truly deleted conversation, but a moved one self-heals.
+    // Make history readable on this pod first (the owner may have moved after a rollout),
+    // and 404 only if the conversation is unknown anywhere so the client stops reconnecting
+    // for a deleted one.
     if (!sessions.get(id) && !(await sessions.ensureReadable(id))) {
       res.writeHead(404, { "Content-Type": "application/json" }).end('{"error":"not found"}');
       return;
@@ -827,9 +647,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
     });
     const send = (frame: unknown) => res.write(`data: ${JSON.stringify(frame)}\n\n`);
 
-    // Subscribe to live appends FIRST so nothing emitted during replay is lost;
-    // buffer them until replay is done, then flush + go live. Dedup by checksum
-    // (an event seen in replay won't be re-sent live).
+    // Subscribe to live appends before replaying, buffering until replay is done and
+    // deduping by checksum.
     const seen = new Set<string>();
     let live = false;
     const buffer: ChecksummedEvent[] = [];
@@ -842,33 +661,24 @@ export function createManagementApi(deps: ManagementDeps): Router {
       }
     });
 
-    // FLUSH pending appends before replaying: appends are fire-and-forget (void
-    // store.appendEvent), so a fresh revive's just-sent user message can still be mid-write when
-    // the UI opens this stream. readEventsWithChecksum would then read a log WITHOUT it, and its
-    // onAppend fires only AFTER the write lands — so it's in neither the replay nor the pre-live
-    // buffer, and the message "disappears" until the user refreshes. Awaiting flush(id) makes
-    // every enqueued append durable (and its onAppend fired → buffered) before we read. (No-op
-    // for synchronous in-memory stores.)
+    // Flush pending fire-and-forget appends before replaying, so a just-sent message still
+    // mid-write lands in the replay or the pre-live buffer rather than neither.
     await store.flush?.(id);
 
-    // Called THROUGH `store`: these methods use `this`, so a detached ref breaks.
+    // Called through `store` because these methods use `this`.
     const replay = store.readEventsWithChecksum
       ? (i: SessionId) => store.readEventsWithChecksum!(i)
       : undefined;
     if (replay) {
-      // History goes as ONE snapshot, not N events: the client's applier rebuilds the
-      // message list per event and deep-clones it on each emit, so a long conversation
-      // costs O(n²) (15,062 clones for 4,000 events, measured). Events that carry no
-      // message state (RUN_*, QUEUE_UPDATED, CONTEXT_USAGE, SYSTEM_MESSAGE) are still
-      // replayed individually — the client derives run/queue/context state from them.
+      // History goes as one snapshot rather than N events, since the client's applier
+      // rebuilds and clones the message list per event; events carrying no message state
+      // still replay individually.
       const history: AguiEvent[] = [];
       for await (const c of replay(id)) {
         seen.add(c.checksum);
         history.push(c.event);
       }
-      // Only the trailing window is painted up front; older history pages in on
-      // scroll. Mounting a whole long thread is one synchronous ~900ms commit that
-      // blocks the composer (~34 React fibers per message).
+      // Only the trailing window is painted up front; older history pages in on scroll.
       const { tail, fromSeq, hasOlder } = splitForInitialSnapshot(history);
       const messages = foldToMessages(tail);
       if (messages.length > 0) {
@@ -877,8 +687,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
           event: { type: "MESSAGES_SNAPSHOT", messages, ...(hasOlder ? { fromSeq } : {}) },
         });
       }
-      // Non-message events replay from the FULL history: run/queue/context state is
-      // cumulative, so windowing it would leave the client's trackers out of date.
+      // Non-message events replay from the full history because run/queue/context state is cumulative.
       for (const e of history) {
         if (!MESSAGE_EVENTS.has(e.type)) send({ kind: "event", event: e });
       }
@@ -891,16 +700,12 @@ export function createManagementApi(deps: ManagementDeps): Router {
       }
     }
     live = true;
-    // Mark the end of the initial replay so the client knows it's caught up.
+    // Mark the end of the initial replay so the client knows it is caught up.
     send({ kind: "synced" });
 
-      // OWNERSHIP: this stream only carries LIVE events for a conversation THIS pod
-      // runs (onAppend is the local store). If another pod owns it — typical when the
-      // stream was opened BEFORE the controller assigned an owner, and the router
-      // therefore picked a pod at random — end the stream after the replay: the
-      // client's reconnect goes back through the router, which routes by hostIP now.
-      // Checked again periodically so a MID-STREAM reassignment also hands the viewer
-      // to the new owner instead of leaving them on a silent stream.
+      // This stream only carries live events for a conversation this pod runs, so when
+      // another pod owns it end the stream after replay (and re-check periodically) so the
+      // client's reconnect goes back through the router.
       const closeIfElsewhere = async () => {
         const where = await deps.streamOwnership?.(id).catch(() => "unknown" as const);
         if (where === "elsewhere") {
@@ -912,16 +717,11 @@ export function createManagementApi(deps: ManagementDeps): Router {
       const ownershipTimer = setInterval(() => void closeIfElsewhere(), 5_000);
       if (typeof ownershipTimer.unref === "function") ownershipTimer.unref();
 
-    // SSE HEARTBEAT: an idle conversation emits no events, so without this the stream
-    // goes byte-silent until the next activity. Any proxy in front (the UI's nginx has
-    // proxy_read_timeout 3600s; an ingress/LB may be far stricter) then times the
-    // upstream out — the observed `upstream timed out (110) ... events.integrity`,
-    // dropping a live viewer's stream on a quiet conversation. Send an SSE COMMENT line
-    // (`:`-prefixed) every 25s: it keeps the connection warm for every proxy layer, and
-    // the client parser ignores it (it only reads `data:` lines). Cleared on close.
+    // SSE heartbeat: an idle conversation emits no events, so send an SSE comment line every
+    // 25s to keep every proxy layer's read timeout from dropping the stream.
     const heartbeat = setInterval(() => {
-      // res.write can throw if the socket is already gone between 'close' and clear.
-      try { res.write(": ping\n\n"); } catch { /* connection closed — the close handler clears this */ }
+      // res.write can throw if the socket is already gone.
+      try { res.write(": ping\n\n"); } catch { /* connection closed */ }
     }, 25_000);
     // Don't let the heartbeat timer keep the process alive on shutdown.
     if (typeof heartbeat.unref === "function") heartbeat.unref();
@@ -936,8 +736,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.post("/conversations/:id/permission/:toolCallId", async (ctx) => {
     const body = await ctx.body<{ optionId?: string }>();
     if (!body.optionId) return { status: 400, json: { error: "optionId required" } };
-    // The answering user's identity — the broker authorizes THIS person for an AWS
-    // approval (not the conversation owner). Anonymous → no identity claims.
+    // The broker authorizes the answering user, not the conversation owner; anonymous
+    // means no identity claims.
     const approver = ctx.user.anonymous
       ? undefined
       : { id: ctx.user.id, email: ctx.user.email, name: ctx.user.name };
@@ -945,10 +745,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { status: 204, json: null };
   });
 
-  // May the CURRENT viewer act on this request? The UI calls this per pending approval
-  // interrupt to decide whether to grey the gated option (per-viewer: the interrupt is
-  // raised once server-side but seen by many users). Anonymous users can never approve
-  // (no identity to authorize) → canApprove:false, greyed.
+  // Whether the current viewer may act on this request, per viewer since one interrupt is
+  // seen by many users; anonymous users can never approve.
   r.get("/conversations/:id/approvals/:contrib/:requestId/can-approve", async (ctx) => {
     if (!deps.canApproveRequest) return { json: { canApprove: true } }; // unwired → don't block
     if (ctx.user.anonymous) return { json: { canApprove: false } };
@@ -959,29 +757,20 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: { canApprove } };
   });
 
-  // External resource links (the GitHub PR / Slack thread a conversation came
-  // from). The webhooks service POSTs them on create; the UI GETs them for the
-  // linked-resources panel.
-  // Resolve a conversation id that MIGHT be the broker's short DNS hash
-  // (`sandbox-{shortId}`) rather than the full threadId the store keys by. The
-  // broker (auto-link injector + explicit /link) identifies the conversation
-  // from the SA token, which carries the short id — a plain store.*(ctx.params.id)
-  // would miss it (the same shortId mismatch that broke the approvals route). Falls back
-  // to the raw id for UI/webhooks callers that already pass the full threadId.
+  // External resource links (the GitHub PR / Slack thread a conversation came from): the
+  // webhooks service POSTs them on create and the UI GETs them.
+
+  // Resolve an id that may be the broker's short DNS hash (`sandbox-{shortId}`) rather than
+  // the full threadId the store keys by.
   const resolveConvId = async (id: string): Promise<string | null> => {
     const conv = sessions.get(id) ?? (await sessions.getByShortId(id));
     return conv?.id ?? null;
   };
 
-  // The webhooks `conversation_map` row for a conversation — the FALLBACK target
-  // source for a provider reply tool whose link carries neither a usable `ref` nor a
-  // parseable URL (a conversation predating `ref`).
-  //
-  // Exposed here because the tools moved to the broker (#700) and the broker must not
-  // read the webhooks service's table directly — that is the per-service split
-  // contrib/README.md exists to keep. The agent-host already has read access, so it
-  // fronts it. Separate from GET /links on purpose: the UI renders that list, and
-  // folding synthetic rows into it would show phantom links in the sidebar.
+  // The webhooks `conversation_map` row for a conversation, the fallback target source for
+  // a provider reply tool whose link has neither a usable `ref` nor a parseable URL; served
+  // here because the broker must not read the webhooks table directly, and kept out of
+  // GET /links so the UI shows no phantom links.
   r.get("/conversations/:id/resource-map", async (ctx) => {
     if (!deps.resourceLookup) return { json: { mappings: [] } };
     const source = ctx.query.get("source") ?? "";
@@ -1004,11 +793,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: { links } };
   });
 
-  // The static shares (broker /shares) this conversation has published, for the
-  // right-panel Shares tab. `configured:false` when the broker path isn't wired
-  // (local/fake) so the UI hides the tab rather than showing a spurious empty one.
-  // Read-only + same view-filter model as /links and /web-services (no ownership
-  // gate); index.ts scopes the broker query to this conversation's short-id.
+  // The static shares this conversation has published, for the Shares tab; `configured:false`
+  // when the broker path is not wired so the UI hides the tab.
   r.get("/conversations/:id/shares", async (ctx) => {
     if (!deps.listShares) return { json: { configured: false, shares: [] } };
     const id = (await resolveConvId(ctx.params.id)) ?? ctx.params.id;
@@ -1027,14 +813,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (!body.source || !body.resourceType) {
       return { status: 400, json: { error: "source and resourceType required" } };
     }
-    // Fall back to the raw path id when resolution misses — a link may be
-    // registered BEFORE the conversation materializes: the Slack webhook flow
-    // posts the thread link in its on_created hook (to anchor the first reply to
-    // the thread) which fires before /agui creates the session. 404-ing here
-    // silently dropped that link (the broker-autolink regression). The store keys
-    // by the full threadId, which is exactly what the webhook posts, so writing
-    // under the raw id makes it resolvable once the conversation exists (GET does
-    // the same fallback).
+    // Fall back to the raw path id because a link may be registered before the conversation
+    // materializes (the Slack webhook posts the thread link before /agui creates the
+    // session), and the store keys by the full threadId the webhook posts.
     const id = (await resolveConvId(ctx.params.id)) ?? ctx.params.id;
     await store.addLink?.(id, {
       source: body.source,
@@ -1046,17 +827,15 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { status: 201, json: { ok: true } };
   });
 
-  // Web services (marimo/xterm/vscode) declared in the conversation's sandbox and
-  // reverse-proxied at /c/<id>/<name>/. The UI Services panel lists them (with
-  // liveness) and Starts one. No extra auth — same view-filter model as the rest.
-  // Actual pod readiness — the conversation `status` can be "running" (Sandbox
-  // operatingMode Running) while the pod is still ContainerCreating. exec succeeds
-  // only once the pod is Ready, so this distinguishes "requested" from "actually up".
-  // The UI Sandbox tab shows "Starting…" while status=running but ready=false.
+  // Web services (marimo/xterm/vscode) declared in the sandbox and reverse-proxied at
+  // /c/<id>/<name>/; the UI Services panel lists and starts them.
+
+  // Actual pod readiness: `status` can be "running" while the pod is still
+  // ContainerCreating, and exec succeeds only once the pod is Ready.
   r.get("/conversations/:id/ready", async (ctx) => {
     const id = await resolveConvId(ctx.params.id);
     const conv = id ? sessions.get(id) : undefined;
-    // Only a running-status conversation can be ready; suspended/ended are never ready.
+    // Only a running-status conversation can be ready.
     if (!id || !conv || conv.status !== "running" || !deps.webServices) {
       return { json: { ready: false, status: conv?.status ?? "unknown" } };
     }
@@ -1067,25 +846,21 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.get("/conversations/:id/web-services", async (ctx) => {
     const id = await resolveConvId(ctx.params.id);
     if (!id || !deps.webServices) return { json: { services: [] } };
-    // ?refresh=1 re-reads the in-pod manifest instead of serving a cached read —
-    // the agent declares services with `scooter-rebuild`, and nothing in the pod
-    // tells us it happened.
+    // ?refresh=1 re-reads the in-pod manifest, since nothing in the pod signals a `scooter-rebuild`.
     const force = ctx.query.get("refresh") === "1";
     const services = await deps.webServices.list(id, { force });
-    // One size read for the whole list, not one per service. Absent (fake mode / no
-    // broker) leaves every `fit` undefined, which the UI renders as no warning at all
-    // — the right default, since we genuinely can't judge.
+    // One size read for the whole list; absent (fake mode / no broker) leaves every `fit`
+    // undefined, which the UI renders as no warning.
     const size = deps.sandboxResources ? await deps.sandboxResources(id).catch(() => undefined) : undefined;
     const withState = await Promise.all(
       services.map(async (s) => ({
         name: s.name,
         displayName: s.displayName,
-        // The browser opens the service under the FULL threadId path.
+        // The browser opens the service under the full threadId path.
         url: `/c/${encodeURIComponent(sessions.get(id)?.threadId ?? id)}/${s.name}/`,
         running: await deps.webServices!.isRunning(id, s.name).catch(() => false),
         resources: s.resources,
-        // Two forms of the same gap: `fitShort` fits the card, `fit` is the full
-        // sentence the card shows on hover.
+        // `fitShort` fits the card; `fit` is the full sentence shown on hover.
         fit: s.resources ? fitAdvice(s.displayName, s.resources, size) : undefined,
         fitShort: s.resources ? fitSummary(s.resources, size) : undefined,
       })),
@@ -1093,9 +868,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: { services: withState } };
   });
 
-  // The sandbox's current resource allotment (cpu/memory/gpu requests + limits), so
-  // the Sandbox tab can show the user what the pod is sized for. Absent getter (no
-  // broker / fake mode) -> {resources: null}, and the UI simply doesn't show the row.
+  // The sandbox's current resource allotment for the Sandbox tab; an absent getter yields
+  // {resources: null}.
   r.get("/conversations/:id/resources", async (ctx) => {
     const id = await resolveConvId(ctx.params.id);
     if (!id || !deps.sandboxResources) return { json: { resources: null } };
@@ -1103,29 +877,22 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: { resources } };
   });
 
-  // The available named sandbox size presets (name → {cpu, memory, gpu?}) and the
-  // default preset name. Used by the UI dropdown and the agent to discover available
-  // sizes. Absent getter (no broker / fake mode) -> {sizes: {}, default: null}.
+  // The named sandbox size presets and the default preset name; an absent getter yields
+  // {sizes: {}, default: null}.
   r.get("/sandbox-sizes", async () => {
     if (!deps.sandboxSizes) return { json: { sizes: {}, default: null } };
     const result = (await deps.sandboxSizes().catch(() => ({ sizes: {}, default: null })));
     return { json: result };
   });
 
-  // Pick a size preset for this conversation (the Sandbox tab's dropdown). Preset
-  // NAME only — the raw-resources path stays agent-only, so the UI can't invent a
-  // size outside the deployment's table. Takes effect on the next sandbox restart.
-  // PATCH, not PUT: the agent-host Router (src/http/router.ts) exposes
-  // get/post/patch/del only, and this is a partial update of one conversation field
-  // exactly like the sibling title/starred writes.
+  // Pick a size preset by name for this conversation (the raw-resources path stays
+  // agent-only), taking effect on the next sandbox restart.
   r.patch("/conversations/:id/size", async (ctx) => {
     if (!deps.setSandboxSize) return { status: 501, json: { error: "sandbox sizing unavailable" } };
-    // Hydrate-if-absent so a size write against an idle conversation doesn't 404,
-    // mirroring the title/star writes.
+    // Hydrate-if-absent so a size write against an idle conversation does not 404.
     if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
-    // Ownership is enforced here, not just in the broker: resizing is a real
-    // privilege (it changes what the cluster reserves), so it follows the same
-    // mutableFor gate as the other conversation mutations.
+    // Resizing changes what the cluster reserves, so it follows the same mutableFor gate
+    // as the other mutations.
     const { conv, error } = mutableFor(ctx.params.id, ctx.user);
     if (error === 404) return { status: 404, json: { error: "not found" } };
     if (error === 403) return { status: 403, json: { error: "not your conversation" } };
@@ -1136,8 +903,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
     try {
       await deps.setSandboxSize(conv!.id, size.trim());
     } catch (e) {
-      // The broker validates the preset name; surface its message (e.g. the list of
-      // available presets) rather than a bare 500, so the UI can show why it failed.
+      // Surface the broker's validation message (e.g. the available presets) rather than a bare 500.
       return { status: 400, json: { error: (e as Error).message } };
     }
     return { json: { size: size.trim() } };
@@ -1172,12 +938,11 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   // --- Modules (Sandbox tab search/install + settings list) --------------------
-  // `configured` distinguishes "no module registry wired" (fake/local) from
-  // "configured but nothing found", so the UI shows the right empty state.
+  // `configured` distinguishes "no module registry wired" from "configured but nothing found".
   const noModules = { status: 501, json: { configured: false, error: "modules unavailable" } };
 
-  // Search the broker module catalog (caller's own + all public). Empty q = all.
-  // Also used by the settings "available modules" list. Includes which are attached.
+  // Search the broker module catalog (caller's own + all public, empty q = all), marking
+  // which are attached.
   r.get("/conversations/:id/module-registry", async (ctx) => {
     if (!deps.moduleRegistry) return noModules;
     const id = await resolveConvId(ctx.params.id);
@@ -1204,8 +969,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: { configured: true, attached: await deps.moduleRegistry.attached(id) } };
   });
 
-  // Install (attach) a registry module by name-or-id + re-converge. Needs the pod
-  // running (the CLI runs in-pod).
+  // Attach a registry module by name-or-id and re-converge; needs the pod running since
+  // the CLI runs in-pod.
   r.post("/conversations/:id/modules/:ref/install", async (ctx) => {
     if (!deps.moduleRegistry) return noModules;
     const id = await resolveConvId(ctx.params.id);
@@ -1218,15 +983,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
     }
   });
 
-  // A contrib's broker half calls this when its agent-side asks for something a human
-  // must allow: raise an in-conversation approval interrupt. The user's pick routes
-  // back to that contrib via deps.resolveApproval.
-  //
-  // `:contrib` is not validated against the configured set. The relay is (index.ts
-  // looks the name up in APPROVAL_CONTRIBS_JSON and does nothing for an unknown one),
-  // and refusing here would mean a contrib whose broker half is deployed slightly
-  // ahead of the agent-host cannot raise anything — while accepting costs only an
-  // interrupt whose answer goes nowhere, which is the same as today's unwired case.
+  // A contrib's broker half calls this to raise an in-conversation approval interrupt
+  // whose answer routes back via deps.resolveApproval; `:contrib` is not validated here so
+  // a contrib deployed slightly ahead of the agent-host can still raise.
   r.post("/conversations/:id/approvals/:contrib", async (ctx) => {
     const body = await ctx.body<{
       request_id?: string;
@@ -1234,27 +993,17 @@ export function createManagementApi(deps: ManagementDeps): Router {
       options?: Array<{ optionId: string; name: string; kind: string }>;
     }>();
     if (!body.request_id) return { status: 400, json: { error: "request_id required" } };
-    // Resolve the conversation. The BROKER identifies it by the SHORT DNS-safe
-    // hash (from the sandbox SA name `sandbox-{shortId}`), NOT the full threadId
-    // the session map is keyed by — so a plain get(ctx.params.id) MISSES and the
-    // approval 404s (the "window never appears" root cause). Try the full id first
-    // (webhooks/UI use it), then fall back to the short-id resolution (which also
-    // hydrates a persisted-but-evicted conversation).
+    // The broker identifies the conversation by the short DNS-safe hash from the sandbox
+    // SA name rather than the full threadId, so fall back to short-id resolution (which
+    // also hydrates an evicted conversation).
     const conv =
       sessions.get(ctx.params.id) ?? (await sessions.getByShortId(ctx.params.id));
     if (!conv) {
-      // A genuinely unknown conversation — nothing to raise the interrupt on.
       return { status: 404, json: { error: "unknown conversation" } };
     }
-    // The conversation exists but its in-memory BRIDGE may be absent — it was
-    // idle-suspended, or hydrated-but-not-revived after an agent-host restart, or
-    // torn down by a model switch. The agent that asked is still running in the
-    // sandbox and is blocked on the answer, so we MUST NOT drop it on the floor:
-    // revive to rebuild the bridge, then raise. Without this the route dropped it
-    // and the broker (fire-and-forget) swallowed it — "the approval window never
-    // appeared." raiseInterrupt persists the interrupt, so it also survives a
-    // reload once raised. Key off the RESOLVED conversation's real id (conv.id),
-    // not ctx.params.id, which may be the short hash.
+    // The bridge may be absent (idle-suspended, hydrated-but-not-revived, or torn down by
+    // a model switch) while the agent is still blocked on the answer, so revive to rebuild
+    // it, keyed by the resolved conv.id rather than the possibly-short path id.
     let bridge = sessions.get(conv.id)?.bridge;
     if (!bridge) {
       try {
@@ -1274,10 +1023,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   // --- Scheduled tasks (UI settings page) ----------------------------------------
-  // Proxy CRUD to the scheduler service, SCOPED to the caller: every call passes
-  // x-auth-user = the caller's id (or null → the unowned/anonymous bucket, which is
-  // a valid scope, not a refusal — same as the agent MCP tools). Absent scheduler
-  // (no SCHEDULER_URL) → 501.
+  // Proxy CRUD to the scheduler scoped to the caller (x-auth-user = the caller's id, or
+  // null for the anonymous bucket); 501 without a scheduler.
   const scheduler = deps.scheduler;
   const scopeOwner = (ctx: { user: { anonymous: boolean; id: string } }) =>
     ctx.user.anonymous ? null : ctx.user.id;

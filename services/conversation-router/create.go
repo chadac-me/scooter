@@ -14,33 +14,22 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
-// Creating a conversation is a control-plane write: mint the id, write the
-// Conversation CR, return. No agent-host is consulted, so this succeeds even when
-// the fleet is at capacity — the conversation is Pending until assigned.
+// Creating a conversation is a control-plane write that consults no agent-host, so it
+// succeeds even when the fleet is at capacity and the conversation is Pending until assigned.
 
-// NewConversation is the conversation to persist: the CR spec, plus the create-time
-// metadata that is NOT part of the CR.
-//
-// Title is separate from Spec on purpose. It used to be put in the spec map, where the
-// cluster's structural CRD schema — which has no `title` property — silently PRUNED it,
-// and only dev mode (a Postgres row, no schema) ever saw it. That made an apiserver
-// pruning rule the mechanism a feature depended on: invisible in the code, undetectable
-// at the call site, and one `title: {type: string}` away from changing behaviour in
-// production by accident. The field now says where it applies, and the CR carries only
-// what its schema declares. Why: PR #556.
+// NewConversation is the conversation to persist: the CR spec, plus create-time metadata that is not part of the CR.
 type NewConversation struct {
 	Name string
 	Spec map[string]interface{}
-	// Title is create-time ROW metadata, not a CR field. In cluster it is dropped here
-	// rather than by the apiserver: the title arrives later, from the agent's <title>.
+	// Title is create-time row metadata, not a CR field, and is dropped in cluster.
 	Title string
 }
 
-// ConversationCreator creates a Conversation CR. Narrow so the route is testable
-// with a hand-written fake.
+// ConversationCreator creates a Conversation CR.
 type ConversationCreator interface {
 	Create(ctx context.Context, c NewConversation) error
 }
@@ -52,8 +41,7 @@ type dynamicCreator struct {
 }
 
 func (d *dynamicCreator) Create(ctx context.Context, c NewConversation) error {
-	// c.Title is deliberately not written: it is not in the CRD schema, so the apiserver
-	// would prune it anyway. Dropping it here makes that visible in the code.
+	// c.Title is not in the CRD schema and is not written.
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": conversationGVR.Group + "/" + conversationGVR.Version,
 		"kind":       "Conversation",
@@ -73,15 +61,7 @@ func (d *dynamicCreator) Remove(ctx context.Context, name string) error {
 	return err
 }
 
-// dualCreator writes both stores on create: the Conversation CR and the `conversations` row. It
-// exists so the row can become the source of truth for existence — nothing can read a row that no
-// writer produces, and in the cluster stack nothing produced one at create time.
-//
-// BOTH writes are REQUIRED now; see PR #726.
-//
-// conversationRowWriter is the row half. Narrow for the same reason ConversationCreator is: the
-// interesting behaviour here is which failure is fatal, and that must be testable without a
-// Postgres.
+// conversationRowWriter is the row half of dualCreator, kept narrow so which failure is fatal is testable without a Postgres.
 type conversationRowWriter interface {
 	CreateConversation(ctx context.Context, c NewConversation) error
 }
@@ -91,6 +71,23 @@ type crRemover interface {
 	Remove(ctx context.Context, name string) error
 }
 
+// mirrorClaim copies a claim onto the CR status, best-effort.
+func mirrorClaim(dyn dynamic.Interface, namespace string) func(context.Context, Assignment, string) {
+	return func(ctx context.Context, as Assignment, ip string) {
+		body, _ := json.Marshal(map[string]interface{}{"status": map[string]interface{}{
+			"phase": "Assigned", "hostPod": as.Pod, "hostIP": ip, "generation": as.Gen,
+		}})
+		mctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		_, err := dyn.Resource(conversationGVR).Namespace(namespace).Patch(
+			mctx, as.ConvID, types.MergePatchType, body, metav1.PatchOptions{}, "status")
+		if err != nil && !apierrors.IsNotFound(err) {
+			logger("assign").Warn("CR status mirror failed", convAttr(as.ConvID), errAttr(err))
+		}
+	}
+}
+
+// dualCreator writes both the Conversation CR and the `conversations` row on create, so the row can be the source of truth for existence.
 type dualCreator struct {
 	cr   ConversationCreator
 	rows conversationRowWriter
@@ -104,7 +101,7 @@ func (d *dualCreator) Create(ctx context.Context, c NewConversation) error {
 		log := logger("create")
 		remover, ok := d.cr.(crRemover)
 		if ok {
-			// NOT the request's context, which may itself be the cancellation.
+			// Not the request's context, which may itself be the cancellation.
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			if rerr := remover.Remove(rctx, c.Name); rerr != nil {
@@ -120,21 +117,17 @@ func (d *dualCreator) Create(ctx context.Context, c NewConversation) error {
 	return nil
 }
 
-// createRequest is the accepted body. No threadId: the server mints the id.
+// createRequest is the accepted body; the server mints the id.
 type createRequest struct {
 	Title    string `json:"title"`
 	Model    string `json:"model"`
 	ParentID string `json:"parentId"`
-	// Owner is PRIVILEGED and honored ONLY for a TokenReview-verified in-cluster
-	// caller (webhooks/scheduler creating on a human's behalf) — see trustedcaller.go.
-	// From anyone else it is ignored, never an error.
+	// Owner is honored only for a TokenReview-verified in-cluster caller (see trustedcaller.go) and ignored from anyone else.
 	Owner string `json:"owner"`
 }
 
 type createResponse struct {
-	// The conversation id. It IS the thread id — manager.ts:648 sets
-	// `const id: SessionId = threadId`, so they are the same value by
-	// construction. This endpoint returns it once.
+	// The conversation id, which is also the thread id.
 	ID        string `json:"id"`
 	Status    string `json:"status"`
 	Title     string `json:"title"`
@@ -150,12 +143,7 @@ func IsConversationCreate(method, path string) bool {
 // modelRe guards the only client-controlled string that reaches the CR spec.
 var modelRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
-// serveConversationCreate returns 201 without waiting for assignment or provisioning.
-//
-// `owner` is the ingress-resolved caller (ownerFrom). `trusted` may be nil; when it is
-// not, a body `owner` from a verified in-cluster caller wins over the header — that is
-// the path webhooks/scheduler use, because the header's NAME is deployment-specific and
-// they do not come through the ingress that sets it (#527).
+// serveConversationCreate returns 201 without waiting for assignment; `owner` is the ingress-resolved caller, and a body `owner` from a `trusted` in-cluster caller wins over it.
 func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator ConversationCreator, owner string, trusted TrustedCaller) {
 	var req createRequest
 	if r.Body != nil {
@@ -172,8 +160,7 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 	}
 
 	if req.Owner != "" && req.Owner != owner {
-		// Verify only when it would change the outcome: a browser create carries no
-		// body owner, so it never pays the TokenReview round-trip.
+		// Verify only when it would change the outcome, so a browser create never pays the TokenReview round-trip.
 		if trusted != nil && trusted(r.Context(), r) {
 			owner = req.Owner
 		} else {
@@ -195,9 +182,7 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	// The title rides ALONGSIDE the spec, not in it: dev mode persists it on the row (so an
-	// API-seeded conversation that is never prompted still lists with its title —
-	// sessions.spec.ts "fresh first visit", fast-only), and the CR has no field for it.
+	// The title rides alongside the spec because the CR has no field for it.
 	if err := creator.Create(ctx, NewConversation{Name: id, Spec: spec, Title: req.Title}); err != nil {
 		logger("create").Error("conversation create failed",
 			convAttr(id),

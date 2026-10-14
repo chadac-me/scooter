@@ -20,9 +20,7 @@
     config = {
       src = ./.;
 
-      # The UI row that used to be hardcoded in ui/src/{sourceIcon.tsx,
-      # toolCallView.ts,sessions.ts}: a deployment without this contrib now has no
-      # GitLab chip, icon or card, instead of a dead one. Why: PR #601.
+      # The UI row: the GitLab chip, icon and card.
       ui = {
         source = { label = "GitLab"; icon = ./icon.svg; color = "#FC6D26"; linkProvider = true; };
         tools.gitlab_comment = {
@@ -34,8 +32,7 @@
       services.broker.enable = true;
       services.webhooks = {
         enable = true;
-        # Only this half reads Jira keys (MR titles, branches, descriptions), and the
-        # grammar is jira's. Why: PR #583.
+        # Only this half reads Jira keys, and the grammar is jira's.
         pythonDeps = ps: [ ps.scooterContrib.jira ];
       };
     };

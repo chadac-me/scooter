@@ -1,19 +1,9 @@
 { lib, python3Packages, scooterLib, ... }:
 
-# scooter_broker_lib — the broker extension surface (provider/transport/source
-# contracts + reusable building blocks). A broker provider — in-tree or a contrib
-# — build-depends on this instead of the broker app, which breaks the app<->contrib
-# build cycle. Depends only on scooter_lib.
-#
-# NOTE the absent pyjwt/cryptography: those were here only for the GitHub App
-# credential source, which is github's implementation and now sits in
-# contrib/github/. A shared lib pulling a crypto stack for one integration was
-# the boundary being wrong out loud. See PR #567.
-#
-# sqlalchemy IS here, by that same test: three stores already compose `store.py`
-# (aws, registry, shares) and a contrib that owns a table is the fourth. The DB
-# DRIVERS stay with the app — engine creation is lazy, so asyncpg/aiosqlite are
-# only needed where a connection is actually opened. See PR #622.
+# scooter_broker_lib: the broker extension surface (provider/transport/source
+# contracts and building blocks) that a provider build-depends on instead of the
+# broker app. Depends only on scooter_lib; the DB drivers stay with the app since
+# engine creation is lazy.
 
 python3Packages.buildPythonPackage {
   pname = "scooter-broker-lib";
@@ -28,10 +18,7 @@ python3Packages.buildPythonPackage {
     fastapi
     httpx
     sqlalchemy
-    # fastmcp owns the MCP protocol, schema generation and per-request middleware, so
-    # the tool surface is a declaration layer rather than a protocol implementation.
-    # It belongs HERE and not just in the app, unlike pyjwt: a contrib declaring tools
-    # imports it directly. Why: issue #700.
+    # A contrib declaring MCP tools imports fastmcp directly.
     fastmcp
   ];
 
@@ -39,9 +26,8 @@ python3Packages.buildPythonPackage {
     pytestCheckHook
     pytest-asyncio
   ];
-  # Every sub-package, so a transport or source that fails to import is this
-  # build's failure rather than a provider quietly missing at broker startup —
-  # the whole point of making the surface a real build dependency.
+  # Every sub-package, so a broken import fails this build rather than a provider
+  # quietly missing at broker startup.
   pythonImportsCheck = [
     "scooter_broker_lib.types"
     "scooter_broker_lib.registry"

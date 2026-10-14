@@ -1,17 +1,12 @@
-# nixosTest: the mcpServers option renders a unit + the discovery manifest,
-# auto-assigns ports, mints a bearer token, and binds loopback by default.
-#
-# Uses FAKE MCP servers (a python http.server) rather than a real one, so the VM
-# stays hermetic — no lazy `uv tool run mcp-proxy` fetch inside the test. What is
-# under test is the MODULE's contract with the agent-host McpServerRegistry, not
-# any particular MCP implementation.
+# nixosTest: the mcpServers option renders a unit and the discovery manifest,
+# auto-assigns ports, and binds loopback by default. Fake python http.servers
+# stand in for real MCP servers so the VM stays hermetic; what is under test is
+# the module's contract with the agent-host McpServerRegistry.
 
 { pkgs, lib, sandboxModule }:
 
 let
-  # Answers 200 on /mcp, echoing the conversation id so we can prove the unit
-  # recovered CONVERSATION_ID from PID 1's environ. Binds the address+port it is
-  # told, so the loopback-by-default claim is testable.
+  # Answers 200 on /mcp echoing CONVERSATION_ID, bound to the address and port it is given.
   fakeServer = pkgs.writeShellScript "fake-mcp-server" ''
     set -euo pipefail
     exec ${pkgs.python3}/bin/python3 - "$1" "$2" <<'PY'
@@ -37,25 +32,16 @@ pkgs.testers.runNixOSTest {
   nodes.machine = { lib, ... }: {
     imports = [ sandboxModule ];
 
-    # `ss` for the bind-address assertions. Declared HERE rather than assumed: it is
-    # not in the sandbox image's systemPackages, and the loopback-bind check is the
-    # security property this test exists to prove — it must not silently skip.
+    # `ss` for the bind-address assertions; it is not in the sandbox image's systemPackages.
     environment.systemPackages = [ pkgs.iproute2 ];
 
-    # Same container-env reproduction the web-services test uses: the kernel passes
-    # unrecognized key=VALUE cmdline args to INIT's environment, so CONVERSATION_ID
-    # lands on /proc/1/environ but NOT in the systemd manager env. The module must
-    # recover it, so we deliberately do not set it in the unit environment.
+    # Unrecognised kernel cmdline args land on PID 1's environ but not in the systemd manager env, so the module must recover CONVERSATION_ID itself.
     boot.kernelParams = [ "CONVERSATION_ID=conv-test" ];
 
-    # A web service alongside, so the test proves the two port spaces really are
-    # disjoint (ttyd 7681 vs the 9700 MCP base) rather than trusting the assertion,
-    # and gives the restartIfChanged contrast in step 6 something to compare against.
-    # Declaration only — ttyd is a lazy tool we must not build inside the VM.
+    # A web service alongside, declared only, for the port-space and restartIfChanged contrasts.
     webServices.terminal.enable = true;
 
-    # Two auto-port servers ("alpha" < "beta" -> 9700, 9701) and one explicit, to
-    # prove assignment is by sorted index and that the two kinds coexist.
+    # Two auto-port servers and one explicit, so assignment by sorted index and coexistence are both covered.
     mcpServers.alpha = {
       enable = true;
       description = "Alpha test server";
@@ -82,8 +68,7 @@ pkgs.testers.runNixOSTest {
     data = json.loads(machine.succeed("cat /run/scooter/mcp-servers.json"))
     srv = { s["name"]: s for s in data["servers"] }
 
-    # 1. Ports are AUTO-ASSIGNED by sorted index from the 9700 base, and an
-    #    explicit port is left alone.
+    # 1. Ports are auto-assigned by sorted index from the 9700 base, and an explicit port is left alone.
     assert srv["alpha"]["port"] == 9700, srv
     assert srv["beta"]["port"] == 9701, srv
     assert srv["gamma"]["port"] == 9911, srv
@@ -91,45 +76,33 @@ pkgs.testers.runNixOSTest {
     assert srv["alpha"]["description"] == "Alpha test server", srv
     assert srv["alpha"]["path"] == "/mcp", srv
 
-    # 2. The manifest carries NO credential. Access control here is the loopback
-    #    bind (asserted in 4), not a secret — a token nothing enforces would read as
-    #    auth without being it. One belongs with the proxy that checks it, if and
-    #    when a server is exposed off-loopback.
+    # 2. The manifest carries no credential; access control is the loopback bind.
     assert "token" not in json.dumps(data).lower(), data
 
-    # 3. autoStart: alpha is up on its own; beta/gamma are declared but not started
-    #    (the agent has no way to know it must start a server first, so the DEFAULT
-    #    is on — but the option has to actually work).
+    # 3. autoStart defaults on, so alpha is up on its own while beta and gamma are declared but not started.
     machine.wait_for_unit("mcp-alpha.service")
     machine.wait_for_open_port(9700)
     machine.fail("systemctl is-active --quiet mcp-beta.service")
     machine.fail("systemctl is-active --quiet mcp-gamma.service")
 
-    # 4. LOOPBACK BY DEFAULT + firewall closed. These pods have no NetworkPolicy, so
-    #    a 0.0.0.0 bind would publish the agent's tools to every pod that can route
-    #    here. Assert both halves: nothing listening off-loopback, and no accept rule.
+    # 4. Loopback by default and the firewall closed: nothing listens off-loopback and there is no accept rule.
     machine.succeed("ss -ltn | grep -q '127.0.0.1:9700'")
     machine.fail("ss -ltn | grep -qE '0\\.0\\.0\\.0:9700|\\*:9700'")
     machine.succeed("systemctl is-active --quiet firewall")
     machine.fail("iptables -S nixos-fw | grep -E -- '--dport 9700 .*-j nixos-fw-accept'")
 
-    # 5. It serves, and CONVERSATION_ID was recovered from /proc/1/environ (the unit
-    #    does not declare it, so "conv-test" can only have come from the ExecStartPre).
+    # 5. It serves, and CONVERSATION_ID was recovered from /proc/1/environ since the unit does not declare it.
     machine.succeed("curl -fsS http://127.0.0.1:9700/mcp | grep -q 'mcp-ok:conv-test'")
     assert "CONVERSATION_ID" not in machine.succeed("systemctl cat mcp-alpha.service")
 
     # extraConfig is merged over the generated unit.
     assert "X-Mcp-Test=yes" in machine.succeed("systemctl cat mcp-alpha.service")
 
-    # 6. The unit must NOT opt out of restart-on-change the way webServices does
-    #    (X-RestartIfChanged=false): an auto-assigned port can be renumbered by a
-    #    rebuild, and a server that does not rebind leaves the manifest advertising a
-    #    port nothing is listening on.
+    # 6. The unit must restart on change, since a rebuild can renumber an auto-assigned port.
     assert "X-RestartIfChanged=false" not in machine.succeed("systemctl cat mcp-alpha.service")
     assert "X-RestartIfChanged=false" in machine.succeed("systemctl cat webservice-terminal.service")
 
-    # 7. scooter-mcp drives the units without a rebuild, and persists intent to the
-    #    workspace PVC so the boot restore brings them back after a resume.
+    # 7. scooter-mcp drives the units without a rebuild and persists intent to the workspace PVC.
     machine.succeed("command -v scooter-mcp")
     machine.succeed("scooter-mcp list | grep -q alpha")
     machine.succeed("scooter-mcp status alpha | grep -q active")
@@ -137,10 +110,10 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("systemctl is-active --quiet mcp-beta.service", timeout=30)
     machine.succeed("grep -q beta /workspace/.scooter/mcp.json")
     machine.succeed("scooter-mcp stop beta")
-    machine.fail("grep -q beta /workspace/.scooter/mcp.json")   # stopped => not restored
-    machine.fail("scooter-mcp start nope")                      # unknown => non-zero
+    machine.fail("grep -q beta /workspace/.scooter/mcp.json")
+    machine.fail("scooter-mcp start nope")
 
-    # 8. restore() re-starts what was running before a pod recreate.
+    # 8. restore re-starts what was running before a pod recreate.
     machine.succeed("scooter-mcp start beta")
     machine.succeed("systemctl stop mcp-beta.service")
     machine.succeed("scooter-mcp restore")

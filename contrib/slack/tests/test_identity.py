@@ -1,9 +1,4 @@
-"""Slack owner resolution: a Slack user id -> the email Scooter matches on.
-
-Moved out of the webhooks app's test_identity_resolve with the resolver (PR #588).
-The generic chain (email -> agent-host /users/by-email) stays covered there and in
-the lib; what is slack's own is the users.info call and its gating.
-"""
+"""Slack owner resolution: a Slack user id to the email Scooter matches on, via users.info."""
 
 from __future__ import annotations
 
@@ -36,8 +31,7 @@ async def test_slack_email(monkeypatch):
         return httpx.Response(200, json={"ok": True, "user": {"profile": {"email": "a@x.io"}}})
 
     _patch(monkeypatch, handler)
-    # Through the lib registry, not the function: the registration is what the
-    # webhooks service actually calls.
+    # Through the lib registry, which is what the webhooks service calls.
     assert await lib_identity.get_user_email("slack", "U123") == "a@x.io"
 
 
@@ -53,8 +47,7 @@ async def test_slack_email_no_token(monkeypatch):
 
 
 async def test_no_raw_slack_id_reaches_a_log_field(monkeypatch, caplog):
-    """An identifier is personal data: it must reach a log line only pseudonymized,
-    since a structured field is searchable and inherits the store's retention."""
+    """An identifier is personal data and reaches a log line only pseudonymized."""
     import logging
 
     secret_id = "U-SECRET-SLACK-ID"

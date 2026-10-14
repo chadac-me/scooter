@@ -1,5 +1,5 @@
-// Postgres access for the router: a read pool (Store, read-only for the list/LISTEN path) and a
-// narrow write pool (WriteStore) for idle star/title writes. Read-only guarantee + why: PR #475.
+// Postgres access for the router: a read-only pool (Store) for the list/LISTEN path and a
+// narrow write pool (WriteStore) for idle star/title writes.
 package main
 
 import (
@@ -14,9 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ConversationRow is the durable metadata the sidebar list needs. It deliberately omits
-// pending_queue (the queued-message blob) — the list never reads it, and leaving it out keeps
-// this a projection, not a full mirror of the agent-host row.
+// ConversationRow is the durable metadata the sidebar list needs, a projection rather than a full mirror of the agent-host row.
 type ConversationRow struct {
 	ID             string
 	ThreadID       string
@@ -28,23 +26,16 @@ type ConversationRow struct {
 	ParentID       *string
 	UserTitled     *bool
 	Starred        *bool
-	// Columns, NOT a read-time join against the CR (status.phase, spec.sandboxRef). Every writer of
-	// a phase reaches them: agent-host writes Assigned/Suspended, the controller mirrors Failed /
-	// Pending / the Suspended drift repair and converges the column each reconcile pass. NULL is a
-	// legal read — statusForPhase("") is "running", with an empty sandbox name. Why: PR #654.
+	// Columns converged by every phase writer, never a read-time join against the CR; NULL is a legal read.
 	Phase      *string
 	SandboxRef *string
 }
 
-// conversationColumns is the ONE projection list, shared by the two SELECTs and the write path's
-// RETURNING. They drifted apart easily while each spelled its own columns — and a RETURNING that
-// omitted sandbox_ref would make a title PATCH answer with a blank sandbox name, because the PATCH
-// response is built by the same makeListRow as the list.
+// conversationColumns is the one projection list, shared by the SELECTs and the write path's RETURNING so they cannot drift.
 const conversationColumns = `id, thread_id, title, created_at, last_activity_at,
                              model, owner, parent_id, user_titled, starred, phase, sandbox_ref`
 
-// scannable is satisfied by both pgx.Row and pgx.Rows, so one scan helper serves every read and the
-// column ORDER cannot drift from conversationColumns at one call site but not another.
+// scannable is satisfied by both pgx.Row and pgx.Rows, so one scan helper serves every read.
 type scannable interface {
 	Scan(dest ...any) error
 }
@@ -54,21 +45,14 @@ func scanConversation(s scannable, c *ConversationRow) error {
 		&c.Model, &c.Owner, &c.ParentID, &c.UserTitled, &c.Starred, &c.Phase, &c.SandboxRef)
 }
 
-// Store is a read-only handle on the agent_host database. nil when no DSN is configured
-// (the router then runs exactly as before — DB access is additive, never required to proxy).
+// Store is a read-only handle on the agent_host database, nil when no DSN is configured.
 type Store struct {
 	pool *pgxpool.Pool
-	// connConfig is the parsed, read-only-pinned single-connection config. The LISTEN loop
-	// (events.go) opens a DEDICATED connection from it rather than borrowing a pool conn: a
-	// LISTEN holds its connection for the process lifetime, which would permanently starve the
-	// tiny (MaxConns=4) request pool.
+	// connConfig is the read-only-pinned single-connection config the LISTEN loop opens a dedicated connection from, since a LISTEN would otherwise starve the tiny request pool.
 	connConfig *pgx.ConnConfig
 }
 
-// storeDSNFromEnv assembles the connection string for the agent_host database from the same
-// AGENT_HOST_DB_* variables agent-host reads, EXCEPT the credentials name the router's
-// read-only role. Prefers an explicit AGENT_HOST_DB_DSN. Returns "" when no password is set —
-// the signal that DB access is not configured (dev / pg-less), NOT an error.
+// storeDSNFromEnv assembles the agent_host connection string from AGENT_HOST_DB_DSN or the AGENT_HOST_DB_* parts, returning "" when no password is set.
 func storeDSNFromEnv() string {
 	if dsn := os.Getenv("AGENT_HOST_DB_DSN"); dsn != "" {
 		return dsn
@@ -89,26 +73,24 @@ func storeDSNFromEnv() string {
 	return dsn
 }
 
-// buildPoolConfig parses dsn and pins the connection to read-only. Factored out so the
-// read-only guard is unit-testable without a live database.
+// buildPoolConfig parses dsn and pins the connection to read-only.
 func buildPoolConfig(dsn string) (*pgxpool.Config, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
-	// Client-side half of the read-only guarantee (the DB role is the other half). Applied to
-	// every connection the pool opens, so nothing from this process can begin a writing txn.
+	// The client-side half of the read-only guarantee; the DB role is the other half.
 	if cfg.ConnConfig.RuntimeParams == nil {
 		cfg.ConnConfig.RuntimeParams = map[string]string{}
 	}
 	cfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
-	// A proxy, not a batch worker: keep the footprint tiny and never block a request on the DB.
+	// Keep the footprint tiny and never block a request on the DB.
 	cfg.MinConns = 0
 	cfg.MaxConns = 4
 	return cfg, nil
 }
 
-// OpenStore connects the read-only pool. The caller must Close it.
+// OpenStore connects the read-only pool, which the caller must Close.
 func OpenStore(ctx context.Context, dsn string) (*Store, error) {
 	cfg, err := buildPoolConfig(dsn)
 	if err != nil {
@@ -121,27 +103,19 @@ func OpenStore(ctx context.Context, dsn string) (*Store, error) {
 	return &Store{pool: pool, connConfig: cfg.ConnConfig}, nil
 }
 
-// NewListenConn opens a DEDICATED (non-pool) read-only connection for the LISTEN loop. It carries
-// the same default_transaction_read_only guard as the pool (LISTEN is permitted under it — the
-// notification stream is not a transaction). The caller owns the connection and must Close it;
-// the loop reconnects through here after a drop.
+// NewListenConn opens a dedicated read-only connection for the LISTEN loop, which the caller must Close.
 func (s *Store) NewListenConn(ctx context.Context) (*pgx.Conn, error) {
 	return pgx.ConnectConfig(ctx, s.connConfig)
 }
 
-// CountConversations reads the conversations table — used at boot to VERIFY the SELECT grant
-// actually works (a bad grant surfaces as an error here, not silently later).
+// CountConversations reads the conversations table, verifying the SELECT grant at boot.
 func (s *Store) CountConversations(ctx context.Context) (int64, error) {
 	var n int64
 	err := s.pool.QueryRow(ctx, "SELECT count(*) FROM conversations").Scan(&n)
 	return n, err
 }
 
-// Conversations returns every conversation's durable metadata, most-recently-active first — the row
-// set the fleet-aggregate list is built from. This ORDER BY is the ONLY thing that establishes the
-// GET /conversations order: assembleList filters but does not re-sort, so changing it here changes
-// the endpoint. created_at breaks ties — rows sharing a last_activity_at (bulk-migrated ones do)
-// would otherwise come back in an arbitrary order that reshuffles between polls. Why: issue #540.
+// Conversations returns every conversation's durable metadata most-recently-active first with created_at breaking ties; this ORDER BY alone establishes the GET /conversations order.
 func (s *Store) Conversations(ctx context.Context) ([]ConversationRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+conversationColumns+`
@@ -162,10 +136,7 @@ func (s *Store) Conversations(ctx context.Context) ([]ConversationRow, error) {
 	return out, rows.Err()
 }
 
-// ConversationByID reads ONE conversation's durable metadata — the row the LISTEN loop re-reads on
-// each notification to build an `upsert` frame (the NOTIFY payload carries only the id; the row is
-// authoritative). Returns (nil, nil) when the row is gone — a delete that raced ahead of the read —
-// so the caller simply emits nothing (the poll reconciles removals).
+// ConversationByID reads one conversation's durable metadata, returning (nil, nil) when the row is gone.
 func (s *Store) ConversationByID(ctx context.Context, id string) (*ConversationRow, error) {
 	var c ConversationRow
 	err := scanConversation(s.pool.QueryRow(ctx, `
@@ -181,21 +152,19 @@ func (s *Store) ConversationByID(ctx context.Context, id string) (*ConversationR
 	return &c, nil
 }
 
-// Close releases the pool. Safe on a nil Store (the not-configured case).
+// Close releases the pool and is safe on a nil Store.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
 		s.pool.Close()
 	}
 }
 
-// WriteStore is the router's narrow production write path to agent_host.conversations (title /
-// starred / user_titled, idle conversations only). nil when no DSN is configured. Why: PR #475.
+// WriteStore writes conversations: idle metadata, creates, assignment claims.
 type WriteStore struct {
 	pool *pgxpool.Pool
 }
 
-// buildWritePoolConfig pins the pool READ-WRITE, overriding the role's read-only default (a startup
-// option outranks ALTER ROLE SET). Tiny pool — writes are rare and must never block a request.
+// buildWritePoolConfig pins the pool read-write, overriding the role's read-only default.
 func buildWritePoolConfig(dsn string) (*pgxpool.Config, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -206,11 +175,11 @@ func buildWritePoolConfig(dsn string) (*pgxpool.Config, error) {
 	}
 	cfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "off"
 	cfg.MinConns = 0
-	cfg.MaxConns = 2
+	cfg.MaxConns = 8
 	return cfg, nil
 }
 
-// OpenWriteStore connects the read-write pool. The caller must Close it.
+// OpenWriteStore connects the read-write pool, which the caller must Close.
 func OpenWriteStore(ctx context.Context, dsn string) (*WriteStore, error) {
 	cfg, err := buildWritePoolConfig(dsn)
 	if err != nil {
@@ -223,33 +192,29 @@ func OpenWriteStore(ctx context.Context, dsn string) (*WriteStore, error) {
 	return &WriteStore{pool: pool}, nil
 }
 
-// writeColumns is the RETURNING list — the same projection ConversationByID reads, so the write's
-// row builds the wire response without a second SELECT.
+// writeColumns is the RETURNING list, the same projection ConversationByID reads.
 const writeColumns = conversationColumns
 
-// SetStarred sets the star flag and returns the updated row ((nil,nil) if the row raced a delete).
+// SetStarred sets the star flag and returns the updated row, (nil, nil) if the row raced a delete.
 func (s *WriteStore) SetStarred(ctx context.Context, id string, starred bool) (*ConversationRow, error) {
 	return scanUpdated(s.pool.QueryRow(ctx,
 		`UPDATE conversations SET starred = $2 WHERE id = $1 RETURNING `+writeColumns, id, starred))
 }
 
-// SetUserTitle sets the title AND locks it (user_titled=true), mirroring agent-host's setUserTitle.
+// SetUserTitle sets the title and locks it with user_titled=true, mirroring agent-host's setUserTitle.
 func (s *WriteStore) SetUserTitle(ctx context.Context, id, title string) (*ConversationRow, error) {
 	return scanUpdated(s.pool.QueryRow(ctx,
 		`UPDATE conversations SET title = $2, user_titled = true WHERE id = $1 RETURNING `+writeColumns,
 		id, title))
 }
 
-// CreateConversation inserts the create-time row in the cluster stack, alongside the CR that
-// dualCreator writes. It is what makes a conversation created through the API but never prompted
-// visible to GET /conversations, which reads rows: without it the row appears only when agent-host
-// first persists meta.
+// CreateConversation inserts the create-time row alongside the CR, so a conversation created but never prompted still lists.
 func (s *WriteStore) CreateConversation(ctx context.Context, c NewConversation) error {
 	_, err := s.pool.Exec(ctx, insertConversationSQL, conversationRowOf(c, time.Now().UnixMilli()).args()...)
 	return err
 }
 
-// scanUpdated maps a RETURNING row to a ConversationRow; no-rows (raced delete) becomes (nil, nil).
+// scanUpdated maps a RETURNING row to a ConversationRow, with no rows becoming (nil, nil).
 func scanUpdated(row pgx.Row) (*ConversationRow, error) {
 	var c ConversationRow
 	err := scanConversation(row, &c)
@@ -262,7 +227,7 @@ func scanUpdated(row pgx.Row) (*ConversationRow, error) {
 	return &c, nil
 }
 
-// Close releases the write pool. Safe on a nil WriteStore (the not-configured case).
+// Close releases the write pool and is safe on a nil WriteStore.
 func (s *WriteStore) Close() {
 	if s != nil && s.pool != nil {
 		s.pool.Close()
@@ -276,6 +241,5 @@ func envOr(k, def string) string {
 	return def
 }
 
-// verifyTimeout bounds the boot-time read so a slow/unreachable DB can't delay the router
-// coming up to serve proxy traffic (which does not depend on the DB).
+// verifyTimeout bounds the boot-time read so a slow DB cannot delay the router serving proxy traffic.
 const verifyTimeout = 5 * time.Second

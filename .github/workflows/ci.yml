@@ -1,56 +1,26 @@
 name: CI
 
-# Runs the fast check tier on every PR and on pushes to main:
-#   - nix flake show          (flake evaluates)
-#   - check-manifests         (example platform config renders, resources present)
-#   - typecheck               (agent-host + ui)
-#   - unit tests              (vitest against fakes, no cluster)
-#   - broker + webhooks builds (their nix build runs pytest via pytestCheckHook)
-#
-# The KVM-backed dev-env nixosTests run as a parallel MATRIX (one job per VM
-# test) below, so they finish in the time of the slowest single test rather than
-# 8 serial boots.
-#
-# Cluster (e2e full + integration): a PATH-GATED k3d job (`cluster-image-boot`) runs the
-# self-contained image-boot specs (sandbox-os + overlay-store) on a real cluster
-# when the sandbox image / its modules / those specs change — covering the OCI
-# packaging + in-pod systemd boot + the local-overlay store's PROD topology that
-# the VM tests can't. The rest of the cluster integration suite (controller/broker/
-# webhooks) and the e2e suites stay manual — see the `cluster` / `e2e` justfile
-# recipes + docs/TESTING.md.
-#
-# BINARY CACHE (Cachix) — one-time setup so expensive closures (e.g. the
-# scooter-module NixOS toplevel) are built ONCE and pulled across branches/PRs
-# instead of rebuilt cold per branch:
-#   1. Create a cache named `scooter` at https://app.cachix.org (public read).
-#   2. Generate a write auth token; add it as the repo secret CACHIX_AUTH_TOKEN.
-# Without the secret CI still works — cachix-action pulls read-only (no push),
-# so forks/contributors are unaffected; they just don't populate the cache.
+# The check tier for PRs, main and the nightly: the fast checks, the nixosTest
+# matrix, the path-gated k3d jobs, the sharded e2e suites and the opt-in flake and
+# full-target jobs. Every reporting job writes one section of a shared PR comment,
+# and `ci-summary` is the single required check that evaluates those sections
+# against .github/ci-gates.yml. The Cachix cache `scooter` is pushed to when
+# CACHIX_AUTH_TOKEN is set and pulled read-only otherwise.
 
 on:
   pull_request:
-    # `labeled` so adding `flake-check` / `e2e-full-flake-check` (or `e2e-full`,
-    # `full-nixos-tests`) to an open PR re-triggers CI and runs the opt-in job.
+    # `labeled` so adding an opt-in label (`flake-check`, `e2e-full-flake-check`,
+    # `e2e-full`, `full-nixos-tests`) to an open PR re-runs CI.
     types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
-  # MERGE QUEUE. Required for the queue to function: GitHub tests each entry on a
-  # temporary `gh-readonly-queue/*` ref built from main + the entries ahead of it,
-  # and reports the required checks against THAT ref. Without this trigger the
-  # checks never run and every queue entry times out.
-  #
-  # This is what catches a SEMANTIC merge collision — two PRs that touch no common
-  # line but disagree about a signature. #318 added a required `owner` argument
-  # while #322 (branched earlier) still called the old one: both green, the merge
-  # textually clean, and main went red.
+  # The merge queue tests each entry on a temporary `gh-readonly-queue/*` ref and
+  # needs this trigger for the required checks to run there.
   merge_group:
-  # Nightly: run the FULL nixosTest set incl. the heavy ones (see HEAVY_TESTS
-  # below) that are too slow for per-PR (a ~1h from-source NixOS toplevel build).
-  # Also runs the flake-detection job (the whole e2e suite, each test 5×).
+  # Nightly: the full nixosTest set including HEAVY_TESTS, plus the flake-detection job.
   schedule:
     - cron: "0 7 * * *" # 07:00 UTC daily
-  # Manual trigger (Actions tab) — handy for running the flake-detection job on
-  # demand without waiting for the nightly.
+  # Manual trigger for running the nightly-only jobs on demand.
   workflow_dispatch:
 
 # Cancel superseded runs on the same ref (e.g. a force-push to a PR branch).
@@ -70,51 +40,32 @@ jobs:
 
       - uses: nixbuild/nix-quick-install-action@v30
 
-      # Cachix binary cache: build-once-share-everywhere across branches/PRs, so
-      # an expensive closure (e.g. the scooter-module NixOS toplevel) is realised
-      # ONCE and pulled thereafter rather than rebuilt cold per branch. With the
-      # CACHIX_AUTH_TOKEN secret set it also PUSHES; without it (forks) it still
-      # PULLS read-only. See README/docs for creating the `scooter` cache.
+      # Cachix binary cache: pushes with CACHIX_AUTH_TOKEN set, pulls read-only without it.
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # The fast `just ci` bundle, run inside the pinned dev shell (gets `just`,
-      # node, npm from the flake). check-flake + check-manifests + typecheck +
-      # unit vitest. CI=1 makes vitest use the default (non-verbose) reporter.
+      # check-flake + check-manifests + typecheck + unit vitest inside the pinned dev
+      # shell; CI=1 selects vitest's default reporter.
       - name: just ci (flake check, typecheck, unit)
         env:
           CI: "1"
         run: nix develop --command just ci
 
-      # Python services: their nix build runs the test suite (pytestCheckHook).
-      # Building them here gives PR coverage of the Python services without a
-      # separate Python toolchain in CI. Keep in sync with the buildPythonApplication
-      # services (broker, webhooks, scheduler, conversation-controller,
-      # warm-store-controller).
-      #
-      # `scheduler` was MISSING from this list despite the "keep in sync" note above,
-      # so its suite never ran in CI — which is how a semantic merge collision (#318
-      # added a required `owner` arg; #322 branched earlier and called the old
-      # signature) landed on main with 8 failing tests and nothing to catch it.
-      #
-      # `.#contribs-all` is an aggregate over EVERY contrib variant, not a list to
-      # keep in sync — a new contrib is covered the day it lands. Building a service
-      # only covers the contribs it ships, which silently omits `example = true`
-      # ones. Why: PR #573.
+      # Each Python service's nix build runs its pytest suite (keep the list in sync
+      # with the buildPythonApplication services); `.#contribs-all` aggregates every
+      # contrib variant, including `example = true` ones no service build ships.
       - name: python service tests (nix build runs pytest)
         run: nix build .#broker .#webhooks .#scheduler .#conversation-controller .#warm-store-controller .#scooter-schema .#contribs-all --print-build-logs
 
-      # The generated Drizzle schema package + the agent-host that symlinks it in.
-      # Building .#agentHost under nix exercises the @scooter/schema image integration
-      # (tsc resolves the import via the nix symlink) — a failure surface the plain-npm
-      # `just typecheck` can't see, since it resolves @scooter/schema from the workspace.
+      # Building .#agentHost under nix resolves @scooter/schema through the nix
+      # symlink, which the workspace-resolving `just typecheck` cannot exercise.
       - name: agent-host + byoc-controller + generated Drizzle schema (nix)
         run: nix build .#scooter-schema-js .#agentHost .#byoc-controller --print-build-logs
 
-      # This job IS the 'fast' gate, so it reports itself. always(), or a red run
-      # would leave the gate pending forever and `ci-summary` could never resolve.
+      # This job is the 'fast' gate and reports itself; always() so a red run still
+      # resolves the gate for `ci-summary`.
       - name: post fast-checks section
         if: always() && github.event_name == 'pull_request'
         continue-on-error: true
@@ -135,15 +86,9 @@ jobs:
           node scripts/ci-report.mjs post --section fast --status "$status" \
             --summary "$summary" --body fast.md --labels "$LABELS"
 
-  # Build the OCI images — REQUIRED, always-on. Assembling the nix2container image
-  # (its per-layer builds over the whole system closure) is a distinct failure surface
-  # the nixosTests never touch (they build the NixOS toplevel, not the image) and the
-  # heavier path-gated k3d boot job (`cluster-image-boot`) doesn't gate on. A
-  # musl/static path leaking into the layer closure via a lazy-tool `.drv` broke this
-  # build while every required check stayed green (the bug that shipped in #95, only
-  # caught later at deploy). So build the images here on EVERY PR — including ones that
-  # only bump a flake input (e.g. nix-stubs) — so a broken image fails the PR red.
-  # Cheap-ish and Cachix-backed; no cluster needed.
+  # Assembling the nix2container image over the whole system closure is a failure
+  # surface neither the nixosTests nor the path-gated k3d job covers, so every PR
+  # builds it.
   image-build:
     name: build sandbox-os images
     runs-on: ubuntu-latest
@@ -154,18 +99,13 @@ jobs:
         with:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      # Build the sandbox image to completion — forces every layer derivation over the full
-      # system closure, so an unrealised/broken closure member fails here. (One image now:
-      # the overlay store is always on.)
+      # Building to completion forces every layer derivation over the full system closure.
       - name: nix build .#sandbox-os-image
         run: nix build .#sandbox-os-image --print-build-logs
 
-  # Image-size benchmark: measure every shipped image on the PR and diff it against
-  # origin/main, then post a sticky PR comment with the table. A SIGNAL (report-only,
-  # never fails the PR) so a closure that balloons is visible before it ships. The
-  # baseline is REBUILT from origin/main in this same job — accurate + self-contained;
-  # Cachix substitutes the unchanged images, so only what the PR actually changed
-  # rebuilds. PR-only (needs a PR to compare against + comment on).
+  # Measures every shipped image on the PR, rebuilds the baseline from origin/main in
+  # the same job (Cachix substitutes the unchanged images) and posts the diff as a
+  # report-only section. PR-only, since it needs a PR to compare against.
   image-sizes:
     name: image size benchmark
     runs-on: ubuntu-latest
@@ -176,7 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # Need main's history for the worktree baseline build (origin/main).
+          # main's history for the worktree baseline build.
           fetch-depth: 0
       - uses: nixbuild/nix-quick-install-action@v30
       - uses: cachix/cachix-action@v15
@@ -188,10 +128,8 @@ jobs:
       - name: measure PR image sizes
         run: ./scripts/image-sizes.sh > pr-sizes.json
 
-      # 2. Measure origin/main's images from a worktree — same measures, same script.
-      #    Run the PR's copy of the script against main's FLAKE (copy it in, since main
-      #    may predate the script — as it does on this very PR), so the baseline uses
-      #    identical measurement logic. Cachix substitutes the unchanged images.
+      # 2. Measure origin/main from a worktree with the PR's copy of the script, so
+      #    both sides use identical measurement logic.
       - name: measure origin/main (baseline) image sizes
         run: |
           set -euo pipefail
@@ -210,13 +148,10 @@ jobs:
           set -euo pipefail
           ./scripts/image-sizes-diff.sh base-sizes.json pr-sizes.json 5 > report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"   # also surface it in the run summary
-          # One SECTION of the shared CI comment, not a comment of its own — see
-          # scripts/ci-report.mjs. The runner's own node runs it: the script has no
-          # dependencies, so this nix-only job needs no npm install.
-          # The TRAILER line, not any ⚠️: the report's legend reads "⚠️ marks growth
-          # ≥ 5%" on EVERY run, so grepping for the emoji reported a failure every time.
-          # warn, never fail: this report is a signal by design (see the job comment) —
-          # image-sizes-diff.sh deliberately never exits non-zero.
+          # One section of the shared CI comment (scripts/ci-report.mjs), run with the
+          # runner's own node since the script has no dependencies.
+          # Match the trailer line rather than the ⚠️ glyph, which the legend prints on
+          # every run; warn at worst, since this report is a signal rather than a gate.
           if grep -q '^✅ No image grew' report.md; then
             status=pass; summary='image size — no image grew ≥ 5%'
           else
@@ -226,19 +161,16 @@ jobs:
           node scripts/ci-report.mjs post --section size --status "$status" \
             --summary "$summary" --body report.md --labels "$LABELS"
 
-  # Enumerate the dev-env-* nixosTests into a matrix so each VM test runs in its
-  # OWN parallel job. This generate job is cheap (eval only). By default the
-  # HEAVY tests (a ~1h from-source NixOS toplevel build — see HEAVY_TESTS) are
-  # EXCLUDED from per-PR runs; they run nightly (schedule) or when a PR carries
-  # the `full-nixos-tests` label. The fast tests run on every PR.
+  # Enumerates the dev-env-* nixosTests into a matrix so each VM test runs in its
+  # own job; HEAVY_TESTS are excluded per-PR and included nightly or with the
+  # `full-nixos-tests` label.
   nixos-tests-matrix:
     name: enumerate dev-env nixosTests
     runs-on: ubuntu-latest
     outputs:
       tests: ${{ steps.list.outputs.tests }}
     env:
-      # Tests too expensive for per-PR (space-separated check names). scooter-module
-      # builds a full second nixos-system toplevel from nixos-unstable (~1h cold).
+      # Tests too expensive for per-PR runs (space-separated check names).
       HEAVY_TESTS: "dev-env-scooter-module"
       # Include heavy tests when: nightly schedule, OR the PR has the label.
       INCLUDE_HEAVY: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'full-nixos-tests') }}
@@ -259,7 +191,7 @@ jobs:
             tests="$all"
             echo "including heavy tests ($HEAVY_TESTS)"
           else
-            # Drop the heavy ones with jq (per-PR fast path).
+            # Drop the heavy ones.
             tests=$(echo "$all" | jq -c --arg heavy "$HEAVY_TESTS" \
               '($heavy | split(" ")) as $h | [ .[] | select( . as $t | ($h | index($t)) | not ) ]')
             echo "excluding heavy tests ($HEAVY_TESTS) — run nightly or add the 'full-nixos-tests' label"
@@ -271,23 +203,19 @@ jobs:
     name: nixosTest ${{ matrix.test }}
     needs: nixos-tests-matrix
     runs-on: ubuntu-latest
-    # Non-required for now (continue-on-error) — promote to required once the
-    # KVM-accelerated matrix is confirmed consistently green on the runner.
+    # Non-required until the KVM-accelerated matrix is consistently green on the runner.
     continue-on-error: true
     strategy:
       fail-fast: false
-      # Cap concurrent VM jobs so we don't exhaust the runner pool; each is a
-      # full NixOS VM. Tune up if the org has more runner capacity.
+      # Cap concurrent VM jobs so the runner pool is not exhausted.
       max-parallel: 4
       matrix:
         test: ${{ fromJSON(needs.nixos-tests-matrix.outputs.tests) }}
     steps:
       - uses: actions/checkout@v5
 
-      # GitHub's standard Linux runners HAVE KVM hardware, but /dev/kvm ships with
-      # restrictive group perms — so qemu can't open it and the nixosTest VM
-      # silently falls back to TCG software emulation (~6-10x slower; this is why
-      # the old serial job took ~1h). Loosen the perms so qemu uses real KVM.
+      # /dev/kvm ships with restrictive group perms on GitHub runners, and without
+      # them qemu silently falls back to much slower TCG emulation.
       - name: enable KVM access (else qemu falls back to slow TCG)
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -298,22 +226,18 @@ jobs:
 
       - uses: nixbuild/nix-quick-install-action@v30
 
-      # Cachix: the heavy bits (esp. scooter-module's NixOS toplevel closure) are
-      # built once and pulled across branches/PRs — so a cold branch doesn't
-      # rebuild them from source. Pushes when CACHIX_AUTH_TOKEN is set; pulls
-      # read-only otherwise.
+      # Cachix: pushes when CACHIX_AUTH_TOKEN is set, pulls read-only otherwise.
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # virtiofsd holds one HOST fd per guest-visible inode, so a test that reads a
-      # big tree off the shared store (a whole-nixpkgs eval) exhausts the runner's
-      # default 65536 and the guest gets ENFILE. Why: PR #516.
+      # virtiofsd holds one host fd per guest-visible inode, so a test that reads a
+      # big tree off the shared store exhausts the default 65536.
       - name: raise the fd limit virtiofsd inherits
         run: |
-          # Only matters if this runner's nix uses a daemon; the build step raises
-          # its own shell's limit for the single-user case.
+          # Only matters when nix uses a daemon; the build step raises its own shell's
+          # limit for the single-user case.
           if systemctl list-unit-files nix-daemon.service >/dev/null 2>&1; then
             sudo mkdir -p /etc/systemd/system/nix-daemon.service.d
             printf '[Service]\nLimitNOFILE=1048576\n' \
@@ -329,9 +253,7 @@ jobs:
           ulimit -n
           nix build ".#checks.x86_64-linux.${{ matrix.test }}" --print-build-logs
 
-  # Decide whether the cluster jobs need to run: only when the sandbox
-  # image, its NixOS modules, or the image-boot cluster specs change. Most PRs
-  # touch none of these and skip the (heavier) cluster job entirely.
+  # Decides from the changed paths which cluster jobs need to run.
   cluster-changes:
     name: detect sandbox-image changes
     runs-on: ubuntu-latest
@@ -353,19 +275,17 @@ jobs:
               - 'test/cluster/sandbox-os.spec.ts'
               - 'test/cluster/overlay-store.spec.ts'
               - 'test/cluster/scooter-converge.spec.ts'
-              # warm /nix/store pool: the warm-seed unit lives in the sandbox image; the
-              # round-trip + claim CAS spec is self-contained (only the sandbox-os image).
+              # The warm-seed unit lives in the sandbox image and the warm-store spec
+              # needs only that image.
               - 'test/cluster/warm-store.spec.ts'
               - 'modules/warm-store-controller.nix'
               - 'services/warm-store-controller/**'
-              # the .scooter seed lives in the provisioner — a seed change must run the
-              # k3d converge/tool-on-PATH spec too.
+              # The .scooter seed lives in the provisioner, so a seed change must run
+              # the converge spec.
               - 'services/agent-host/src/session/k8sProvisioner.ts'
               - 'test/support/cluster.ts'
-            # Multi-replica PLATFORM topology (Deployment/routing/rollout) — a change here
-            # runs the k3d platform smoke (platform comes up + a conversation routes). Kept a
-            # SEPARATE filter output so the platform smoke can run without the sandbox-image
-            # specs and vice-versa. See ROLLOUT_DRAIN_AND_POD_IP.md.
+            # `example` and `platform` are separate outputs so the platform smoke and
+            # the sandbox-image specs can run independently.
             example:
               - 'examples/**'
               - 'modules/**'
@@ -377,43 +297,30 @@ jobs:
               - 'services/conversation-router/**'
               - 'test/cluster/platform-smoke.spec.ts'
               - 'flake.nix'
-              # The agent-host side of the SAME multi-replica contract: it writes the
-              # Conversation CRs the controller assigns and the router forwards to, and
-              # hydrate() adopts them on boot. Without these, a change to conversation
-              # ownership/liveness skipped the only job that exercises it on a real
-              # cluster — which is how a hydrate that adopted nothing shipped green.
+              # The agent-host side of the multi-replica contract: it writes the
+              # Conversation CRs the controller assigns, and hydrate() adopts them on boot.
               - 'services/agent-host/src/session/conversationRegistry.ts'
               - 'services/agent-host/src/session/k8sConversationRegistry.ts'
-              # The e2e-full BROWSER stories now run in this job, so the things that
-              # decide WHAT runs must open the gate too — otherwise a change to the
-              # tier mechanism, the cluster project's testMatch, or a spec it selects
-              # silently skips the only job that exercises it. A green PR whose
-              # platform job says `skipping` is NOT cluster-verified.
+              # Everything that decides what the e2e-full browser stories run must
+              # open the gate too.
               - '.github/workflows/ci.yml'
-              # …and the scripts the job delegates to. The cluster bring-up, the
-              # port-forward/hook setup and the failure dump now live in
-              # `.github/scripts/`, so without this a change to how the cluster is
-              # STOOD UP would skip the only job that stands one up — the same
-              # blind spot the line above exists to close.
+              # ...and the scripts the job delegates to for cluster bring-up,
+              # port-forward setup and the failure dump.
               - '.github/scripts/**'
               - 'playwright.config.ts'
               - 'test/e2e/target.ts'
-              # The event-backfill Job and its cluster spec run ONLY in this job, so a
-              # change to either must open the gate — otherwise the fix for a backfill
-              # failure can never be verified by the suite that caught it (#488).
+              # The event-backfill Job and its cluster spec run only in this job.
               - 'modules/event-backfill.nix'
               - 'test/cluster/event-backfill.spec.ts'
-              # The full-target allowlist IS "what runs": adding/removing a spec there
-              # must run the only job that executes it.
+              # The full-target allowlist and every spec on it must open the gate,
+              # since this is the only job that executes them; keep the list in sync
+              # with test/e2e/full-specs.json.
               - 'test/e2e/full-specs.json'
               - 'test/e2e/cluster-stories.spec.ts'
+              - 'test/e2e/first-message.spec.ts'
               - 'test/e2e/chat-search-filter.spec.ts'
               - 'test/e2e/linked-resources.spec.ts'
-              - 'test/e2e/target.ts' # the tier mechanism (was tier.ts — a stale name here kept the gate shut)
-              # The full-target ALLOWLIST + shard planner decide exactly what the full job
-              # runs — editing them without running the job is how an unverified spec
-              # would land in the allowlist. Then every spec the allowlist selects: a
-              # changed spec must run on the cluster, not just on the fake stack.
+              - 'test/e2e/target.ts'
               - 'test/e2e/support/shard-e2e.mjs'
               - 'test/e2e/support/shard-tests.mjs'
               - 'test/e2e/support/test-inventory.mjs'
@@ -425,23 +332,13 @@ jobs:
               - 'test/e2e/revive.spec.ts'
               - 'test/e2e/stop-run.spec.ts'
               - 'test/e2e/tail-rerender.spec.ts'
-              # The full-target allowlist + every spec on it: enabling a spec (or editing
-              # an enabled one) must run the only job that executes it — otherwise the
-              # enablement PR goes green with the new spec never having met a cluster.
               - 'test/e2e/aws-interrupt.spec.ts'
               - 'test/e2e/interrupt-queue-recovery.spec.ts'
               - 'test/e2e/interrupt.spec.ts'
-              # target.ts (né tier.ts — #363 renamed it and this filter went stale, so
-              # gate-mechanism changes stopped opening the gate) + the allowlist that IS
-              # the full project's testMatch + the shard planner that distributes it.
-              # The specs the allowlist currently selects — editing one must re-run the
-              # only job that executes it.
               - 'test/e2e/live-real-agent.spec.ts'
               - 'test/e2e/tier.ts'
               - 'test/e2e/multi-user.spec.ts'
               - 'test/e2e/ownership.spec.ts'
-              # The full-target allowlist AND every spec on it: a change to what runs
-              # (or to a spec that runs) must run the job that runs it.
               - 'test/e2e/concurrency-divergence.spec.ts'
               - 'test/e2e/conversation.spec.ts'
               - 'test/e2e/live-monitoring.spec.ts'
@@ -451,45 +348,34 @@ jobs:
               - 'test/e2e/settings-tabs.spec.ts'
               - 'test/e2e/suspended-recovery.spec.ts'
               - 'test/e2e/fixtures.ts'
-              # The full-target allowlist AND every spec on it: editing a listed spec
-              # (or the list itself) must run the only job that executes it. The list
-              # of files here must stay in sync with test/e2e/full-specs.json.
               - 'test/e2e/full-specs.json'
               - 'test/e2e/client-server-identity.spec.ts'
               - 'test/e2e/cluster-stories.spec.ts'
+              - 'test/e2e/first-message.spec.ts'
               - 'test/e2e/component-coverage.spec.ts'
               - 'test/e2e/refresh-history.spec.ts'
               - 'test/e2e/stop-run.spec.ts'
               - 'test/e2e/ui-state-consistency.spec.ts'
               - 'services/agent-host/src/session/ownershipGuard.ts'
               - 'services/agent-host/src/session/manager.ts'
-              # The CREATE contract: conversations are created by the ROUTER (a CR write),
-              # and the agent-host REFUSES an unknown threadId rather than creating one
-              # implicitly. platform-smoke is the only place that exercises create-then-
-              # prompt against a real cluster, so a change to either side of that contract
-              # — the /agui handler, the management routes, or the two services that spawn
-              # conversations — must run it.
+              # Conversations are created by the router (a CR write) and the agent-host
+              # refuses an unknown threadId, and platform-smoke is the only place that
+              # exercises create-then-prompt on a real cluster.
               - 'services/agent-host/src/agui/server.ts'
               - 'services/agent-host/src/api/management.ts'
               - 'services/scheduler/scheduler/spawn.py'
               - 'services/webhooks/webhooks/agent_host_client.py'
 
-  # Image-boot cluster tests on a REAL Kubernetes cluster (k3d = k3s in
-  # Docker; no root, runs on the standard runner). Covers what the nixosTest VMs
-  # cannot: the OCI packaging + the in-pod systemd-PID-1 boot, and the
-  # local-overlay store in the PROD topology (baked store as the read-only lower).
-  # Path-gated via cluster-changes; only the self-contained image-boot specs run
-  # (sandbox-os + overlay-store) — no controller/broker/webhooks needed.
+  # Image-boot specs on a real k3d cluster: the OCI packaging, the in-pod
+  # systemd-PID-1 boot and the local-overlay store in its production topology,
+  # which the nixosTest VMs cannot cover. Path-gated via cluster-changes; only the
+  # self-contained image-boot specs run.
   cluster-image-boot:
     name: cluster image boot (k3d)
     needs: cluster-changes
     if: needs.cluster-changes.outputs.run == 'true'
     runs-on: ubuntu-latest
-    # Required: this is the ONLY tier that boots the real OCI image in a pod (the prod
-    # container topology — minimal PATH, the .scooter CM mount, the in-pod switch under
-    # systemd cgroups). Two bugs shipped green because nothing required exercised it
-    # (the sandbox-os-image musl leak; the .scooter seed/converge tool-on-PATH path). A
-    # failure here now blocks the PR.
+    # Required: this is the only tier that boots the real OCI image in a pod.
     steps:
       - uses: actions/checkout@v5
       - uses: nixbuild/nix-quick-install-action@v30
@@ -498,28 +384,23 @@ jobs:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # k3d needs Docker (present on ubuntu-latest). Get k3d + kubectl from nixpkgs.
+      # k3d needs Docker (present on ubuntu-latest); k3d and kubectl come from nixpkgs.
       - name: create k3d cluster
         run: |
           nix shell nixpkgs#k3d nixpkgs#kubectl -c k3d cluster create scooter-ci --no-lb --wait
           nix shell nixpkgs#k3d -c k3d kubeconfig merge scooter-ci --kubeconfig-merge-default
 
-      # Build both OS images (Cachix-cached) and stream them straight into the Docker
-      # daemon, then import into k3d by NAME. The images are nix2container:
-      # `<attr>.copyTo docker-daemon:<name>:<tag>` loads Docker directly with no
-      # intermediate tarball (dockerTools' gzipped tar was what ctr's importer used to
-      # reject). k3d then imports the now-loaded images by name.
+      # `<attr>.copyTo docker-daemon:<name>:<tag>` loads the nix2container image
+      # straight into Docker, and k3d then imports it by name.
       - name: build + import sandbox image
         run: |
           set -euo pipefail
-          # One image now — the overlay store is always on. The overlay-store cluster spec
-          # uses this same image (OVERLAY_IMAGE == SANDBOX_OS_IMAGE).
+          # The overlay-store spec uses this same image (OVERLAY_IMAGE == SANDBOX_OS_IMAGE).
           nix run ".#sandbox-os-image.copyTo" -- docker-daemon:agent-sandbox-os:latest
           nix shell nixpkgs#k3d -c k3d image import agent-sandbox-os:latest -c scooter-ci
 
-      # Run ONLY the two self-contained image-boot specs against the live cluster.
-      # `npm install` first (node_modules for vitest + the k8s client), inside the
-      # dev shell so node/npm come from the flake.
+      # Only the self-contained image-boot specs, inside the dev shell so node/npm
+      # come from the flake.
       - name: image-boot specs
         env:
           RUN_CLUSTER_TESTS: "1"
@@ -527,10 +408,8 @@ jobs:
           SANDBOX_OS_IMAGE: agent-sandbox-os:latest
           OVERLAY_IMAGE: agent-sandbox-os:latest   # same image (overlay always on)
           CI: "1"
-        # --no-file-parallelism: run the two specs SEQUENTIALLY. Each boots a
-        # privileged systemd-PID-1 pod; two at once on a single-node k3d contend
-        # for resources (slow boots → flaky readiness) and share the test
-        # namespace. One at a time is reliable and still fast.
+        # --no-file-parallelism: each spec boots a privileged systemd-PID-1 pod, and
+        # two at once on single-node k3d contend for resources and share the namespace.
         run: nix develop --command bash -c 'npm install && npm run test:cluster -- sandbox-os overlay-store scooter-converge scooterRebuildTwice warm-store --no-file-parallelism'
 
       - name: tear down k3d
@@ -539,14 +418,10 @@ jobs:
           nix shell nixpkgs#k3d -c k3d cluster delete scooter-ci || true
           nix shell nixpkgs#k3d -c k3d registry delete scooter-reg.localhost || true
 
-  # EXAMPLE VALIDATION on a real k3d apiserver. `just check-manifests` proves the
-  # example EVALUATES and wires its features; this proves the YAML it produces is VALID
-  # KUBERNETES — server-side dry-run runs the real admission/schema validation, catching a bad
-  # field, a malformed probe, or a resource the apiserver rejects. The example is the config
-  # the docs tell people to copy, so "it renders" is not a strong enough guarantee.
-  #
-  # Dry-run, not a deploy: no images are built or pulled (minutes saved), and nothing has to
-  # come up — this is a validity check, and the full platform-smoke job below covers runtime.
+  # Validates the example's rendered YAML against a real k3d apiserver with a
+  # server-side dry-run, which runs the real schema and admission validation that
+  # `just check-manifests` cannot. No images are built or pulled; runtime is covered
+  # by the platform smoke.
   example-manifests:
     name: example manifests (k3d dry-run)
     needs: cluster-changes
@@ -568,12 +443,8 @@ jobs:
           nix shell nixpkgs#k3d -c k3d cluster create scooter-example \
             --agents 0 --wait --timeout 180s
 
-      # A dry-run validates against CURRENT cluster state, so anything the manifests' own
-      # resources depend on must exist for real first:
-      #   - the NAMESPACE every namespaced resource targets (the render creates it, but in a
-      #     single dry-run pass it does not exist yet -> "namespaces not found" for all 50+);
-      #   - the CRDs whose instances are in the same file (else they fail as unknown kinds).
-      # These two applies are the only non-dry-run writes; everything else stays a dry-run.
+      # A dry-run validates against current cluster state, so the namespace and the
+      # CRDs the manifests' own resources depend on must be applied for real first.
       - name: install the rendered namespace + CRDs
         run: |
           set -euo pipefail
@@ -587,9 +458,8 @@ jobs:
       - name: validate against the apiserver (server-side dry-run)
         run: |
           set -euo pipefail
-          # --server-side runs the apiserver's REAL schema + admission validation, unlike a
-          # client-side dry-run which only checks local structure. A fresh k3d has no
-          # competing field managers, so conflicts here are genuine problems.
+          # --server-side runs the apiserver's real schema and admission validation;
+          # a fresh k3d has no competing field managers.
           nix shell nixpkgs#kubectl -c kubectl apply --server-side -f example.yaml \
             --dry-run=server 2>&1 | tee dry-run.log
           count=$(grep -c 'serverside-applied' dry-run.log || true)
@@ -610,59 +480,50 @@ jobs:
         if: always()
         run: nix shell nixpkgs#k3d -c k3d cluster delete scooter-example || true
 
-  # e2e full is sharded with the SAME distribute -> shard-matrix -> collect shape as
-  # e2e fast, so the two suites stay structurally consistent and widening the full
-  # allowlist later is a number bump, not a restructure. Three shards now that the
-  # misc specs are enabled: the 12-spec test phase (~35-50m serial at cluster pace —
-  # suspended-recovery and concurrency alone fund two sandbox boots per test) has
-  # outgrown the ~13m k3d setup, which is the documented bump condition (each shard
-  # boots its OWN cluster — that is the price of a shard here).
+  # e2e full is sharded with the same distribute -> shard-matrix -> collect shape
+  # as e2e fast; each shard boots its own cluster.
   e2e-full-distribute:
     name: e2e full distribute (shard)
     needs: cluster-changes
-    # OPT-IN, not on by default. A full run builds a k3d cluster per shard (~25 min
-    # each) and the required checks are the unit/nixosTest/e2e-fast set — so the full
-    # target runs NIGHTLY, on demand, or on a PR labelled `e2e-full`.
-    # Trigger ONLY — deliberately NOT path-gated on `cluster-changes.platform`, same
-    # as `flake-focus-full` below. That filter covers the specs and the cluster
-    # plumbing but NOT the product code under test, so a labelled UI-only PR was
-    # silently skipped. Why: PR #646.
+    # Trigger-gated only (nightly, manual, or the `e2e-full` label); the platform
+    # path filter would skip product-code changes the suite must cover.
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'e2e-full')
     runs-on: ubuntu-latest
-    env:
-      # 4 here (the link below runs 2). The shard count is not only a wall-clock knob: every
-      # spec on a shard competes for sandbox provisioning with the others, and CI forces
-      # CONVERSATION_POD_CAP=1 so each conversation needs its own pod. Packing a whole
-      # allowlist onto too few shards pushes cold boots past budgets that are generous in
-      # isolation — specs then fail purely waiting for a pod while behaving correctly.
-      #
-      # 4, not 3: at 3 the heaviest shard still lost turns to provisioning — scroll-lock's
-      # thread fill timed out with only its FIRST turn on screen, at a 90s per-turn budget,
-      # which is a pod it never got rather than a scroll bug. This link carries the whole
-      # 26-spec allowlist, so it needs the most splitting.
-      #
-      # ONE SHARD when the PR carries `e2e-one-shard`. Infrastructure work on the
-      # self-hosted fleet needs a fast round trip -- four shards is four instances
-      # and ~13 min to learn one thing about the runner, and the shards are
-      # independent, so a single one exercises the whole path (attach, mount,
-      # k3d, platform, specs) just as well. The nightly and any normal `e2e-full`
-      # run keep the full four.
-      E2E_FULL_SHARDS: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-one-shard') && '1' || '4' }}
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      # Only the repeat count: the planner caps the shard count at the inventory size,
+      # so `matrix.include | length` is the trustworthy figure downstream.
+      repeat: ${{ steps.budget.outputs.repeat }}
     steps:
       - uses: actions/checkout@v5
 
-      # NIX + npm install are REQUIRED here now, where the old file-level sharder
-      # needed only `node`. The planner's inventory comes from
-      # `playwright test --list` and `vitest list`, which is the whole point: those
-      # resolve projects, testMatch and testIgnore, so the plan cannot drift from
-      # what actually runs. A regex over spec sources would be cheaper and would
-      # drift. This job is ubuntu-latest, so the extra ~1-2 min is free runner time
-      # and it removes ~46s x 4 of duplicated work from the PAID fleet.
+      # Every spec on a shard competes for sandbox provisioning (CI forces
+      # CONVERSATION_POD_CAP=1), so the shard count is a provisioning-concurrency
+      # control as much as a wall-clock one.
+      - id: budget
+        name: resolve the sweep budget
+        env:
+          # A labelled PR stays a single pass: it wants a verdict, and five costs the
+          # fleet ~90 min. A sweep of a branch is a `workflow_dispatch` away.
+          SWEEP: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          ONE_SHARD: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-one-shard') }}
+        run: |
+          set -euo pipefail
+          # Twice the shards keeps a sweep's wall clock near a single pass's.
+          if [ "$SWEEP" = "true" ]; then repeat=5; shards=8; else repeat=1; shards=4; fi
+          # `e2e-one-shard` is infrastructure work on the bring-up, where the suite is
+          # beside the point.
+          if [ "$ONE_SHARD" = "true" ]; then repeat=1; shards=1; fi
+          echo "repeat=$repeat" >> "$GITHUB_OUTPUT"
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "each test ×$repeat across $shards shard(s)"
+
+      # nix + npm install are needed because the planner's inventory comes from
+      # `playwright test --list` and `vitest list`, which resolve projects, testMatch
+      # and testIgnore.
       - uses: nixbuild/nix-quick-install-action@v30
       - uses: cachix/cachix-action@v15
         with:
@@ -689,43 +550,29 @@ jobs:
 
       - id: plan
         name: plan shards
+        env:
+          E2E_FULL_SHARDS: ${{ steps.budget.outputs.shards }}
+          # The planner weights the e2e tests by the repetitions they will get, so a
+          # shard carrying cluster tests (which run once either way) is not overpacked.
+          E2E_FULL_REPEAT: ${{ steps.budget.outputs.repeat }}
         run: |
           set -euo pipefail
           report=""
           [ -f prior/report.json ] && report="prior/report.json"
-          # PER-TEST sharding. shard-tests.mjs asserts that the union of every
-          # shard's selection equals the inventory exactly once, and EXITS NON-ZERO
-          # otherwise -- so a plan that would silently drop a test fails here
-          # rather than in four green shards. See test-inventory.mjs for the three
-          # ways title selection can lose a test.
-          # WRITE THE JSON TO A FILE, do not capture stdout. `nix develop` prints
-          # a welcome banner to stdout before the command runs, so $(...) picked
-          # up the banner AND the JSON, and $GITHUB_OUTPUT rejected the result:
-          #   Invalid format '  just  -- task runner (test-quick, test, ...)'
-          # The planner itself was fine -- it logged "217 tests -> 4 shards" and
-          # its coverage assertion passed. Only the capture was wrong.
+          # Per-test sharding: shard-tests.mjs exits non-zero unless the union of every
+          # shard's selection equals the inventory exactly once.
+          # The JSON goes to a file because `nix develop` prints a banner to stdout
+          # that $(...) would capture.
           nix develop --command bash -c \
-            "npm install --silent && PRIOR_REPORT='$report' SHARDS='$E2E_FULL_SHARDS' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
+            "npm install --silent && PRIOR_REPORT='$report' SHARDS='$E2E_FULL_SHARDS' REPEAT='$E2E_FULL_REPEAT' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
           matrix=$(cat /tmp/matrix.json)
-          # A banner or a stray log line here would break the matrix in a way
-          # that is hard to read downstream; fail on it now instead.
+          # Fail now on a banner or stray log line rather than downstream.
           echo "$matrix" | jq -e 'has("include")' >/dev/null \
             || { echo "::error::planner did not emit a matrix"; head -c 400 /tmp/matrix.json; exit 1; }
 
-          # `e2e-one-shard` is for INFRASTRUCTURE work on the self-hosted runner,
-          # where the thing under test is the cluster bring-up -- not the specs.
-          # One shard alone does not give that: it gives ONE runner running ALL
-          # 41 specs, which is slower than four. Narrow to a single cheap spec so
-          # the loop measures startup rather than the suite.
-          # `e2e-one-shard` is for INFRASTRUCTURE work on the self-hosted runner,
-          # where the thing under test is the cluster bring-up -- not the specs.
-          # One shard alone does not give that: it gives ONE runner running the
-          # WHOLE suite, which is slower than four. Narrow to one cheap test so the
-          # loop measures startup rather than the suite.
-          #
-          # Narrowing by TEST now, not by spec file. The selector is a --grep, so
-          # the replacement has to be a title -- and it must be one that exists, or
-          # the shard silently runs nothing (an unmatched --grep exits 0).
+          # `e2e-one-shard` is for infrastructure work where the thing under test is
+          # the cluster bring-up, so narrow to one cheap test; the selector is a
+          # --grep, so the title must exist or the shard silently runs nothing.
           if [ "$E2E_FULL_SHARDS" = "1" ]; then
             matrix=$(node -e '
               const m = JSON.parse(process.argv[1]);
@@ -740,104 +587,61 @@ jobs:
 
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
-  # PLATFORM SMOKE on a real k3d cluster: deploy the FULL multi-replica platform
-  # (agent-host Deployment + conversation-controller + conversation-router, fake agent) and
-  # assert it comes up + a conversation ROUTES + is assigned a hostIP. Path-gated on the
-  # `platform` filter (topology/controller/router changes) — the class of change that
-  # #254/#255/#256 shipped with NO cluster coverage (validated only manually on odin). See
-  # todo/docs/ROLLOUT_DRAIN_AND_POD_IP.md.
+  # One e2e-full shard: brings up k3d plus the full multi-replica platform (fake
+  # agent), runs its assigned cluster tests and browser stories, and uploads its
+  # report.
   e2e-full-shard:
     name: e2e full shard ${{ matrix.shard }}
     needs: [cluster-changes, e2e-full-distribute]
     # Runs only when distribute did — that job carries the opt-in decision.
     if: needs.e2e-full-distribute.result == 'success'
-    # THE SELF-HOSTED FLEET (infra/runners.tf in server-config). This job, and
-    # ONLY this job: an e2e shard is ~25 min of k3d + platform deploy, and
-    # measured queue wait dominates actual work 4.6:1. Everything else in this
-    # workflow stays on GitHub-hosted runners, where it is free.
-    #
-    # SAFE because the gate above is `schedule` / `workflow_dispatch` / an
-    # `e2e-full` LABEL: a fork can trigger none of those (labelling needs write
-    # access), and fork-PR approval is on. `runs-on` is NOT a security boundary
-    # on its own -- a fork controls its own workflow file -- so do not relax
-    # that gate without revisiting this.
+    # The self-hosted fleet, for this job only: a shard is ~25 min of k3d and
+    # platform deploy, ~60 on a sweep. Safe only because the gate above is
+    # schedule/dispatch/label, none of which a fork can trigger; `runs-on` is not a
+    # security boundary on its own.
     runs-on: [self-hosted, linux, x64, nix]
+    # Bounds a wedged cluster holding a fleet runner all day; the default 360 does not.
+    timeout-minutes: 150
     strategy:
       fail-fast: false # one shard failing must not cancel the others (collect reports all)
       matrix: ${{ fromJSON(needs.e2e-full-distribute.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
       - uses: nixbuild/nix-quick-install-action@v30
-      # READ-ONLY on purpose: no authToken. This job runs on the SELF-HOSTED
-      # fleet, and the runner spec's rule is "no secrets on self-hosted runners"
-      # -- CACHIX_AUTH_TOKEN is a WRITE token, and a shard only ever needs to
-      # PULL. Cache population stays with the GitHub-hosted jobs that already do
-      # it. Dropping the token costs nothing here and keeps the blast radius of
-      # a compromised runner to the instance itself.
+      # No authToken: self-hosted runners get no secrets, and a shard only needs to pull.
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
 
-      # Cluster, registry, agent-sandbox controller, platform images, and the
-      # deployed platform — all of it in one script so the label-gated
-      # `flake focus full` job below stands up an IDENTICAL cluster. See the
-      # script for why each piece is here.
+      # One script so the `flake focus full` job stands up an identical cluster.
       - name: bring up k3d + the platform
         run: .github/scripts/k3d-platform-up.sh
 
-      # Only the cluster tests THIS shard was assigned. Previously every shard ran
-      # platform-smoke + event-backfill in full (127s + 30s) against four
-      # identical clusters -- the same 6 tests, 24 times. They are now scheduled
-      # like any other test and run ONCE across the matrix.
-      #
-      # `if` GUARDS THE EMPTY CASE, and it is load-bearing: vitest -t with an
-      # empty pattern matches EVERYTHING, so a shard with no cluster tests would
-      # silently run the whole cluster suite instead of nothing.
+      # Only the cluster tests this shard was assigned; the `if` guards the empty
+      # case because vitest -t with an empty pattern matches everything.
       - name: cluster smoke (shard ${{ matrix.shard }})
         if: matrix.cluster_grep != ''
         env:
           RUN_CLUSTER_TESTS: "1"
           CLUSTER_PROVIDER: existing
           CI: "1"
-          # THE PATTERN TRAVELS AS AN ENV VAR, never interpolated into the shell.
-          # Four of the four shard selectors contain an apostrophe -- "each
-          # conversation's messages", "don't wedge", "THAT CONTRIB'S words" --
-          # and inlining one into a single-quoted string ends the string early:
-          # verified, bash reports `unexpected EOF while looking for matching '`.
-          # ${{ }} here is a YAML value, so the quote is data rather than syntax.
+          # The pattern travels as an env var, never interpolated into the shell,
+          # because shard selectors contain apostrophes.
           CLUSTER_GREP: ${{ matrix.cluster_grep }}
-        # platform-smoke: the multi-replica topology comes up + a conversation routes.
-        # event-backfill: the one-shot mirror→Postgres migration Job, end-to-end against
-        # this deployed platform's Postgres + agent-host-history PVC (both in the k3d
-        # render). It builds the real Job from .#platform-manifests-k3d-backfill, seeds the
-        # mirror, runs it, and asserts rows land + a corrupt log FAILS the Job. This is the
-        # ONLY tier that exercises the rendered Job's image/DB-env/volume wiring — Tier 1
-        # covers the verify logic against a fake db. See modules/event-backfill.nix, PR #463.
+        # platform-smoke: the multi-replica topology comes up and a conversation
+        # routes; event-backfill: the mirror→Postgres Job end-to-end against this
+        # platform's Postgres and history PVC (see modules/event-backfill.nix).
         run: |
-          # THE FILE FILTERS ARE NOT OPTIONAL. `-t` selects by NAME, but vitest
-          # still LOADS every file in the project first -- all 15 of them, 47
-          # tests. A shard assigned a warmpool or self-modify test would then run
-          # infrastructure work its cluster was never prepared for. Observed
-          # before these filters were restored: 8 failed test FILES in a shard
-          # that had been given 11 cluster tests.
-          #
-          # These are the same two the step passed before per-test sharding, and
-          # they must stay in step with SHARDED_CLUSTER_SPECS in
-          # test/e2e/support/test-inventory.mjs -- the planner only ever assigns
-          # tests from these files.
+          # The file filters are required: `-t` selects by name but vitest still loads
+          # every file in the project, and they must stay in step with
+          # SHARDED_CLUSTER_SPECS in test/e2e/support/test-inventory.mjs.
           nix develop --command bash -c 'npm install && npx vitest run --project cluster --no-file-parallelism platform-smoke event-backfill -t "$CLUSTER_GREP"'
 
-      # e2e FULL browser stories: the same Playwright specs, against the REAL cluster.
-      # This is the seam nothing else covers — test/cluster is curl-only (no UI) and the
-      # fast suite never sees a real server, so a bug between them is invisible to both.
-      # That is how a client-minted conversation id reached the URL and made scooter
-      # unusable while all 122 fast tests passed.
-      #
-      # Port-forward the `ui` Service (nginx: static build + API proxy, so ONE origin
+      # The browser stories against the real cluster, the one seam neither
+      # test/cluster (curl-only) nor the fast suite (no real server) covers.
       # serves both the app and /conversations — exactly the browser's real topology).
-      - name: e2e full browser stories (shard ${{ matrix.shard }})
-        # Same empty-pattern hazard as the smoke step: an empty --grep matches
-        # EVERYTHING, so a shard with no e2e tests must skip rather than run all.
+      - name: e2e full browser stories ×${{ needs.e2e-full-distribute.outputs.repeat }} (shard ${{ matrix.shard }})
+        # An empty --grep matches everything, so a shard with no e2e tests must skip.
         if: matrix.e2e_grep != ''
         env:
           E2E_TARGET: full
@@ -845,19 +649,19 @@ jobs:
           E2E_ROLLOUT_HOOK: http://127.0.0.1:8898
           CI: "1"
           PLAYWRIGHT_JSON_OUTPUT_NAME: "report-full-shard-${{ matrix.shard }}.json"
-          # An env var, not an inlined string -- see the cluster step for why.
-          # Apostrophes in test titles break shell quoting otherwise.
+          # An env var, not an inlined string, since test titles contain apostrophes.
           E2E_GREP: ${{ matrix.e2e_grep }}
+          # `retries: 0` is pinned in playwright.config.ts, so each repetition counts
+          # as an independent run and the rates below mean something.
+          E2E_FULL_REPEAT: ${{ needs.e2e-full-distribute.outputs.repeat }}
         run: |
           set -euo pipefail
-          # Sourced, not executed: the background PIDs + cleanup trap must live in
-          # THIS shell so they outlast the helper and are reaped with the step.
+          # Sourced so the background PIDs and cleanup trap live in this shell and
+          # are reaped with the step.
           . .github/scripts/e2e-full-serve.sh
-          # --grep, not positional spec paths: the shard plan is per-TEST now.
-          # The pattern is an alternation of escaped titles built by
-          # shard-tests.mjs; an EMPTY one would match every test, which is why the
-          # step is guarded by `if` above.
-          nix develop --command bash -c 'npm install && npx playwright test --project=full --reporter=json,list --grep "$E2E_GREP"'
+          # --grep with the alternation of escaped titles built by shard-tests.mjs;
+          # the `if` above guards the empty pattern.
+          nix develop --command bash -c 'npm install && npx playwright test --project=full --repeat-each="$E2E_FULL_REPEAT" --reporter=json,list --grep "$E2E_GREP"'
 
       - name: upload shard report
         if: always()
@@ -879,11 +683,8 @@ jobs:
             /tmp/cluster-sampler.log
             /tmp/rollout-hook.log
           retention-days: 7
-      # ALWAYS, not on failure. The sandbox crash loop does not reliably fail the
-      # suite: a sandbox can crash, be retried by the kubelet, and the spec still
-      # pass. Job 111556690687 passed 5/5 with the dump skipped and so reported
-      # nothing about whether a sandbox crashed. Cheap (two kubectl reads) and never
-      # a gate -- it exits 0 and annotates.
+      # always(): a sandbox can crash, be retried by the kubelet, and the spec still
+      # pass, so the census runs on green too; it exits 0 and only annotates.
       - name: sandbox crash census
         if: always()
         run: .github/scripts/k3d-sandbox-census.sh
@@ -895,35 +696,26 @@ jobs:
         if: always()
         run: nix shell nixpkgs#k3d -c k3d cluster delete scooter-ci || true
 
-      # The input that sizes the persistent /nix volumes (server-config
-      # docs/github-runners-spec.md §11): volume = 3x this, rotate at 2.5x.
-      # Measured AFTER the job so it includes the platform images and browsers,
-      # not just the devshell closure. `always()` so a failed shard still
-      # reports -- a shard that dies late has done most of the building.
-      # The ~5min `du -sh /nix/store` walk runs on the NIGHTLY only. df is not a
-      # substitute: its Used is the whole volume (30G against a 22G store on this
-      # fleet), so the 3x rule must take the nightly's store figure, not this one.
-      # ROOT is reported too -- the node's ephemeral-storage lives there, and it is
-      # DiskPressure on root (not /nix) that evicts the platform. Why: PR #712.
+      # Sizes the persistent /nix volumes on the runner fleet (volume = 3x the
+      # nightly's `du` figure, rotate at 2.5x), with always() so a failed shard still
+      # reports; root is reported too because DiskPressure on root, not /nix, is
+      # what evicts the platform.
       - name: report /nix/store size
         if: always()
         run: |
           df -h /nix / 2>/dev/null || df -h / || true
           if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then du -sh /nix/store 2>/dev/null || true; fi
-          # Is /nix the pooled EBS volume or the instance root disk? The
-          # difference decides whether a store was REUSED or built cold, and
-          # a size alone cannot tell you -- both report a plausible number.
+          # Whether /nix is the pooled EBS volume or the instance root disk decides
+          # whether a store was reused or built cold.
           findmnt -no SOURCE,FSTYPE,SIZE /nix 2>/dev/null || echo "/nix is not a separate mount (root disk)"
 
-  # The GATE for e2e full: succeeds only when every shard passed; merges the per-shard
-  # reports into `e2e-full-report` so the next run's distribute weights by real
-  # durations. Mirrors e2e-collect. Skips (not passes) when the path filter skipped
-  # the suite — a green PR with this job skipped is NOT cluster-verified.
+  # The gate for e2e full: succeeds only when every shard passed, merges the
+  # per-shard reports into `e2e-full-report` for the next run's weights, and skips
+  # (not passes) when the suite was opted out.
   e2e-full-collect:
     name: e2e full (k3d)
     needs: [cluster-changes, e2e-full-distribute, e2e-full-shard]
-    # SKIPS (not passes) when the suite was opted out, so a green PR without the
-    # `e2e-full` label is never mistaken for one the full target verified.
+    # Skips rather than passes when the suite was opted out.
     if: always() && needs.e2e-full-distribute.result == 'success'
     runs-on: ubuntu-latest
     # The verdict comment (below) edits a PR comment; the default token is read-only.
@@ -931,8 +723,8 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      # FIRST, before the artifact downloads: actions/checkout cleans the workspace,
-      # so a checkout placed after them deletes the reports it would compare.
+      # First: actions/checkout cleans the workspace and would delete reports
+      # downloaded before it.
       - uses: actions/checkout@v5
 
       - name: gate on shard results
@@ -945,10 +737,8 @@ jobs:
           [ "$DISTRIBUTE_RESULT" = "success" ] && [ "$SHARDS_RESULT" = "success" ]
 
       - name: download shard reports
-        # always(): the `gate on shard results` step above FAILS the job on a red
-        # night, which would otherwise skip this step and the merge+upload below —
-        # discarding the report for exactly the nights worth measuring. The gate
-        # still fails the job; the artifact is just no longer collateral.
+        # always(): the gate step above fails the job on a red night, and the
+        # report must still be merged and uploaded.
         if: always()
         uses: actions/download-artifact@v4
         with:
@@ -966,10 +756,8 @@ jobs:
             const fs = require("fs");
             const dir = "shard-reports";
             let suites = [];
-            // A shard that dies before writing its JSON contributes nothing, so a merged
-            // report silently UNDERCOUNTS specs. Record how many shards actually landed:
-            // a lost shard is otherwise indistinguishable from a pile of failures, which
-            // is precisely the ambiguity this artifact exists to remove.
+            // Record how many shards landed: a shard that dies before writing its JSON
+            // would otherwise read as a pile of passes.
             let shardReports = 0;
             for (const f of (fs.existsSync(dir) ? fs.readdirSync(dir) : [])) {
               if (!f.endsWith(".json")) continue;
@@ -979,25 +767,21 @@ jobs:
             console.log("merged " + suites.length + " top-level suites from " + shardReports + " shard reports");
           '
 
-      # Kept for the next run's shard weights AND as the per-night record of which
-      # specs passed. `e2e-full-distribute` still weights from the last SUCCESSFUL
-      # run only, so retaining red nights cannot skew the sharding.
+      # Kept for the next run's shard weights and as the per-night record of which
+      # specs passed; distribute weights from the last successful run only.
       - name: upload merged e2e-full-report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-full-report
           path: report.json
-          # 90d, not 14d: a baseline needs a window long enough to show the spread.
+          # A baseline window needs enough runs to show the spread.
           retention-days: 90
           if-no-files-found: ignore
 
-      # THE BASELINE. Deliberately NOT `--status success` (which the weights fetch
-      # above still uses): this workflow's conclusion covers every job in it, so one
-      # unrelated red job — the nixosTest has been red for weeks — would void the
-      # comparison. And the full suite itself has not been green since 2026-08-24,
-      # so a success filter here selects nothing, forever. What this needs is the
-      # last run that PRODUCED A REPORT, which is exactly what #564 started retaining.
+      # The baseline is the last run that produced a report, not the last successful
+      # one: the workflow conclusion covers every job, so an unrelated red job would
+      # void the comparison.
       - name: fetch baseline e2e-full report (last run on the default branch)
         if: always()
         continue-on-error: true
@@ -1007,14 +791,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p baseline
-          # Walk back from newest: the artifact expires (90d) and a run that died
-          # before `merge reports` has none, so "most recent" is not "has one".
+          # Walk back from newest: the artifact expires and a run that died before
+          # the merge has none.
           runs=$(gh run list --workflow "${{ github.workflow }}" --branch "$DEFAULT_BRANCH" \
             --limit 20 --json databaseId,headSha,createdAt \
             --jq '.[] | "\(.databaseId) \(.headSha) \(.createdAt)"' 2>/dev/null || true)
-          # A WINDOW, not one run. Against a single baseline the suite's own
-          # night-to-night churn (~7 specs each way, no change between them) reads
-          # as regressions — see scripts/e2e-full-compare.mjs.
+          # A window, not one run: the suite's own night-to-night churn would read as
+          # regressions against a single baseline (see scripts/e2e-full-compare.mjs).
           found=0 newest=""
           while read -r id sha created; do
             [ -n "${id:-}" ] || continue
@@ -1024,8 +807,7 @@ jobs:
             if gh run download "$id" --name e2e-full-report --dir "baseline/$id" 2>/dev/null; then
               found=$((found + 1))
               [ -z "$newest" ] && newest="${DEFAULT_BRANCH}@${sha:0:7} (${created%T*})"
-              # The column header for this run in the verdict's history table. A
-              # date reads; a run id does not.
+              # The column header for this run in the verdict's history table.
               printf '%s' "${created%T*}" | cut -c6- > "baseline/$id/label"
               echo "baseline run $id (${sha:0:7}, $created)"
             fi
@@ -1037,10 +819,8 @@ jobs:
             echo "no run on $DEFAULT_BRANCH carries an e2e-full-report — no baseline this time"
           fi
 
-      # The verdict. The full suite is flaky night to night (13/7/12 failures on
-      # three consecutive nightlies, only partly overlapping), so the failure COUNT
-      # is not a signal and the bare red check taught a reader nothing. The diff
-      # against main is the signal: what this run broke, versus what was already red.
+      # The verdict is the diff against main, since the full suite's night-to-night
+      # failure count carries no signal on its own.
       - name: compare against the baseline
         if: always()
         continue-on-error: true
@@ -1060,7 +840,7 @@ jobs:
           done < <(find baseline -name report.json 2>/dev/null | sort)
           if [ ${#base[@]} -gt 0 ]; then base+=(--baseline-ref "${BASELINE_REF:-unknown}"); fi
           # A lost shard's specs are absent from the merge, which set difference reads
-          # as "passed" — the compare script voids the diff instead when this is short.
+          # as "passed"; the compare script voids the diff when the shard count is short.
           shards=$(echo "$MATRIX" | jq '.include | length')
           node scripts/e2e-full-compare.mjs report.json "${base[@]}" \
             --expected-shards "$shards" \
@@ -1068,8 +848,42 @@ jobs:
             > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
-      # PR only: the nightly has no PR to comment on, and its verdict is in the step
-      # summary above. Sticky, so a re-run replaces the verdict instead of stacking one.
+      # Sweeps are nightly-only, so there is no PR to comment on: step summary and
+      # artifact instead.
+      - name: per-test flake rates (sweep only)
+        if: always() && needs.e2e-full-distribute.outputs.repeat != '1'
+        continue-on-error: true
+        env:
+          MATRIX: ${{ needs.e2e-full-distribute.outputs.matrix }}
+          REPEAT: ${{ needs.e2e-full-distribute.outputs.repeat }}
+        run: |
+          set -euo pipefail
+          # The verdict's baseline window again, this time as the trend columns.
+          hist=()
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            hist+=(--history "$f")
+            label="$(cat "$(dirname "$f")/label" 2>/dev/null || true)"
+            hist+=(--history-label "${label:-?}")
+          done < <(find baseline -name report.json 2>/dev/null | sort)
+          shards=$(echo "$MATRIX" | jq '.include | length')
+          node scripts/e2e-full-flake-report.mjs report.json \
+            --repeat "$REPEAT" --expected-shards "$shards" "${hist[@]}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            > sweep.md
+          cat sweep.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The record a later night's trend columns read from.
+      - name: upload the sweep report
+        if: always() && hashFiles('sweep.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-full-flake-report
+          path: sweep.md
+          retention-days: 90
+          if-no-files-found: ignore
+
+      # PR only; sticky, so a re-run replaces the verdict.
       - name: post the verdict on the PR
         if: always() && github.event_name == 'pull_request' && hashFiles('comment.md') != ''
         continue-on-error: true
@@ -1079,45 +893,34 @@ jobs:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           set -euo pipefail
-          # NO --summary: the compare script renders its own <details> with the whole
-          # verdict in the summary line, so ci-report places the body verbatim. Each
-          # job stays the author of its own presentation.
-          #
-          # ADVISORY (.github/ci-gates.yml), so the status here decides what the gate
-          # table shows, not whether the PR can merge: this suite's own night-to-night
-          # swing is larger than most regressions.
+          # No --summary: the compare script renders its own <details> summary line,
+          # so ci-report places the body verbatim.
+          # Advisory per .github/ci-gates.yml, so this status decides what the gate
+          # table shows, not whether the PR can merge.
           status=warn
           grep -q '^<details><summary>✅' comment.md && status=pass
           grep -q '^<details><summary>❌' comment.md && status=fail
           node scripts/ci-report.mjs post --section e2e-full --status "$status" \
             --body comment.md --labels "$LABELS"
 
-  # e2e fast — Playwright through the UI against the fake-agent stack (no
-  # cluster/model). SHARDED across N parallel runners (default 4): distribute →
-  # e2e-shard (matrix) → e2e-collect (gate). Each shard is its OWN runner with its OWN
-  # fresh webServer + /tmp state, so playwright.config's workers:1 (the suite shares
-  # one backend) is preserved WITHIN a shard while shards run in parallel — which also
-  # cuts flakiness (fewer specs interleaving on shared state per runner). The dev shell
-  # provides the Nix-wrapped Playwright browsers (no separate install).
+  # e2e fast: Playwright through the UI against the fake-agent stack, sharded as
+  # distribute → e2e-shard → e2e-collect. Each shard has its own runner, webServer
+  # and /tmp state, so playwright.config's workers:1 holds within a shard while
+  # shards run in parallel.
 
-  # Balance the spec FILES into N shards, weighted by per-file runtime — auto-measured
-  # from the LAST successful e2e run's Playwright JSON report (downloaded here), with a
-  # committed fallback (test/e2e/shard-weights.json). Emits a matrix of {shard, specs}.
+  # Balances the spec files into N shards weighted by per-file runtime from the
+  # last successful run's report, with test/e2e/shard-weights.json as the fallback.
   e2e-distribute:
     name: e2e fast distribute (shard)
     runs-on: ubuntu-latest
     env:
-      # Shard count — tune here (or override per-run via the workflow env). 4 balances
-      # speed vs runner cost for ~19 specs.
       E2E_SHARDS: "4"
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v5
 
-      # Pull the newest report.json artifact ("e2e-report") from a prior run of THIS
-      # workflow on the default branch, so shard weights reflect real durations. Best-
-      # effort: no artifact yet (first run / expired) → the committed fallback is used.
+      # Best-effort: without a prior report the committed fallback weights are used.
       - name: fetch prior e2e report (for weights)
         continue-on-error: true
         env:
@@ -1125,7 +928,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p prior
-          # The most recent successful run of this workflow on the default branch.
           run_id=$(gh run list --workflow "${{ github.workflow }}" --branch "${{ github.event.repository.default_branch }}" \
             --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
           if [ -n "${run_id:-}" ]; then
@@ -1145,8 +947,8 @@ jobs:
           matrix=$(PRIOR_REPORT="$report" SHARDS="$E2E_SHARDS" node test/e2e/support/shard-e2e.mjs)
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
-  # Each shard runs its assigned spec FILES on its own runner + webServer. Emits a
-  # per-shard Playwright JSON report (report.json), merged into the weights artifact.
+  # Each shard runs its assigned spec files on its own runner and webServer and
+  # emits a per-shard Playwright JSON report.
   e2e-shard:
     name: e2e fast shard ${{ matrix.shard }}
     needs: e2e-distribute
@@ -1162,17 +964,16 @@ jobs:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # Run ONLY this shard's specs; emit a JSON report so a later run's distribute can
-      # weight by real durations. PLAYWRIGHT_JSON_OUTPUT_NAME makes the json reporter
-      # write to a file (not stdout). pretest:e2e (via npm) builds the agent-host dist.
+      # PLAYWRIGHT_JSON_OUTPUT_NAME makes the json reporter write to a file;
+      # pretest:e2e builds the agent-host dist.
       - name: e2e fast (shard ${{ matrix.shard }})
         env:
           CI: "1"
           PLAYWRIGHT_JSON_OUTPUT_NAME: "report-shard-${{ matrix.shard }}.json"
         run: nix develop --command bash -c 'npm install && npm run test:e2e -- --reporter=json,list ${{ matrix.specs }}'
 
-      # The per-shard report (always — success OR failure) so the collect job can merge
-      # a fresh weights artifact from a fully-green run.
+      # Uploaded on success or failure so collect can merge a weights artifact from
+      # a fully-green run.
       - name: upload shard report
         if: always()
         uses: actions/upload-artifact@v4
@@ -1192,10 +993,9 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # The GATE: succeeds ONLY when every shard passed. On any failure it comments on the
-  # PR which shard(s) failed (one sticky comment, updated). Also merges the per-shard
-  # reports into a single `e2e-report` artifact so the NEXT run's distribute can weight
-  # by real durations (only from a fully-green run, so weights stay clean).
+  # The gate: succeeds only when every shard passed, reports failing shards on the
+  # PR, and merges the per-shard reports into `e2e-report` (from a fully-green run
+  # only, so weights stay clean).
   e2e-collect:
     name: e2e fast (Playwright, fake stack)
     needs: [e2e-distribute, e2e-shard]
@@ -1207,8 +1007,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Merge the per-shard reports into one report.json (only meaningful when all
-      # shards ran; a missing one is fine — it just contributes no weights next time).
+      # A missing shard report just contributes no weights next time.
       - name: download shard reports
         uses: actions/download-artifact@v4
         with:
@@ -1221,9 +1020,8 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          # Concatenate each shard's `suites` into one report.json shaped like a single
-          # Playwright JSON run (the distribute parser only reads `.suites[].file` +
-          # per-test durations, so a merged suites array is sufficient).
+          # A merged suites array is enough: the distribute parser reads only
+          # `.suites[].file` and per-test durations.
           node -e '
             const fs = require("fs");
             const dir = "shard-reports";
@@ -1245,11 +1043,8 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      # ONE sticky PR comment reflecting the CURRENT e2e result. On failure it lists the
-      # failing shard(s)/specs; on success it RESOLVES a prior failure comment to a green
-      # "all pass" (so a fail→fix→pass sequence doesn't leave a stale ❌ sitting there).
-      # It never CREATES a fresh comment on green (no noise on an always-green PR) — it
-      # only updates one that already exists. Always runs so the green branch can fire.
+      # One sticky section reflecting the current e2e result; it runs on green too
+      # so a prior failure resolves.
       - name: post e2e shard section
         if: always() && github.event_name == 'pull_request'
         env:
@@ -1261,20 +1056,15 @@ jobs:
           DISTRIBUTE_RESULT: ${{ needs.e2e-distribute.result }}
         run: |
           set -euo pipefail
-          # A CANCELLED distribute publishes no matrix, so MATRIX is the empty string and
-          # every reconstruction below is meaningless — there are no shards to attribute a
-          # result to. Bail before the parse: `JSON.parse("")` throws, which used to fail
-          # this step and report the superseded run as a genuine e2e FAILURE. The common
-          # way to get here is the opt-in path itself — labelling an open PR starts a second
-          # run and `cancel-in-progress` kills the first.
+          # A cancelled distribute publishes no matrix, so there are no shards to
+          # attribute a result to.
           if [ -z "${MATRIX:-}" ]; then
             echo "distribute=$DISTRIBUTE_RESULT published no matrix — nothing to report"
             exit 0
           fi
-          # GitHub exposes only the AGGREGATE result on `needs`, so per-shard pass/fail
-          # is reconstructed from the uploaded reports: a shard with a report and no
-          # failing test passed; a shard whose report is missing crashed before writing
-          # one, which is a failure and not an absence of tests.
+          # GitHub exposes only the aggregate result on `needs`, so per-shard pass/fail
+          # is reconstructed from the uploaded reports; a missing report is a crashed
+          # shard, not an absence of tests.
           node -e '
             const fs = require("fs");
             const path = require("path");
@@ -1312,10 +1102,8 @@ jobs:
               if (bad.length)
                 lines.push(`- **shard ${m.shard}** — ${bad.length} failure(s):\n` + bad.map((b) => `    - ${b}`).join("\n"));
             }
-            // Re-running a SINGLE shard job does NOT re-run this gate — GitHub only
-            // re-triggers `needs:` dependents from the workflow-level "Re-run failed
-            // jobs" button. So after a fix or a flake, use THAT button or the gate and
-            // this section stay stuck on the old result.
+            // Re-running a single shard job does not re-run this gate; only the
+            // workflow-level "Re-run failed jobs" re-triggers `needs:` dependents.
             const note = "\n\n<sub>⚠️ To re-check after a push or flake, use **“Re-run failed jobs”** on the whole workflow — re-running a single shard alone will NOT refresh this gate.</sub>";
             const green = process.env.SHARDS_RESULT === "success" && process.env.DISTRIBUTE_RESULT === "success";
             fs.writeFileSync("shard-count", String(failures));
@@ -1337,15 +1125,12 @@ jobs:
           node scripts/ci-report.mjs post --section e2e-fast --status "$status" \
             --summary "$summary" --body comment.md --labels "$LABELS"
 
-      # The actual gate: fail this job iff any shard failed. (The distribute job failing
-      # also fails this via `needs`.)
+      # The gate: fail iff any shard failed.
       - name: gate on shard results
         if: always()
         run: |
-          # CANCELLED is not a verdict about the code — the run was superseded (a push, or
-          # a label starting a second run) and its replacement carries the real checks for
-          # this SHA. Failing here would mark the commit red for a suite that never
-          # finished, so cancellation passes the gate. A genuine `failure` still fails.
+          # A cancelled run was superseded and its replacement carries the real checks
+          # for this SHA, so cancellation passes the gate.
           if [ "${{ needs.e2e-distribute.result }}" = "cancelled" ] || [ "${{ needs.e2e-shard.result }}" = "cancelled" ]; then
             echo "e2e cancelled (run superseded) — deferring to the replacement run"
             exit 0
@@ -1357,11 +1142,8 @@ jobs:
           echo "all e2e shards passed"
 
   # ---------------------------------------------------------------------------
-  # Flake detection — NIGHTLY. Run the WHOLE Playwright e2e suite with
-  # --repeat-each=5: each test executes 5×, and with playwright.config retries=0
-  # ANY single failure fails the job and names the flaky test. This surfaces
-  # timing/ordering flakes (a dropped turn, a replay race) that a single per-PR
-  # run misses. Not on PRs (5× the e2e wall-time); nightly + manual only.
+  # Flake detection, nightly: the whole e2e suite with --repeat-each=5 under
+  # retries=0, so any single failure names the flaky test.
   flake-nightly:
     name: flake detection (e2e ×5, nightly)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -1376,8 +1158,6 @@ jobs:
       - name: e2e ×5 (report flaky)
         env:
           CI: "1"
-        # --repeat-each=5 runs every test 5×; the list reporter names each failing
-        # repetition. A non-zero exit = at least one repetition flaked.
         run: nix develop --command bash -c 'npm install && npm run test:e2e -- --repeat-each=5 --reporter=list'
       - name: upload artifacts
         if: failure()
@@ -1388,23 +1168,11 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # Focused flake check — PR opt-in. A PR that FIXES a specific flake adds the
-  # `flake-check` label AND a structured line in its description naming the test:
-  #
-  #     flake-test: <playwright -g pattern>
-  #
-  # e.g.  flake-test: multi-turn re-render
-  #
-  # OPTIONAL — some flakes only reproduce under CROSS-SPEC CONTENTION (the flaky
-  # test interleaved with other specs' load), so a lone `-g <test>` run never
-  # triggers them. Such a PR ALSO lists the spec files to run together:
-  #
-  #     flake-specs: test/e2e/sessions.spec.ts test/e2e/chat-search-filter.spec.ts
-  #
-  # When `flake-specs:` is present the job runs exactly those spec files (each
-  # test 5×) — recreating the contention that surfaces the flake — instead of the
-  # whole suite filtered to the pattern. Gated on the label so it never runs on
-  # unrelated PRs.
+  # Focused flake check, PR opt-in via the `flake-check` label. The PR description
+  # names the test with `flake-test: <playwright -g pattern>` and may add
+  # `flake-specs: <spec files>` for flakes that only reproduce under cross-spec
+  # contention, in which case those files run together instead of the whole suite
+  # filtered to the pattern.
   flake-focus:
     name: flake focus (targeted ×20)
     if: contains(github.event.pull_request.labels.*.name, 'flake-check')
@@ -1413,15 +1181,13 @@ jobs:
       contents: read
       pull-requests: write   # to post/update the sticky flake-verdict comment
     env:
-      # The Playwright JSON report the verdict is computed from. One absolute path
-      # so the writer (inside `nix develop`) and the reader (the summary step) name
-      # the same file without depending on either one's working directory.
+      # One absolute path so the writer (inside `nix develop`) and the reader name
+      # the same file regardless of working directory.
       PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/flake-report.json
     steps:
       - uses: actions/checkout@v5
         with:
-          # Full history: the control run below builds a worktree at the PR's BASE
-          # commit, which a depth-1 checkout does not have.
+          # Full history: the control run builds a worktree at the PR's base commit.
           fetch-depth: 0
       - uses: nixbuild/nix-quick-install-action@v30
       - uses: cachix/cachix-action@v15
@@ -1429,63 +1195,44 @@ jobs:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # Pull the `flake-test:` pattern (and optional `flake-specs:` list) out of the
-      # PR description. Fail loudly if the label is set but no pattern is given (so the
-      # check can't silently pass by running nothing).
+      # Fails loudly when the label is set but no pattern is given.
       - name: resolve flake-test pattern
         id: pat
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: .github/scripts/flake-focus-pattern.sh
 
-      # CONTENTION path: `flake-specs:` was given — run those spec FILES together,
-      # each test 5×, so cross-spec load (the poll/SSE churn that disrupts an
-      # in-progress interaction) recreates the flake. retries=0 → one failure fails.
+      # Contention path: run the `flake-specs:` files together, each test 5×, so
+      # cross-spec load recreates the flake.
       - name: e2e ×5 (contention — flake-specs)
         if: steps.pat.outputs.specs != ''
         env:
           CI: "1"
           FLAKE_SPECS: ${{ steps.pat.outputs.specs }}
-        # `json` alongside `list`: the contention path runs whole spec FILES, so the
-        # exit status cannot say whether the TARGETED test passed, failed, or ever
-        # ran. The report below answers that (scripts/flake-focus-report.mjs).
+        # `json` alongside `list`: the exit status cannot say whether the targeted
+        # test passed, failed or ever ran, so the report below answers that.
         run: nix develop --command bash -c 'npm install && npm run test:e2e -- --repeat-each=5 --reporter=list,json $FLAKE_SPECS'
 
-      # TARGETED path: no `flake-specs:` — hammer just the matching test 20×.
+      # Targeted path: no `flake-specs:`, so hammer just the matching test 20×.
       - name: e2e ×20 (targeted)
         if: steps.pat.outputs.specs == ''
         env:
           CI: "1"
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
-        # -g greps test titles; --repeat-each=20 hammers the match. retries=0 means
-        # one failure across the 20 fails the job.
-        #
-        # --trace on OVERRIDES playwright.config's `trace: on-first-retry`: because
-        # the config also sets retries=0, on-first-retry NEVER fires — so a normal
-        # failure yields only a screenshot + one-line error, never the actionable
-        # trace.zip. This job exists specifically to root-cause a known flake, so we
-        # force a FULL trace (DOM snapshots + action timeline + console + network)
-        # for EVERY repetition regardless of retries. Scoped to this invocation only
-        # — the default e2e shards keep retries=0 / on-first-retry untouched. The
-        # trace.zip lands under test-results/ (uploaded below); open it with
-        # `npx playwright show-trace trace.zip`.
+        # --trace on overrides playwright.config's `trace: on-first-retry`, which
+        # never fires under retries=0, so every repetition gets a full trace.zip
+        # under test-results/.
         run: nix develop --command bash -c 'npm install && npm run test:e2e -- -g "$FLAKE_PATTERN" --repeat-each=20 --trace on --reporter=list,json'
 
-      # THE POINT OF THE JOB, stated on the PR: did the flake this PR claims to fix
-      # actually stop reproducing? A green job does not answer that — under
-      # `flake-specs:` it can pass having never executed the flaky test — so we
-      # resolve `flake-test:` against the report and post the verdict.
-      #
-      # Plain `node` (not the dev shell): the script is dependency-free ESM, and
-      # this step must still post when the run step died before `nix develop`
-      # finished producing anything.
+      # Resolves `flake-test:` against the report, since a green job under
+      # `flake-specs:` can pass having never executed the flaky test; plain `node`
+      # so this still posts when the run step died before `nix develop` finished.
       - name: resolve the verdict (no comment yet)
         id: summary
         if: always()
         env:
-          # Via env, never inline `${{ }}` in the script: the pattern/specs come
-          # from the PR DESCRIPTION, so interpolating them into `run:` would let a
-          # PR body execute shell in this job.
+          # Via env, never inline `${{ }}`: these come from the PR description, so
+          # interpolating them into `run:` would let a PR body execute shell.
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
           FLAKE_SPECS: ${{ steps.pat.outputs.specs }}
         run: |
@@ -1494,22 +1241,14 @@ jobs:
           node scripts/flake-focus-report.mjs "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
             --pattern "$FLAKE_PATTERN" --target fast --mode "$mode" > /dev/null
 
-      # THE CONTROL. "0 failures in 20 runs" is unfalsifiable on its own — a test
-      # that fires once in 200 runs produces exactly that on a branch that fixed
-      # nothing. So run the SAME test with the SAME budget on the PR's base commit:
-      # if it fires there and not here, the budget was adequate and the behaviour
-      # changed; if it fires on neither, this run had no power to detect anything
-      # and the comment says so instead of showing a green tick.
-      #
-      # Only when the PR's own run came back clean: if the flake still reproduces
-      # here we already have the answer, and a control would just burn ~10 minutes.
-      # continue-on-error + `|| true` because the control is EXPECTED to fail tests
-      # — a red baseline is the good outcome and must never fail this job.
+      # The control runs the same test with the same budget on the PR's base commit
+      # (only when the PR's own run came back clean) because "0 failures in 20 runs"
+      # is unfalsifiable alone; continue-on-error and `|| true` because a red
+      # baseline is the expected outcome.
       - name: control — does it still reproduce on the base?
         id: control
-        # !cancelled(), not always(): a superseded run (every push and label event
-        # cancels the previous one) must not spend ten minutes on a control whose
-        # verdict nobody will read.
+        # !cancelled(), not always(): a superseded run must not spend ten minutes on
+        # a control nobody will read.
         if: "!cancelled() && steps.summary.outputs.verdict == 'fixed'"
         continue-on-error: true
         env:
@@ -1518,21 +1257,17 @@ jobs:
           FLAKE_SPECS: ${{ steps.pat.outputs.specs }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/flake-baseline.json
-          # A DIFFERENT Postgres port from the run above. `pg_ctl` daemonizes, so
-          # the first run's database can outlive playwright's webServer teardown
-          # and still hold 55432 — which is exactly how the first control run in
-          # CI died ("pg_ctl: could not start server") and reported no baseline.
+          # A different Postgres port: `pg_ctl` daemonizes, so the first run's database
+          # can outlive playwright's webServer teardown and still hold 55432.
           E2E_PG_PORT: "55433"
         run: |
           set -euo pipefail
-          # Belt and braces: reap any database the run above left behind, so the
-          # control is not at the mercy of that teardown having worked.
+          # Reap any database the run above left behind.
           pkill -f 'scooter-e2e-pg' 2>/dev/null || true
           git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
           git worktree add --detach ../baseline "$BASE_SHA"
           cd ../baseline
-          # Same commands as above, same repetition counts — an unmatched budget
-          # would make the two rates incomparable, which is the whole measurement.
+          # Same commands and repetition counts, or the two rates are incomparable.
           if [ -n "$FLAKE_SPECS" ]; then
             nix develop --command bash -c 'npm install && npm run test:e2e -- --repeat-each=5 --reporter=list,json $FLAKE_SPECS' || true
           else
@@ -1540,10 +1275,8 @@ jobs:
           fi
 
       - name: flake verdict comment
-        # !cancelled(): a CANCELLED run has no report, so its comment step would
-        # overwrite a good verdict in the SHARED comment with "no report to
-        # summarise" — about a run that was superseded and nobody is waiting on.
-        # A genuinely failed run still comments: that is a real signal.
+        # !cancelled(): a cancelled run has no report, and its comment would
+        # overwrite a good verdict in the shared comment.
         if: "!cancelled() && github.event_name == 'pull_request'"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1560,8 +1293,7 @@ jobs:
           mode=targeted; [ -n "$FLAKE_SPECS" ] && mode=contention
           # Only nag about the full target when this PR isn't already running it.
           suggest=(--suggest-full); [ "$HAS_FULL_LABEL" = "true" ] && suggest=()
-          # Absent when the control was skipped (the flake still reproduces) — the
-          # comment then simply has no control section.
+          # Absent when the control was skipped; the comment then has no control section.
           base=()
           [ -f flake-baseline.json ] && base=(--baseline flake-baseline.json --baseline-ref "$BASE_REF@${BASE_SHA:0:7}")
           node scripts/flake-focus-report.mjs "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
@@ -1569,11 +1301,8 @@ jobs:
             --specs "$FLAKE_SPECS" --run-url "$RUN_URL" \
             "${suggest[@]}" "${base[@]}" > flake-comment.md
           cat flake-comment.md >> "$GITHUB_STEP_SUMMARY"
-          # ONE section of the shared CI comment (scripts/ci-report.mjs). The report
-          # renders its own heading, so ci-report is given a summary line and folds the
-          # detail behind it. ADVISORY per .github/ci-gates.yml: a reproduction is
-          # information, not a veto — but the gate blocks while it is PENDING, because a
-          # label that asks a question must get its answer before the PR merges.
+          # One section of the shared CI comment; advisory per .github/ci-gates.yml,
+          # but the gate blocks while it is pending.
           status=pass
           grep -q "STILL reproduces" flake-comment.md && status=fail
           grep -q "no power" flake-comment.md && status=warn
@@ -1581,8 +1310,8 @@ jobs:
             --summary "$(sed -n 's/^### [^ ]* //p' flake-comment.md | head -1 | grep . || echo 'flake focus (fast)')" \
             --body flake-comment.md --labels "$LABELS"
 
-      # A run that executed the flaky test ZERO times is the false green this whole
-      # job exists to prevent, and the test command exits 0 for it. Fail here.
+      # A run that executed the targeted test zero times exits 0 and is the false
+      # green this job exists to prevent.
       - name: gate — the targeted test must have run
         if: always() && steps.summary.outputs.verdict == 'not-run'
         run: |
@@ -1590,8 +1319,7 @@ jobs:
                "this check proved nothing about the flake. See the PR comment."
           exit 1
 
-      # if: always() (not failure()) so the trace.zip survives even when the job is
-      # cancelled/retried — the whole point of this job is to capture the artifact.
+      # always() so the trace.zip survives a cancelled or retried job.
       - name: upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -1605,54 +1333,33 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
-  # Focused flake check, FULL TARGET — PR opt-in via the `e2e-full-flake-check`
-  # label. Same contract as `flake-focus` above (`flake-test:` / `flake-specs:`
-  # in the PR body), but the repetitions run against a REAL k3d cluster instead
-  # of the fake stack.
-  #
-  # Why this exists as a separate job: `flake-focus` runs the FAST target, and
-  # most of what the nightly `e2e-full` reports never reproduces there. The fast
-  # stack has no sandbox pods, so it cannot produce a cold boot, cannot saturate
-  # a node's CPU, and cannot contend for provisioning — which is precisely the
-  # machinery the full-target flakes live in. A fast ×20 that passes is evidence
-  # of no REGRESSION; it is not evidence the flake is fixed. Three PRs shipped
-  # green on that basis and only a nightly could confirm them.
-  #
-  # The cost is real, and measured end-to-end on #697 (run 37222327127): 3m37s
-  # to stand up k3d and roll out the platform, 3m18s for 5 targeted repetitions,
-  # 5m25s for the control, 13m08s total. Opt-in per PR rather than always-on,
-  # and the repeat counts stay far lower than the fast job's ×20.
-  #
-  # SELF-HOSTED, the same fleet as the `e2e-full` shards. A control has to run
-  # where the flake lives: the paragraph above rejects the fast stack for having
-  # no sandbox pods and no provisioning contention, and that argument applies
-  # again one level up — a nightly flake observed on the fleet, re-run on a
-  # GitHub-hosted runner, is being asked to reproduce on different hardware with
-  # a cold store. Why: PR #703.
+  # Focused flake check against the full target, PR opt-in via the
+  # `e2e-full-flake-check` label. Same contract as `flake-focus` (`flake-test:` /
+  # `flake-specs:` in the PR body), but the repetitions run on a real k3d cluster,
+  # because the fast stack has no sandbox pods and so cannot reproduce the cold
+  # boots, CPU saturation or provisioning contention the full-target flakes live
+  # in. Runs on the self-hosted fleet, where those flakes are observed, with lower
+  # repeat counts since each repetition costs a real sandbox pod.
   flake-focus-full:
     name: flake focus full (k3d, targeted ×5)
-    # Label ONLY — deliberately NOT gated on `cluster-changes`. A flake fix is
-    # usually test-only, so the platform path filter would skip this job in
-    # exactly the case it was added for.
+    # Label only, not gated on `cluster-changes`: a flake fix is usually test-only
+    # and the path filter would skip it.
     if: contains(github.event.pull_request.labels.*.name, 'e2e-full-flake-check')
     runs-on: [self-hosted, linux, x64, nix]
     permissions:
       contents: read
       pull-requests: write   # to post/update the sticky flake-verdict comment
     env:
-      # Same JSON report the fast job summarises — see `flake verdict comment` there.
+      # The JSON report the verdict is computed from.
       PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/flake-report.json
-      # Repetitions. Each one costs a real sandbox pod and a cold boot, so these
-      # are wall-clock knobs with teeth: at cluster pace a targeted repetition is
-      # ~30-90s and a contention repetition runs whole spec FILES. Bump here if a
-      # flake needs more attempts to show; the k3d setup is paid once either way.
+      # Each repetition costs a real sandbox pod and a cold boot; the k3d setup is
+      # paid once either way.
       FULL_REPEAT_TARGETED: "5"
       FULL_REPEAT_CONTENTION: "3"
     steps:
       - uses: actions/checkout@v5
         with:
-          # Full history: the control step below builds a worktree at the PR's
-          # BASE commit, which a depth-1 checkout does not have.
+          # Full history: the control step builds a worktree at the PR's base commit.
           fetch-depth: 0
       - uses: nixbuild/nix-quick-install-action@v30
       - uses: cachix/cachix-action@v15
@@ -1660,9 +1367,8 @@ jobs:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # Same resolver as the fast job. FULL_TARGET=1 additionally intersects
-      # `flake-specs:` with the full-target allowlist and FAILS if that leaves
-      # nothing to run — a full check must not pass by running zero tests.
+      # FULL_TARGET=1 intersects `flake-specs:` with the full-target allowlist and
+      # fails if nothing is left to run.
       - name: resolve flake-test pattern
         id: pat
         env:
@@ -1673,9 +1379,8 @@ jobs:
       - name: bring up k3d + the platform
         run: .github/scripts/k3d-platform-up.sh
 
-      # CONTENTION path: `flake-specs:` named at least one full-allowlisted spec.
-      # Run those files together so cross-spec load — on this target, competing
-      # for sandbox provisioning on one 4-vCPU node — recreates the flake.
+      # Contention path: run the full-allowlisted `flake-specs:` files together so
+      # competing for sandbox provisioning recreates the flake.
       - name: e2e full ×N (contention — flake-specs)
         if: steps.pat.outputs.specs_full != ''
         env:
@@ -1689,10 +1394,8 @@ jobs:
           . .github/scripts/e2e-full-serve.sh
           nix develop --command bash -c 'npm install && just e2e-full-run --repeat-each="$FULL_REPEAT_CONTENTION" --reporter=list,json $FLAKE_SPECS'
 
-      # TARGETED path: no usable `flake-specs:` — hammer just the matching test.
-      # --trace on overrides playwright.config's `trace: on-first-retry`, which
-      # never fires under retries=0; a cluster failure without the trace is
-      # nearly unreadable.
+      # Targeted path: --trace on overrides `trace: on-first-retry`, which never
+      # fires under retries=0.
       - name: e2e full ×N (targeted)
         if: steps.pat.outputs.specs_full == ''
         env:
@@ -1706,15 +1409,8 @@ jobs:
           . .github/scripts/e2e-full-serve.sh
           nix develop --command bash -c 'npm install && just e2e-full-run -g "$FLAKE_PATTERN" --repeat-each="$FULL_REPEAT_TARGETED" --trace on --reporter=list,json'
 
-      # BEFORE the control, which deletes this cluster and builds the base's in
-      # its place. Dumping after it would hand someone debugging a red PR run the
-      # state of a DIFFERENT platform — the one commit that is known not to carry
-      # the change under test.
-      # ALWAYS, not on failure. The sandbox crash loop does not reliably fail the
-      # suite: a sandbox can crash, be retried by the kubelet, and the spec still
-      # pass. Job 111556690687 passed 5/5 with the dump skipped and so reported
-      # nothing about whether a sandbox crashed. Cheap (two kubectl reads) and never
-      # a gate -- it exits 0 and annotates.
+      # Before the control, which replaces this cluster with the base's; always(),
+      # since a sandbox can crash, be retried by the kubelet, and the spec still pass.
       - name: sandbox crash census
         if: always()
         run: .github/scripts/k3d-sandbox-census.sh
@@ -1722,14 +1418,13 @@ jobs:
         if: failure()
         run: .github/scripts/k3d-dump-state.sh
 
-      # Resolve the verdict BEFORE commenting: the control below runs only when
-      # the PR's own repetitions came back clean, and that decision needs the
-      # verdict. Writes outputs only — the comment is posted after the control.
+      # The control below runs only on a clean verdict, so resolve it first; the
+      # comment is posted after the control.
       - name: resolve the verdict (no comment yet)
         id: summary
         if: always()
         env:
-          # Via env, never inline `${{ }}`: these come from the PR DESCRIPTION,
+          # Via env, never inline `${{ }}`: these come from the PR description,
           # so interpolating them into `run:` would let a PR body execute shell.
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
           FLAKE_SPECS: ${{ steps.pat.outputs.specs_full }}
@@ -1739,32 +1434,14 @@ jobs:
           nix develop --command node scripts/flake-focus-report.mjs "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
             --pattern "$FLAKE_PATTERN" --target full --mode "$mode" > /dev/null
 
-      # THE CONTROL. "0 failures in 5 runs" is unfalsifiable on its own — a test
-      # that fires once in 50 runs produces exactly that on a branch that fixed
-      # nothing — so run the SAME test with the SAME budget at the PR's base and
-      # report both rates. Without it this job can only ever say "it did not
-      # happen here", which is no way to demonstrate a fix.
-      #
-      # The base's PLATFORM, not just its specs. A flake fix that touches a
-      # service measured against the PR's own deployment is not a control at all;
-      # that mismatch is only meaningful when the fix happens to be test-side,
-      # and whether it is test-side is precisely what nobody knows up front.
-      #
-      # ONE CLUSTER AT A TIME. k3d-platform-up.sh names its cluster `scooter-ci`,
-      # and a 4-vCPU runner cannot host two platforms anyway — so the PR's
-      # cluster is torn down first. The registry SURVIVES that (it is a separate
-      # k3d object) and its tags are content-addressed, so every image the base
-      # shares with the PR is already in the blob store and skips the push.
-      #
-      # Only when the PR's own run came back clean: a flake that still reproduces
-      # here already has its answer, and a control would just burn the time.
-      # continue-on-error + `|| true` because the control is EXPECTED to fail
-      # tests — a red baseline is the good outcome and must never fail this job.
+      # The control runs the same test with the same budget on the base's own
+      # platform (only when the PR's run came back clean) because "0 failures in 5
+      # runs" is unfalsifiable alone; continue-on-error and `|| true` because a red
+      # baseline is the expected outcome.
       - name: control — does it still reproduce on the base?
         id: control
-        # !cancelled(), not always(): a superseded run (every push and label
-        # event cancels the previous one) must not spend ten minutes on a control
-        # whose verdict nobody will read.
+        # !cancelled(), not always(): a superseded run must not spend ten minutes on
+        # a control nobody will read.
         if: "!cancelled() && steps.summary.outputs.verdict == 'fixed'"
         continue-on-error: true
         env:
@@ -1775,82 +1452,53 @@ jobs:
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
           FLAKE_SPECS: ${{ steps.pat.outputs.specs_full }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          # The report the comment step diffs against. Absolute, and under the
-          # PR's workspace rather than the baseline worktree, so it outlives the
-          # worktree and the comment step can find it by name.
+          # Absolute and under the PR's workspace so it outlives the baseline worktree.
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/flake-baseline.json
-          # No E2E_PG_PORT override, unlike the fast job's control: the `full`
-          # project sets `webServer: undefined` (playwright.config.ts), so this
-          # run starts no local Postgres for the first one's to collide with.
+          # No E2E_PG_PORT override: the `full` project sets `webServer: undefined`,
+          # so no local Postgres is started.
         run: |
           set -euo pipefail
+          # One cluster at a time; the registry survives this and its content-addressed
+          # tags skip every image push the base shares with the PR.
           nix shell nixpkgs#k3d -c k3d cluster delete scooter-ci || true
           git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
           git worktree add --detach ../baseline "$BASE_SHA"
           cd ../baseline
-          # The BASE's own bring-up script and manifests, not the PR's. That cuts
-          # both ways: a change to k3d-platform-up.sh does not reach this run
-          # until it is ON the base. Until the registry-reuse guard lands there,
-          # the base's older script still calls `k3d registry create` and logs
-          #   FATA Failed to create registry: A registry node with that name
-          #   already exists
-          # which is NOISE, not a failure — the inner `bash -c` block sets no
-          # `-e`, so it continues and `--registry-use` attaches to the registry
-          # that is already there (verified on #697: pushes skipped, rollout
-          # fine). Do not add `set -e` to that block without also landing the
-          # guard, or this step starts failing on a cosmetic error.
+          # The base's own bring-up script and manifests, not the PR's.
           .github/scripts/k3d-platform-up.sh
           . .github/scripts/e2e-full-serve.sh
-          # Same project, same repetition counts as the run above — an unmatched
-          # budget makes the two rates incomparable, which is the measurement.
-          #
-          # Open-coded `npx playwright`, NOT `just e2e-full-run` like the two steps
-          # above: we are inside the BASE's worktree, so `just` resolves the BASE's
-          # justfile, which has no such recipe until this PR is on main. Both
-          # branches end in `|| true`, so that miss would be SILENT — no baseline
-          # report, and the comment quietly drops its control section. Convert once
-          # the recipe is on main. Why: PR #703.
+          # Same project and repetition counts as the run above; open-coded
+          # `npx playwright` because `just` here resolves the base's justfile.
           if [ -n "$FLAKE_SPECS" ]; then
             nix develop --command bash -c 'npm install && npx playwright test --project=full --repeat-each="$FULL_REPEAT_CONTENTION" --reporter=list,json $FLAKE_SPECS' || true
           else
             nix develop --command bash -c 'npm install && npx playwright test --project=full -g "$FLAKE_PATTERN" --repeat-each="$FULL_REPEAT_TARGETED" --reporter=list,json' || true
           fi
 
-      # PRIOR evidence, free: the same `e2e-full-report` artifacts `e2e-full-collect`
-      # diffs against, which already say whether this spec is failing on main right
-      # now. Reusing them costs a download instead of the control's cluster rebuild.
-      #
-      # It does NOT replace the control. A nightly runs the WHOLE suite, so its rate
-      # carries full-suite contention that the targeted run above does not — scoring
-      # a quiet clean run against a contended base rate overstates significance in
-      # the exact direction that manufactures a false "fixed". What it does catch is
-      # the inverse: a control that reproduced nothing while main is still failing
-      # the spec, which is an unrepresentative control, not a fix. Why: PR #703.
+      # Prior evidence: the nightly `e2e-full-report` artifacts say whether this spec
+      # is failing on main now, which catches a control that reproduced nothing while
+      # main still fails the spec; it does not replace the control, since a nightly's
+      # rate includes full-suite contention.
       - name: fetch the nightly e2e-full window (main)
         if: "!cancelled() && github.event_name == 'pull_request'"
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        # `nix shell nixpkgs#gh`: gh is in NEITHER the devshell nor the fleet
-        # runner image. Unlike ubuntu-latest, where it is preinstalled.
+        # gh is in neither the devshell nor the fleet runner image.
         run: nix shell nixpkgs#gh -c .github/scripts/fetch-e2e-full-window.sh history 5
 
-      # The verdict on the PR — identical contract to the fast job, but this one is
-      # the evidence that actually counts for a flake first seen on `e2e-full`, so
-      # its comment says "real k3d cluster" and carries no full-target nudge.
+      # Same contract as the fast job's comment, but this is the evidence that
+      # counts for a flake first seen on `e2e-full`.
       - name: flake verdict comment
-        # !cancelled(): a CANCELLED run has no report, so its comment step would
-        # overwrite a good verdict in the SHARED comment with "no report to
-        # summarise" — about a run that was superseded and nobody is waiting on.
-        # A genuinely failed run still comments: that is a real signal.
+        # !cancelled(): a cancelled run has no report, and its comment would
+        # overwrite a good verdict in the shared comment.
         if: "!cancelled() && github.event_name == 'pull_request'"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          # Env, not inline `${{ }}` — these come from the PR description (see the
-          # fast job).
+          # Env, not inline `${{ }}`: these come from the PR description.
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
           FLAKE_SPECS: ${{ steps.pat.outputs.specs_full }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1859,8 +1507,7 @@ jobs:
         run: |
           set -euo pipefail
           mode=targeted; [ -n "$FLAKE_SPECS" ] && mode=contention
-          # Absent when the control was skipped (the flake still reproduces, so
-          # the answer is already in) — the comment then has no control section.
+          # Absent when the control was skipped; the comment then has no control section.
           base=()
           [ -f flake-baseline.json ] && base=(--baseline flake-baseline.json --baseline-ref "$BASE_REF@${BASE_SHA:0:7}")
           # `sort` on the run-id directory names is chronological (ids increase),
@@ -1876,11 +1523,8 @@ jobs:
             --specs "$FLAKE_SPECS" --run-url "$RUN_URL" --history-ref "$BASE_REF" \
             "${base[@]}" "${hist[@]}" > flake-comment.md
           cat flake-comment.md >> "$GITHUB_STEP_SUMMARY"
-          # ONE section of the shared CI comment (scripts/ci-report.mjs). The report
-          # renders its own heading, so ci-report is given a summary line and folds the
-          # detail behind it. ADVISORY per .github/ci-gates.yml: a reproduction is
-          # information, not a veto — but the gate blocks while it is PENDING, because a
-          # label that asks a question must get its answer before the PR merges.
+          # One section of the shared CI comment; advisory per .github/ci-gates.yml,
+          # but the gate blocks while it is pending.
           status=pass
           grep -q "STILL reproduces" flake-comment.md && status=fail
           grep -q "no power" flake-comment.md && status=warn
@@ -1888,9 +1532,7 @@ jobs:
             --summary "$(sed -n 's/^### [^ ]* //p' flake-comment.md | head -1 | grep . || echo 'flake focus (full)')" \
             --body flake-comment.md --labels "$LABELS"
 
-      # Zero repetitions of the targeted test = a false green (see the fast job).
-      # Costlier here: a cluster run that proved nothing burned ~11 minutes. (It
-      # does not also pay for the control — that runs only on a `fixed` verdict.)
+      # Zero repetitions of the targeted test is a false green.
       - name: gate — the targeted test must have run
         if: always() && steps.summary.outputs.verdict == 'not-run'
         run: |
@@ -1898,8 +1540,7 @@ jobs:
                "full target — this check proved nothing about the flake. See the PR comment."
           exit 1
 
-      # always(), not failure(): capturing the trace/sampler is the whole point of
-      # this job, and a cancelled run is the one that most needs them.
+      # always(): a cancelled run is the one that most needs the trace and sampler.
       - name: upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -1919,10 +1560,8 @@ jobs:
         if: always()
         run: nix shell nixpkgs#k3d -c k3d cluster delete scooter-ci || true
 
-  # ONE section for the whole nixosTest matrix. The legs cannot each write: 13
-  # concurrent read-modify-writes on one comment would spend the retry budget on
-  # each other. This job is the single writer, and it reads the legs' outcome from
-  # `needs` rather than re-deriving it.
+  # One section for the whole nixosTest matrix, written by this single job, since
+  # concurrent legs would spend the retry budget on each other.
   nixos-report:
     name: nixosTest report
     needs: [nixos-tests-matrix, nixos-test]
@@ -1951,22 +1590,16 @@ jobs:
           else
             status=fail; summary="nixosTests — at least one VM test failed"
           fi
-          # The matrix's aggregate result is all `needs` exposes, so name the legs and
-          # point at the run: which one failed is one click away, and duplicating the
-          # per-leg status here would just be a second source of truth to drift.
+          # `needs` exposes only the aggregate result, so name the legs and point at the run.
           echo "$TESTS" | jq -r '.[] | "- \(.)"' > nixos.md
           printf '\n<sub>Per-leg results are the `nixosTest *` checks on this commit.</sub>\n' >> nixos.md
           node scripts/ci-report.mjs post --section nixos --status "$status" \
             --summary "$summary" --body nixos.md --labels "$LABELS"
 
-  # THE REQUIRED CHECK. Everything else reports; this decides. It reads the shared
-  # comment every reporting job wrote into and fails when a gate in
-  # .github/ci-gates.yml is failing OR has not reported — because a gate nobody
-  # reported is not a passing gate, and treating absence as success is how an
-  # opt-in suite ends up decorative.
-  #
-  # needs: every producer, so this runs LAST. always(), or a red producer would
-  # skip the summary and leave the PR with no verdict at all.
+  # The required check: reads the shared comment every reporting job wrote into and
+  # fails when a gate in .github/ci-gates.yml is failing or has not reported, since
+  # an unreported gate is not a passing gate. needs every producer so it runs last;
+  # always() so a red producer still yields a verdict.
   ci-summary:
     name: ci summary (gates)
     needs: [ci, image-sizes, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]

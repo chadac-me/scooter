@@ -1,4 +1,4 @@
-"""Tier 1 — in-flight (sandbox ↔ PV) reservations (no cluster, fake clock)."""
+"""Tier 1: in-flight sandbox/PV reservations with a fake clock, no cluster."""
 
 import threading
 
@@ -34,7 +34,7 @@ def test_a_claim_records_BOTH_directions():
 
 
 def test_ONE_PV_ONE_SANDBOX_a_second_sandbox_is_refused():
-    # RWO does not stop a same-node double-mount; two uppers on one disk is corruption.
+    # RWO does not stop a same-node double-mount, and two uppers on one disk is corruption.
     r = res()
     r.claim("pv-a", "conv-1")
     with pytest.raises(AlreadyClaimed, match="already claimed by sandbox 'conv-1'"):
@@ -42,7 +42,7 @@ def test_ONE_PV_ONE_SANDBOX_a_second_sandbox_is_refused():
 
 
 def test_ONE_SANDBOX_ONE_PV_a_second_volume_is_refused():
-    # The first PV would strand: claimRef'd to a PVC nobody creates.
+    # The first PV would otherwise strand, claimRef'd to a PVC nobody creates.
     r = res()
     r.claim("pv-a", "conv-1")
     with pytest.raises(AlreadyClaimed, match="already holds 'pv-a'"):
@@ -50,14 +50,14 @@ def test_ONE_SANDBOX_ONE_PV_a_second_volume_is_refused():
 
 
 def test_re_claiming_the_SAME_pair_is_idempotent_and_refreshes():
-    # The only way to extend a hold, and only by naming the pair you already own.
+    # A hold is extended only by re-claiming the pair already owned.
     clock = FakeClock()
     r = res(clock=clock)
     r.claim("pv-a", "conv-1")
     clock.advance(50)
     r.claim("pv-a", "conv-1")
     clock.advance(50)
-    assert r.in_flight_reservations() == {"pv-a"}  # would have lapsed at 60 without the refresh
+    assert r.in_flight_reservations() == {"pv-a"}
 
 
 def test_a_released_pv_can_go_to_a_DIFFERENT_sandbox():
@@ -79,7 +79,7 @@ def test_a_released_sandbox_can_take_a_DIFFERENT_pv():
 # --- expiry ----------------------------------------------------------------
 
 def test_THE_LEAK_GUARD_a_reservation_expires():
-    # A controller dying mid-decision would otherwise strand this PV forever.
+    # A controller dying mid-decision would otherwise strand the PV forever.
     clock = FakeClock()
     r = res(clock=clock)
     r.claim("pv-a", "conv-1")
@@ -96,8 +96,8 @@ def test_an_EXPIRED_reservation_frees_BOTH_sides():
     clock.advance(61)
     assert r.get_pv_owner("pv-a") is None
     assert r.get_pv_for_pod("conv-1") is None
-    r.claim("pv-a", "conv-2")          # the PV is free for another sandbox...
-    r.claim("pv-b", "conv-1")          # ...and conv-1 is free to take another PV
+    r.claim("pv-a", "conv-2")          # the PV is free for another sandbox
+    r.claim("pv-b", "conv-1")          # and conv-1 is free to take another PV
     assert r.get_pv_owner("pv-a") == "conv-2"
     assert r.get_pv_for_pod("conv-1") == "pv-b"
 
@@ -108,7 +108,7 @@ def test_expiry_is_per_reservation():
     r.claim("old", "conv-1")
     clock.advance(40)
     r.claim("new", "conv-2")
-    clock.advance(30)  # old is 70s in (expired), new is 30s in
+    clock.advance(30)  # old is expired, new is 30s in
     assert r.in_flight_reservations() == {"new"}
 
 
@@ -143,7 +143,7 @@ def test_release_rolls_back_a_failed_reservation():
 
 
 def test_release_stays_IDEMPOTENT():
-    # The loop calls this every pass, so "already released" is the steady state.
+    # The loop releases every realised PVC every pass, so "already released" is the steady state.
     r = res()
     r.claim("pv-a", "conv-1")
     r.release("pv-a")
@@ -178,7 +178,7 @@ def test_concurrent_claims_on_one_PV_yield_exactly_ONE_winner():
 
 
 def test_concurrent_claims_by_one_SANDBOX_yield_exactly_ONE_winner():
-    # The other direction: one sandbox racing for several PVs must end up holding one.
+    # One sandbox racing for several PVs must end up holding exactly one.
     r = res()
     wins, lock = [], threading.Lock()
     start = threading.Barrier(16)

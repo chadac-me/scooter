@@ -1,14 +1,8 @@
 /**
- * Tier 3 E2E — conversation history (esp. TOOL CALLS) survives a page refresh.
- *
- * The open conversation renders SOLELY from the integrity SSE stream
- * (events.integrity), which replays the full persisted event log on (re)connect
- * before going live. A page reload drops all live state and rebuilds purely from
- * that replay — so this is the true test that tool-call events are (a) persisted
- * and (b) faithfully re-materialized into the thread on reload, not just shown
- * live. Regression guard for "tool calls vanish after refresh".
- *
- * Every test also gets the automatic "no error in the UI" assertion (fixtures).
+ * Tier 3 E2E for conversation history (especially tool calls) surviving a page refresh. The
+ * open conversation renders solely from the integrity SSE stream, which replays the full
+ * persisted event log on (re)connect, so a reload rebuilds purely from that replay and
+ * proves tool-call events are persisted and faithfully re-materialized.
  */
 
 import { test, expect } from "./fixtures.js";
@@ -16,21 +10,18 @@ import { test, expect } from "./fixtures.js";
 test.describe("history survives a page refresh", () => {
   test("a tool call is still rendered after reload", async ({ chat, page }) => {
     await chat.open();
-    // "!" runs a real sandbox command via the ACP createTerminal path -> the
-    // bridge emits TOOL_CALL_START/ARGS/END/RESULT, which are persisted.
+    // "!" runs a real sandbox command, so the bridge emits TOOL_CALL events that are persisted.
     await chat.send("!echo zxcvbnm-marker");
 
     // Live: the tool call renders and its output flows into the reply.
     await expect(chat.toolCalls().first()).toBeVisible({ timeout: 30_000 });
     await expect(chat.assistantMessages().last()).toContainText(/zxcvbnm-marker/i, { timeout: 30_000 });
 
-    // Reload: all live state is gone; the page reconnects to events.integrity
-    // and rebuilds history purely from the replayed log.
+    // Reload: all live state is gone and the page rebuilds history purely from the replayed log.
     await page.reload();
     await expect(chat.input()).toBeVisible({ timeout: 20_000 });
 
-    // The tool call — and the user message + assistant reply — must reappear
-    // from the replay, not just from the live stream.
+    // The tool call, user message and assistant reply must reappear from the replay.
     await expect(chat.userMessages().first()).toContainText(/echo zxcvbnm-marker/i, { timeout: 30_000 });
     await expect(chat.toolCalls().first()).toBeVisible({ timeout: 30_000 });
     await expect(chat.assistantMessages().last()).toContainText(/zxcvbnm-marker/i, { timeout: 30_000 });

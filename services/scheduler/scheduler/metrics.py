@@ -1,9 +1,5 @@
-"""OpenTelemetry metrics for the scheduler service.
-
-Mirrors the agent-host pattern (services/agent-host/src/metrics/metrics.ts):
-- OTLP exporter (vendor-neutral)
-- No-op sink when disabled
-- In-memory reader as a test seam
+"""OpenTelemetry metrics for the scheduler service, matching services/agent-host/src/metrics/metrics.ts:
+an OTLP exporter, a no-op sink when disabled, and an in-memory reader as a test seam.
 
 Instruments:
   - scheduler_fires_total: Counter {status=spawned|failed}
@@ -15,7 +11,7 @@ Instruments:
   - scheduler_due_backlog: ObservableGauge
   - scheduler_runs_pruned_total: Counter
 
-CRITICAL: NO task_id or owner attributes — unbounded cardinality.
+No instrument carries a task_id or owner attribute, since their cardinality is unbounded.
 """
 
 from __future__ import annotations
@@ -32,22 +28,22 @@ logger = get_logger("metrics")
 
 
 class MetricsSink:
-    """Interface for recording metrics. A no-op implementation is used when disabled."""
+    """Interface for recording metrics, with a no-op implementation when disabled."""
 
     def fire_started(self) -> None:
-        """A task fire started (reserved for in-flight tracking if needed)."""
+        """A task fire started."""
         pass
 
     def fire_completed(self, *, status: str, duration_ms: float) -> None:
-        """A task fire completed. status=spawned|failed."""
+        """A task fire completed with status spawned or failed."""
         pass
 
     def tick_started(self) -> None:
-        """A scheduler tick started (reserved)."""
+        """A scheduler tick started."""
         pass
 
     def tick_completed(self, *, outcome: str) -> None:
-        """A scheduler tick completed. outcome=ok|error. MUST be called every tick."""
+        """A scheduler tick completed with outcome ok or error, called every tick."""
         pass
 
     def claim_lag(self, *, lag_ms: float) -> None:
@@ -77,7 +73,6 @@ class _OTelMetricsSink(MetricsSink):
     def __init__(self, reader):
         resource = Resource.create({"service.name": "agent-scheduler"})
         provider = MeterProvider(resource=resource, metric_readers=[reader])
-        # Note: We don't use set_global_meter_provider here; just use the local provider
         self._provider = provider
         meter = provider.get_meter("agent-scheduler")
 
@@ -112,11 +107,11 @@ class _OTelMetricsSink(MetricsSink):
             unit="ms",
         )
 
-        # Observable gauges (set from outside at collection time)
+        # Observable gauge values, read by the callbacks at collection time.
         self._task_count_enabled = 0
         self._task_count_disabled = 0
         self._due_backlog_count = 0
-        # Instruments whose callback has already reported a failure — see _guarded.
+        # Instruments whose callback has already reported a failure (see _guarded).
         self._failed_instruments: set[str] = set()
 
         meter.create_observable_gauge(
@@ -130,14 +125,8 @@ class _OTelMetricsSink(MetricsSink):
             description="Number of tasks currently overdue.",
         )
 
-    # OTel observable-gauge callbacks. The SDK hands each a CallbackOptions and expects it to
-    # RETURN (or yield) Observation objects — CallbackOptions has no `.observe()`, so the old
-    # `observer.observe(...)` form raised AttributeError every collection cycle.
-    #
-    # A callback that raises is logged by the SDK as "Callback failed for instrument <name>"
-    # EVERY collection cycle, forever — an unbounded error stream from an observability path
-    # that must never be the loudest thing in the logs. So each one is wrapped: a failure
-    # drops that cycle's data point and is reported ONCE, not once per cycle. Why: PR #534.
+    # Observable-gauge callbacks return Observation objects, and each is wrapped because the
+    # SDK would otherwise log a raising callback on every collection cycle forever.
     def _observe_tasks(self, options: CallbackOptions) -> list[Observation]:
         return self._guarded(
             "scheduler_tasks",
@@ -151,15 +140,10 @@ class _OTelMetricsSink(MetricsSink):
         return self._guarded("scheduler_due_backlog", lambda: [Observation(self._due_backlog_count)])
 
     def _guarded(self, instrument: str, build) -> list[Observation]:
-        """Run a gauge callback body, converting a raise into a dropped data point.
-
-        Reports the FIRST failure per instrument and stays quiet until that instrument
-        collects cleanly again — so a persistent bug is still visible exactly once, and a
-        flapping one is reported on each new episode rather than on each collection.
-        """
+        """Run a gauge callback body, converting a raise into a dropped data point that is logged once per failure episode."""
         try:
             observations = build()
-        except Exception as e:  # observability must not be able to spam the logs
+        except Exception as e:
             if instrument not in self._failed_instruments:
                 self._failed_instruments.add(instrument)
                 logger.error(
@@ -180,9 +164,7 @@ class _OTelMetricsSink(MetricsSink):
     def claim_lag(self, *, lag_ms: float) -> None:
         self._claim_lag_hist.record(lag_ms)
 
-    # Coerce at the SETTER, not in the callback: a bad value rejected here is attributable
-    # to the caller that produced it, while the same value rejected at collection time
-    # surfaces as an anonymous callback failure minutes later.
+    # Coerced at the setter so a bad value is attributable to the caller that produced it.
     def set_task_counts(self, *, enabled: int, disabled: int) -> None:
         self._task_count_enabled = int(enabled)
         self._task_count_disabled = int(disabled)
@@ -207,19 +189,10 @@ class _NoopMetricsSink(MetricsSink):
 
 
 def create_metrics(*, enabled: bool, reader_for_test=None) -> MetricsSink:
-    """Create a metrics sink.
-
-    Args:
-        enabled: If False, returns a no-op sink.
-        reader_for_test: Test seam — an in-memory reader instead of OTLP export.
-
-    Returns:
-        A MetricsSink (either live OTel or no-op).
-    """
+    """Create a metrics sink: a no-op when disabled, else OTel with `reader_for_test` or an OTLP exporter."""
     if not enabled:
         return _NoopMetricsSink()
 
-    # The OTLP exporter reads OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS / _PROTOCOL
-    # from the environment automatically (set by the module when otel.enable is true).
+    # The OTLP exporter reads OTEL_EXPORTER_OTLP_* from the environment.
     reader = reader_for_test or PeriodicExportingMetricReader(OTLPMetricExporter())
     return _OTelMetricsSink(reader)

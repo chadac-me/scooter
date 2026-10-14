@@ -1,8 +1,7 @@
 /**
- * Tier 1 contract — the show_sandbox_resources / set_sandbox_resources MCP tool
- * handlers. The agent sees its sandbox's current cpu/memory/gpu and right-sizes it.
- * Validation lives HERE (a bad quantity is refused, never sent to the broker); the
- * wiring's setResources WRITES the broker size spec (applied on the next restart).
+ * The show_sandbox_resources and set_sandbox_resources MCP tool handlers. Validation
+ * lives here (a bad quantity is refused before reaching the broker); the wiring's
+ * setResources writes the size spec, applied on the next restart.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -23,7 +22,7 @@ function wiring(over: Partial<SandboxResourceToolsWiring> = {}): {
     currentResources: async () => ({ requests: { cpu: "500m", memory: "1Gi" }, limits: { memory: "4Gi" } }),
     setResources: vi.fn(async (id: string, r: SandboxResources) => {
       set.push([id, r]);
-      return true; // the size was recorded on the broker
+      return true;
     }),
     ...over,
   };
@@ -94,8 +93,7 @@ describe("show_sandbox_resources — the deployment's size presets", () => {
     const text = (await handleShowSandboxResources(deps, "c1")).content[0].text;
     expect(text).toContain("small: 1 CPU, 2Gi");
     expect(text).toContain("large: 4 CPU, 16Gi");
-    // The hint is the whole point of a deployment-authored catalog — without it the
-    // model picks by guessing at numbers.
+    // Without the hint the model picks by guessing at numbers.
     expect(text).toContain("Parallel builds, large test runs.");
     expect(text).toMatch(/small:.*\(default\)/);
   });

@@ -1,9 +1,7 @@
 /**
- * Transcript REPLAY support — load a recorded NDJSON transcript and turn its RAW
- * input frames into a fake that drives the REAL bridge, so tests run against the
- * exact shapes real goose/claude emit (not hand-authored fictions).
- *
- * See todo/docs/AGENT_TRANSCRIPT_HARNESS.md. Fixtures live under
+ * Transcript replay support: load a recorded NDJSON transcript and turn its raw
+ * input frames into a fake that drives the real bridge, so tests run against the
+ * exact shapes goose and claude emit. Fixtures live under
  * test/fixtures/transcripts/<provider>/<scenario>.ndjson.
  */
 
@@ -22,20 +20,18 @@ const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures",
 export const PROVIDERS = ["claude", "goose"] as const;
 export type Provider = (typeof PROVIDERS)[number];
 
-/** Path to a recorded fixture (may not exist — use fixtureExists first). */
+/** Path to a recorded fixture, which may not exist. */
 export function fixturePath(provider: Provider, scenario: string): string {
   return join(FIXTURES, provider, `${scenario}.ndjson`);
 }
 export function fixtureExists(provider: Provider, scenario: string): boolean {
   return existsSync(fixturePath(provider, scenario));
 }
-/** Providers that HAVE a recorded fixture for a scenario (so a cross-provider test
- *  parametrizes only over what's actually captured). */
+/** Providers that have a recorded fixture for a scenario. */
 export function providersWith(scenario: string): Provider[] {
   return PROVIDERS.filter((p) => fixtureExists(p, scenario));
 }
-/** Scenarios recorded for ALL providers — the cross-provider test iterates these so
- *  adding a fixture pair automatically extends coverage (no test edit needed). */
+/** Scenarios recorded for every provider. */
 export function scenariosForAllProviders(): string[] {
   const byProvider = PROVIDERS.map((p) => {
     const dir = join(FIXTURES, p);
@@ -57,52 +53,42 @@ export function loadTranscript(path: string): TranscriptEntry[] {
     .map((l) => JSON.parse(l) as TranscriptEntry);
 }
 
-/** The RAW input entries only (acp-in / sdk-in), in record order — what the fake
- *  agent/query must reproduce. */
+/** The raw input entries (acp-in / sdk-in) in record order. */
 export function inputEntries(entries: TranscriptEntry[]): TranscriptEntry[] {
   return entries.filter((e) => e.layer === "acp-in" || e.layer === "sdk-in");
 }
 
-/** The AG-UI output the bridge produced for this transcript (what a replay can
- *  assert its own bridge re-produces). */
+/** The AG-UI output the bridge produced for this transcript. */
 export function aguiOutEntries(entries: TranscriptEntry[]): unknown[] {
   return entries.filter((e) => e.layer === "agui-out").map((e) => e.data);
 }
 
-/** The recorded goose ACP updates (sessionUpdate frames) for a transcript — feed
- *  these to the fake ACP agent so it emits REAL shapes. */
+/** The recorded goose ACP sessionUpdate frames, for the fake ACP agent to emit. */
 export function acpUpdates(entries: TranscriptEntry[]): SessionUpdate[] {
   return entries.filter((e) => e.layer === "acp-in").map((e) => e.data as SessionUpdate);
 }
 
-/** The recorded RAW claude SDK query() messages — feed these to a fake query() so
- *  it yields REAL shapes (the layer that lied about tool_result). */
+/** The recorded raw claude SDK query() messages, for a fake query() to yield. */
 export function sdkMessages(entries: TranscriptEntry[]): unknown[] {
   return entries.filter((e) => e.layer === "sdk-in").map((e) => e.data);
 }
 
-/** All assistant TEXT the bridge emitted for a scenario (concatenated), from the
- *  normalized agui-out layer — provider-agnostic. Used to assert CONTENT (e.g. a
- *  multi-turn scenario recalling a value from an earlier turn = session continuity). */
+/** All assistant text the bridge emitted for a scenario, concatenated from the agui-out layer. */
 export function assistantText(provider: Provider, scenario: string): string {
   const out = aguiOutEntries(loadFixture(provider, scenario)) as Array<{ type?: string; delta?: string }>;
   return out.filter((e) => e.type === "TEXT_MESSAGE_CONTENT").map((e) => e.delta ?? "").join("");
 }
 
 /**
- * Re-derive the normalized SessionUpdates a scenario produces UNDER THE CURRENT
- * CODE from its recorded INPUT layer — so a cross-provider test reflects today's
- * behavior, not the frozen `agui-out` captured at record time (which would hide a
- * fix). claude sdk-in runs through the real `sdkMessageToUpdates`; goose acp-in
- * frames ARE already normalized SessionUpdates (the recorder tapped after
- * normalization). Returns `sessionUpdate` type names for shape assertions.
+ * Re-derive the SessionUpdate type names a scenario produces under the current code
+ * from its recorded input layer. claude sdk-in runs through the real
+ * `sdkMessageToUpdates`; goose acp-in frames are already normalized SessionUpdates.
  */
 export async function derivedUpdateTypes(provider: Provider, scenario: string): Promise<string[]> {
   const entries = loadFixture(provider, scenario);
   if (provider === "goose") {
     return acpUpdates(entries).map((u) => (u as { sessionUpdate?: string }).sessionUpdate ?? "?");
   }
-  // claude: replay the raw SDK messages through the live adapter.
   const { sdkMessageToUpdates } = await import("@scooter/claude-sdk-provider");
   const out: string[] = [];
   for (const msg of sdkMessages(entries)) {
@@ -111,12 +97,7 @@ export async function derivedUpdateTypes(provider: Provider, scenario: string): 
   return out;
 }
 
-/**
- * A fake SDK query() that REPLAYS recorded claude messages verbatim — a drop-in
- * for createSdkAcpClient's `queryImpl`. Records calls + honors interrupt() (stops
- * yielding remaining messages, mirroring a real turn cut short by back-pressure).
- * This is how a test drives the real sdkClient with REAL message shapes.
- */
+/** A fake SDK query() replaying recorded claude messages verbatim, a drop-in for createSdkAcpClient's `queryImpl` that records calls and honors interrupt(). */
 export function replaySdkQuery(messages: unknown[]) {
   const calls: Array<{ prompt: string; options: Record<string, unknown> }> = [];
   let interrupted = false;
@@ -124,10 +105,9 @@ export function replaySdkQuery(messages: unknown[]) {
     calls.push({ prompt: params.prompt, options: params.options });
     async function* gen() {
       for (const msg of messages) {
-        if (interrupted) return; // a back-pressure interrupt stops the stream
+        if (interrupted) return;
         yield msg as never;
-        // Yield to the event loop so an interrupt() triggered by a callback during
-        // this message is observed before the next one (models real async streaming).
+        // Yield to the event loop so an interrupt() during this message is observed before the next one.
         await Promise.resolve();
       }
     }

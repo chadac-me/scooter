@@ -1,13 +1,7 @@
 /**
- * Tier 1 contract test — reading token usage from goose's session DB.
- *
- * We build a FIXTURE sqlite DB shaped like goose's sessions.db (the real schema
- * is undocumented + version-specific, so the reader introspects rather than
- * hard-coding it, and these tests pin the introspection against a plausible
- * shape + prove graceful degradation when the DB/columns are absent).
- *
- * Uses node:sqlite (built into Node >= 22) so there's no native dependency.
- * RED against the NOT_IMPLEMENTED stub in metrics/gooseUsage.ts.
+ * Reading token usage from goose's sessions.db. The reader introspects the schema
+ * rather than hard-coding it, so these tests pin it against a fixture DB (built with
+ * node:sqlite) and prove graceful degradation when the DB or its columns are absent.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -21,11 +15,7 @@ import { createGooseUsageReader } from "../../src/metrics/gooseUsage.js";
 let home: string;
 let dbPath: string;
 
-/**
- * Create the goose sessions.db layout under a fake $HOME, using goose's REAL
- * schema (crates/goose/src/session/session_manager.rs). The reader reads the
- * `accumulated_*` columns (cumulative per session) so callers can diff per-run.
- */
+/** Create the goose sessions.db layout under a fake $HOME with goose's schema, filling the cumulative `accumulated_*` columns. */
 function seedGooseDb(
   rows: Array<{ id: string; input: number; output: number; cacheRead?: number; cacheWrite?: number }>,
 ) {
@@ -97,7 +87,7 @@ describe("goose usage reader", () => {
   });
 
   it("degrades gracefully when the DB doesn't exist (no goose run yet)", async () => {
-    // No seedGooseDb() — the DB file is absent.
+    // The DB file is absent.
     const reader = createGooseUsageReader({ gooseHome: home });
 
     expect(await reader.readSessionUsage("sess-anything")).toBeUndefined();
@@ -108,7 +98,7 @@ describe("goose usage reader", () => {
     const dir = join(home, ".local", "share", "goose", "sessions");
     mkdirSync(dir, { recursive: true });
     const db = new DatabaseSync(join(dir, "sessions.db"));
-    db.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT);"); // no token cols
+    db.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT);");
     db.prepare("INSERT INTO sessions (id, name) VALUES (?, ?)").run("sess-abc", "x");
     db.close();
 

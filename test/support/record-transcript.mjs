@@ -1,36 +1,13 @@
 /**
- * record-transcript — drive a REAL agent run (goose/ollama locally, or claude via a
- * live agent-host) with the transcript recorder ON, then save the NDJSON as a
- * fixture. Records the RAW agent input + AG-UI output so tests replay real behavior.
+ * record-transcript: drive a real goose run with the transcript recorder on and save
+ * the NDJSON as a fixture under services/agent-host/test/fixtures/transcripts/goose/.
  *
- * See todo/docs/AGENT_TRANSCRIPT_HARNESS.md. CI never runs this — it replays the
- * committed fixtures. Run it only to (re)capture when the SDK/goose drifts.
- *
- * Usage:
- *   node test/support/record-transcript.mjs goose <scenario> [prompt]
- *
- * goose backends (GOOSE_BACKEND, default "ollama"):
- *   - ollama (local, free): env OLLAMA_HOST (default 127.0.0.1:11434),
- *     GOOSE_MODEL (default qwen2.5-coder:7b). A plain 7b won't emit tool calls
- *     natively — set GOOSE_TOOLSHIM=1 (+ GOOSE_TOOLSHIM_OLLAMA_MODEL, default
- *     llama3.1:8b) so goose's toolshim converts text into tool calls, OR use a
- *     natively-tool-calling model. NOTE: the toolshim is unreliable for real
- *     subagent recording (it hallucinates tool names) — use bedrock for those.
- *   - bedrock (real model, metered): GOOSE_BACKEND=bedrock, with AWS creds in the
- *     env (e.g. `eval "$(aws configure export-credentials --profile <p> --format env)"`)
- *     + AWS_REGION + GOOSE_MODEL (a bedrock inference-profile id, e.g.
- *     us.anthropic.claude-sonnet-4-20250514-v1:0). This is the RELIABLE way to record
- *     goose tool + SUBAGENT scenarios — real ACP tool calls. (goose's claude-code
- *     provider does NOT surface ACP tool calls, so it's unusable here.)
- *
- * Scenarios (canned prompts) live in SCENARIOS below; pass a scenario key. The
- * fixture is written to
- *   services/agent-host/test/fixtures/transcripts/<provider>/<scenario>.ndjson
- *
- * Boots agent-host in FAKE_SANDBOX mode (tool calls run as local subprocesses, no
- * cluster). The platform MCP endpoint (spawn_subagent/check_subagent) IS wired even
- * in FAKE_SANDBOX, so subagent scenarios CAN record locally — provided the model
- * actually tool-calls (use bedrock). See todo/docs/AGENT_TRANSCRIPT_HARNESS.md.
+ * Usage: `node test/support/record-transcript.mjs goose <scenario> [prompt]`, with
+ * GOOSE_BACKEND=ollama (OLLAMA_HOST, GOOSE_MODEL, optional GOOSE_TOOLSHIM=1) or
+ * GOOSE_BACKEND=bedrock (AWS creds in the env, AWS_REGION, GOOSE_MODEL). Boots agent-host
+ * in FAKE_SANDBOX mode with the platform MCP endpoint wired, so subagent scenarios record
+ * locally when the model actually emits tool calls. CI never runs this; it replays the
+ * committed fixtures.
  */
 
 import { spawn } from "node:child_process";
@@ -42,20 +19,14 @@ const PROVIDER = process.argv[2];
 const SCENARIO = process.argv[3];
 const PROMPT_OVERRIDE = process.argv[4];
 
-/** Canned scenario prompts — the behaviors the fakes must get right. Deterministic-
- *  ish; a weak local model may vary, so keep prompts explicit + simple. */
+/** Canned scenario prompts, kept explicit and simple so a weak local model follows them. */
 const SCENARIOS = {
   "plain-text-turn": "Reply with exactly one short sentence and nothing else.",
   "shell-tool-and-result": "Run the shell command `echo HARNESS_MARKER` using your shell tool, then tell me its output.",
   "subagent-poll-loop": "Spawn a subagent with spawn_subagent to run 'sleep 6 && echo SUBDONE'. Then call check_subagent a few times to poll until you receive its result.",
-  // Fan-out: spawn TWO subagents that both finish close together, so their
-  // completions race the parent — the shape that exposed the completion-flush bug
-  // (a finished subagent whose RUN_FINISHED lost the fire-and-forget append/read
-  // race got NO result injected). Pure-text tasks (no shell) so it works in
-  // FAKE_SANDBOX and records cleanly. Best driven with the bedrock backend.
+  // Two subagents finishing close together so their completions race the parent; pure-text tasks so it records in FAKE_SANDBOX.
   "subagent-fanout": "Use spawn_subagent to create two subagents. Ask subagent one to write a haiku about the ocean. Ask subagent two to write a haiku about mountains. Wait for both results, then share them.",
-  // Multi-turn: two prompts in ONE conversation. Turn 2 references turn 1, so a
-  // provider that loses session context (SDK resume / ACP continuation) fails it.
+  // Two prompts in one conversation, the second depending on the first's session context.
   "multi-turn": [
     "Remember the secret word: ZEBRA. Reply with exactly: OK.",
     "What was the secret word I told you? Reply with just the word.",
@@ -78,7 +49,7 @@ const port = 8099;
 const gooseBin = process.env.GOOSE_BIN ?? "goose";
 const backend = process.env.GOOSE_BACKEND ?? "ollama";
 
-// Per-backend goose env. ollama = local/free; bedrock = real model (reliable tools).
+// Per-backend goose env.
 let backendEnv;
 if (backend === "bedrock") {
   const model = process.env.GOOSE_MODEL ?? "us.anthropic.claude-sonnet-4-20250514-v1:0";
@@ -93,8 +64,7 @@ if (backend === "bedrock") {
   const ollamaHost = process.env.OLLAMA_HOST ?? "127.0.0.1:11434";
   const gooseModel = process.env.GOOSE_MODEL ?? "qwen2.5-coder:7b";
   backendEnv = { GOOSE_PROVIDER: "ollama", GOOSE_MODEL: gooseModel, OLLAMA_HOST: ollamaHost };
-  // Toolshim: convert a non-tool-calling model's text into tool calls. Opt-in
-  // (GOOSE_TOOLSHIM=1); default the interpreter to a tool-capable local model.
+  // Opt-in toolshim converts a non-tool-calling model's text into tool calls.
   if (process.env.GOOSE_TOOLSHIM === "1") {
     backendEnv.GOOSE_TOOLSHIM = "1";
     backendEnv.GOOSE_TOOLSHIM_OLLAMA_MODEL = process.env.GOOSE_TOOLSHIM_OLLAMA_MODEL ?? "llama3.1:8b";
@@ -113,12 +83,10 @@ const child = spawn("node", ["services/agent-host/dist/index.js"], {
     FAKE_SANDBOX: "1",
     LOCAL_STATE_PATH: join(recordDir, "state"),
     TRANSCRIPT_RECORD_DIR: recordDir,
-    // A local model's FIRST inference includes a slow cold load — give the
-    // dead-on-arrival + liveness watchdogs plenty of room so recording doesn't
-    // spuriously RUN_ERROR before the model warms up.
+    // Give the watchdogs room for a local model's slow cold load.
     FIRST_ACTIVITY_TIMEOUT_MS: "300000",
     AGENT_LIVENESS_PROBE_MS: "0",
-    // Disable back-pressure noise unless the scenario needs it (subagent does).
+    // Back-pressure only for the scenario that needs it.
     SUBAGENT_BACKPRESSURE: SCENARIO === "subagent-poll-loop" ? "1" : "0",
   },
   stdio: ["ignore", "pipe", "pipe"],
@@ -142,7 +110,7 @@ const cid = `rec-${SCENARIO}-${Date.now()}`;
 try {
   await waitReady();
   console.error(">> agent-host ready; driving the scenario (local model — may be slow)...");
-  // A scenario is one prompt or an array of prompts (multi-turn, same conversation).
+  // A scenario is one prompt or an array of prompts in the same conversation.
   const prompts = Array.isArray(prompt) ? prompt : [prompt];
   const runsFinished = async () => {
     const h = await fetch(`http://127.0.0.1:${port}/conversations/${cid}/history`).then((r) => r.json()).catch(() => ({}));
@@ -158,7 +126,7 @@ try {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ threadId: cid, runId: `r${t + 1}`, messages: [{ id: `u${t + 1}`, role: "user", content: prompts[t] }] }),
     });
-    // Wait for THIS turn's run to finish before the next (session continuity).
+    // Wait for this turn's run to finish before sending the next.
     const target = t + 1;
     for (let i = 0; i < 180; i++) {
       await sleep(1000);
@@ -167,10 +135,7 @@ try {
   }
   await sleep(1000);
 
-  // SUBAGENT scenarios: the parent's turn finishes when it has SPAWNED the children,
-  // but each child's result injects into the parent ASYNCHRONOUSLY afterwards (a new
-  // parent run per completion). Keep waiting until the subagent-done SYSTEM_MESSAGE
-  // injections stop arriving, so the fixture captures the whole fan-in.
+  // Subagent results inject into the parent asynchronously after its turn, so wait until the injections stop arriving.
   if (SCENARIO.startsWith("subagent")) {
     const countInjections = async () => {
       const h = await fetch(`http://127.0.0.1:${port}/conversations/${cid}/history`).then((r) => r.json()).catch(() => ({}));
@@ -185,7 +150,7 @@ try {
     console.error(`>> subagent injections captured: ${last}`);
   }
 
-  // Collect the recorded NDJSON (one file per run) into a single fixture, in order.
+  // Collect the per-run NDJSON files into a single fixture, in order.
   const files = readdirSync(recordDir).filter((f) => f.startsWith("sess-") || f.includes(cid) || f.endsWith(".ndjson"));
   const all = files
     .filter((f) => f.endsWith(".ndjson"))

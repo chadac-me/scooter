@@ -1,13 +1,10 @@
 /**
- * WebServiceRegistry — reads a conversation's declared web services from the
- * in-pod discovery manifest (/run/scooter/web-services.json, rendered by the
- * `webServices` NixOS option) via the exec API, and drives their systemd
- * units (is-active / start). Descriptors are cached per conversation with a short
- * TTL, so a `scooter-rebuild` that declares a new service shows up without a
- * restart; start drops the entry, and list({force}) re-reads on demand.
- *
- * Kept separate from webServiceProxy.ts so the proxy stays pure/unit-testable
- * against a fake registry; this module owns the exec/k8s coupling.
+ * WebServiceRegistry: reads a conversation's declared web services from the in-pod
+ * discovery manifest (/run/scooter/web-services.json, rendered by the `webServices`
+ * NixOS option) via the exec API and drives their systemd units. Descriptors are
+ * cached per conversation with a short TTL so a `scooter-rebuild` shows up without a
+ * restart; start drops the entry and list({force}) re-reads on demand. This module
+ * owns the exec coupling so the proxy stays unit-testable against a fake registry.
  */
 
 import type { SandboxRef } from "../types.js";
@@ -16,22 +13,20 @@ import type { WebServiceDescriptor, WebServiceRegistry } from "./webServiceProxy
 /** The manifest file the `webServices` option renders inside the pod. */
 export const MANIFEST_PATH = "/run/scooter/web-services.json";
 
-/** Minimal exec surface we need (a subset of SandboxApiClient). */
+/** The exec surface needed here, a subset of SandboxApiClient. */
 export interface ExecLike {
   execute(req: { command: string; args?: string[] }): Promise<{ stdout: string; stderr: string; exitCode: number }>;
   download(path: string): Promise<string>;
 }
 
 export interface WebServiceRegistryDeps {
-  /** Resolve a conversation id -> its sandbox ref (SessionManager.get(...).sandbox). */
+  /** Resolve a conversation id to its sandbox ref. */
   sandboxFor(conversationId: string): SandboxRef | undefined;
-  /** Connect an exec client for a sandbox (index.ts connectSandbox). */
+  /** Connect an exec client for a sandbox. */
   connect(ref: SandboxRef): Promise<ExecLike>;
 }
 
-/** The manifest's optional `resources` block → a descriptor field, keeping only
- *  well-typed dimensions. Returns `{}` (not `{resources: {}}`) when nothing usable
- *  is declared, so "declared nothing" stays distinguishable from "declared zero". */
+/** The manifest's optional `resources` block as a descriptor field, or `{}` when nothing usable is declared. */
 function parseNeed(v: unknown): { resources?: { cpu?: string; memory?: string; gpu?: number } } {
   if (typeof v !== "object" || v === null) return {};
   const o = v as Record<string, unknown>;
@@ -66,13 +61,7 @@ export function parseManifest(json: string): WebServiceDescriptor[] {
   }
 }
 
-/** How long a successful manifest read stays authoritative. The manifest changes
- *  when the agent runs `scooter-rebuild` (switch-to-configuration re-applies the
- *  tmpfiles rule that points /run/scooter/web-services.json at the new store
- *  path), and nothing in the pod tells us. Without an expiry the list a
- *  conversation started with is served for the life of the process, so a service
- *  the agent just declared never appears. The read is one exec, so re-checking on
- *  this cadence is cheap next to being wrong. */
+/** How long a successful manifest read stays authoritative, since nothing in the pod signals a `scooter-rebuild`. */
 export const MANIFEST_TTL_MS = 10_000;
 
 export function createWebServiceRegistry(
@@ -81,18 +70,14 @@ export function createWebServiceRegistry(
 ): WebServiceRegistry {
   const ttlMs = opts.ttlMs ?? MANIFEST_TTL_MS;
   const now = opts.now ?? (() => Date.now());
-  // conversationId -> descriptors + when they were read. undefined = not yet loaded.
+  // conversationId -> descriptors plus when they were read.
   const cache = new Map<string, { descriptors: WebServiceDescriptor[]; at: number }>();
 
   async function load(conversationId: string, force = false): Promise<WebServiceDescriptor[]> {
     const entry = cache.get(conversationId);
     const cached = !force && entry && now() - entry.at < ttlMs ? entry.descriptors : undefined;
-    // Only a NON-EMPTY cached list is authoritative. An empty [] almost always means
-    // "couldn't read the manifest yet" — the pod was still ContainerCreating when a
-    // prior call ran (download() threw → []), or it was asleep. Caching that empty
-    // result made the Sandbox tab show "no services" forever, even once the pod was
-    // ready (the bug). So we DON'T cache empties: an empty result is retried on the
-    // next call, and only a successful non-empty read is memoized.
+    // Only a non-empty cached list is authoritative, since an empty one usually means
+    // the manifest could not be read yet.
     if (cached && cached.length > 0) return cached;
     const ref = deps.sandboxFor(conversationId);
     if (!ref) return [];
@@ -101,7 +86,7 @@ export function createWebServiceRegistry(
       const exec = await deps.connect(ref);
       descriptors = parseManifest(await exec.download(MANIFEST_PATH));
     } catch {
-      descriptors = []; // pod asleep / creating / manifest missing — retry next time
+      descriptors = []; // pod asleep, creating, or manifest missing
     }
     if (descriptors.length > 0) cache.set(conversationId, { descriptors, at: now() });
     return descriptors;
@@ -125,7 +110,7 @@ export function createWebServiceRegistry(
       if (!u || !ref) return false;
       try {
         const exec = await deps.connect(ref);
-        // `systemctl is-active` exits 0 + prints "active" when running.
+        // `systemctl is-active` exits 0 and prints "active" when running.
         const r = await exec.execute({ command: "systemctl", args: ["is-active", u] });
         return r.exitCode === 0 && r.stdout.trim() === "active";
       } catch {
@@ -137,18 +122,14 @@ export function createWebServiceRegistry(
       const ref = deps.sandboxFor(conversationId);
       if (!u || !ref) throw new Error(`no web service "${name}" for ${conversationId}`);
       const exec = await deps.connect(ref);
-      // Go through `scooter-service` (NOT raw `systemctl start`) so the enabled set is
-      // PERSISTED to /workspace/.scooter/services.json — that's how the boot restore
-      // oneshot brings this service back after a suspend/resume pod recreate. Every
-      // start path (UI Services panel, the proxy's auto-start, the agent's shell) then
-      // records autostart identically. (`scooter-service` runs `systemctl start` under
-      // the hood, so the unit still comes up the same way.)
+      // Through `scooter-service` so the enabled set is persisted to
+      // /workspace/.scooter/services.json and the boot restore brings the service back
+      // after a suspend/resume pod recreate.
       const r = await exec.execute({ command: "scooter-service", args: ["start", name] });
       if (r.exitCode !== 0) {
         throw new Error(`scooter-service start ${name} failed (${r.exitCode}): ${r.stderr.trim()}`);
       }
-      // A start may reveal a freshly-enabled service; drop the cache so a re-list
-      // re-reads the manifest.
+      // A start may reveal a freshly-enabled service, so drop the cache.
       cache.delete(conversationId);
     },
     async stop(conversationId, name) {
@@ -156,8 +137,7 @@ export function createWebServiceRegistry(
       const ref = deps.sandboxFor(conversationId);
       if (!u || !ref) throw new Error(`no web service "${name}" for ${conversationId}`);
       const exec = await deps.connect(ref);
-      // Via `scooter-service stop` so autostart is CLEARED in the state file — a service
-      // the user deliberately stopped must not come back on the next resume.
+      // Via `scooter-service stop` so autostart is cleared and the service stays down on the next resume.
       const r = await exec.execute({ command: "scooter-service", args: ["stop", name] });
       if (r.exitCode !== 0) {
         throw new Error(`scooter-service stop ${name} failed (${r.exitCode}): ${r.stderr.trim()}`);
@@ -169,32 +149,26 @@ export function createWebServiceRegistry(
       if (!u || !ref) return "";
       try {
         const exec = await deps.connect(ref);
-        // -n <lines> recent, no pager, no color; --no-hostname keeps it compact.
-        // A never-started unit journals nothing → "" (harmless; the page shows the
-        // spinner). Merge stderr in case journalctl warns but still prints.
+        // A never-started unit journals nothing; stderr is merged in case journalctl warns but still prints.
         const r = await exec.execute({
           command: "journalctl",
           args: ["-u", u, "-n", String(lines), "--no-pager", "--no-hostname"],
         });
         return (r.stdout || r.stderr || "").trim();
       } catch {
-        return ""; // pod asleep / creating / journalctl unavailable
+        return ""; // pod asleep, creating, or journalctl unavailable
       }
     },
     async ready(conversationId) {
       const ref = deps.sandboxFor(conversationId);
-      if (!ref) return false; // no sandbox → not ready
+      if (!ref) return false;
       try {
-        // Readiness = the pod is reachable via exec. Use the SAME proven path the
-        // service list uses (connect + read the manifest file), rather than a bare
-        // `execute` — download() succeeds only once the pod is Running+Ready and
-        // throws while it's ContainerCreating/absent. (An empty manifest still means
-        // "reachable" → ready; the point is the exec channel is live.)
+        // Readiness means the exec channel is live: download() succeeds only once the pod is Running and Ready.
         const exec = await deps.connect(ref);
         await exec.download(MANIFEST_PATH);
         return true;
       } catch {
-        return false; // pod creating / asleep / unreachable
+        return false; // pod creating, asleep, or unreachable
       }
     },
     invalidate(conversationId) {

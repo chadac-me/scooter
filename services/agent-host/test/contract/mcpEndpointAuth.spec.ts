@@ -1,10 +1,7 @@
 /**
- * The agent-host MCP endpoint's conversation scoping (issue #700).
- *
- * This endpoint hands out sandbox exec, subagents, model switching and scheduled-task
- * management for ONE conversation. It used to take which conversation from `?conv=` on
- * a route with no caller authentication, so these tests exist to pin that the only
- * answer now comes from a signature we made.
+ * The agent-host MCP endpoint's conversation scoping. The endpoint hands out sandbox
+ * exec, subagents, model switching and scheduled-task management for one conversation,
+ * and the only thing that names that conversation is a token the agent-host signed.
  */
 
 import { createServer, type Server } from "node:http";
@@ -92,8 +89,7 @@ describe("the MCP endpoint's conversation scoping", () => {
     expect(res.status).toBe(401);
   });
 
-  // THE one. `?conv=` is deleted, so naming a conversation in the URL must not work
-  // even for a conversation that exists.
+  // Naming a conversation in the URL must not work even for a conversation that exists.
   it("IGNORES ?conv= entirely — a URL cannot name a conversation any more", async () => {
     const { url } = await serve();
     const res = await fetch(`${url}?conv=conv-victim`, toolsList({}));
@@ -103,8 +99,7 @@ describe("the MCP endpoint's conversation scoping", () => {
   it("does not let ?conv= override the token's conversation", async () => {
     const { endpoint, url } = await serve();
     const headers = Object.fromEntries(endpoint.headersFor("conv-a").map((h) => [h.name, h.value]));
-    // A valid token for conv-a plus a query param naming conv-victim. The token wins;
-    // the request is served (200) and the param is simply not consulted.
+    // A valid token for conv-a plus a query param naming conv-victim: the token wins and the param is not consulted.
     const res = await fetch(`${url}?conv=conv-victim`, toolsList(headers));
     expect(res.ok).toBe(true);
   });
@@ -130,8 +125,7 @@ describe("the MCP endpoint's conversation scoping", () => {
     expect(claims.sub).toBe("conv-a");
   });
 
-  // Fails CLOSED. An unconfigured secret must not mean "accept anything" — that would
-  // leave the agent-host failing open while the broker's verifier fails closed.
+  // An unconfigured secret fails closed rather than meaning "accept anything".
   describe("with no secret configured", () => {
     it("offers no headers", async () => {
       const { endpoint } = await serve({ secret: "" });

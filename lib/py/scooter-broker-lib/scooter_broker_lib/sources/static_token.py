@@ -1,4 +1,4 @@
-"""Static token credential source — a PAT / bot token from config."""
+"""Static token credential source: a PAT or bot token from config."""
 
 from __future__ import annotations
 

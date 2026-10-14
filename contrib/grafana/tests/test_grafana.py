@@ -1,16 +1,4 @@
-"""Grafana provider — bearer-token auth + http-proxy target + enable gating.
-
-Proves: the token is injected as `Authorization: Bearer …` so the agent never
-sees it; the upstream is the configured stack URL with any trailing slash
-stripped; and the provider is enabled only when BOTH the url and the token are
-present.
-
-These drive the provider through the ENVIRONMENT rather than by patching the
-broker app's settings singleton, which is what the in-tree copy of this file did.
-That is the point of the move: the contrib reads GRAFANA_* itself, so the test
-now covers the real configuration path — including that the variable names are
-the ones a deployment already sets. Why: PR #573.
-"""
+"""Grafana provider: bearer-token auth, the http-proxy target and enable gating, driven through the environment."""
 
 from __future__ import annotations
 
@@ -58,8 +46,7 @@ def test_proxies_to_the_configured_stack(monkeypatch):
 
 
 def test_trailing_slash_is_stripped(monkeypatch):
-    # The upstream is joined with the proxied path, so a trailing slash would
-    # produce a double slash ("…grafana.net//api/datasources").
+    # The upstream is joined with the proxied path, so a trailing slash would produce a double slash.
     monkeypatch.setenv("GRAFANA_URL", "https://myorg.grafana.net/")
     monkeypatch.setenv("GRAFANA_TOKEN", "glsa_secret")
 
@@ -76,14 +63,13 @@ def test_whitespace_only_url_does_not_enable(monkeypatch):
 @pytest.mark.parametrize(
     "url,token",
     [
-        ("", "glsa_secret"),                # token but no stack URL
-        ("https://myorg.grafana.net", ""),  # URL but no token
-        ("", ""),                           # neither
+        ("", "glsa_secret"),
+        ("https://myorg.grafana.net", ""),
+        ("", ""),
     ],
 )
 def test_requires_both_url_and_token(monkeypatch, url, token):
-    # Enabled iff BOTH are configured — otherwise the /grafana/* routes must not
-    # mount (a half-configured provider would proxy without auth, or to nowhere).
+    # A half-configured provider would proxy without auth, or to nowhere.
     monkeypatch.setenv("GRAFANA_URL", url)
     monkeypatch.setenv("GRAFANA_TOKEN", token)
 
@@ -92,10 +78,7 @@ def test_requires_both_url_and_token(monkeypatch, url, token):
 
 @pytest.mark.asyncio
 async def test_reads_the_env_vars_the_manifests_already_inject(monkeypatch):
-    # modules/broker.nix injects GRAFANA_URL + GRAFANA_TOKEN (the latter from a
-    # secret). If this contrib read anything else, a deployed broker would
-    # silently lose its grafana provider on upgrade — no error, just a missing
-    # route. Why: PR #573.
+    # modules/broker.nix injects GRAFANA_URL and GRAFANA_TOKEN.
     monkeypatch.setenv("GRAFANA_URL", "https://myorg.grafana.net")
     monkeypatch.setenv("GRAFANA_TOKEN", "from-secret")
 

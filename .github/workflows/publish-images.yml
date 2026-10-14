@@ -1,17 +1,11 @@
 name: Publish images (ghcr.io)
 
 # Build every shipped container image with Nix and push it to GitHub Container
-# Registry under a CONTENT tag — the Nix store hash of the built image (12 chars).
-# Same content → same tag, so an unchanged image is NOT rebuilt or re-pushed (the
-# tag already exists in ghcr → skip). Matches the content-tag scheme used by the
-# local deploy / itops-infra / aeonai-agent.
-#
-# Images land at: ghcr.io/<owner>/scooter/<image>:<content-tag>
-#   e.g. ghcr.io/chadac/scooter/ui:bpmbd4xc316k
-# plus a floating `latest` that always points at main's current content.
-#
-# Auth: the built-in GITHUB_TOKEN with packages:write — no PAT needed. Nix builds
-# are Cachix-backed (same cache as CI), so a changed image still builds fast.
+# Registry under a content tag (the first 12 chars of the image's Nix store hash),
+# so an unchanged image is neither rebuilt nor re-pushed. Images land at
+# ghcr.io/<owner>/scooter/<image>:<content-tag>, plus a floating `latest` that
+# points at main's current content. Auth is the built-in GITHUB_TOKEN with
+# packages:write.
 on:
   push:
     branches: [main]
@@ -29,37 +23,26 @@ permissions:
 jobs:
   publish:
     name: publish ${{ matrix.image.name }} (${{ matrix.arch.nix }})
-    # NATIVE runners per arch. Emulation was rejected: these are full Nix closures (sandbox-os
-    # is an entire NixOS system), and building them under QEMU is slow enough to dominate CI.
-    # ubuntu-24.04-arm is free for public repos.
+    # Native runners per arch; emulated builds of full Nix closures are too slow.
     runs-on: ${{ matrix.arch.runner }}
-    # The ubuntu-latest runner ships an /etc/containers/registries.conf in the OLD v1
-    # format, which the nixpkgs skopeo (and n2c's bundled skopeo, used by `.copyTo`)
-    # rejects: "registries.conf must be in v2 format but is in v1" — failing at
-    # `skopeo login` before anything else. Point every skopeo at an empty conf we own
-    # so it ignores the runner's file. Job-level so it covers login + inspect + copy +
-    # the `nix run .copyTo` push. The file is created in the first step below.
+    # The runner's /etc/containers/registries.conf is in the v1 format skopeo
+    # rejects, so every skopeo (login, inspect, copyTo) is pointed at an empty conf
+    # created in the first step.
     env:
       CONTAINERS_REGISTRIES_CONF: ${{ github.workspace }}/.registries.conf
     strategy:
       fail-fast: false # one image failing must not block the others
       matrix:
-        # Every image is built for BOTH arches and pushed under an arch-suffixed tag; the
-        # `manifest` job below then joins each pair into ONE multi-arch tag. Users pull the
-        # plain tag and their runtime picks the right arch — which matters most for
-        # remote-agent, run on laptops where Apple Silicon makes aarch64 the default (today
-        # those users silently get an emulated x86 image).
+        # Every image is built for both arches under an arch-suffixed tag, and the
+        # `manifest` job joins each pair into one multi-arch tag.
         arch:
           - { nix: x86_64-linux, runner: ubuntu-latest, docker: amd64 }
           - { nix: aarch64-linux, runner: ubuntu-24.04-arm, docker: arm64 }
-        # `image` MUST be a real axis, not an `include:` list. An `include:` entry whose keys
-        # match no existing combination is APPENDED as its own job instead of multiplied across
-        # `arch` — which produced 2 arch-only + 12 image-only jobs, so no (arch, image) pair was
-        # ever built and every manifest join then failed on missing source tags.
+        # `image` must be a real axis: an `include:` entry whose keys match no existing
+        # combination is appended as its own job instead of multiplied across `arch`.
         image:
-          # Every image is nix2container: pushed with `<attr>.copyTo`. Image NAMES
-          # follow the canonical agent-* convention deploy.sh + the kubenix module
-          # already use.
+          # Every image is nix2container, pushed with `<attr>.copyTo`; names follow
+          # the agent-* convention deploy.sh and the kubenix module use.
           - { name: agent-host, attr: agent-host-image, unfree: false }
           - { name: agent-sandbox-ui, attr: ui-image, unfree: false }
           - { name: agent-broker, attr: broker-image, unfree: false }
@@ -68,23 +51,14 @@ jobs:
           - { name: agent-db-migrator, attr: db-migrator-image, unfree: false }
           # claude variant bakes the unfree claude-code CLI → allowUnfree + --impure.
           - { name: agent-host-claude, attr: agent-host-image-claude, unfree: true }
-          # The BYO-Claude container users `docker run` from the Settings one-liner. This is
-          # the ONLY image end users pull directly (everything else lands in-cluster), and it
-          # was built by the flake but never in this matrix — so the one-liner handed out an
-          # image ref that 404'd ("denied") on every laptop. unfree: bakes the claude CLI.
+          # The BYO-Claude container users `docker run` from the Settings one-liner,
+          # the only image end users pull directly; unfree bakes the claude CLI.
           - { name: remote-agent, attr: remote-agent-image, unfree: true }
-          # The CONTROLLERS. Each is referenced by a module default
-          # (${registryPrefix}<name>), so a ghcr-based deploy pulls them by these exact names
-          # — but none was ever in this matrix, so all four had ZERO published tags and any
-          # deploy not using a local registry hit ImagePullBackOff. Same gap as the
-          # remote-agent image, four more times.
+          # The controllers, each referenced by a module default (${registryPrefix}<name>).
           - { name: byoc-controller, attr: byoc-controller-image, unfree: false }
           - { name: conversation-controller, attr: conversation-controller-image, unfree: false }
           - { name: conversation-router, attr: conversation-router-image, unfree: false }
           - { name: warm-store-controller, attr: warm-store-controller-image, unfree: false }
-          # sandbox-os is nix2container too now (initializeNixDatabase bakes the
-          # read-only store's Nix DB + .links) — no docker-archive tarball case.
-          # One image — the writable overlay store is always on.
           - { name: agent-sandbox-os, attr: sandbox-os-image, unfree: false }
     steps:
       - uses: actions/checkout@v5
@@ -95,21 +69,20 @@ jobs:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # Empty registries.conf (v2-parseable, no content) at CONTAINERS_REGISTRIES_CONF,
-      # so skopeo ignores the runner's incompatible v1 /etc/containers/registries.conf.
+      # An empty, v2-parseable registries.conf so skopeo ignores the runner's v1 file.
       - name: neutralize the runner's v1 registries.conf
         run: 'touch "$CONTAINERS_REGISTRIES_CONF"'
 
-      # skopeo: logs in to ghcr (its ~/.docker/config.json auth is reused by
-      # nix2container's copyTo) and does the `latest` retag.
+      # skopeo logs in to ghcr (nix2container's copyTo reuses its ~/.docker/config.json)
+      # and does the `latest` retag.
       - name: install skopeo
         run: nix profile install nixpkgs#skopeo
 
       - name: log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | skopeo login ghcr.io -u '${{ github.actor }}' --password-stdin
 
-      # CONTENT tag = the image's Nix store hash (12 chars), evaluated WITHOUT building.
-      # If ghcr already has that tag, the image is unchanged → skip build + push.
+      # The content tag is evaluated without building; if ghcr already has it the
+      # build and push are skipped.
       - name: compute content tag + check registry
         id: tag
         env:
@@ -119,11 +92,9 @@ jobs:
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           repo="ghcr.io/${owner}/scooter/${{ matrix.image.name }}"
           impure=""; [ -n "${NIXPKGS_ALLOW_UNFREE:-}" ] && impure="--impure"
-          # The SHARED tag is the x86_64 content hash — the exact string ghcrImages embeds in
-          # the kubenix defaults, so it must not vary by arch. Each arch pushes to
-          # <tag>-<arch>; the `manifest` job joins those into the shared tag as a manifest
-          # list. (Per-arch derivations hash differently, so an arch-local tag would name
-          # something that was never pushed under the ref deploys actually use.)
+          # The shared tag is the x86_64 content hash, the string ghcrImages embeds in
+          # the kubenix defaults, so it must not vary by arch; each arch pushes to
+          # <tag>-<arch> and the `manifest` job joins those.
           out=$(nix eval $impure --raw ".#packages.x86_64-linux.${{ matrix.image.attr }}.outPath")
           tag=$(basename "$out" | cut -d- -f1 | cut -c1-12)
           archtag="${tag}-${{ matrix.arch.docker }}"
@@ -146,18 +117,17 @@ jobs:
         run: |
           set -euo pipefail
           impure=""; [ -n "${NIXPKGS_ALLOW_UNFREE:-}" ] && impure="--impure"
-          # `.#<attr>` on THIS runner builds this runner's arch natively.
+          # `.#<attr>` on this runner builds its arch natively.
           nix run $impure ".#${{ matrix.image.attr }}.copyTo" -- "docker://${{ steps.tag.outputs.repo }}:${{ steps.tag.outputs.archtag }}"
 
 
-  # Join each image's per-arch tags into ONE multi-arch tag, then move `latest` to it. A
-  # manifest list is what lets `docker pull <tag>` serve the right arch automatically — the
-  # whole point of publishing aarch64 at all.
+  # Joins each image's per-arch tags into one multi-arch tag, so `docker pull <tag>`
+  # serves the right arch, then moves `latest` to it.
   manifest:
     name: multi-arch manifest ${{ matrix.image }}
     needs: publish
-    # Run even when a publish leg failed. Without this ONE broken (image, arch) pair skips
-    # the manifest for ALL images, so no `latest` moves and nothing is deployable. PR #557.
+    # Runs even when a publish leg failed, so one broken (image, arch) pair does not
+    # block every manifest.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
@@ -208,17 +178,15 @@ jobs:
           out=$(nix eval $impure --raw ".#packages.x86_64-linux.${{ matrix.attr }}.outPath")
           tag=$(basename "$out" | cut -d- -f1 | cut -c1-12)
 
-          # Join the per-arch tags. ARCH (not ARCHVARIANT) — ARCHVARIANT expands arm64 to
-          # "arm64v8", which is not what the publish job tagged. --ignore-missing so a
-          # single-arch push still publishes something usable rather than failing the image.
+          # ARCH, not ARCHVARIANT, which expands arm64 to "arm64v8"; --ignore-missing so
+          # a single-arch push still publishes something usable.
           manifest-tool --username '${{ github.actor }}' --password '${{ secrets.GITHUB_TOKEN }}' \
             push from-args --ignore-missing \
             --platforms linux/amd64,linux/arm64 \
             --template "${repo}:${tag}-ARCH" \
             --target "${repo}:${tag}"
 
-          # `latest` tracks main's current content — now pointing at the multi-arch list, so a
-          # plain `docker pull` gets the right arch. Registry-side copy, no rebuild.
+          # `latest` tracks main's current content; a registry-side copy, no rebuild.
           skopeo --insecure-policy copy --all \
             "docker://${repo}:${tag}" "docker://${repo}:latest"
           echo "== ${repo}:${tag} is multi-arch (amd64 + arm64); latest -> it =="

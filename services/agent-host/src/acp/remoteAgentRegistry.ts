@@ -1,7 +1,7 @@
 /**
- * Registry of connected BYO ("bring your own Claude") remote agents, keyed by OWNER, plus the
- * `remote-personalized` AcpProvider that routes a run to the owner's agent — but ONLY for
- * human-initiated triggers (the compliance guardrail). See todo/docs/BYO_CLAUDE_REMOTE_AGENT.md.
+ * Registry of connected bring-your-own-Claude remote agents keyed by owner, plus the
+ * `remote-personalized` AcpProvider that routes a run to the owner's agent only for
+ * human-initiated triggers (the compliance guardrail).
  */
 
 import { formatError, logger } from "../log.js";
@@ -12,46 +12,38 @@ import { createRemoteAcpClient } from "./remoteAcpClient.js";
 import { createByocTransport } from "./byocTransport.js";
 import { offeredTunnelServers } from "./tunnelTargets.js";
 import { startTunnelClient } from "./tunnelClient.js";
+import { modelAllowedFor, type ModelCatalog } from "../agent/models.js";
 import type { RemoteTransport } from "./remoteProtocol.js";
 
 const log = logger("remote-personalized");
 const tunnelLog = logger("tunnel");
 
-/**
- * HUMAN-TRIGGER allowlist — the compliance guardrail. A BYO remote agent may ONLY be driven by a
- * human-initiated trigger; a scheduled/automated trigger falls back to the cloud brain. Sources:
- * "ui" (interactive), "slack"|"github"|"gitlab" (@mention). A run with NO source is a plain
- * interactive UI prompt (the primary human case) → treated as human. Anything else — "scheduler",
- * "webhook", "nudge", or any future automated source — is NOT human (allowlist, not denylist): it
- * must be added here explicitly to ever reach a remote agent.
- */
+/** The human-trigger allowlist: a BYO remote agent may only be driven by one of these sources (or an undefined source, a plain UI prompt), and any other source must be added here explicitly. */
 export const HUMAN_TRIGGER_SOURCES: ReadonlySet<string> = new Set(["ui", "slack", "github", "gitlab"]);
 
-/** Is this run human-initiated (eligible for a BYO remote agent)? Undefined source = interactive UI. */
+/** Whether this run is human-initiated and so eligible for a BYO remote agent. */
 export function isHumanTrigger(source: string | undefined): boolean {
   return source === undefined || HUMAN_TRIGGER_SOURCES.has(source);
 }
 
-/** One connected remote agent — its live transport, bound to the owner it registered as. */
+/** One connected remote agent: its live transport, bound to the owner it registered as. */
 export interface AgentConnection {
   readonly owner: string;
   readonly transport: RemoteTransport;
 }
 
 export interface RemoteAgentRegistry {
-  /** Register (or REPLACE) the connection for an owner. Latest-wins: a re-register (reconnect, or
-   *  a second machine) supersedes the prior connection, which is closed. */
+  /** Register the connection for an owner, latest-wins; a superseded connection is closed. */
   register(conn: AgentConnection): void;
-  /** Remove an owner's connection (on WS close / unregister). No-op if not the current one. */
+  /** Remove an owner's connection; a no-op if it is not the current one. */
   unregister(owner: string, transport: RemoteTransport): void;
-  /** The live connection for an owner, if one is currently registered AND open. */
+  /** The live connection for an owner, if one is registered and open. */
   get(owner: string): AgentConnection | undefined;
-  /** Whether an owner has a live, open agent right now (drives the provider's eligible()). */
+  /** Whether an owner has a live, open agent right now. */
   has(owner: string): boolean;
 }
 
-/** Optional durable-binding hooks — persist online/offline to the shared DB so the badge is
- *  cross-replica + restart-durable (see remoteAgentStore.ts). Best-effort; fire-and-forget. */
+/** Best-effort hooks that persist online/offline to the shared DB (remoteAgentStore.ts). */
 export interface RemoteAgentRegistryHooks {
   onOnline?: (owner: string) => void;
   onOffline?: (owner: string) => void;
@@ -63,17 +55,16 @@ export function createRemoteAgentRegistry(hooks: RemoteAgentRegistryHooks = {}):
     register(conn) {
       const prev = byOwner.get(conn.owner);
       byOwner.set(conn.owner, conn);
-      // Latest-wins: drop the superseded connection so we never route to a stale agent.
+      // Latest-wins: close the superseded connection.
       if (prev && prev.transport !== conn.transport) prev.transport.close();
-      hooks.onOnline?.(conn.owner); // persist ONLINE (durable badge)
+      hooks.onOnline?.(conn.owner);
     },
     unregister(owner, transport) {
       const cur = byOwner.get(owner);
-      // Only clear if THIS transport is still the registered one (a late close of a superseded
-      // connection must not evict the new one — nor flip the reconnected owner offline).
+      // A late close of a superseded connection must not evict the new one.
       if (cur && cur.transport === transport) {
         byOwner.delete(owner);
-        hooks.onOffline?.(owner); // persist OFFLINE
+        hooks.onOffline?.(owner);
       }
     },
     get(owner) {
@@ -92,49 +83,42 @@ export function createRemoteAgentRegistry(hooks: RemoteAgentRegistryHooks = {}):
 }
 
 /**
- * The `remote-personalized` provider: eligible when the run's OWNER has a live registered agent AND
- * the trigger is human (the guardrail). Higher priority than the cloud floor, so a human run
- * prefers the owner's own Claude; a scheduled run (or an offline agent) falls to the floor.
- * createClient binds a RemoteAcpClient to the owner's connection (tools exec into the CLOUD sandbox
- * via the passed ExecBackend).
+ * The `remote-personalized` provider: eligible when the run's owner has a connected agent
+ * and the trigger is human, at a higher priority than the cloud floor. createClient binds
+ * a RemoteAcpClient to the owner's connection, with tools exec'ing into the cloud sandbox
+ * via the passed ExecBackend.
  */
 export function createRemotePersonalizedProvider(deps: {
-  /** The BYOC controller's in-cluster base URL. Ownership is resolved HERE, not from a per-pod map:
-   *  the controller holds every container socket, so ANY replica can drive ANY container (§L). The
-   *  old per-pod `registry` could only answer for sockets THIS pod happened to hold, so on a
-   *  multi-replica fleet a run scheduled elsewhere fell silently to the cloud floor. */
+  /** The BYOC controller's in-cluster base URL, which holds every container socket so any replica can drive any container. */
   controllerUrl: string;
-  /** The conversation-token headers for that endpoint (mcpEndpoint.headersFor). The agent-host
-   *  injects these when it proxies, so the container never holds one. Why: issue #700. */
+  /** The conversation-token headers for the MCP endpoint, injected by the agent-host when it proxies so the container never holds one. */
   mcpHeadersFor?: (conversationId: string) => Array<{ name: string; value: string }>;
   /** The broker MCP proxy's URL, so a BYO agent is offered the contrib provider
    *  tools (github, gitlab, jira, slack) and not only scooter-env. */
   brokerMcpUrlFor?: () => string;
-  /** The in-process MCP endpoint's URL for a conversation (mcpEndpoint.urlFor). Drives the
-   *  tunnel OFFER: absent = no scooter-env is offered and the container starts no proxy,
-   *  rather than one that dead-ends on every call. */
+  /** The model catalog, so eligibility can honor a cloud-only model pick; absent means no
+   *  model gate. */
+  catalog?: ModelCatalog;
+  /** The in-process MCP endpoint's URL for a conversation (mcpEndpoint.urlFor), which drives
+   *  the tunnel offer; absent means no scooter-env is offered and the container starts no proxy. */
   mcpUrlFor?: (conversationId: string) => string;
-  /** The CLOUD sandbox ExecBackend for this conversation — the agent's tools tunnel here. */
+  /** The cloud sandbox ExecBackend the agent's tools tunnel into. */
   exec: ExecBackend;
-  /** Priority above the cloud floor. Default 10. */
+  /** Priority above the cloud floor, defaulting to 10. */
   priority?: number;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
 }): AcpProvider {
   const doFetch = deps.fetchImpl ?? fetch;
   const base = deps.controllerUrl.replace(/\/$/, "");
-  // owner -> sessionId, learned during eligible() and consumed by createClient() in the SAME run.
-  // Not a durable cache: a stale entry would point a run at a container that has since dropped, and
-  // the controller is the only authority on who is connected right now.
+  // owner -> sessionId, learned during eligible() and consumed by createClient() in the same run.
   const resolved = new Map<string, string>();
   return {
     id: "remote-personalized",
-    // Catalog models offered on the user's own container tag themselves "byoc" — these are
-    // API-style ids (claude-sonnet-4-5), never Bedrock ids.
+    // Catalog models offered on the user's own container tag themselves "byoc".
     modelTag: "byoc",
-    // MCP over the tunnel: offer NAMES the container proxies locally. The bridge's default is
-    // the agent-host's own loopback URL, which a laptop cannot reach — that is why a BYO agent
-    // had no scooter-env at all.
+    // MCP over the tunnel offers names the container proxies locally, since a laptop cannot
+    // reach the agent-host's loopback URL.
     mcpServersFor: (conversationId: string) =>
       offeredTunnelServers(conversationId, {
         mcpUrlFor: deps.mcpUrlFor,
@@ -156,6 +140,17 @@ export function createRemotePersonalizedProvider(deps: {
         });
         return false;
       }
+      // The model gate: the catalog tags each model with the providers that serve it, so a
+      // model this "byoc" provider cannot serve declines here and the run falls to the next
+      // candidate.
+      if (ctx.model && deps.catalog && !modelAllowedFor(deps.catalog, ctx.model, "byoc")) {
+        log.info("SKIP — model not offered on byoc, falling to the cloud floor", {
+          conversation_id: ctx.conversationId,
+          owner: ctx.owner,
+          model: ctx.model,
+        });
+        return false;
+      }
       const owner = ctx.owner as string;
       try {
         const res = await doFetch(`${base}/byoc/status?owner=${encodeURIComponent(owner)}`, {
@@ -170,8 +165,7 @@ export function createRemotePersonalizedProvider(deps: {
           return false;
         }
         const body = (await res.json()) as { sessionId?: string; status?: string };
-        // "connected" is the ONLY state that can serve a run: "minted" means the session exists but
-        // the container has not dialled in, so routing a prompt there would hang.
+        // Only "connected" can serve a run; "minted" means the container has not dialled in yet.
         if (body.status !== "connected" || !body.sessionId) {
           log.info("SKIP — container not connected, falling to the cloud floor", {
             conversation_id: ctx.conversationId,
@@ -188,7 +182,7 @@ export function createRemotePersonalizedProvider(deps: {
         });
         return true;
       } catch (err) {
-        // A controller outage must cost the user their personal model for this run, NOT the run.
+        // A controller outage costs the user their personal model for this run, not the run.
         log.info("SKIP — controller unreachable", {
           conversation_id: ctx.conversationId,
           owner,
@@ -201,17 +195,15 @@ export function createRemotePersonalizedProvider(deps: {
     createClient(ctx: RunContext): AcpClient {
       const sessionId = ctx.owner !== undefined ? resolved.get(ctx.owner) : undefined;
       if (!sessionId) {
-        // eligible() gates this, but guard so a race (container dropped between resolve + create)
-        // fails LOUD — the bridge surfaces a RUN_ERROR rather than a silent hang.
+        // A container dropped between resolve and create fails loud as a RUN_ERROR.
         throw new Error(`no live remote agent for owner ${ctx.owner ?? "-"}`);
       }
-      // The pod holds NO socket. Every frame is an HTTP call to the controller, which owns the one
-      // duplex WS to the container — so any replica can drive it and a rollout cannot strand a run.
+      // The pod holds no socket: every frame is an HTTP call to the controller, which owns
+      // the one duplex WS to the container.
       const transport = createByocTransport({ baseUrl: base, sessionId, fetchImpl: deps.fetchImpl });
-      // MCP over the tunnel needs an INBOUND channel: this transport is HTTP/SSE per prompt, so
-      // a stream the CONTAINER opens has no way back here. Hold the controller's dedicated
-      // inbound stream open for as long as this client lives. Only when scooter-env is actually
-      // offered — no offer means no streams to serve.
+      // A stream the container opens needs an inbound channel, so hold the controller's
+      // dedicated inbound stream open for as long as this client lives, but only when
+      // scooter-env is actually offered.
       if (!deps.mcpUrlFor) {
         tunnelLog.info("NOT started: no MCP endpoint configured — the BYO agent gets sandbox tools only", {
           conversation_id: ctx.conversationId,
@@ -220,21 +212,23 @@ export function createRemotePersonalizedProvider(deps: {
       }
       const tunnelClient = deps.mcpUrlFor
         ? startTunnelClient({
-            // The controller root, NOT the per-session base — startTunnelClient builds its own
-            // /byoc/:id/tunnel path (deriving it by stripping the session off `base` would
-            // break the moment that shape changes).
+            // The controller root, since startTunnelClient builds its own /byoc/:id/tunnel path.
             baseUrl: deps.controllerUrl,
             sessionId,
-            // SERVER-SIDE scope for every target this container can resolve; never read from
-            // a container-supplied frame.
+            // Server-side scope for every target this container can resolve, never read from a container-supplied frame.
             conversationId: ctx.conversationId ?? "",
             mcpUrlFor: deps.mcpUrlFor,
+            // The conversation token is injected here as the target resolves, since the
+            // offer ships headers:[] so the container never holds a credential.
+            mcpHeadersFor: deps.mcpHeadersFor,
+            // The inbound stream must resolve scooter-broker too, so the offer and the
+            // resolver are fed from the same place.
+            brokerMcpUrlFor: deps.brokerMcpUrlFor,
             fetchImpl: deps.fetchImpl,
           })
         : undefined;
       const client = createRemoteAcpClient({ transport, exec: deps.exec });
-      // Tear the inbound stream down with the client, or a dead session keeps a reader (and
-      // its reconnect loop) alive forever.
+      // Tear the inbound stream down with the client, or a dead session keeps its reader alive forever.
       const origClose = client.close?.bind(client);
       client.close = async () => {
         tunnelClient?.close();
