@@ -12,6 +12,7 @@ import { loadConversations, loadConversationsResult, loadWhoami } from "./client
 import { subscribeConversations } from "./conversationStream.js";
 import { initTelemetryFromServer, installGlobalErrorHandlers } from "./telemetry.js";
 import { loadContribManifest } from "./contribManifest.js";
+import { installTitleSync } from "./pageTitle.js";
 
 // Telemetry is configured at runtime from nginx's /telemetry/config.json, so the first
 // requests of a page load go untraced while that fetch is in flight; the error handlers
@@ -61,6 +62,9 @@ subscribeConversations({ baseUrl: BASE_URL }, "all", {
 // conversation once the poll/stream delivers it.
 const threadParam = new URLSearchParams(globalThis.location?.search ?? "").get("thread");
 if (threadParam) sessionStore.requestSelect(threadParam);
+else if (viewStore.get() === "chat") sessionStore.startFresh();
+
+installTitleSync();
 
 // Reflect the selected conversation in the URL via replaceState, but never while on a
 // /settings/<tab> path, where it would rewrite the settings URL.

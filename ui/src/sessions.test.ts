@@ -727,3 +727,27 @@ describe("the local key must never be used as a server id", () => {
     expect(conv.shareUrl("https://x")).not.toContain(key);
   });
 });
+
+describe("a bare URL starts on a new conversation (startFresh)", () => {
+  it("leaves the server-backed conversation behind and selects an unnamed one", () => {
+    sessionStore.mergeFromServer([{ id: "prior", title: "Yesterday's work" }]);
+    sessionStore.requestSelect("prior");
+    expect(sessionStore.get().currentId).toBe("prior");
+
+    sessionStore.startFresh();
+    const { sessions, currentId } = sessionStore.get();
+    expect(currentId).not.toBe("prior");
+    expect(sessions.find((s) => s.id === currentId)!.title).toBe("New chat");
+    // The prior conversation is still listed, just not selected.
+    expect(sessions.some((s) => s.id === "prior")).toBe(true);
+  });
+
+  it("reuses an untouched conversation rather than stacking another beside it", () => {
+    const first = sessionStore.startFresh();
+    // The store is a module singleton, so assert a delta, not a total.
+    const rows = sessionStore.get().sessions.length;
+    const again = sessionStore.startFresh();
+    expect(again).toBe(first);
+    expect(sessionStore.get().sessions).toHaveLength(rows);
+  });
+});

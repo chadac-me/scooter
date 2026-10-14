@@ -14,6 +14,8 @@ import { ToolCallView } from "./ToolCallView.js";
 import { ToolGroupOpen } from "./ToolGroupOpen.js";
 import { SettingsPage } from "./SettingsPage.js";
 import { viewStore, useView } from "./view.js";
+import { useSessions } from "./sessions.js";
+import { displayTitle } from "./pageTitle.js";
 import { mobileNav, useDrawer } from "./mobileNav.js";
 import { StartingPodLanding } from "./DeadPodLanding.js";
 import { useSandboxStatus, LABEL as SANDBOX_LABEL, DOT as SANDBOX_DOT } from "./SandboxPanel.js";
@@ -36,6 +38,25 @@ function ConversationArea() {
   const { starting } = useSandboxStatus();
   if (starting) return <StartingPodLanding />;
   return <GuardedThread />;
+}
+
+/** The conversation's title beside the wordmark; absent when unnamed. */
+function HeaderConversationTitle() {
+  const { sessions, currentId } = useSessions();
+  const title = displayTitle(sessions.find((s) => s.id === currentId)?.title);
+  if (!title) return null;
+  return (
+    <>
+      <span className="text-muted-foreground/50" aria-hidden>/</span>
+      <span
+        data-testid="header-conversation-title"
+        title={title}
+        className="max-w-[9rem] truncate text-[13.5px] text-muted-foreground desk:max-w-[32rem]"
+      >
+        {title}
+      </span>
+    </>
+  );
 }
 
 /** Header sandbox pill mirroring the Sandbox tab's status. */
@@ -76,7 +97,7 @@ export function App() {
       <div className="flex h-dvh flex-col">
         <header className="flex h-11 items-center justify-between gap-3 border-b bg-header px-3 pl-4 text-sm">
           {/* Compact wordmark: mark + name. */}
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             {/* Mobile-only sessions-drawer toggle, hidden at desk+ and in settings. */}
             {view !== "settings" && (
               <Button
@@ -94,6 +115,7 @@ export function App() {
             )}
             <span className="text-[15px] leading-none" aria-hidden>🛴</span>
             <span className="text-[13.5px] font-semibold tracking-tight">scooter</span>
+            {view !== "settings" && <HeaderConversationTitle />}
           </div>
           <div className="flex items-center gap-2">
             {/* Live pod status, desktop-only. */}

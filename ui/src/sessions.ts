@@ -47,7 +47,8 @@ export interface SessionLink {
   title?: string;
 }
 
-const DEFAULT_TITLE = "New chat";
+/** The placeholder title, until something names the conversation. */
+export const DEFAULT_TITLE = "New chat";
 const STORAGE_KEY = "kubenix-agent.sessions.v1";
 
 /** Sidebar view filter: the caller's own conversations or all of them. */
@@ -268,6 +269,14 @@ export const sessionStore = {
       currentId: id,
     });
     return id;
+  },
+
+  /** Open a new conversation, reusing an untouched one if present. */
+  startFresh(): string {
+    const spare = state.sessions.find((s) => isPristine(s) && !isServerBacked(s));
+    if (!spare) return this.newSession();
+    if (state.currentId !== spare.id) setState({ ...state, currentId: spare.id });
+    return spare.id;
   },
 
   /** Ensure the current conversation exists server-side and return its server id (null if creation failed), without changing the session's stable key. */

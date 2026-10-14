@@ -18,6 +18,9 @@ const sidebar = {
   renameInput: '[data-testid="session-rename-input"]',
 };
 
+/** The open conversation's title in the top header, which mirrors the tab title. */
+const headerTitle = '[data-testid="header-conversation-title"]';
+
 test.describe("session selector & titles", () => {
   // Most tests here run two conversations, which on the full target is two sandbox boots.
   test.setTimeout(180_000);
@@ -76,6 +79,42 @@ test.describe("session selector & titles", () => {
     // Give the merge poll a chance to (wrongly) clobber it, then assert it held.
     await expect(title).toHaveText(/my pinned project/i, { timeout: 30_000 });
     await expect(title).not.toHaveText(/refactor/i);
+  });
+
+  test("the tab title and the header carry the conversation's title", async ({ chat, page }) => {
+    await chat.open();
+    // An unnamed conversation is the bare wordmark, with no header title beside it.
+    await expect(page).toHaveTitle("scooter");
+    await expect(page.locator(headerTitle)).toHaveCount(0);
+
+    await chat.send("help me refactor the parser");
+    await chat.waitForReply(/dummy agent/i);
+
+    await expect(page.locator(headerTitle)).toHaveText(/refactor the parser/i, { timeout: 30_000 });
+    await expect(page).toHaveTitle(/^scooter - .*refactor the parser/i, { timeout: 30_000 });
+  });
+
+  test("a bare URL opens a NEW conversation, while ?thread= still restores one", async ({ chat, page }) => {
+    await chat.open();
+    await chat.send("earlier conversation marker");
+    await chat.waitForReply(/dummy agent/i);
+
+    // A reload keeps ?thread=, so it restores the conversation it was showing.
+    await page.reload();
+    await expect(chat.input()).toBeVisible({ timeout: 20_000 });
+    await expect(chat.userMessages().filter({ hasText: /earlier conversation marker/i })).toHaveCount(
+      1,
+      { timeout: 30_000 },
+    );
+
+    // The bare root opens an empty conversation, not the last one.
+    await page.goto("/");
+    await expect(chat.input()).toBeVisible({ timeout: 20_000 });
+    await expect(
+      page.locator(sidebar.item).filter({ hasText: /earlier conversation marker/i }),
+    ).toHaveCount(1, { timeout: 30_000 });
+    await expect(chat.userMessages()).toHaveCount(0);
+    await expect(page).toHaveTitle("scooter");
   });
 
   test("the user can star and unstar a conversation", async ({ chat, page }) => {
