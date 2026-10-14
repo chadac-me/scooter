@@ -622,10 +622,8 @@ jobs:
       - name: cluster smoke (shard ${{ matrix.shard }})
         id: cluster-smoke
         if: matrix.cluster_grep != ''
-        # The smoke and the browser stories are two independent reads on the same
-        # cluster, so a red smoke must not skip the stories: the step records its
-        # verdict in its report and in `outcome`, and the job's own gate (last step)
-        # is what turns it into a failure.
+        # A red smoke must not skip the browser stories; the `gate on the cluster
+        # smoke` step below is what fails the shard instead. Why: PR #751.
         continue-on-error: true
         env:
           RUN_CLUSTER_TESTS: "1"
@@ -642,8 +640,7 @@ jobs:
           # The file filters are required: `-t` selects by name but vitest still loads
           # every file in the project, and they must stay in step with
           # SHARDED_CLUSTER_SPECS in test/e2e/support/test-inventory.mjs.
-          # The JSON report is what carries the smoke into the merged report and so
-          # into the verdict comment; without it a red smoke was invisible there.
+          # The json reporter is what carries the smoke into the verdict comment.
           nix develop --command bash -c 'npm install && npx vitest run --project cluster --no-file-parallelism platform-smoke event-backfill -t "$CLUSTER_GREP" --reporter=default --reporter=json --outputFile="$CLUSTER_JSON"'
 
       # The browser stories against the real cluster, the one seam neither
@@ -677,9 +674,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-full-report-shard-${{ matrix.shard }}
-          # Both reports the shard owes: the browser stories' and the cluster smoke's.
-          # The merge knows from the matrix which of the two to expect, so a shard that
-          # died before writing one is not read as a shard that passed.
+          # Both reports the shard owes; the merge expects whichever kinds the matrix
+          # assigned it and reads a missing one as a lost shard. Why: PR #751.
           path: |
             report-full-shard-${{ matrix.shard }}.json
             cluster-report-shard-${{ matrix.shard }}.json
@@ -687,9 +683,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: upload cluster browser artifacts
-        # The smoke step swallows its own failure (continue-on-error), so the
-        # diagnostics steps have to ask it directly or a smoke-only red night would
-        # upload and dump nothing.
+        # `failure()` misses a red smoke: continue-on-error hides it. Why: PR #751.
         if: failure() || steps.cluster-smoke.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
@@ -726,9 +720,8 @@ jobs:
           # whether a store was reused or built cold.
           findmnt -no SOURCE,FSTYPE,SIZE /nix 2>/dev/null || echo "/nix is not a separate mount (root disk)"
 
-      # Last, so the smoke's deferred failure lands after every report, artifact and
-      # teardown step has run. continue-on-error above keeps a red smoke from skipping
-      # the browser stories; this is what still makes the shard red.
+      # Last: the deferred failure must land after every report, artifact and
+      # teardown step. Why: PR #751.
       - name: gate on the cluster smoke
         if: always() && steps.cluster-smoke.outcome == 'failure'
         run: |

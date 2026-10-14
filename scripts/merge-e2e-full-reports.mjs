@@ -82,7 +82,7 @@ export function clusterToSuites(report) {
 }
 
 /**
- * One report from every shard's, with `meta.shardReports` counting the shards that
+ * One report out of every shard's, with `meta.shardReports` counting the shards that
  * reported in full. Each shard is `{ shard, expectE2e, expectCluster, e2e, cluster }`,
  * where a report is null when the step never wrote one.
  */

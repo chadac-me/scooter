@@ -222,17 +222,14 @@ export function compare(current, baselines, opts = {}) {
     // Which of the two reports a shard owes went missing, as the merge named them.
     missingReports: current?.meta?.missingReports ?? [],
     totalSpecs: cur.length,
-    // The cluster smoke runs in the same shards as the browser stories, so the
-    // verdict names it separately rather than burying it in one total: the browser
-    // stories are read through the platform the smoke is testing, so "17 of 18 passed"
-    // means something quite different when the one failure is the smoke.
+    // Tallied apart from the browser stories, which are read *through* the platform
+    // the smoke tests: one failure in eighteen is not one failure. Why: PR #751.
     smoke: {
       total: cur.filter((s) => s.kind === "cluster").length,
       passed: cur.filter((s) => s.kind === "cluster" && s.failed === 0).length,
       failed: cur.filter((s) => s.kind === "cluster" && s.failed > 0).length,
-      // A smoke test that was not already red in the window. Unlike the browser
-      // stories the smoke has no noise floor to hide behind — it either comes up or
-      // the run means nothing — so one of these is an ❌ on its own.
+      // Newly red, and the smoke has no night-to-night noise floor to hide behind:
+      // one of these is an ❌ on its own. Why: PR #751.
       regressions: rows.filter(
         (r) =>
           r.kind === "cluster" &&
