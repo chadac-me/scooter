@@ -6,6 +6,11 @@
  */
 
 import { test, expect } from "./fixtures.js";
+import { isFull } from "./target.js";
+
+/** A tool card lands only once its exec returns, which on the full target is a real sandbox
+ *  exec behind a possibly-cold pod, so the card needs a wider budget than the fake stack. */
+const TOOL_CARD_MS = isFull ? 90_000 : 30_000;
 
 test.describe("history survives a page refresh", () => {
   test("a tool call is still rendered after reload", async ({ chat, page }) => {
@@ -28,20 +33,26 @@ test.describe("history survives a page refresh", () => {
   });
 
   test("a multi-turn conversation with tool calls is intact after reload", async ({ chat, page }) => {
+    // Two sandbox execs on the full target, each with its own 120s turn budget, then a reload.
+    test.setTimeout(isFull ? 300_000 : 120_000);
     await chat.open();
-    await chat.send("!echo first-marker");
-    await expect(chat.toolCalls().first()).toBeVisible({ timeout: 30_000 });
+    // completeTurn, not send: `send` only waits for the idle Send button and SWALLOWS that
+    // wait's timeout, so with the first run still in flight the second message would be
+    // submitted mid-run — where it is dropped and never execs, leaving the second tool card
+    // permanently absent rather than merely late. completeTurn waits for the terminal event.
+    await chat.completeTurn("!echo first-marker");
+    await expect(chat.toolCalls()).toHaveCount(1, { timeout: TOOL_CARD_MS });
     await expect(chat.assistantMessages().last()).toContainText(/first-marker/i, { timeout: 30_000 });
 
-    await chat.send("!echo second-marker");
-    await expect(chat.toolCalls()).toHaveCount(2, { timeout: 30_000 });
+    await chat.completeTurn("!echo second-marker");
+    await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     await expect(chat.assistantMessages().last()).toContainText(/second-marker/i, { timeout: 30_000 });
 
     await page.reload();
     await expect(chat.input()).toBeVisible({ timeout: 20_000 });
 
     // Both turns' tool calls replay from the log (not one, not zero).
-    await expect(chat.toolCalls()).toHaveCount(2, { timeout: 30_000 });
+    await expect(chat.toolCalls()).toHaveCount(2, { timeout: TOOL_CARD_MS });
     await expect(chat.userMessages()).toHaveCount(2, { timeout: 30_000 });
   });
 });
