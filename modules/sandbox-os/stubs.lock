@@ -2,11 +2,11 @@
   "version": 1,
   "inputs": {
     "nixpkgs": {
-      "lastModified": 1790822859,
-      "narHash": "sha256-69xHQhAeMAD2wDXO7T2pcOZIF9Sga2W+JkmY2a11Ops=",
+      "lastModified": 1791594108,
+      "narHash": "sha256-XK4KceonkwD8LuMAt/vNrz982mXJM5jeHAxMwsUXXAQ=",
       "owner": "NixOS",
       "repo": "nixpkgs",
-      "rev": "c59305bab2065cfecc4944690d9eedbb56f3a9fa",
+      "rev": "6510408d147d8c5e6d76043e899e9251756f6a75",
       "type": "github"
     }
   },
@@ -24,7 +24,7 @@
       },
       "code-server": {
         "attr": "code-server",
-        "drv": "/nix/store/d52d8pfgaa9kiqisid5rcgmfg22d7mxj-code-server-4.134.0.drv",
+        "drv": "/nix/store/1p0052cm66wqjm0pj9hkr1x1vdki2mza-code-server-4.134.0.drv",
         "output": "out",
         "bins": [
           "code-server"
@@ -33,12 +33,12 @@
       },
       "marimo": {
         "attr": "marimo",
-        "drv": "/nix/store/2d4kd4v3xmbb17c324s5x6hjnc9hvcrd-python3.14-marimo-0.24.2.drv",
+        "drv": "/nix/store/aah6k86iya3ahnry4cinpx12cw2xa3q2-python3.14-marimo-0.25.1.drv",
         "output": "out",
         "bins": [
           "marimo"
         ],
-        "name": "marimo-0.24.2"
+        "name": "marimo-0.25.1"
       },
       "tree": {
         "attr": "tree",
@@ -60,12 +60,12 @@
       },
       "uv": {
         "attr": "uv",
-        "drv": "/nix/store/r5afv5rqyfl4kli72pflqnwpg55r985l-uv-0.12.17.drv",
+        "drv": "/nix/store/4vid9cd5y0ng5i54jvw6s91k86n8saw3-uv-0.12.22.drv",
         "output": "out",
         "bins": [
           "uv"
         ],
-        "name": "uv-0.12.17"
+        "name": "uv-0.12.22"
       }
     },
     "x86_64-linux": {
@@ -81,7 +81,7 @@
       },
       "code-server": {
         "attr": "code-server",
-        "drv": "/nix/store/04f995wja8d1vwmmmmyzjdda53rw4xpy-code-server-4.134.0.drv",
+        "drv": "/nix/store/q33qha0i4na8032jl8ngiqv3amb9m61m-code-server-4.134.0.drv",
         "output": "out",
         "bins": [
           "code-server"
@@ -90,12 +90,12 @@
       },
       "marimo": {
         "attr": "marimo",
-        "drv": "/nix/store/nxpjp1y61m0mlnh2d3zlwsg4brkxsppp-python3.14-marimo-0.24.2.drv",
+        "drv": "/nix/store/j33lg2094wvzh83jsah9n0iw7cqqbdva-python3.14-marimo-0.25.1.drv",
         "output": "out",
         "bins": [
           "marimo"
         ],
-        "name": "marimo-0.24.2"
+        "name": "marimo-0.25.1"
       },
       "tree": {
         "attr": "tree",
@@ -117,12 +117,12 @@
       },
       "uv": {
         "attr": "uv",
-        "drv": "/nix/store/zz04z7czdy8b6zxvy31j40q55lgrgn45-uv-0.12.17.drv",
+        "drv": "/nix/store/rn37pdffz3dv65vhlh0vrgzr0s6kp0lx-uv-0.12.22.drv",
         "output": "out",
         "bins": [
           "uv"
         ],
-        "name": "uv-0.12.17"
+        "name": "uv-0.12.22"
       }
     }
   }
