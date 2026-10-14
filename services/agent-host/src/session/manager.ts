@@ -1019,12 +1019,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const entry = entries.get(id);
       if (!entry) return Promise.resolve();
       const force = opts?.force === true;
-      // A user-chosen name is locked against the agent, force or not: the rename tool declines
-      // this case itself, and the store is the last place that can still get it wrong.
+      // A user-chosen name is locked against the agent, force or not.
       if (entry.userTitled) return Promise.resolve();
-      // A conversation is named once: a title that is no longer the create-time placeholder
-      // stands, so a restart, revive or BYO reconnect that makes the agent emit a fresh
-      // <title> cannot retitle a thread mid-flight.
+      // A conversation is named only once; `force` is the deliberate rename.
       if (!force && !isPlaceholderTitle(entry.title)) return Promise.resolve();
       entry.title = title;
       // The durable write drives the live sidebar: the conversations row's trigger fires NOTIFY and
