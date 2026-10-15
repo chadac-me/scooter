@@ -46,6 +46,8 @@ in
   dev-env-scooter-module = runTest ./scooter-module.nix;
   # The eval half of dev-env-scooter-module, cheap enough to run on every PR.
   dev-env-reconverge-eval = runTest ./reconverge-eval.nix;
+  # The detached apply the boot unit runs, which re-applies local modules after a resume.
+  dev-env-reconverge-detach = runTest ./reconverge-detach.nix;
   # The shell half of the same guard: the module list reaches Nix intact through scooter-apply-module (build, no VM).
   dev-env-reconverge-quoting = runTest ./reconverge-quoting.nix;
   # The deployment-default module fetch from the broker's default.tar.gz (pure eval, no VM).
