@@ -1,9 +1,10 @@
 /**
  * Conversation-list stream client: subscribes to the agent-host's GET /conversations/events
  * so new conversations appear in the sidebar without waiting for the poll. The server emits
- * an initial `snapshot` (the visible list, same scope as GET /conversations) and then
- * `upsert` frames as conversations are created or change; the UI folds each upsert in via
- * the same sessionStore.mergeFromServer the poll uses, and the poll remains the backstop.
+ * an initial `snapshot` (the visible list, same scope as GET /conversations), then `upsert`
+ * frames as conversations are created or change and `remove` frames as they end; the UI folds
+ * each upsert in via the same sessionStore.mergeFromServer the poll uses, and the poll remains
+ * the backstop.
  */
 
 import type { AgentHostConfig, ConversationView } from "./client.js";
@@ -11,13 +12,16 @@ import type { AgentHostConfig, ConversationView } from "./client.js";
 /** Frames the /conversations/events SSE emits. */
 export type ConversationStreamFrame =
   | { kind: "snapshot"; conversations: ConversationView[] }
-  | { kind: "upsert"; conversation: ConversationView };
+  | { kind: "upsert"; conversation: ConversationView }
+  | { kind: "remove"; id: string };
 
 export interface ConversationStreamCallbacks {
   /** The initial full visible list (replaces the sidebar's known set). */
   onSnapshot(conversations: ConversationView[]): void;
   /** A created/updated conversation to merge into the sidebar. */
   onUpsert(conversation: ConversationView): void;
+  /** A conversation that is gone, by server id; the row carries no data because it no longer exists. */
+  onRemove(id: string): void;
 }
 
 export interface ConversationSubscription {
@@ -43,6 +47,7 @@ export function subscribeConversations(
   const apply = (frame: ConversationStreamFrame): void => {
     if (frame.kind === "snapshot") callbacks.onSnapshot(frame.conversations);
     else if (frame.kind === "upsert") callbacks.onUpsert(frame.conversation);
+    else if (frame.kind === "remove" && frame.id) callbacks.onRemove(frame.id);
   };
 
   const run = async () => {

@@ -85,8 +85,9 @@ CREATE INDEX "conversations_by_owner" ON "conversations" ("owner");
 -- Atlas Community does not diff FUNCTION/TRIGGER objects (`migrate diff` reports "synced,
 -- no changes" for them), so a declaration in this file would silently never reach a
 -- migration — and production is built by REPLAYING migrations, not by applying this file.
--- The trigger's source of truth is therefore its migration:
---   migrations/<ts>_notify_conversation_changes.sql
+-- The trigger's source of truth is therefore its migrations:
+--   migrations/<ts>_notify_conversation_changes.sql — the triggers (which columns push)
+--   migrations/<ts>_notify_conversation_owner.sql   — the payload ({id, op, owner})
 -- Keep the two in sync by hand when the notified columns change (that migration and the
 -- router's assembleList are the only two places that must agree on which changes push).
 -- Assignment changes notify 'conversation_assignment' instead, for the router.

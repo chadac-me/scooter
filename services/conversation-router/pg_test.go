@@ -266,3 +266,93 @@ func TestPgNoTriggerMeansNoCache(t *testing.T) {
 		t.Fatal("cache went live with nothing to invalidate it")
 	}
 }
+
+// The conversations_changed payload is the ONLY copy of a deleted row's owner — the row is
+// gone before the listener can re-read it — so the remove frame's visibility filter lives or
+// dies by this trigger. Replays the real migrations, so it also guards the trigger's SQL.
+func TestPgNotifyPayloadCarriesOpAndOwner(t *testing.T) {
+	pool := startPG(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// waitForDelete drains notifications until the row's delete arrives, since the owner
+	// UPDATE notifies first, and returns what the router would parse from it.
+	waitForDelete := func(t *testing.T, conn *pgxpool.Conn, id string) change {
+		t.Helper()
+		for {
+			n, err := conn.Conn().WaitForNotification(ctx)
+			if err != nil {
+				t.Fatalf("%s: no delete notification arrived: %v", id, err)
+			}
+			c, ok := notifyDecision(n.Payload)
+			if !ok {
+				t.Fatalf("the router would drop its own trigger's payload: %q", n.Payload)
+			}
+			if c.ID == id && c.deleted() {
+				return c
+			}
+		}
+	}
+
+	listen := func(t *testing.T) *pgxpool.Conn {
+		t.Helper()
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(conn.Release)
+		if _, err := conn.Exec(ctx, "listen conversations_changed"); err != nil {
+			t.Fatal(err)
+		}
+		return conn
+	}
+
+	t.Run("an owned conversation's delete names its owner", func(t *testing.T) {
+		insertConv(t, pool, "c-owned", "", "")
+		if _, err := pool.Exec(ctx, `UPDATE conversations SET owner = 'alice' WHERE id = 'c-owned'`); err != nil {
+			t.Fatal(err)
+		}
+		conn := listen(t)
+		if _, err := pool.Exec(ctx, `DELETE FROM conversations WHERE id = 'c-owned'`); err != nil {
+			t.Fatal(err)
+		}
+		c := waitForDelete(t, conn, "c-owned")
+		if c.Owner == nil || *c.Owner != "alice" {
+			t.Fatalf("owner = %v, want alice; without it a removal cannot be visibility-filtered", c.Owner)
+		}
+	})
+
+	t.Run("an unowned conversation's delete reports a nil owner, not an empty one", func(t *testing.T) {
+		// "" is a real caller identity to visible(), so the two must stay distinguishable.
+		insertConv(t, pool, "c-unowned", "", "")
+		conn := listen(t)
+		if _, err := pool.Exec(ctx, `DELETE FROM conversations WHERE id = 'c-unowned'`); err != nil {
+			t.Fatal(err)
+		}
+		if c := waitForDelete(t, conn, "c-unowned"); c.Owner != nil {
+			t.Fatalf("owner = %v, want nil", c.Owner)
+		}
+	})
+
+	t.Run("an insert still notifies as an upsert", func(t *testing.T) {
+		conn := listen(t)
+		insertConv(t, pool, "c-new", "", "")
+		for {
+			n, err := conn.Conn().WaitForNotification(ctx)
+			if err != nil {
+				t.Fatalf("no insert notification arrived: %v", err)
+			}
+			c, ok := notifyDecision(n.Payload)
+			if !ok {
+				t.Fatalf("the router would drop its own trigger's payload: %q", n.Payload)
+			}
+			if c.ID != "c-new" {
+				continue
+			}
+			if c.deleted() {
+				t.Fatalf("an insert must notify as an upsert, got %+v", c)
+			}
+			return
+		}
+	})
+}

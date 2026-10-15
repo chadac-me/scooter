@@ -384,6 +384,15 @@ export const sessionStore = {
     setState({ ...state, sessions, currentId, pendingSelect });
   },
 
+  /** Drop a conversation the server says is gone, keyed by SERVER id; a no-op for one we never had. */
+  removeFromServer(serverId: string) {
+    // An open rename input would be detached by the re-render, and the poll reconciles the row.
+    if (state.editingId !== undefined) return;
+    const gone = state.sessions.find((s) => serverKeyOf(s) === serverId);
+    if (!gone) return;
+    sessionStore.deleteSession(gone.id);
+  },
+
   /** Delete a conversation. If it was current, select another (or start fresh). */
   deleteSession(id: string) {
     const remaining = state.sessions.filter((s) => s.id !== id);
