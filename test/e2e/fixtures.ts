@@ -100,7 +100,9 @@ export class Chat {
 
   /** Wait for an assistant reply containing `re`; this matches the first occurrence, which
    *  a prior identical reply already satisfies, so use `sendTurn` for multi-turn loops. */
-  async waitForReply(re: RegExp = /\S/, timeout = 45_000) {
+  // Same budget as sendTurn/completeTurn: on the full target the reply waits out a cold
+  // sandbox boot, which alone can outlast the fast target's whole budget.
+  async waitForReply(re: RegExp = /\S/, timeout = process.env.E2E_TARGET === "full" ? 120_000 : 45_000) {
     await expect(this.page.getByText(re).first()).toBeVisible({ timeout });
   }
 

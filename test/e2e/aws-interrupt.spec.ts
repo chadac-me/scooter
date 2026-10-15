@@ -141,7 +141,9 @@ test.describe("AWS approval interrupt", () => {
     const res = await requestAws(request, base, conversationId, `awsreq-susp-${Date.now()}`);
     expect(res.status(), "the approvals route must revive an inactive conversation, not 404").toBe(202);
 
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    // The 202 only acknowledges the raise; on the full target the interrupt reaches the
+    // integrity stream behind the revive, which re-attaches a real sandbox.
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: isFull ? API_BUDGET_MS : 30_000 });
     await expect(page.locator(panel.option).filter({ hasText: /approve/i })).toHaveCount(1);
   });
 
