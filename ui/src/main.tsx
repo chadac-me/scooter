@@ -10,6 +10,7 @@ import { viewStore } from "./view.js";
 import { currentConversation, sessionStore } from "./sessions.js";
 import { loadConversations, loadConversationsResult, loadWhoami } from "./client.js";
 import { subscribeConversations } from "./conversationStream.js";
+import { pollWhileVisible } from "./visiblePoll.js";
 import { initTelemetryFromServer, installGlobalErrorHandlers } from "./telemetry.js";
 import { loadContribManifest } from "./contribManifest.js";
 import { installTitleSync } from "./pageTitle.js";
@@ -46,7 +47,8 @@ const initialLoad = async () => {
   }
 };
 void initialLoad();
-setInterval(refreshConversations, 10000);
+// Visibility-gated: a backgrounded tab polls nothing and re-reads once on return.
+pollWhileVisible(refreshConversations, 10000);
 
 // Live sidebar push: the conversation-list stream folds through the same
 // mergeFromServer as the poll, with scope "all" to match it, and the poll stays as
