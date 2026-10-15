@@ -36,16 +36,50 @@ export const ATTR = {
 /** Matches a conversation id in a request URL. */
 const CONV_URL_RE = /\/conversations\/([0-9a-f-]{36})/;
 
+/** Span attributes the fetch instrumentation records the request URL on, newest semconv first. */
+const SPAN_URL_ATTRS = ["url.full", "http.url"] as const;
+
+/**
+ * The traced request's URL. The fetch instrumentation hands this callback the second
+ * `fetch` argument, so a `fetch(url, init)` call — which is every call site in this UI —
+ * passes a RequestInit with no `url`, and only the span carries the URL by then.
+ */
+export function tracedRequestUrl(request: unknown, span: Span): string {
+  if (typeof request === "string") return request;
+  const own = (request as { url?: unknown } | null | undefined)?.url;
+  if (typeof own === "string") return own;
+  const attrs = (span as unknown as { attributes?: Record<string, unknown> }).attributes;
+  for (const key of SPAN_URL_ATTRS) {
+    const value = attrs?.[key];
+    if (typeof value === "string") return value;
+  }
+  return "";
+}
+
 /** Bucket a request into a low-cardinality kind so traces group by what the request was. */
-function classifyRoute(url: string): string {
+export function classifyRoute(url: string): string {
+  // "unknown" is kept distinct from "other" so a URL we failed to read can never hide
+  // among the routes we simply do not classify.
+  if (!url) return "unknown";
   const path = url.replace(/^https?:\/\/[^/]+/, "").replace(/\?.*$/, "");
   if (path.endsWith("/messages")) return "send-message";
   if (path.includes("events.integrity")) return "stream";
+  if (path.endsWith("/conversations/events")) return "list-stream";
   if (path.endsWith("/cancel")) return "cancel";
   if (path.endsWith("/ready")) return "ready";
   if (path.endsWith("/links")) return "links";
   if (path.endsWith("/history")) return "history";
+  if (path.endsWith("/tail")) return "tail";
+  if (path.endsWith("/shares")) return "shares";
+  if (path.includes("/web-services")) return "web-services";
+  if (path.includes("/module-registry") || path.includes("/modules/")) return "modules";
+  if (path.endsWith("/resources") || path.endsWith("/size")) return "sandbox-resources";
+  if (path.endsWith("/resume")) return "resume";
+  if (path.endsWith("/title") || path.endsWith("/starred")) return "conversation-edit";
+  if (path.endsWith("/compact")) return "compact";
   if (path === "/conversations") return "list-or-create";
+  if (path === "/models") return "models";
+  if (path === "/agui") return "agui";
   return "other";
 }
 
@@ -122,8 +156,7 @@ export function initTelemetry(opts: {
           propagateTraceHeaderCorsUrls: [new RegExp(`^${location.origin}`)],
           // Tag every request with its conversation and outcome.
           applyCustomAttributesOnSpan: (span, request, result) => {
-            const url =
-              typeof request === "string" ? request : ((request as Request).url ?? String(request));
+            const url = tracedRequestUrl(request, span);
             const conv = CONV_URL_RE.exec(url)?.[1];
             if (conv) span.setAttribute(ATTR.conversationId, conv);
             span.setAttribute("http.route_kind", classifyRoute(url));
