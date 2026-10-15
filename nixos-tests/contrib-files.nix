@@ -93,13 +93,29 @@ pkgs.testers.runNixOSTest {
         f"curl -fsS 'http://localhost:7801{base}/static/vendor/highlight-nix.min.js'"
     )
 
-    # 7. Read-only: the viewer offers no write path at all.
+    # 7. The file tree is read-only: annotations are the only writable surface, so a
+    # POST to a read route is refused as 405 rather than being quietly routed.
     machine.succeed(
         "test $(curl -s -o /dev/null -w '%{http_code}' -X POST "
-        f"'http://localhost:7801{base}/api/file?path=docs/design.md') = 501"
+        f"'http://localhost:7801{base}/api/file?path=docs/design.md') = 405"
     )
 
-    # 8. `scooter-service start` recorded the intent on the PVC, so a pod recreate
+    # 8. The annotation routes answer, and say which half is deployed: this VM has no
+    # broker, so a comment is recorded and reported as never sent rather than lost.
+    posted = json.loads(machine.succeed(
+        "curl -fsS -X POST -H 'content-type: application/json' "
+        """-d '{"path": "docs/design.md", "line": 1, "quote": "hello", "text": "why?"}' """
+        f"'http://localhost:7801{base}/api/annotations'"
+    ))["annotation"]
+    assert posted["state"] in ("pending", "failed", "disabled"), posted
+    listed = json.loads(machine.succeed(
+        f"curl -fsS 'http://localhost:7801{base}/api/annotations?path=docs/design.md'"
+    ))
+    assert [a["text"] for a in listed["annotations"]] == ["why?"], listed
+    # "hello" is line 1 of the fixture, so the anchor resolved against the file.
+    assert listed["annotations"][0]["anchor_state"] == "ok", listed
+
+    # 9. `scooter-service start` recorded the intent on the PVC, so a pod recreate
     # brings the viewer back without the user asking twice.
     state = json.loads(machine.succeed("cat /workspace/.scooter/services.json"))
     assert state["enabled"]["files"]["autostart"] is True, state

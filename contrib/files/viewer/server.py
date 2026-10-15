@@ -45,6 +45,9 @@ RAW_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".ico
 # or an attack whose read would cost the pod's memory.
 MAX_BODY_BYTES = 128 * 1024
 
+# Readable and never writable; a POST to one of these is refused as 405.
+READ_ONLY_ROUTES = ("/api/list", "/api/file", "/api/raw", "/api/health")
+
 # Directories that are never interesting to review and enormous to walk.
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", "result"}
 
@@ -309,6 +312,10 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self.fail(HTTPStatus.BAD_REQUEST, str(exc))
 
+        # The file routes exist and are readable, so a write to one is 405 rather
+        # than 404: the tree itself stays read-only.
+        if route in READ_ONLY_ROUTES or route.startswith("/static/") or route in ("/", "."):
+            return self.fail(HTTPStatus.METHOD_NOT_ALLOWED, f"{route} is read-only")
         self.fail(HTTPStatus.NOT_FOUND, f"no route {route}")
 
     def add_annotation(self, body: dict) -> None:

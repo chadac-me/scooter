@@ -528,3 +528,22 @@ def test_a_hinted_line_that_moves_says_so_in_the_reply(tmp_path: Path):
         assert status == 202
         assert body["annotation"]["line"] == 3
         assert body["annotation"]["anchor_state"] == "moved"
+
+
+def test_a_write_to_a_read_route_is_refused_as_read_only(tmp_path: Path):
+    # 405, not 404: /api/file exists and answers a GET, so "no such route" would
+    # misdescribe it. The VM test pins the same contract against the shipped unit.
+    with viewer(tmp_path) as (call, _store):
+        assert call("POST", "/api/file?path=doc.md", {})[0] == 405
+        assert call("POST", "/api/list", {})[0] == 405
+        # An unknown route is still a 404; only the read surface is "read-only".
+        assert call("POST", "/api/nonsense", {})[0] == 404
+
+
+def test_a_write_to_a_read_route_is_refused_as_read_only(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        # 405, not 404, because the route exists and is readable: what the request got
+        # wrong is that the tree is read-only.
+        assert call("POST", "/api/file?path=doc.md", {})[0] == 405
+        assert call("POST", "/api/list", {})[0] == 405
+        assert call("POST", "/api/nope", {})[0] == 404
