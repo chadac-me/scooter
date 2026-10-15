@@ -6,13 +6,11 @@
  * interrupt) and `!sleep` (a long run).
  */
 
-import { test, expect } from "./fixtures.js";
+import { test, expect, answerInterrupt, interruptSel } from "./fixtures.js";
 import { isFull } from "./target.js";
 
 const panel = {
-  root: '[data-testid="interrupt-panel"]',
-  option: '[data-testid="interrupt-option"]',
-  cancel: '[data-testid="interrupt-cancel"]',
+  ...interruptSel,
   approvalsTab: '[data-testid="right-panel-tab-approvals"]',
   approvalsBadge: '[data-testid="right-panel-badge-approvals"]',
   queueTab: '[data-testid="right-panel-tab-queue"]',
@@ -23,27 +21,6 @@ const panel = {
 // post-answer waits need cluster budgets.
 const CLUSTER_BUDGET_MS = 180_000;
 const ANSWER_BUDGET_MS = 90_000;
-
-/**
- * Click an interrupt option (or Dismiss) until the agent's answer actually lands, re-clicking
- * while the panel is still up because a click made before it is wired never reaches the agent.
- */
-async function answerInterrupt(
-  page: import("@playwright/test").Page,
-  option: RegExp | null,
-  expected: RegExp,
-) {
-  const target = option
-    ? page.locator(panel.option).filter({ hasText: option })
-    : page.locator(panel.cancel);
-  await expect(target).toBeEnabled({ timeout: 30_000 });
-  await expect(async () => {
-    if (await page.locator(panel.root).isVisible().catch(() => false)) {
-      await target.click({ timeout: 5_000 }).catch(() => {});
-    }
-    await expect(page.getByText(expected).first()).toBeVisible({ timeout: 15_000 });
-  }).toPass({ timeout: ANSWER_BUDGET_MS });
-}
 
 test.describe("interrupt + queue coexistence", () => {
   test.beforeEach(() => test.setTimeout(CLUSTER_BUDGET_MS));
@@ -70,7 +47,7 @@ test.describe("interrupt + queue coexistence", () => {
 
     // Switch back to the Approvals tab so the interrupt options are visible, then answer.
     await page.locator(panel.approvalsTab).click();
-    await answerInterrupt(page, /green/i, /you picked: green/i);
+    await answerInterrupt(page, /green/i, /you picked: green/i, ANSWER_BUDGET_MS);
 
     // The queued message becomes a real user turn, which on the full target runs a real
     // sandbox exec.
@@ -122,7 +99,7 @@ test.describe("interrupt persistence + recovery", () => {
     await chat.open();
     await chat.send("?pick a color");
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
-    await answerInterrupt(page, /blue/i, /you picked: blue/i);
+    await answerInterrupt(page, /blue/i, /you picked: blue/i, ANSWER_BUDGET_MS);
 
     // Clean state: the interrupt panel is gone, no stuck run-status bar, and a new turn works first-try.
     await expect(page.locator(panel.root)).toHaveCount(0, { timeout: 10_000 });
@@ -136,7 +113,7 @@ test.describe("interrupt persistence + recovery", () => {
     await chat.open();
     await chat.send("?pick a color");
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
-    await answerInterrupt(page, null, /you picked: \(cancelled\)/i);
+    await answerInterrupt(page, null, /you picked: \(cancelled\)/i, ANSWER_BUDGET_MS);
     await expect(page.locator(panel.root)).toHaveCount(0, { timeout: 10_000 });
     // This is the conversation's first completed exec, so it funds the cold sandbox boot.
     await chat.sendTurn("works after a cancel", ANSWER_BUDGET_MS);

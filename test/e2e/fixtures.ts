@@ -326,6 +326,63 @@ export const test = base.extend<Fixtures>({
   },
 });
 
+/** Interrupt-panel selectors, shared by every spec that answers an approval. */
+export const interruptSel = {
+  root: '[data-testid="interrupt-panel"]',
+  request: '[data-testid="interrupt-request"]',
+  option: '[data-testid="interrupt-option"]',
+  cancel: '[data-testid="interrupt-cancel"]',
+};
+
+/**
+ * Answer the pending interrupt(s) by clicking `option` (or Dismiss when null) until the
+ * agent's continuation renders `expected`.
+ *
+ * Two invariants the obvious version gets wrong, both observed in nightly e2e-full:
+ *   - Clicks MUST be scoped to one card. A conversation can hold more than one pending
+ *     interrupt, and an unscoped option locator then throws strict-mode instead of
+ *     clicking — which a swallowed catch turns into a silent no-op retry loop.
+ *   - A click MUST NOT be re-fired until the previous one has had a chance to land, or the
+ *     panel's own click + the first retry double-resume the same interrupt ~1s apart.
+ * See PR #762.
+ */
+export async function answerInterrupt(
+  page: Page,
+  option: RegExp | null,
+  expected: RegExp,
+  budget = 90_000,
+): Promise<void> {
+  const cards = page.locator(interruptSel.request);
+  const target = (card: Locator) =>
+    option ? card.locator(interruptSel.option).filter({ hasText: option }).first() : card.locator(interruptSel.cancel).first();
+
+  await expect(target(cards.first())).toBeEnabled({ timeout: 30_000 });
+
+  // Retained so a timeout reports why the clicks stopped landing rather than only that the
+  // reply never rendered.
+  let lastClickError = "";
+  await expect(async () => {
+    // Every pending card, because the run is paused on one of them and a stale sibling must
+    // not shadow it.
+    const n = await cards.count();
+    for (let i = 0; i < n; i++) {
+      await target(cards.nth(i))
+        .click({ timeout: 5_000 })
+        .catch((e: unknown) => {
+          lastClickError = String(e);
+        });
+    }
+    await expect(page.getByText(expected).first()).toBeVisible({ timeout: 15_000 });
+  }).toPass({ timeout: budget });
+
+  if (lastClickError) {
+    // Non-fatal: the answer landed anyway. Logged because a click that failed on the way to
+    // a pass is the signature of the strict-mode bug above regressing.
+    // eslint-disable-next-line no-console
+    console.log(`  [answerInterrupt] recovered after a failed click: ${lastClickError.slice(0, 200)}`);
+  }
+}
+
 /** After every test: assert the UI surfaced no error. */
 test.afterEach(async ({ page, consoleErrors }) => {
   // 1. No rendered error box.

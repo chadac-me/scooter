@@ -8,15 +8,13 @@
  * Red/Green/Blue and reports the chosen one.
  */
 
-import { test, expect } from "./fixtures.js";
+import { test, expect, answerInterrupt, interruptSel } from "./fixtures.js";
 
 const panel = {
+  ...interruptSel,
   rightPanel: '[data-testid="right-panel"]',
   sandboxTab: '[data-testid="right-panel-tab-sandbox"]',
   approvalsTab: '[data-testid="right-panel-tab-approvals"]',
-  root: '[data-testid="interrupt-panel"]',
-  option: '[data-testid="interrupt-option"]',
-  cancel: '[data-testid="interrupt-cancel"]',
 };
 
 test.describe("agent option dropdown (interrupt)", () => {
@@ -32,19 +30,14 @@ test.describe("agent option dropdown (interrupt)", () => {
     await expect(page.locator(panel.rightPanel)).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(panel.approvalsTab)).toHaveAttribute("aria-selected", "true");
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator(panel.option)).toHaveCount(3, { timeout: 30_000 });
-    await expect(page.locator(panel.option).filter({ hasText: /green/i })).toHaveCount(1);
+    // Scoped to one card: a second interrupt can go pending at any moment, and a
+    // whole-panel count then measures both cards' options together.
+    const card = page.locator(panel.request).first();
+    await expect(card.locator(panel.option)).toHaveCount(3, { timeout: 30_000 });
+    await expect(card.locator(panel.option).filter({ hasText: /green/i })).toHaveCount(1);
 
-    // Pick "Green", re-clicking while the panel is up because a click made before it is
-    // wired never reaches the agent.
-    const green = page.locator(panel.option).filter({ hasText: /green/i });
-    await expect(green).toBeEnabled({ timeout: 30_000 });
-    await expect(async () => {
-      if (await page.locator(panel.root).isVisible().catch(() => false)) {
-        await green.click({ timeout: 5_000 }).catch(() => {});
-      }
-      await expect(page.getByText(/you picked: green/i).first()).toBeVisible({ timeout: 15_000 });
-    }).toPass({ timeout: 90_000 });
+    // Pick "Green" (answerInterrupt retries until the agent's continuation lands).
+    await answerInterrupt(page, /green/i, /you picked: green/i);
 
     // The interrupt content goes away once answered; the right panel itself persists and
     // returns to the Sandbox tab.
@@ -58,19 +51,9 @@ test.describe("agent option dropdown (interrupt)", () => {
     await chat.send("?pick a color");
 
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
-    // Wait for the Dismiss button itself to be enabled, not merely the panel.
-    const cancel = page.locator(panel.cancel);
-    await expect(cancel).toBeEnabled({ timeout: 30_000 });
-    await cancel.click();
 
-    // The agent reports the cancellation and the interrupt content clears, re-clicking while
-    // the panel is up because a click made before it is wired never reaches the agent.
-    await expect(async () => {
-      if (await page.locator(panel.root).isVisible().catch(() => false)) {
-        await cancel.click({ timeout: 5_000 }).catch(() => {});
-      }
-      await expect(page.getByText(/you picked: \(cancelled\)/i).first()).toBeVisible({ timeout: 10_000 });
-    }).toPass({ timeout: 60_000 });
+    // Dismiss; the agent reports the cancellation and the interrupt content clears.
+    await answerInterrupt(page, null, /you picked: \(cancelled\)/i);
     await expect(page.locator(panel.root)).toHaveCount(0, { timeout: 10_000 });
     await expect(page.locator(panel.rightPanel)).toBeVisible();
     await expect(page.locator(panel.sandboxTab)).toBeVisible();
