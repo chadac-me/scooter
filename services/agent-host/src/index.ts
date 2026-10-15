@@ -1557,16 +1557,8 @@ export async function main(
     // The skills are re-read on every conversation start, so editing the skills ConfigMap
     // takes effect for new conversations with no image rebuild.
     const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
-    /**
-     * Write the skills this conversation's agent reads, and answer the owner's personal
-     * ones for the payload path, ONCE per conversation.
-     *
-     * Deferred to the first agent start rather than done here because the owner's skills
-     * come from the database and makeBridge is synchronous — and because a conversation
-     * that is only listed or hydrated should not read them at all. Memoized so the two
-     * callers (the in-pod client factory, the BYO payload) cannot disagree about what this
-     * conversation's skills are.
-     */
+    // Write the agent's skills once per conversation, answering the owner's personal ones.
+    // Memoized and deferred: makeBridge is sync and these come from the database. Why: PR #767.
     let skillsOnce: Promise<readonly Skill[]> | undefined;
     const prepareSkills = (): Promise<readonly Skill[]> =>
       (skillsOnce ??= (async () => {
