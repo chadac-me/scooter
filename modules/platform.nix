@@ -1006,6 +1006,14 @@ in
           writers = [ "agent-host" ];
           note = "Asset metadata (bytes on dedicated PVC). Replaces in-memory blob URLs.";
         };
+        user_skills = {
+          writers = [ "agent-host" ];
+          note = ''
+            Per-user skills authored in the settings page, injected into that user's conversations
+            next to the deployment-wide `agent-skills` ConfigMap. agent-host both serves the CRUD
+            and reads them at conversation start, so it is the only writer and there are no
+            readers: a skill body is user prose about their own repos, not shared config.'';
+        };
       };
     };
 

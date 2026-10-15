@@ -687,6 +687,96 @@ export async function deleteScheduledTask(config: AgentHostConfig, id: string): 
   return res.ok;
 }
 
+/** A personal skill, as the agent-host's /user-skills routes return it. */
+export interface UserSkillView {
+  id: string;
+  name: string;
+  description: string;
+  body: string;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Fields the settings form sends when creating/editing a personal skill. */
+export interface UserSkillInput {
+  name: string;
+  description: string;
+  body: string;
+  enabled?: boolean;
+}
+
+/** Result of a /user-skills fetch, where `configured` distinguishes a missing store (501) from no skills. */
+export interface UserSkillsResult {
+  configured: boolean;
+  skills: UserSkillView[];
+  /** The deployment's own skill names, so the form can warn that this name replaces one. */
+  builtinNames: string[];
+}
+
+/** List the caller's personal skills (501 = no database, so the feature is off). */
+export async function loadUserSkills(config: AgentHostConfig): Promise<UserSkillsResult> {
+  const empty = { skills: [], builtinNames: [] };
+  try {
+    const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/user-skills`, {
+      headers: authHeaders(config),
+    });
+    if (res.status === 501) return { configured: false, ...empty };
+    if (!res.ok) {
+      console.warn(`[client] loadUserSkills: HTTP ${res.status}`);
+      return { configured: true, ...empty };
+    }
+    const body = (await res.json()) as Partial<UserSkillsResult>;
+    return { configured: true, skills: body.skills ?? [], builtinNames: body.builtinNames ?? [] };
+  } catch (e) {
+    console.warn("[client] loadUserSkills failed:", e);
+    return { configured: true, ...empty };
+  }
+}
+
+/** The server's rejection message, which for a skill is the validation text the form shows. */
+const skillError = async (res: Response): Promise<never> => {
+  throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+};
+
+/** Create a personal skill, throwing with the server's validation message on refusal. */
+export async function createUserSkill(
+  config: AgentHostConfig,
+  input: UserSkillInput,
+): Promise<UserSkillView> {
+  const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/user-skills`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeaders(config) },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) await skillError(res);
+  return (await res.json()) as UserSkillView;
+}
+
+/** Patch any subset of a personal skill's fields (the enabled toggle included). */
+export async function updateUserSkill(
+  config: AgentHostConfig,
+  id: string,
+  patch: Partial<UserSkillInput>,
+): Promise<UserSkillView> {
+  const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/user-skills/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...authHeaders(config) },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) await skillError(res);
+  return (await res.json()) as UserSkillView;
+}
+
+/** Delete a personal skill, answering whether it was there. */
+export async function deleteUserSkill(config: AgentHostConfig, id: string): Promise<boolean> {
+  const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/user-skills/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(config),
+  });
+  return res.ok;
+}
+
 /** Which conversations to list: the caller's own ("mine", default) or all. */
 export type ConversationScope = "mine" | "all";
 

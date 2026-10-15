@@ -81,3 +81,21 @@ class Conversations(Base):
     phase: Mapped[Optional[str]] = mapped_column(Text)
     sandbox_ref: Mapped[Optional[str]] = mapped_column(Text)
     creator_pod: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class UserSkills(Base):
+    __tablename__ = 'user_skills'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='user_skills_pkey'),
+        Index('user_skills_by_owner', 'owner'),
+        Index('user_skills_owner_name', 'owner', 'name', unique=True)
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('true'))
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)

@@ -18,6 +18,7 @@ export type View = "chat" | "settings";
 /** The settings tabs, in sidebar order; `id` is the URL segment. */
 export const SETTINGS_TABS = [
   { id: "tasks", label: "Scheduled Tasks" },
+  { id: "skills", label: "Skills" },
   { id: "claude", label: "Bring Your Own Claude" },
   { id: "modules", label: "Modules" },
   { id: "admin", label: "Admin Area" },

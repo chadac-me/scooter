@@ -6,7 +6,9 @@
  * `.claude/skills/<name>/SKILL.md`, so its prompt carries no skill bodies.
  * Provider-specific text lives in gooseAddendum/sdkAddendum, never in identityCore.
  * Skills are read from a directory at runtime (a ConfigMap mount in cluster, a local
- * dir in dev), so adding or editing one needs no image rebuild.
+ * dir in dev), so adding or editing one needs no image rebuild. The conversation
+ * owner's PERSONAL skills (userSkillStore) are merged over that directory before any
+ * provider sees them, so both halves travel every path identically.
  */
 
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, symlinkSync, rmSync, lstatSync } from "node:fs";
@@ -118,6 +120,84 @@ export function loadSkills(dir: string): Skill[] {
     });
 }
 
+// --- personal skills -------------------------------------------------------
+// A user's own skills, authored in the settings page and stored per owner, merged
+// into the deployment's before any provider sees them. Budgets exist because the
+// goose path inlines every body into .goosehints verbatim.
+
+/** Longest a single personal skill body may be. */
+export const MAX_PERSONAL_SKILL_BYTES = 32 * 1024;
+/** Most personal skills one owner may keep. */
+export const MAX_PERSONAL_SKILLS = 50;
+/** Total body budget per owner, the limit that actually bounds the prompt. */
+export const MAX_PERSONAL_TOTAL_BYTES = 128 * 1024;
+/** A name is the agent-visible filename, so it must be a safe single path segment. */
+export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/** A personal skill as the user authored it. */
+export interface PersonalSkillInput {
+  name: string;
+  description: string;
+  body: string;
+}
+
+/** Shape a stored row as a `Skill` so it merges with the directory-loaded ones. */
+export function personalSkill(row: PersonalSkillInput): Skill {
+  const description = row.description.trim() || skillDescription(row.name, row.body);
+  return { name: row.name, text: row.body, description };
+}
+
+/** Deployment skills plus personal ones, name-sorted, a personal skill replacing a deployment skill of the same name. */
+export function mergeSkills(base: readonly Skill[], personal: readonly Skill[]): Skill[] {
+  const by = new Map(base.map((s) => [s.name, s]));
+  for (const s of personal) by.set(s.name, s);
+  return [...by.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The deployment skill names a personal skill is replacing, for the UI's warning and the host's log. */
+export function shadowedNames(base: readonly Skill[], personal: readonly Skill[]): string[] {
+  const names = new Set(base.map((s) => s.name));
+  return personal.filter((s) => names.has(s.name)).map((s) => s.name).sort();
+}
+
+/** The reason a skill is invalid, or null when it is fine; the message goes to the settings form. */
+export function validateSkillInput(row: PersonalSkillInput): string | null {
+  if (!SKILL_NAME_RE.test(row.name)) {
+    return "name must be lowercase letters, digits and dashes, start with a letter or digit, and be at most 64 characters";
+  }
+  if (!row.description.trim()) {
+    // The SDK drops a skill whose frontmatter has no description, so it would vanish silently.
+    return "description is required — it is what the agent matches on to decide the skill applies";
+  }
+  if (!row.body.trim()) return "body is required";
+  if (Buffer.byteLength(row.body, "utf8") > MAX_PERSONAL_SKILL_BYTES) {
+    return `body must be at most ${MAX_PERSONAL_SKILL_BYTES} bytes`;
+  }
+  return null;
+}
+
+/**
+ * Whether one owner can afford `incomingBody` on top of `others` (their OTHER skills —
+ * the row being replaced is excluded by the caller), or the reason they cannot.
+ *
+ * Enabled and disabled alike count: a disabled skill is one toggle away from the prompt,
+ * so a budget that ignored them would be enforced at the worst possible moment.
+ */
+export function checkPersonalBudget(
+  others: ReadonlyArray<{ body: string }>,
+  incomingBody: string,
+): string | null {
+  if (others.length + 1 > MAX_PERSONAL_SKILLS) {
+    return `at most ${MAX_PERSONAL_SKILLS} skills per user`;
+  }
+  const used = others.reduce((n, s) => n + Buffer.byteLength(s.body, "utf8"), 0);
+  const total = used + Buffer.byteLength(incomingBody, "utf8");
+  if (total > MAX_PERSONAL_TOTAL_BYTES) {
+    return `your skills would total ${total} bytes, over the ${MAX_PERSONAL_TOTAL_BYTES}-byte budget — shorten or delete one`;
+  }
+  return null;
+}
+
 /** Assemble the full `.goosehints` content: identity + each skill's body. */
 export function assembleHints(skills: Skill[], identity: AgentIdentity = DEFAULT_IDENTITY): string {
   const parts = [identityPrompt(identity)];
@@ -133,8 +213,9 @@ export function writeHints(
   cwd: string,
   skillsDir: string,
   identity: AgentIdentity = DEFAULT_IDENTITY,
+  personal: readonly Skill[] = [],
 ): number {
-  const skills = loadSkills(skillsDir);
+  const skills = mergeSkills(loadSkills(skillsDir), personal);
   writeFileSync(join(cwd, ".goosehints"), assembleHints(skills, identity), "utf8");
   return skills.length;
 }
@@ -147,8 +228,8 @@ export interface SkillPayload {
 }
 
 /** The skills to send a BYO container, which has no access to this pod's filesystem and writes them itself (writeSkillPayloads) for its own SDK to discover. */
-export function skillPayloads(skillsDir: string): SkillPayload[] {
-  return loadSkills(skillsDir).map((s) => ({ name: s.name, content: renderSkillFile(s) }));
+export function skillPayloads(skillsDir: string, personal: readonly Skill[] = []): SkillPayload[] {
+  return mergeSkills(loadSkills(skillsDir), personal).map((s) => ({ name: s.name, content: renderSkillFile(s) }));
 }
 
 /** Write received payloads as `.claude/skills/<name>/SKILL.md` under `cwd`, the container-side counterpart of writeSkillDir, returning the number written. */
@@ -169,8 +250,9 @@ export function writeSkillPayloads(cwd: string, skills: readonly SkillPayload[])
 export function writeSkillDir(
   cwd: string,
   skillsDir: string,
+  personal: readonly Skill[] = [],
 ): number {
-  const skills = loadSkills(skillsDir);
+  const skills = mergeSkills(loadSkills(skillsDir), personal);
   if (!skills.length) return 0;
   const base = join(cwd, ".claude", "skills");
   for (const s of skills) {
