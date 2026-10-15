@@ -147,3 +147,39 @@ CREATE INDEX "conversation_assets_by_conv" ON "conversation_assets" ("conversati
 
 -- Find orphaned asset_ids (bytes on disk with no metadata row) for GC.
 CREATE INDEX "conversation_assets_by_id" ON "conversation_assets" ("asset_id");
+
+-- PERSONALIZED skills: markdown a user writes in the settings page, injected into their
+-- own conversations alongside the deployment's ConfigMap skills. The ConfigMap is a
+-- deployment-wide, cluster-admin artifact; this table is the per-user half, so a user can
+-- teach the agent about their repos and habits without a redeploy.
+--
+-- `owner` is the ingress identity, or the literal 'anonymous' for a deployment with no
+-- identity ingress (one shared bucket, which is the right answer for a single-user box).
+-- `name` is the filename the agent sees, so it is unique per owner and constrained to a
+-- filesystem-safe charset by the store, never by a CHECK: the validation message has to
+-- reach the settings form.
+--
+-- `description` is its own column rather than parsed out of `body` because the Claude SDK
+-- matches on it to decide a skill is relevant, and a skill whose frontmatter fails to
+-- parse is silently dropped. Deriving it (skillDescription) is a fallback for the
+-- platform's own skills, which predate the field; a skill authored in a form can just ask.
+--
+-- bigint epoch-ms timestamps, matching the other agent_host tables.
+CREATE TABLE "user_skills" (
+  "id"          text NOT NULL,
+  "owner"       text NOT NULL,
+  "name"        text NOT NULL,
+  "description" text NOT NULL,
+  "body"        text NOT NULL,
+  "enabled"     boolean NOT NULL DEFAULT true,
+  "created_at"  bigint NOT NULL,
+  "updated_at"  bigint NOT NULL,
+  PRIMARY KEY ("id")
+);
+
+-- The injection path reads one owner's enabled skills at every conversation start, so this
+-- index is on the hot path, not just the settings page.
+CREATE INDEX "user_skills_by_owner" ON "user_skills" ("owner");
+
+-- A name is the agent-visible filename, so one owner cannot have two.
+CREATE UNIQUE INDEX "user_skills_owner_name" ON "user_skills" ("owner", "name");

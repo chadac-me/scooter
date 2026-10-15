@@ -107,6 +107,8 @@ let
         location /whoami        { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
         # Scheduled-tasks CRUD for the Settings page.
         location /scheduled-tasks { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
+        # Personal-skills CRUD for the Settings page.
+        location /user-skills   { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
         # The Users page listing and the webhooks reverse lookup (/users/by-email).
         location /users         { proxy_pass ''${AGENT_HOST_PROXY}; proxy_set_header Host $host; proxy_set_header Connection ""; }
 

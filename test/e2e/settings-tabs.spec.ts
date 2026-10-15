@@ -19,6 +19,7 @@ async function openTabs(page: Page) {
 
 const TABS = [
   { id: "tasks", label: "Scheduled Tasks" },
+  { id: "skills", label: "Skills" },
   { id: "claude", label: "Bring Your Own Claude" },
   { id: "modules", label: "Modules" },
   { id: "admin", label: "Admin Area" },

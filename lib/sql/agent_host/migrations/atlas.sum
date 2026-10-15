@@ -1,4 +1,4 @@
-h1:tjalCVMGnZ6LLEVkklBSDuvgPR5W0ORTLy5epiLwwzQ=
+h1:91UEByw6ZR+zoaKqwQYY3jyzCHdokSqpwcdbE3XuzVU=
 20260831184920_create_conversation_jobs.sql h1:iuMeVplqACz56tY81stXZq2zM5gojTDGkZby4hdIaAw=
 20260831203036_create_conversations.sql h1:FWFJ5L5WjnUtjyNz9OyXmLqF64UWgDgjSDWS21CLhqA=
 20260901163900_create_conversation_events.sql h1:MD1+P9uCLlF7y28sjec1JXqVTnpSl5UTqPY9am/30Zk=
@@ -7,3 +7,4 @@ h1:tjalCVMGnZ6LLEVkklBSDuvgPR5W0ORTLy5epiLwwzQ=
 20260925231159_add_conversation_assignment.sql h1:x2XO/Zo+ud2ocJicTB8cBMU2apjA10vv/NpSesimAVs=
 20261013164212_add_conversation_assignment_routing.sql h1:x2Cv7b0oZYC0iCrrEX2xTxg1qji3Uh3XaqukqUW/i4s=
 20261015024000_notify_conversation_owner.sql h1:SjlLp+euzMmRVCMevyBidw1Rv+78wcvbSxMU6EU/bnw=
+20261015160747_add_user_skills.sql h1:UftiS2X1OqP7onClsH+qVuSa5YlPN02fMKXkU+R8Q1s=

@@ -6,7 +6,7 @@
  * the permission UI.
  */
 
-import { skillPayloads, sdkPrompt } from "./agent/skills.js";
+import { skillPayloads, sdkPrompt, type Skill } from "./agent/skills.js";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -343,6 +343,8 @@ export interface BridgeDeps {
 
   /** The conversation owner, part of the per-run RunContext an owner-bound provider selects on. */
   owner?: string;
+  /** The owner's personal skills, resolved once per conversation; the same set the in-pod skill files are written from. */
+  personalSkills?: () => Promise<readonly Skill[]>;
 
   /** Run-completion hook for metrics, called once per run with the ACP session id, duration
    *  and outcome; must not throw. */
@@ -1210,7 +1212,9 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         model,
         // A provider that cannot read this pod's filesystem takes the skills as data and
         // writes its own .claude/skills.
-        skills: provider.needsSkillPayloads ? skillPayloads(deps.config.skillsDir) : undefined,
+        skills: provider.needsSkillPayloads
+          ? skillPayloads(deps.config.skillsDir, (await deps.personalSkills?.()) ?? [])
+          : undefined,
         // One that builds no identity of its own takes the host's prompt, without which it
         // runs anonymous and never emits the <title> marker.
         systemPrompt: provider.needsSystemPrompt

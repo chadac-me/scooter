@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { createRouter, type Router, type ResolveUser } from "../http/router.js";
+import { createRouter, type JsonResult, type Router, type ResolveUser } from "../http/router.js";
 import type { SessionManager, Conversation } from "../session/manager.js";
 import type { ConversationStore, ChecksummedEvent, ConversationLink } from "../session/manager.js";
 import type { SessionId } from "../types.js";
@@ -27,6 +27,7 @@ import type { ModuleRegistry } from "../proxy/moduleRegistry.js";
 import type { IdentityStore } from "../auth/identityStore.js";
 import type { AssetStore } from "../session/assetStore.js";
 import type { SchedulerClient } from "../agent/schedulerTools.js";
+import { UserSkillError, type UserSkill, type UserSkillStore } from "../session/userSkillStore.js";
 import type { SandboxResources } from "../session/resources.js";
 import { fitAdvice, fitSummary } from "../session/resourceFit.js";
 import type { SandboxSizePreset } from "../session/resources.js";
@@ -111,6 +112,10 @@ export interface ManagementDeps {
   assets?: AssetStore;
   /** Scheduler client for the settings page's scheduled-tasks CRUD, always scoped to the caller; absent means the routes report it unconfigured. */
   scheduler?: SchedulerClient;
+  /** Personal-skills store for the settings page's CRUD, always scoped to the caller; absent (no agent_host DSN) means the routes report it unconfigured. */
+  userSkills?: UserSkillStore;
+  /** The deployment skills' names, so the settings form can warn that a personal skill of the same name replaces one. */
+  builtinSkillNames?: () => string[];
   /** Summarize older turns and continue on summary+recent; null when too short to compact, throws on summarizer failure. */
   compact?: (conversationId: string) => Promise<{ summarizedTurns: number; keptRuns: number } | null>;
   /** The conversation's current sandbox resource requests/limits; wired only on the broker path. */
@@ -1075,6 +1080,77 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.del("/scheduled-tasks/:id", async (ctx) => {
     if (!scheduler) return noScheduler;
     const gone = await scheduler.del(scopeOwner(ctx), ctx.params.id);
+    return gone ? { status: 204, json: null } : { status: 404, json: { error: "not found" } };
+  });
+
+  // --- Personal skills (UI settings page) ---------------------------------------
+  // Owner-scoped CRUD over the same rows the conversation-start path injects, so what
+  // the user sees here is exactly what their next conversation gets. 501 without a store.
+  const userSkills = deps.userSkills;
+  const noSkillStore = { status: 501, json: { error: "personal skills not configured" } };
+  // `user.id` is already "anonymous" with no identity ingress: one shared bucket, which is
+  // the right answer for a single-user box and the same trust boundary as its conversations.
+  const skillOwner = (ctx: { user: { id: string } }) => ctx.user.id;
+  // camelCase, unlike the scheduler's snake_case passthrough: these rows are ours.
+  const skillView = (s: UserSkill) => ({
+    id: s.id,
+    name: s.name,
+    description: s.description,
+    body: s.body,
+    enabled: s.enabled,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+  });
+  /** A rejected write is the user's typo, not a server fault, so it reads as 400 with the store's message. */
+  const skillWrite = async (fn: () => Promise<JsonResult>): Promise<JsonResult> => {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e instanceof UserSkillError) return { status: 400, json: { error: e.message } };
+      throw e;
+    }
+  };
+
+  r.get("/user-skills", async (ctx) => {
+    if (!userSkills) return noSkillStore;
+    const skills = await userSkills.list(skillOwner(ctx));
+    // The deployment's names travel with the list so the form can warn about a shadow
+    // without a second round trip.
+    return { json: { skills: skills.map(skillView), builtinNames: deps.builtinSkillNames?.() ?? [] } };
+  });
+
+  r.post("/user-skills", async (ctx) =>
+    skillWrite(async () => {
+      if (!userSkills) return noSkillStore;
+      const body = await ctx.body<{ name?: string; description?: string; body?: string; enabled?: boolean }>();
+      const created = await userSkills.create(skillOwner(ctx), {
+        name: (body.name ?? "").trim(),
+        description: (body.description ?? "").trim(),
+        body: body.body ?? "",
+        enabled: body.enabled,
+      });
+      return { status: 201, json: skillView(created) };
+    }),
+  );
+
+  r.patch("/user-skills/:id", async (ctx) =>
+    skillWrite(async () => {
+      if (!userSkills) return noSkillStore;
+      const body = await ctx.body<{ name?: string; description?: string; body?: string; enabled?: boolean }>();
+      const updated = await userSkills.patch(skillOwner(ctx), ctx.params.id, {
+        ...(body.name === undefined ? {} : { name: body.name.trim() }),
+        ...(body.description === undefined ? {} : { description: body.description.trim() }),
+        ...(body.body === undefined ? {} : { body: body.body }),
+        ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
+      });
+      // 404 rather than 403 for someone else's id: the scope is the whole answer here.
+      return updated ? { json: skillView(updated) } : { status: 404, json: { error: "not found" } };
+    }),
+  );
+
+  r.del("/user-skills/:id", async (ctx) => {
+    if (!userSkills) return noSkillStore;
+    const gone = await userSkills.remove(skillOwner(ctx), ctx.params.id);
     return gone ? { status: 204, json: null } : { status: 404, json: { error: "not found" } };
   });
 

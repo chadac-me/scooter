@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { createManagementApi, raiseApprovalInterrupt, fetchPendingApprovals } from "../../src/api/management.js";
+import { UserSkillError, type UserSkillStore } from "../../src/session/userSkillStore.js";
 import { shortId } from "../../src/session/manager.js";
 import type { Conversation, SessionManager, ConversationStore, ConversationLink } from "../../src/session/manager.js";
 import type { AguiServer } from "../../src/agui/server.js";
@@ -1175,4 +1176,147 @@ describe("management API", () => {
       expect(r.status).not.toBe(404);
     });
   });
+
+  // --- Personal skills (UI settings page) --------------------------------------
+  // The /user-skills routes are owner-scoped CRUD over the rows the conversation-start
+  // path injects, so a caller must never see or touch another user's skill.
+  describe("personal skills", () => {
+    const skill = (over: Record<string, unknown> = {}) => ({
+      id: "s1",
+      owner: "alice",
+      name: "acme",
+      description: "Acme conventions. Use when working in acme/app.",
+      body: "Run make check.",
+      enabled: true,
+      createdAt: 1000,
+      updatedAt: 1000,
+      ...over,
+    });
+
+    /** An in-memory UserSkillStore recording the owner each call was scoped to. */
+    function fakeSkills(seed: Array<ReturnType<typeof skill>> = []) {
+      const rows = [...seed];
+      const calls: Array<{ method: string; owner: string }> = [];
+      const mine = (owner: string) => rows.filter((r) => r.owner === owner);
+      const store: UserSkillStore = {
+        async list(owner) {
+          calls.push({ method: "list", owner });
+          return mine(owner);
+        },
+        async listEnabled(owner) {
+          calls.push({ method: "listEnabled", owner });
+          return mine(owner).filter((r) => r.enabled);
+        },
+        async create(owner, input) {
+          calls.push({ method: "create", owner });
+          // The real store validates; the fake stands in for its one rejection path.
+          if (!/^[a-z0-9][a-z0-9-]*$/.test(input.name)) throw new UserSkillError("bad name");
+          const row = skill({ ...input, owner, id: `s${rows.length + 1}`, enabled: input.enabled ?? true });
+          rows.push(row);
+          return row;
+        },
+        async patch(owner, id, patch) {
+          calls.push({ method: "patch", owner });
+          const row = mine(owner).find((r) => r.id === id);
+          if (!row) return null;
+          Object.assign(row, patch);
+          return row;
+        },
+        async remove(owner, id) {
+          calls.push({ method: "remove", owner });
+          const i = rows.findIndex((r) => r.owner === owner && r.id === id);
+          if (i < 0) return false;
+          rows.splice(i, 1);
+          return true;
+        },
+        async close() {},
+      };
+      return { store, calls, rows };
+    }
+
+    const mk = (userSkills?: UserSkillStore, builtinSkillNames?: () => string[]) =>
+      createManagementApi({
+        sessions: fakeSessions(),
+        store: fakeStore([]),
+        server: stubServer,
+        answerPermission: async () => {},
+        userSkills,
+        builtinSkillNames,
+      });
+
+    it("501s when no store is wired (no database)", async () => {
+      const res = await call(mk(undefined), "GET", "/user-skills", undefined, { "x-auth-user": "alice" });
+      expect(res.status).toBe(501);
+    });
+
+    it("GET lists only the caller's skills", async () => {
+      const { store, calls } = fakeSkills([skill(), skill({ id: "s2", owner: "bob", name: "bobs" })]);
+      const res = await call(mk(store), "GET", "/user-skills", undefined, { "x-auth-user": "alice" });
+      expect(res.status).toBe(200);
+      const body = res.json as { skills: Array<{ id: string }> };
+      expect(body.skills.map((s) => s.id)).toEqual(["s1"]);
+      // Scoped in the STORE call, not filtered afterwards.
+      expect(calls[0]).toEqual({ method: "list", owner: "alice" });
+    });
+
+    it("an anonymous caller gets the shared 'anonymous' bucket rather than a refusal", async () => {
+      // A deployment with no identity ingress is single-user by construction; refusing there
+      // would make the feature unreachable on exactly the simplest install.
+      const { store, calls } = fakeSkills([skill({ owner: "anonymous" })]);
+      const res = await call(mk(store), "GET", "/user-skills");
+      expect(res.status).toBe(200);
+      expect(calls[0]).toEqual({ method: "list", owner: "anonymous" });
+      expect((res.json as { skills: unknown[] }).skills).toHaveLength(1);
+    });
+
+    it("GET carries the deployment's skill names so the form can warn about a shadow", async () => {
+      const { store } = fakeSkills();
+      const res = await call(mk(store, () => ["nix-packages", "scooter-env"]), "GET", "/user-skills", undefined, {
+        "x-auth-user": "alice",
+      });
+      expect((res.json as { builtinNames: string[] }).builtinNames).toEqual(["nix-packages", "scooter-env"]);
+    });
+
+    it("POST creates one for the caller and answers 201", async () => {
+      const { store, calls, rows } = fakeSkills();
+      const res = await call(
+        mk(store),
+        "POST",
+        "/user-skills",
+        { name: "acme", description: "when in acme/app", body: "notes" },
+        { "x-auth-user": "alice" },
+      );
+      expect(res.status).toBe(201);
+      expect(calls.at(-1)).toEqual({ method: "create", owner: "alice" });
+      expect(rows[0].owner).toBe("alice");
+    });
+
+    it("POST 400s a store rejection with its message, since it is the user's typo", async () => {
+      const { store } = fakeSkills();
+      const res = await call(mk(store), "POST", "/user-skills", { name: "../escape", description: "d", body: "b" }, {
+        "x-auth-user": "alice",
+      });
+      expect(res.status).toBe(400);
+      expect((res.json as { error: string }).error).toBe("bad name");
+    });
+
+    it("PATCH toggles the caller's skill; someone else's id is a 404", async () => {
+      const { store } = fakeSkills([skill(), skill({ id: "s2", owner: "bob" })]);
+      const ok = await call(mk(store), "PATCH", "/user-skills/s1", { enabled: false }, { "x-auth-user": "alice" });
+      expect(ok.status).toBe(200);
+      expect((ok.json as { enabled: boolean }).enabled).toBe(false);
+      const nope = await call(mk(store), "PATCH", "/user-skills/s2", { enabled: false }, { "x-auth-user": "alice" });
+      expect(nope.status).toBe(404);
+    });
+
+    it("DELETE removes the caller's skill; someone else's id is a 404 and stays put", async () => {
+      const { store, rows } = fakeSkills([skill(), skill({ id: "s2", owner: "bob" })]);
+      const gone = await call(mk(store), "DELETE", "/user-skills/s1", undefined, { "x-auth-user": "alice" });
+      expect(gone.status).toBe(204);
+      const nope = await call(mk(store), "DELETE", "/user-skills/s2", undefined, { "x-auth-user": "alice" });
+      expect(nope.status).toBe(404);
+      expect(rows.map((r) => r.id)).toEqual(["s2"]);
+    });
+  });
+
 });

@@ -60,7 +60,7 @@ describe("settings path building", () => {
 
 describe("tab declaration", () => {
   it("declares the expected tabs in sidebar order", () => {
-    expect(SETTINGS_TABS.map((t) => t.id)).toEqual(["tasks", "claude", "modules", "admin"]);
+    expect(SETTINGS_TABS.map((t) => t.id)).toEqual(["tasks", "skills", "claude", "modules", "admin"]);
   });
 
   it("gives every tab a human label", () => {

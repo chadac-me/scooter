@@ -1,10 +1,11 @@
 /**
- * Settings page: the Scheduled Tasks, Bring Your Own Claude, Modules and Admin tabs.
+ * Settings page: the Scheduled Tasks, Skills, Bring Your Own Claude, Modules and Admin tabs.
  *
  * A scheduled task cron-spawns a fresh Scooter conversation with a prompt via the
  * scheduler service, proxied through the agent-host's /scheduled-tasks routes and
- * scoped to the caller. Each section shows a "not configured" note when its backing
- * service is not deployed.
+ * scoped to the caller. A personal skill is markdown the caller writes here and the agent
+ * loads next to the deployment's built-in skills at the start of their conversations. Each
+ * section shows a "not configured" note when its backing service is not deployed.
  */
 
 import { useCallback, useEffect, useState, type FC } from "react";
@@ -17,12 +18,18 @@ import {
   updateScheduledTask,
   deleteScheduledTask,
   loadUsers,
+  loadUserSkills,
+  createUserSkill,
+  updateUserSkill,
+  deleteUserSkill,
   searchModules,
   loadRemoteAgentStatus,
   requestRemoteAgentJoinToken,
   type ScheduledTaskView,
   type ScheduledTaskInput,
   type UserView,
+  type UserSkillView,
+  type UserSkillInput,
   type RegistryModule,
 } from "./client.js";
 import { useSessions, currentConversation } from "./sessions.js";
@@ -248,6 +255,302 @@ function TaskRow({
         </Button>
       </div>
     </li>
+  );
+}
+
+const BLANK_SKILL: UserSkillInput = { name: "", description: "", body: "", enabled: true };
+
+/** The create / edit form for a personal skill; `initial` seeds edit mode. */
+function SkillForm({
+  initial,
+  submitLabel,
+  builtinNames,
+  onSubmit,
+  onCancel,
+}: {
+  initial: UserSkillInput;
+  submitLabel: string;
+  builtinNames: string[];
+  onSubmit: (input: UserSkillInput) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState<UserSkillInput>(initial);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const set = <K extends keyof UserSkillInput>(k: K, v: UserSkillInput[K]) =>
+    setForm((f) => ({ ...f, [k]: v }));
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onSubmit({ ...form, name: form.name.trim(), description: form.description.trim() });
+    } catch (e) {
+      // The server's validation message, which is written for this form.
+      setError((e as Error)?.message ?? "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const name = form.name.trim();
+  const valid = name && form.description.trim() && form.body.trim();
+  // A same-named personal skill replaces the deployment's, which is allowed but worth saying.
+  const shadows = builtinNames.includes(name);
+
+  return (
+    <div data-testid="skill-form" className="flex flex-col gap-3 rounded-md border bg-muted/30 p-4">
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-medium text-muted-foreground">Name</label>
+        <input
+          data-testid="skill-name"
+          value={form.name}
+          onChange={(e) => set("name", e.target.value)}
+          placeholder="acme-conventions"
+          className="rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm"
+        />
+        <span className="text-[11px] text-muted-foreground">
+          Lowercase letters, digits and dashes — it is the filename the agent sees.
+        </span>
+        {shadows && (
+          <span data-testid="skill-shadow-warning" className="text-[11px] text-warning">
+            A built-in skill is also called “{name}”. Yours will replace it in your conversations.
+          </span>
+        )}
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-medium text-muted-foreground">When to use it</label>
+        <textarea
+          data-testid="skill-description"
+          value={form.description}
+          onChange={(e) => set("description", e.target.value)}
+          placeholder="Conventions for the acme/app repo. Use when working in acme/app or reviewing its PRs."
+          rows={2}
+          className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+        />
+        <span className="text-[11px] text-muted-foreground">
+          This is what the agent reads to decide the skill applies, so describe the situation, not the contents.
+        </span>
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-medium text-muted-foreground">Instructions (markdown)</label>
+        <textarea
+          data-testid="skill-body"
+          value={form.body}
+          onChange={(e) => set("body", e.target.value)}
+          placeholder={"# Acme conventions\n\n- Run `make check` before pushing.\n- Never edit generated/."}
+          rows={10}
+          className="rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm"
+        />
+      </div>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          data-testid="skill-enabled"
+          type="checkbox"
+          checked={form.enabled ?? true}
+          onChange={(e) => set("enabled", e.target.checked)}
+        />
+        Enabled
+      </label>
+      {error && <p data-testid="skill-form-error" className="text-sm text-destructive">{error}</p>}
+      <div className="flex gap-2">
+        <Button variant="default" size="sm" data-testid="skill-submit" disabled={!valid || busy} onClick={submit}>
+          {busy ? "Saving…" : submitLabel}
+        </Button>
+        <Button variant="outline" size="sm" data-testid="skill-cancel" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** One skill row — summary + enable toggle, edit, delete. */
+function SkillRow({
+  skill,
+  builtinNames,
+  onChanged,
+}: {
+  skill: UserSkillView;
+  builtinNames: string[];
+  onChanged: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      await updateUserSkill(agentHostConfig, skill.id, { enabled: !skill.enabled });
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!confirm(`Delete skill “${skill.name}”?`)) return;
+    setBusy(true);
+    try {
+      await deleteUserSkill(agentHostConfig, skill.id);
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <li data-testid="skill-item" className="list-none">
+        <SkillForm
+          initial={{ name: skill.name, description: skill.description, body: skill.body, enabled: skill.enabled }}
+          submitLabel="Save changes"
+          builtinNames={builtinNames}
+          onCancel={() => setEditing(false)}
+          onSubmit={async (input) => {
+            await updateUserSkill(agentHostConfig, skill.id, input);
+            setEditing(false);
+            onChanged();
+          }}
+        />
+      </li>
+    );
+  }
+
+  return (
+    <li
+      data-testid="skill-item"
+      data-enabled={skill.enabled}
+      className="flex list-none flex-col gap-2 rounded-md border p-3 sm:flex-row sm:items-start sm:gap-3"
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span data-testid="skill-item-name" className="truncate font-mono font-medium">{skill.name}</span>
+          <span
+            className={
+              "rounded px-1.5 py-0.5 text-[10px] " +
+              (skill.enabled ? "bg-success/15 text-success" : "bg-muted text-muted-foreground")
+            }
+          >
+            {skill.enabled ? "enabled" : "disabled"}
+          </span>
+          {builtinNames.includes(skill.name) && (
+            <span data-testid="skill-item-shadow" className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning">
+              replaces a built-in
+            </span>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">{skill.description}</p>
+        <p className="mt-1 line-clamp-2 text-sm text-foreground/80">{skill.body}</p>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <Button
+          variant="outline"
+          size="xs"
+          data-testid="skill-toggle"
+          disabled={busy}
+          onClick={toggle}
+          title={skill.enabled ? "Disable" : "Enable"}
+        >
+          {skill.enabled ? "Disable" : "Enable"}
+        </Button>
+        <Button variant="outline" size="xs" data-testid="skill-edit" disabled={busy} onClick={() => setEditing(true)}>
+          Edit
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
+          data-testid="skill-delete"
+          disabled={busy}
+          onClick={remove}
+          aria-label={`Delete ${skill.name}`}
+          className="text-destructive hover:bg-destructive/10"
+        >
+          Delete
+        </Button>
+      </div>
+    </li>
+  );
+}
+
+/**
+ * The caller's own skills, which the agent loads next to the deployment's built-in ones
+ * at the start of their next conversation (an open conversation keeps the set it started
+ * with). Reports itself unconfigured when the host has no database.
+ */
+function SkillsSection() {
+  const [skills, setSkills] = useState<UserSkillView[]>([]);
+  const [builtinNames, setBuiltinNames] = useState<string[]>([]);
+  const [configured, setConfigured] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+
+  const refresh = useCallback(async () => {
+    const res = await loadUserSkills(agentHostConfig);
+    setConfigured(res.configured);
+    setSkills(res.skills);
+    setBuiltinNames(res.builtinNames);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="font-medium">Your skills</h2>
+          <p className="text-sm text-muted-foreground">
+            Markdown you write once and Scooter reads when it is relevant — your repos, your
+            conventions, how you like things done. Added to every new conversation of yours.
+          </p>
+        </div>
+        {configured && !creating && (
+          <Button variant="default" size="sm" data-testid="skill-new" onClick={() => setCreating(true)}>
+            + New skill
+          </Button>
+        )}
+      </div>
+
+      {!configured ? (
+        <p data-testid="skills-unavailable" className="rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground">
+          This deployment has no database configured, so personal skills aren’t available here.
+        </p>
+      ) : (
+        <>
+          {creating && (
+            <SkillForm
+              initial={BLANK_SKILL}
+              submitLabel="Create skill"
+              builtinNames={builtinNames}
+              onCancel={() => setCreating(false)}
+              onSubmit={async (input) => {
+                await createUserSkill(agentHostConfig, input);
+                setCreating(false);
+                await refresh();
+              }}
+            />
+          )}
+
+          {loading ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : skills.length === 0 ? (
+            <p data-testid="skills-empty" className="rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground">
+              No skills yet. Create one, or ask Scooter to write one for you.
+            </p>
+          ) : (
+            <ul data-testid="skill-list" className="flex flex-col gap-2">
+              {skills.map((s) => (
+                <SkillRow key={s.id} skill={s} builtinNames={builtinNames} onChanged={refresh} />
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -701,6 +1004,7 @@ function AdminAreaSection() {
 
 const TAB_BODIES: Record<SettingsTab, FC> = {
   tasks: ScheduledTasksSection,
+  skills: SkillsSection,
   claude: ClaudeAgentSection,
   modules: ModulesSettingsSection,
   admin: AdminAreaSection,

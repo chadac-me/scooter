@@ -50,6 +50,7 @@ nav:
   - Features:
       - Overview: features/index.md
       - Conversations & sandboxes: features/conversations.md
+      - Skills: features/skills.md
       - Bring your own Claude: features/byoc.md
       - Models: features/models.md
       - Integrations: features/integrations.md
