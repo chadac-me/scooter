@@ -39,7 +39,9 @@ pkgs.testers.runNixOSTest {
         "test \"$(cat /run/scooter/env-switch/status)\" = failed", timeout=300
     )
     machine.fail("scooter-rebuild status")
-    log = machine.succeed("cat /run/scooter/env-switch/log")
-    assert "building toplevel" in log, f"the detached child never reached the build: {log!r}"
+    # `log` is the driver's own logger, so the switch log needs its own name.
+    switch_log = machine.succeed("cat /run/scooter/env-switch/log")
+    assert "building toplevel" in switch_log, \
+        f"the detached child never reached the build: {switch_log!r}"
   '';
 }
