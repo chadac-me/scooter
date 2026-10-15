@@ -56,6 +56,12 @@ const echoBackend: AgentBackend = {
           say(params.sessionId, `tools ${parts.length ? parts.join(" | ") : "(no MCP endpoint offered)"}`);
         } else if (text.startsWith("~model")) {
           say(params.sessionId, `model=${deps.model ?? "(none)"}`);
+        } else if (text.startsWith("~sleep")) {
+          // A turn still in flight when something underneath it breaks.
+          const secs = Math.min(Number(text.split(/\s+/)[1]) || 30, 300);
+          say(params.sessionId, `sleeping ${secs}s`);
+          await new Promise((r) => setTimeout(r, secs * 1000));
+          say(params.sessionId, `slept ${secs}s`);
         } else {
           say(params.sessionId, `echo: ${text}`);
         }

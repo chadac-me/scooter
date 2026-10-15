@@ -14,9 +14,8 @@ import { readToken } from "./claudeCreds.js";
 import { selectBackend } from "./agentBackend.js";
 import "./echoBackend.js"; // self-registers
 import { startLoginServer } from "./loginServer.js";
-import { runRemoteAgentClient } from "./remoteAgentClient.js";
-import { hostname } from "node:os";
-import { generateDeviceKey, loadDeviceIdentity, saveDeviceIdentity } from "./deviceKey.js";
+import { challengeNonceFrom, controllerHttpBase, registerDevice, runRemoteAgentClient } from "./remoteAgentClient.js";
+import { loadDeviceIdentity } from "./deviceKey.js";
 
 const log = (m: string) => console.log(`[remote-agent] ${m}`);
 
@@ -76,28 +75,11 @@ async function main() {
   const backend = selectBackend(args.backend);
   const oauthToken = backend.needsClaudeAuth ? await ensureLogin() : undefined;
 
-  // The controller's HTTP base: the connect URL is ws://host/byoc/ws/<session-id> and the registration/challenge routes are siblings of `ws`, so strip the whole `/ws/<id>` tail.
-  const httpBase = args.url.replace(/^ws/, "http").replace(/\/ws\/[^/]*\/?$/, "");
+  // The registration/challenge routes are siblings of `ws`.
+  const httpBase = controllerHttpBase(args.url);
 
-  // Exchange the short-lived join token for a device key once; if registration fails, still connect with the join token.
   if (!existing && args.join) {
-    const key = generateDeviceKey();
-    try {
-      const res = await fetch(`${httpBase}/devices`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ joinToken: args.join, publicKey: key.publicKeyPem, label: hostname() }),
-      });
-      if (res.ok) {
-        const { deviceId } = (await res.json()) as { deviceId: string };
-        await saveDeviceIdentity({ deviceId, ...key });
-        log(`registered this device as ${deviceId} — future reconnects need no join token`);
-      } else {
-        log(`device registration failed (${res.status}); falling back to the join token`);
-      }
-    } catch (err) {
-      log(`device registration unreachable (${String(err)}); falling back to the join token`);
-    }
+    await registerDevice(httpBase, args.join, log);
   } else if (existing) {
     log(`using registered device ${existing.deviceId}`);
   }
@@ -106,11 +88,7 @@ async function main() {
   const client = runRemoteAgentClient({
     url: args.url,
     joinToken: args.join ?? "",
-    challengeNonce: async () => {
-      const r = await fetch(`${httpBase}/challenge`);
-      if (!r.ok) throw new Error(`challenge ${r.status}`);
-      return ((await r.json()) as { nonce: string }).nonce;
-    },
+    challengeNonce: challengeNonceFrom(httpBase),
     oauthToken,
     model: args.model,
     backend: args.backend,

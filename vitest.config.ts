@@ -71,6 +71,14 @@ export default defineConfig({
         },
       },
       {
+        // Cross-service: agent-host, byoc-controller and the BYO container together.
+        test: {
+          name: "integration",
+          include: ["test/integration/**/*.spec.ts"],
+          environment: "node",
+        },
+      },
+      {
         // CI helper scripts, whose verdict logic is unreachable from the CI job itself;
         // the shard planner is one of them.
         test: {

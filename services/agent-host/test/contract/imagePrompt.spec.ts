@@ -94,6 +94,7 @@ function capturingAcp(): { client: AcpClient; lastPrompt: () => PromptParams | u
     onSessionUpdate: (cb) => { updateCb = cb as never; return () => {}; },
     onTerminalCreated: () => () => {},
     onPermissionRequest: () => {},
+    isAlive: () => true,
     close: async () => {},
   };
   return { client, lastPrompt: () => last };

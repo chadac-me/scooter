@@ -552,6 +552,7 @@ describe("revive history reinjection", () => {
         return () => {};
       },
       onPermissionRequest() {},
+      isAlive: () => true,
       async close() {},
     };
     return { client, prompts };
@@ -646,6 +647,7 @@ describe("system messages (platform-injected, non-human)", () => {
       onSessionUpdate() { return () => {}; },
       onTerminalCreated() { return () => {}; },
       onPermissionRequest() {},
+      isAlive: () => true,
       async close() {},
     };
     return { client, prompts };

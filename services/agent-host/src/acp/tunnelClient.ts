@@ -8,6 +8,7 @@
 import { formatError, logger } from "../log.js";
 import { createTunnelService, type TunnelServiceDeps } from "./tunnelService.js";
 import type { WireFrame } from "./remoteProtocol.js";
+import { STREAM_IDLE_MS } from "./byocTransport.js";
 
 const log = logger("tunnel");
 
@@ -19,6 +20,7 @@ export interface TunnelClientDeps extends Omit<TunnelServiceDeps, "send"> {
   /** The conversation this session serves, the server-side scope for every target it resolves. */
   conversationId: string;
   fetchImpl?: typeof fetch;
+  idleMs?: number;
 }
 
 export interface TunnelClient {
@@ -67,10 +69,18 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
     },
   });
 
+  const idleMs = deps.idleMs ?? STREAM_IDLE_MS;
   const follow = async (): Promise<void> => {
     while (!closed) {
+      let idle: NodeJS.Timeout | undefined;
       try {
-        controller = new AbortController();
+        const ac = (controller = new AbortController());
+        // A silent stream is dead; abort and redial.
+        const arm = () => {
+          clearTimeout(idle);
+          idle = setTimeout(() => ac.abort(new Error(`no bytes for ${idleMs}ms`)), idleMs);
+        };
+        arm();
         const res = await doFetch(`${base}/tunnel`, {
           headers: { Accept: "text/event-stream" },
           signal: controller.signal,
@@ -86,6 +96,7 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
+          arm();
           buf += decoder.decode(value, { stream: true });
           let idx: number;
           while ((idx = buf.indexOf("\n\n")) !== -1) {
@@ -110,6 +121,8 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
           retry_in_ms: 1000,
           error: formatError(err),
         });
+      } finally {
+        clearTimeout(idle);
       }
       if (closed) return;
       await new Promise((r) => setTimeout(r, 1000));

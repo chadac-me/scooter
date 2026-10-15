@@ -1019,7 +1019,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           st.retryable = true; // the ACP call threw (init/session/stream) — transient; pump retries
           // A dead remote session fails identically on every retry, so drop the cached session
           // and let the next attempt re-initialize (and re-seed history).
-          if (/unknown session/i.test(raw) && currentProviderId) {
+          if (/unknown session|not connected|disconnected/i.test(raw) && currentProviderId) {
             debug("[bridge] remote session invalid (%s) — dropping cached session for %s", raw, currentProviderId);
             readySessions.delete(currentProviderId);
           }
@@ -1324,6 +1324,22 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     }
   };
 
+  /** Drop a dead client's session; the run reconnects and re-seeds. */
+  const dropSessionIfDead = async (providerId: string): Promise<void> => {
+    const cached = readySessions.get(providerId);
+    if (!cached) return;
+    let settled: { client: AcpClient };
+    try {
+      settled = await cached;
+    } catch {
+      return; // readyProvider already dropped it
+    }
+    if (settled.client.isAlive()) return;
+    log.warn("cached agent client is dead; reconnecting", { conversation_id: sessionId, provider: providerId });
+    readySessions.delete(providerId);
+    await settled.client.close().catch(() => {});
+  };
+
   // Resolve the provider for a run and point acpClient/acpSessionId at its ready client,
   // throwing if none is eligible.
   const resolveForRun = async (ctx: RunContext): Promise<void> => {
@@ -1333,6 +1349,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         `no ACP provider eligible (source=${ctx.source ?? "-"}, owner=${ctx.owner ?? "-"})`,
       );
     }
+    await dropSessionIfDead(provider.id);
     await dropSessionIfMcpChanged(provider.id);
     const ready = await readyProvider(provider);
     acpClient = ready.client;

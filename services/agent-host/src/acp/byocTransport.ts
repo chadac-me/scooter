@@ -8,7 +8,13 @@
  * in-flight requests and lets the bridge emit RUN_ERROR rather than hang.
  */
 
+import { logger } from "../log.js";
 import type { RemoteTransport, WireFrame } from "./remoteProtocol.js";
+
+const log = logger("byoc-transport");
+
+/** Silence this long means dead; the controller pings every 15s. */
+export const STREAM_IDLE_MS = 45_000;
 
 export interface ByocTransportConfig {
   /** Base URL of the in-cluster BYOC controller Service, e.g. http://byoc-controller:8080. */
@@ -17,11 +23,13 @@ export interface ByocTransportConfig {
   sessionId: string;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
+  idleMs?: number;
 }
 
 export function createByocTransport(config: ByocTransportConfig): RemoteTransport {
   const { baseUrl, sessionId } = config;
   const doFetch = config.fetchImpl ?? fetch;
+  const idleMs = config.idleMs ?? STREAM_IDLE_MS;
   const base = `${baseUrl.replace(/\/$/, "")}/byoc/${encodeURIComponent(sessionId)}`;
 
   const frameCbs = new Set<(frame: WireFrame) => void>();
@@ -52,8 +60,8 @@ export function createByocTransport(config: ByocTransportConfig): RemoteTranspor
     return `${base}/prompt`;
   };
 
-  /** Read an SSE body, dispatching each `data:` line as a frame. */
-  const pump = async (res: Response): Promise<void> => {
+  /** Read an SSE body into frames; `arm` runs per read. */
+  const pump = async (res: Response, arm: () => void): Promise<void> => {
     const body = res.body;
     if (!body) return;
     const reader = body.getReader();
@@ -62,6 +70,7 @@ export function createByocTransport(config: ByocTransportConfig): RemoteTranspor
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      arm();
       buf += decoder.decode(value, { stream: true });
       // SSE events are separated by a blank line; a frame can span reads.
       let idx: number;
@@ -85,8 +94,17 @@ export function createByocTransport(config: ByocTransportConfig): RemoteTranspor
       if (!open) return;
       const ac = new AbortController();
       inflight.add(ac);
+      let idle: NodeJS.Timeout | undefined;
+      const arm = () => {
+        clearTimeout(idle);
+        idle = setTimeout(() => {
+          log.warn("controller stream went silent; closing the transport", { session_id: sessionId, idle_ms: idleMs });
+          shutdown();
+        }, idleMs);
+      };
       void (async () => {
         try {
+          arm();
           const res = await doFetch(endpointFor(frame), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -98,10 +116,11 @@ export function createByocTransport(config: ByocTransportConfig): RemoteTranspor
             shutdown();
             return;
           }
-          await pump(res);
+          await pump(res, arm);
         } catch {
           if (!ac.signal.aborted) shutdown(); // an abort is our own close(), not a failure
         } finally {
+          clearTimeout(idle);
           inflight.delete(ac);
         }
       })();
