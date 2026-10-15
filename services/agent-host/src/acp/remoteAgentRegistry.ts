@@ -108,6 +108,7 @@ export function createRemotePersonalizedProvider(deps: {
   priority?: number;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
+  streamIdleMs?: number;
 }): AcpProvider {
   const doFetch = deps.fetchImpl ?? fetch;
   const base = deps.controllerUrl.replace(/\/$/, "");
@@ -159,6 +160,8 @@ export function createRemotePersonalizedProvider(deps: {
       try {
         const res = await doFetch(`${base}/byoc/status?owner=${encodeURIComponent(owner)}`, {
           headers: { Accept: "application/json" },
+          // A pooled connection can be dead without erroring.
+          signal: AbortSignal.timeout(5_000),
         });
         if (!res.ok) {
           log.info("SKIP — controller status not ok", {
@@ -204,7 +207,7 @@ export function createRemotePersonalizedProvider(deps: {
       }
       // The pod holds no socket: every frame is an HTTP call to the controller, which owns
       // the one duplex WS to the container.
-      const transport = createByocTransport({ baseUrl: base, sessionId, fetchImpl: deps.fetchImpl });
+      const transport = createByocTransport({ baseUrl: base, sessionId, fetchImpl: deps.fetchImpl, idleMs: deps.streamIdleMs });
       // A stream the container opens needs an inbound channel, so hold the controller's
       // dedicated inbound stream open for as long as this client lives, but only when
       // scooter-env is actually offered.
@@ -229,6 +232,7 @@ export function createRemotePersonalizedProvider(deps: {
             // resolver are fed from the same place.
             brokerMcpUrlFor: deps.brokerMcpUrlFor,
             fetchImpl: deps.fetchImpl,
+            idleMs: deps.streamIdleMs,
           })
         : undefined;
       const client = createRemoteAcpClient({ transport, exec: deps.exec });

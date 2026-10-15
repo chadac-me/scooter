@@ -10,10 +10,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-const SRC = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "..", "src", "index.ts"),
-  "utf8",
-);
+// The entrypoint plus the network shell it starts.
+const SRC = ["index.ts", "shell.ts"]
+  .map((f) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", f), "utf8"))
+  .join("\n");
 
 describe("controller entrypoint wiring", () => {
   it("constructs deviceAuth", () => {

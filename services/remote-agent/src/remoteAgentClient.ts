@@ -5,6 +5,8 @@
  * the cloud sandbox over Channel B. The Claude subscription token stays local.
  */
 
+import { hostname } from "node:os";
+
 import { WebSocket } from "ws";
 import { pruneSkillDirs, writeSkillPayloads } from "./skills.js";
 // The SDK-backed AcpClient, the same package the agent-host imports cloud-side.
@@ -14,7 +16,7 @@ import "./echoBackend.js"; // self-registers
 import { REMOTE_PROTOCOL_VERSION, type WireFrame } from "./protocol.js";
 import { parsePermissionAnswer } from "./permissionAnswer.js";
 import { nextReconnectDelay, closeDisposition } from "./reconnect.js";
-import { loadDeviceIdentity, signChallenge } from "./deviceKey.js";
+import { generateDeviceKey, loadDeviceIdentity, saveDeviceIdentity, signChallenge } from "./deviceKey.js";
 import { createTunnelExecBackend } from "./tunnelExec.js";
 import { startMcpProxies } from "./mcpProxy.js";
 
@@ -38,12 +40,56 @@ export interface RemoteAgentClientDeps {
   claudeCodePath?: string;
   /** Log sink, defaulting to console. */
   log?: (msg: string) => void;
+  /** Redial when the controller's pings stop this long. */
+  pingTimeoutMs?: number;
 }
+
+/** The controller pings every 20s. */
+export const PING_TIMEOUT_MS = 45_000;
 
 export interface RemoteAgentClient {
   /** Resolves when the connection closes and reconnect attempts stop. */
   closed: Promise<void>;
   stop(): void;
+}
+
+const CONTROLLER_HTTP_TIMEOUT_MS = 10_000;
+
+/** The controller's HTTP base: ws://host/byoc/ws/<id> minus the `/ws/<id>` tail. */
+export function controllerHttpBase(wsUrl: string): string {
+  return wsUrl.replace(/^ws/, "http").replace(/\/ws\/[^/]*\/?$/, "");
+}
+
+/** Trade the join token for a device key, once. */
+export async function registerDevice(httpBase: string, joinToken: string, log: (m: string) => void): Promise<void> {
+  const key = generateDeviceKey();
+  try {
+    const res = await fetch(`${httpBase}/devices`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ joinToken, publicKey: key.publicKeyPem, label: hostname() }),
+      signal: AbortSignal.timeout(CONTROLLER_HTTP_TIMEOUT_MS),
+    });
+    if (res.ok) {
+      const { deviceId } = (await res.json()) as { deviceId: string };
+      await saveDeviceIdentity({ deviceId, ...key });
+      log(`registered this device as ${deviceId} — future reconnects need no join token`);
+    } else {
+      log(`device registration failed (${res.status}); falling back to the join token`);
+    }
+  } catch (err) {
+    log(`device registration unreachable (${String(err)}); falling back to the join token`);
+  }
+}
+
+/** A fresh challenge nonce for a device-signed connect. */
+export function challengeNonceFrom(httpBase: string): () => Promise<string> {
+  return async () => {
+    // A pooled connection can be dead without erroring.
+    const r = await fetch(`${httpBase}/challenge`, { signal: AbortSignal.timeout(CONTROLLER_HTTP_TIMEOUT_MS) });
+    if (!r.ok) throw new Error(`challenge ${r.status}`);
+    return ((await r.json()) as { nonce: string }).nonce;
+  };
 }
 
 /**
@@ -187,7 +233,20 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
     const sdk = primary.sdk;
     const clients = new Map<string, { sdk: typeof primary.sdk; stamp: { sid?: string }; closeMcp?: () => Promise<void> }>();
 
+    // A path dying without FIN shows only as missing pings.
+    const pingTimeoutMs = deps.pingTimeoutMs ?? PING_TIMEOUT_MS;
+    let pingWatch: NodeJS.Timeout | undefined;
+    const armPingWatch = () => {
+      clearTimeout(pingWatch);
+      pingWatch = setTimeout(() => {
+        log(`no ping from the controller for ${pingTimeoutMs}ms; reconnecting`);
+        ws?.terminate();
+      }, pingTimeoutMs);
+    };
+    ws.on("ping", armPingWatch);
+
     ws.on("open", () => {
+      armPingWatch();
       void (async () => {
         attempt = 0; // a successful connect resets the backoff window
         // Auth already happened at the upgrade; the hello only negotiates the protocol version.
@@ -306,6 +365,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
     // Set when the upgrade itself was rejected, so the meaningless 1006 close that follows terminate() takes the auth disposition.
     let upgradeAuthRejected = false;
     ws.on("close", (code, reasonBuf) => {
+      clearTimeout(pingWatch);
       // The controller uses application close codes for conditions a container must react to differently than a network blip.
       const disposition = upgradeAuthRejected
         ? closeDisposition(4001, "rejected at the WebSocket upgrade (HTTP 401)", attempt + 1)
