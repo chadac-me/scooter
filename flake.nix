@@ -563,6 +563,14 @@
             contrib-kagi = contribs.packages.kagi.broker;
             contrib-slack = contribs.packages.slack.broker;
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
+            # The files viewer ships in the sandbox image rather than in a service,
+            # so it has no contrib package to carry its tests as check inputs.
+            contrib-files-viewer = pkgs.runCommand "contrib-files-viewer-tests"
+              { nativeBuildInputs = [ pkgs.python3Packages.pytest ]; } ''
+              cp -r ${./contrib/files} files && chmod -R u+w files
+              pytest files/tests -q
+              touch $out
+            '';
             # The shared Python libraries.
             inherit scooterLib scooterBrokerLib scooterWebhooksLib;
           } // devEnvTests // contribSandboxChecks;

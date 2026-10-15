@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Files — scooter</title>
+<style>
+/* Warm Paper / Solarized Dark, the same tokens as the conversation UI. */
+:root {
+  --radius: 0.625rem;
+  --background: #faf8f3; --foreground: #1c1917;
+  --card: #fffefa; --secondary: #f0ece1; --muted-foreground: #57534e;
+  --accent: #e6e1d3; --border: #d2ccbc; --input: #948d80;
+  --brand: #145d8f; --warning: #8a6100; --success: #4d6b00; --destructive: #b3261e;
+  --header: #f3f0e7; --sidebar: #f3f0e7;
+  /* Syntax tokens: Solarized hue assignments, darkened for a paper background so
+     both themes read the same way. */
+  --tok-comment: #8a8475; --tok-key: #5c6a00; --tok-str: #1f7a74;
+  --tok-num: #a3307a; --tok-fn: #145d8f; --tok-type: #8a6100; --tok-meta: #5a5fb5;
+}
+html.dark {
+  --background: #002b36; --foreground: #839496;
+  --card: #073642; --secondary: #073642; --muted-foreground: #657b83;
+  --accent: #0d4a58; --border: #0d4a58; --input: #0d4a58;
+  --brand: #268bd2; --warning: #b58900; --success: #859900; --destructive: #dc322f;
+  --header: #073642; --sidebar: #002b36;
+  --tok-comment: #586e75; --tok-key: #859900; --tok-str: #2aa198;
+  --tok-num: #d33682; --tok-fn: #268bd2; --tok-type: #b58900; --tok-meta: #6c71c4;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; height: 100vh; display: flex; flex-direction: column;
+  background: var(--background); color: var(--foreground);
+  font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+header {
+  display: flex; align-items: center; gap: 11px; padding: 0 13px;
+  height: 46px; flex: 0 0 46px; background: var(--header);
+  border-bottom: 1px solid var(--border);
+}
+.logo { font-weight: 650; }
+.logo .dot { color: var(--brand); }
+.crumb { font-size: 12.5px; color: var(--muted-foreground); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spacer { flex: 1; }
+.btn {
+  font: inherit; font-size: 12px; cursor: pointer; border-radius: 7px;
+  border: 1px solid var(--input); background: var(--card); color: var(--foreground); padding: 4px 9px;
+}
+.btn:hover { background: var(--accent); }
+.btn.on { background: var(--accent); border-color: var(--brand); color: var(--brand); }
+.chip {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--border); color: var(--muted-foreground);
+}
+.chip.warn { border-color: var(--warning); color: var(--warning); }
+main { flex: 1; display: grid; grid-template-columns: 300px 1fr; min-height: 0; }
+@media (max-width: 820px) { main { grid-template-columns: 1fr; } nav { display: none; } }
+nav {
+  border-right: 1px solid var(--border); background: var(--sidebar);
+  overflow-y: auto; padding: 8px 0 40px;
+}
+.row {
+  display: flex; align-items: center; gap: 7px; padding: 4px 12px;
+  cursor: pointer; font-size: 13px; border: 0; background: none;
+  color: inherit; width: 100%; text-align: left; font-family: inherit;
+}
+.row:hover { background: var(--accent); }
+.row.sel { background: var(--accent); font-weight: 600; }
+.row .ic { width: 13px; flex: 0 0 13px; color: var(--muted-foreground); font-size: 11px; }
+.row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .sz { font-size: 11px; color: var(--muted-foreground); }
+.row.dim .nm { color: var(--muted-foreground); }
+section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
+.filebar {
+  position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 9px;
+  padding: 7px 13px; background: var(--card); border-bottom: 1px solid var(--border);
+  font-size: 12px; flex: 0 0 auto;
+}
+.body { flex: 1; min-height: 0; }
+.note {
+  margin: 22px; padding: 14px; border: 1px dashed var(--input); border-radius: 9px;
+  color: var(--muted-foreground); font-size: 13px; text-align: center;
+}
+
+/* The gutter is a sibling of the <pre>, not a column interleaved with it, so a
+   highlight span crossing lines is never split. Why not a grid: PR #772. */
+.codewrap { display: flex; align-items: flex-start; font-size: 12.5px; line-height: 1.5; min-height: 100%; }
+.codewrap .gutter {
+  position: sticky; left: 0; z-index: 1; flex: 0 0 auto;
+  padding: 12px 10px 12px 13px; margin: 0; text-align: right;
+  color: var(--muted-foreground); opacity: 0.55; user-select: none;
+  background: var(--background); border-right: 1px solid var(--border);
+  white-space: pre; font-size: inherit; line-height: inherit;
+}
+.codewrap pre { margin: 0; padding: 12px 16px; flex: 1; white-space: pre; font-size: inherit; line-height: inherit; }
+.codewrap code { font: inherit; }
+
+/* --- highlight.js tokens, mapped onto the theme ------------------------- */
+.hljs-comment, .hljs-quote { color: var(--tok-comment); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-name, .hljs-section { color: var(--tok-key); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute, .hljs-template-tag { color: var(--tok-str); }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link { color: var(--tok-num); }
+.hljs-title, .hljs-title.function_, .hljs-built_in, .hljs-selector-id { color: var(--tok-fn); }
+.hljs-type, .hljs-class .hljs-title, .hljs-params, .hljs-variable.constant_ { color: var(--tok-type); }
+.hljs-meta, .hljs-meta .hljs-keyword, .hljs-tag { color: var(--tok-meta); }
+.hljs-attr, .hljs-variable, .hljs-template-variable, .hljs-selector-attr { color: var(--tok-fn); }
+.hljs-deletion { color: var(--destructive); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* --- rendered markdown --------------------------------------------------- */
+.md { max-width: 54rem; padding: 26px 34px 80px; }
+.md > *:first-child { margin-top: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { line-height: 1.25; margin: 1.7em 0 0.6em; font-weight: 650; }
+.md h1 { font-size: 1.85em; } .md h2 { font-size: 1.42em; } .md h3 { font-size: 1.18em; }
+.md h4 { font-size: 1.02em; } .md h5, .md h6 { font-size: 0.94em; color: var(--muted-foreground); }
+.md h1, .md h2 { padding-bottom: 0.25em; border-bottom: 1px solid var(--border); }
+.md p, .md ul, .md ol, .md blockquote, .md table, .md pre { margin: 0 0 1em; }
+.md li { margin: 0.25em 0; }
+.md li > ul, .md li > ol { margin: 0.25em 0; }
+.md a { color: var(--brand); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md blockquote {
+  padding: 0.1px 1em; border-left: 3px solid var(--border);
+  color: var(--muted-foreground); background: var(--secondary); border-radius: 0 7px 7px 0;
+}
+.md code { background: var(--secondary); padding: 0.14em 0.38em; border-radius: 5px; font-size: 0.89em; }
+.md pre {
+  background: var(--card); border: 1px solid var(--border); border-radius: 9px;
+  padding: 12px 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.5;
+}
+.md pre code { background: none; padding: 0; font-size: inherit; }
+.md table { border-collapse: collapse; display: block; overflow-x: auto; width: max-content; max-width: 100%; }
+.md th, .md td { border: 1px solid var(--border); padding: 6px 11px; text-align: left; }
+.md th { background: var(--secondary); font-weight: 650; }
+.md tbody tr:nth-child(even) { background: var(--secondary); }
+.md img { max-width: 100%; border-radius: 7px; }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+.md kbd {
+  background: var(--secondary); border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 5px; padding: 0.05em 0.4em; font-size: 0.85em; font-family: ui-monospace, monospace;
+}
+.md input[type="checkbox"] { margin-right: 0.45em; }
+.md .task-list-item { list-style: none; margin-left: -1.2em; }
+/* Heading anchors appear on hover, so the user can link a colleague to a section. */
+.md .anchor {
+  float: left; margin-left: -0.85em; padding-right: 0.25em;
+  color: var(--muted-foreground); opacity: 0; font-weight: 400; text-decoration: none;
+}
+.md h1:hover .anchor, .md h2:hover .anchor, .md h3:hover .anchor,
+.md h4:hover .anchor, .md h5:hover .anchor, .md h6:hover .anchor { opacity: 0.65; }
+.md :target { scroll-margin-top: 54px; }
+.md .xref { border-bottom: 1px dotted var(--brand); }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">scooter<span class="dot">.</span></span>
+  <span class="chip">files</span>
+  <span class="crumb mono" id="crumb">/workspace</span>
+  <span class="spacer"></span>
+  <span class="chip" id="meta"></span>
+  <button class="btn" id="view-toggle" hidden>raw</button>
+  <button class="btn" id="refresh" title="Re-read the tree from disk">refresh</button>
+  <button class="btn" id="theme">dark</button>
+</header>
+<main>
+  <nav id="tree"></nav>
+  <section>
+    <div class="filebar">
+      <span class="chip" id="renderer">listing</span>
+      <span class="crumb mono" id="openpath">—</span>
+    </div>
+    <div class="body" id="view"><div class="note">Pick a file on the left.</div></div>
+  </section>
+</main>
+
+<!-- Pinned, image-baked assets (contrib/files/viewer/deps.nix). Classic scripts,
+     so they are in place before the inline module below runs; each is optional and
+     the page falls back to plain text when the vendor dir was never built. -->
+<script src="{{BASE}}/static/vendor/markdown-it.min.js"></script>
+<script src="{{BASE}}/static/vendor/purify.min.js"></script>
+<script src="{{BASE}}/static/vendor/highlight.min.js"></script>
+<script src="{{BASE}}/static/vendor/highlight-nix.min.js"></script>
+<script>
+// The proxy serves this app under /c/<conversation>/files and does not strip that
+// prefix, so every request is built from the base the server injected.
+const BASE = "{{BASE}}";
+const api = (route, params) => {
+  const qs = params ? "?" + new URLSearchParams(params) : "";
+  return fetch(`${BASE}/api/${route}${qs}`).then(async (r) => {
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || r.statusText);
+    return body;
+  });
+};
+
+const el = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const human = (n) =>
+  n == null ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} kB` : `${(n / 1048576).toFixed(1)} MB`;
+
+el("theme").addEventListener("click", (e) => {
+  const dark = document.documentElement.classList.toggle("dark");
+  e.target.textContent = dark ? "light" : "dark";
+});
+
+// --- syntax highlighting -----------------------------------------------------
+// highlight.js' common bundle plus the Nix grammar, which that bundle omits and
+// this workspace is largely written in.
+const HLJS = window.hljs || null;
+if (HLJS) HLJS.configure({ ignoreUnescapedHTML: true });
+
+// Extension -> grammar. Auto-detect is off by default: on a short file it guesses
+// confidently and wrongly.
+const LANG_BY_EXT = {
+  nix: "nix", py: "python", pyi: "python", js: "javascript", mjs: "javascript", cjs: "javascript",
+  jsx: "javascript", ts: "typescript", tsx: "typescript", json: "json", lock: "json",
+  yaml: "yaml", yml: "yaml", toml: "ini", ini: "ini", cfg: "ini", conf: "ini",
+  sh: "bash", bash: "bash", zsh: "bash", fish: "bash", md: "markdown", markdown: "markdown",
+  rs: "rust", go: "go", c: "c", h: "c", cc: "cpp", cpp: "cpp", hpp: "cpp", java: "java",
+  kt: "kotlin", rb: "ruby", php: "php", sql: "sql", css: "css", scss: "scss", less: "less",
+  html: "xml", xml: "xml", svg: "xml", diff: "diff", patch: "diff", lua: "lua", r: "r",
+  swift: "swift", cs: "csharp", pl: "perl", graphql: "graphql", gql: "graphql",
+};
+const LANG_BY_NAME = {
+  makefile: "makefile", justfile: "makefile", dockerfile: "dockerfile",
+  "flake.lock": "json", ".gitignore": "bash", ".envrc": "bash",
+};
+// Past this the regex passes block the main thread long enough to be felt.
+const MAX_HIGHLIGHT_BYTES = 400 * 1024;
+
+function languageOf(path) {
+  const name = path.split("/").pop().toLowerCase();
+  if (LANG_BY_NAME[name]) return LANG_BY_NAME[name];
+  const ext = name.includes(".") ? name.split(".").pop() : "";
+  return LANG_BY_EXT[ext] || null;
+}
+
+/** Highlighted HTML for `code`, or null when it should be rendered as plain text. */
+function highlight(code, lang, { allowAuto = false } = {}) {
+  if (!HLJS || code.length > MAX_HIGHLIGHT_BYTES) return null;
+  try {
+    if (lang && HLJS.getLanguage(lang)) {
+      return HLJS.highlight(code, { language: lang, ignoreIllegals: true }).value;
+    }
+    if (allowAuto) return HLJS.highlightAuto(code).value;
+  } catch {
+    // A grammar that throws is a highlighting bug, never a reason to not show the
+    // file; fall through to plain text.
+  }
+  return null;
+}
+
+// --- tree -------------------------------------------------------------------
+// Expanded directories are kept flat and re-rendered, rather than nesting DOM, so
+// collapsing a parent cannot orphan a child's open state.
+const opened = new Set([""]);
+let selected = null;
+
+// Listings are awaited per directory, so a render MUST build into a detached
+// fragment and drop itself if a newer one started: two concurrent renders
+// otherwise interleave their appends into the live tree. Why: PR #772.
+let renderToken = 0;
+const listings = new Map();
+
+const listDir = (dir) => {
+  if (!listings.has(dir)) listings.set(dir, api("list", { path: dir }));
+  return listings.get(dir);
+};
+
+// ?path=<file> is how the agent deep-links the user to the thing it is talking
+// about, so the ancestors of that file are expanded before the first render.
+function expandAncestors(path) {
+  const parts = path.split("/").slice(0, -1);
+  for (let i = 0; i < parts.length; i++) opened.add(parts.slice(0, i + 1).join("/"));
+}
+
+async function render() {
+  const token = ++renderToken;
+  // Warm every open directory concurrently before the depth-first walk reads the
+  // cache: a proxied request costs a full round trip (~1s). Why: PR #772.
+  await Promise.all([...opened].map((dir) => listDir(dir).catch(() => {})));
+  if (token !== renderToken) return;
+  const frag = document.createDocumentFragment();
+  await draw("", 0, frag, token);
+  // A newer render is already in flight; its fragment is the current truth.
+  if (token !== renderToken) return;
+  el("tree").replaceChildren(frag);
+}
+
+async function draw(dir, depth, into, token) {
+  let data;
+  try {
+    data = await listDir(dir);
+  } catch (err) {
+    listings.delete(dir); // a failed listing must not be cached as the answer
+    into.appendChild(row({ name: `! ${err.message}`, kind: "file" }, depth, () => {}, true));
+    return;
+  }
+  if (token !== renderToken) return;
+  for (const entry of data.entries) {
+    const path = dir ? `${dir}/${entry.name}` : entry.name;
+    const isOpen = opened.has(path);
+    const node = row(entry, depth, async () => {
+      if (entry.kind === "dir") {
+        if (isOpen) opened.delete(path);
+        else opened.add(path);
+        await render();
+      } else {
+        await openPath(path);
+      }
+    }, entry.skip, isOpen, path === selected);
+    into.appendChild(node);
+    if (entry.kind === "dir" && isOpen && !entry.skip) await draw(path, depth + 1, into, token);
+  }
+}
+
+function row(entry, depth, onClick, dim, isOpen, isSel) {
+  const b = document.createElement("button");
+  b.className = `row${dim ? " dim" : ""}${isSel ? " sel" : ""}`;
+  b.style.paddingLeft = `${12 + depth * 14}px`;
+  const icon = entry.kind === "dir" ? (isOpen ? "▾" : "▸") : "·";
+  b.innerHTML =
+    `<span class="ic">${icon}</span><span class="nm mono">${esc(entry.name)}</span>` +
+    (entry.repo ? `<span class="chip">git</span>` : "") +
+    `<span class="sz">${human(entry.size)}</span>`;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+el("refresh").addEventListener("click", async () => {
+  // The agent writes while the user reads: the cache needs an out besides reload.
+  listings.clear();
+  await render();
+  if (selected) await open(selected);
+});
+
+// --- file view --------------------------------------------------------------
+// `raw` is sticky across files: a reader who wants markdown source generally wants
+// it for the next document too.
+let rawMode = false;
+let current = null;
+
+const toggle = el("view-toggle");
+toggle.addEventListener("click", () => {
+  rawMode = !rawMode;
+  toggle.textContent = rawMode ? "rendered" : "raw";
+  toggle.classList.toggle("on", rawMode);
+  if (current) draw_file(current);
+});
+
+/** Select a file, update the tree selection and the address bar, and show it. */
+async function openPath(path, hash = "") {
+  selected = path;
+  expandAncestors(path);
+  // Keep the address bar on the open file so the user can hand the link back.
+  history.replaceState(null, "", `${BASE}/?path=${encodeURIComponent(path)}${hash}`);
+  // Independent requests; serializing them doubles the wait on a link click.
+  await Promise.all([open(path), render()]);
+  if (hash) document.getElementById(hash.slice(1))?.scrollIntoView();
+}
+
+async function open(path) {
+  el("openpath").textContent = `/workspace/${path}`;
+  try {
+    current = await api("file", { path });
+    draw_file(current);
+  } catch (err) {
+    current = null;
+    toggle.hidden = true;
+    el("view").innerHTML = `<div class="note">${esc(err.message)}</div>`;
+  }
+}
+
+function draw_file(f) {
+  const view = el("view");
+  const canRender = f.renderer === "markdown" && window.markdownit && window.DOMPurify;
+  el("renderer").textContent = canRender && !rawMode ? "markdown" : f.renderer === "markdown" ? "markdown source" : f.renderer;
+  el("meta").textContent = [human(f.size), f.etag && `etag ${f.etag}`].filter(Boolean).join(" · ");
+  // The toggle is only meaningful where there are two ways to show the file.
+  toggle.hidden = !canRender;
+
+  if (f.renderer === "binary") {
+    view.innerHTML = `<div class="note">Binary file — nothing to render.</div>`;
+    return;
+  }
+  if (f.renderer === "too-large") {
+    view.innerHTML = `<div class="note">${human(f.size)} is past the viewer's read limit.</div>`;
+    return;
+  }
+  if (canRender && !rawMode) {
+    view.replaceChildren(renderMarkdown(f.body, f.path));
+    document.getElementById(location.hash.slice(1))?.scrollIntoView();
+    return;
+  }
+  view.replaceChildren(renderCode(f.body, f.path));
+}
+
+/** A code file: one <pre> plus a sticky line-number gutter beside it. */
+function renderCode(body, path) {
+  const lines = body.split("\n");
+  // A trailing newline is a line terminator, not an empty last line to number.
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+
+  const wrap = document.createElement("div");
+  wrap.className = "codewrap";
+
+  const gutter = document.createElement("div");
+  gutter.className = "gutter mono";
+  gutter.textContent = lines.map((_, i) => i + 1).join("\n");
+
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  const lang = languageOf(path);
+  const html = highlight(lines.join("\n"), lang, { allowAuto: false });
+  if (html === null) code.textContent = lines.join("\n");
+  else code.innerHTML = html; // highlight.js escapes the text it wraps
+  code.className = "hljs";
+  pre.appendChild(code);
+
+  wrap.append(gutter, pre);
+  return wrap;
+}
+
+// One parser for the life of the page. `html: true` because real documents carry
+// inline HTML; everything it produces goes through DOMPurify before it is a node.
+const md = window.markdownit
+  ? window.markdownit({
+      html: true,
+      linkify: true,
+      typographer: false,
+      highlight: (str, lang) => highlight(str, lang, { allowAuto: false }) ?? "",
+    })
+  : null;
+
+const slug = (text) =>
+  text.toLowerCase().trim().replace(/[^\w\- ]+/g, "").replace(/\s+/g, "-").replace(/^-+|-+$/g, "") || "section";
+
+/** Rendered markdown as a detached fragment, sanitized and re-pointed at the viewer. */
+function renderMarkdown(body, path) {
+  const dirty = md.render(body);
+  // Detached, so relative <img> srcs are rewritten before any fetch of the original.
+  const frag = window.DOMPurify.sanitize(dirty, {
+    RETURN_DOM_FRAGMENT: true,
+    ADD_ATTR: ["align"],
+  });
+
+  const dir = path.split("/").slice(0, -1);
+  // Resolve a document-relative href the way the filesystem would.
+  const resolveRel = (href) => {
+    const abs = href.startsWith("/");
+    const out = abs ? [] : [...dir];
+    for (const part of href.split("/")) {
+      if (part === "" || part === ".") continue;
+      if (part === "..") out.pop();
+      else out.push(part);
+    }
+    return out.join("/");
+  };
+  const isExternal = (href) => /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("//");
+
+  frag.querySelectorAll("a[href]").forEach((a) => {
+    const href = a.getAttribute("href");
+    if (href.startsWith("#")) {
+      // In-document anchors stay in the page rather than reloading it under the proxy.
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        document.getElementById(href.slice(1))?.scrollIntoView({ behavior: "smooth" });
+        history.replaceState(null, "", `${BASE}/?path=${encodeURIComponent(path)}${href}`);
+      });
+      return;
+    }
+    if (isExternal(href)) {
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      return;
+    }
+    // A link to another workspace file opens in the viewer, not as a proxy 404.
+    const [rel, hash = ""] = href.split("#");
+    const target = resolveRel(rel);
+    a.classList.add("xref");
+    a.href = `${BASE}/?path=${encodeURIComponent(target)}${hash ? "#" + hash : ""}`;
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      openPath(target, hash ? `#${hash}` : "");
+    });
+  });
+
+  frag.querySelectorAll("img[src]").forEach((img) => {
+    const src = img.getAttribute("src");
+    if (isExternal(src) || src.startsWith("data:")) return;
+    img.src = `${BASE}/api/raw?path=${encodeURIComponent(resolveRel(src))}`;
+    img.loading = "lazy";
+  });
+
+  const seen = new Map();
+  frag.querySelectorAll("h1, h2, h3, h4, h5, h6").forEach((h) => {
+    let id = slug(h.textContent);
+    // Two sections called "Design" must not fight over one anchor.
+    const n = (seen.get(id) || 0) + 1;
+    seen.set(id, n);
+    if (n > 1) id = `${id}-${n}`;
+    h.id = id;
+    const anchor = document.createElement("a");
+    anchor.className = "anchor";
+    anchor.href = `#${id}`;
+    anchor.textContent = "#";
+    anchor.setAttribute("aria-label", `Link to ${h.textContent}`);
+    anchor.addEventListener("click", (e) => {
+      e.preventDefault();
+      h.scrollIntoView({ behavior: "smooth" });
+      history.replaceState(null, "", `${BASE}/?path=${encodeURIComponent(path)}#${id}`);
+    });
+    h.prepend(anchor);
+  });
+
+  frag.querySelectorAll("pre > code").forEach((c) => c.classList.add("hljs"));
+
+  const article = document.createElement("article");
+  article.className = "md";
+  article.appendChild(frag);
+  return article;
+}
+
+// Expand ancestors first, so a deep link opens showing where the file lives.
+const deepLink = new URLSearchParams(location.search).get("path");
+if (deepLink) {
+  selected = deepLink.replace(/^\/+/, "");
+  expandAncestors(selected);
+  // Fetched alongside the tree, not after it: two round trips become one.
+  Promise.all([open(selected), render()]);
+} else {
+  render();
+}
+</script>
+</body>
+</html>

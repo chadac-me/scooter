@@ -1,0 +1,330 @@
+"""The files viewer's contract: path confinement, proxy-prefix routing, renderers.
+
+The viewer is reached through the agent-host proxy at /c/<id>/files/ with the
+prefix NOT stripped, so "does it route under a base path" is as much a part of the
+contract as what it returns. These tests therefore drive a real server over a real
+socket rather than calling the handler's methods.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import sys
+import threading
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "viewer"))
+
+import server  # noqa: E402
+
+
+# --- fixtures -------------------------------------------------------------------
+
+
+@pytest.fixture
+def workspace(tmp_path: Path) -> Path:
+    """A workspace with one of everything the renderers branch on."""
+    (tmp_path / "README.md").write_text("# hello\n\nsome prose\n")
+    (tmp_path / "main.py").write_text("print('hi')\n")
+    (tmp_path / "blob.bin").write_bytes(b"\x00\x01\x02" * 100)
+    (tmp_path / ".hidden").write_text("secret-ish\n")
+    (tmp_path / "node_modules").mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    (repo / "a.txt").write_text("a\n")
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("not in the workspace\n")
+    return tmp_path
+
+
+@pytest.fixture
+def cfg(workspace: Path) -> "server.Config":
+    return server.Config(root=workspace, base="/c/conv-test/files", port=0)
+
+
+@contextlib.contextmanager
+def running(cfg: "server.Config"):
+    """A live viewer for one config; yields a getter of (status, body)."""
+    httpd = server.make_server(cfg)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def get(path: str, base: bool = True):
+        prefix = cfg.base if base else ""
+        url = f"http://127.0.0.1:{port}{prefix}{path}"
+        try:
+            with urllib.request.urlopen(url) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read()
+
+    def get_json(path: str, **kw):
+        status, body = get(path, **kw)
+        return status, json.loads(body)
+
+    get.json = get_json
+    try:
+        yield get
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.fixture
+def client_for():
+    """Factory for a viewer with a config other than the default fixture's."""
+    return running
+
+
+@pytest.fixture
+def client(cfg):
+    """A live viewer; returns (status, body) for a path appended to the base."""
+    with running(cfg) as get:
+        yield get
+
+
+# --- path confinement -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("escape", ["..", "../outside.txt", "repo/../../outside.txt"])
+def test_resolve_refuses_paths_outside_the_root(cfg, escape: str) -> None:
+    # Not a trust boundary — whoever reaches this has a terminal on the same pod —
+    # but a viewer that can be walked up to / turns every stray ../ into a 200.
+    with pytest.raises(ValueError):
+        server.resolve(cfg.root, escape)
+
+
+@pytest.mark.parametrize("absolute", ["/etc/passwd", "//etc/passwd"])
+def test_absolute_paths_are_read_as_workspace_relative(cfg, absolute: str) -> None:
+    # Every path in this API is workspace-relative, so a leading slash is the
+    # workspace root and not the host's. Reinterpreting beats rejecting: the UI
+    # builds paths by joining, and a stray slash should resolve, not 400.
+    assert server.resolve(cfg.root, absolute) == cfg.root / "etc" / "passwd"
+
+
+def test_a_host_path_that_exists_outside_the_workspace_is_still_a_404(client) -> None:
+    status, payload = client.json("/api/file?path=/etc/passwd")
+    assert status == 404, payload
+
+
+def test_resolve_accepts_the_root_itself_and_children(cfg) -> None:
+    assert server.resolve(cfg.root, "") == cfg.root
+    assert server.resolve(cfg.root, "repo/a.txt") == cfg.root / "repo" / "a.txt"
+
+
+def test_escaping_request_is_refused_over_http(client) -> None:
+    status, payload = client.json("/api/file?path=../outside.txt")
+    assert status == 400, payload
+
+
+# --- routing under the proxy prefix ---------------------------------------------
+
+
+def test_routes_are_resolved_under_the_proxy_base(client) -> None:
+    # The agent-host does NOT strip /c/<id>/files, so the server must.
+    status, payload = client.json("/api/health")
+    assert status == 200 and payload["ok"] is True
+
+
+def test_base_path_is_required_when_configured(client) -> None:
+    # A request that skips the prefix is not this service's traffic.
+    status, _ = client("/api/health", base=False)
+    assert status == 404
+
+
+def test_index_is_served_at_the_base_root_with_its_base_injected(client, cfg) -> None:
+    status, body = client("/")
+    assert status == 200
+    text = body.decode()
+    assert "{{BASE}}" not in text, "the page must not ship its placeholder"
+    assert cfg.base in text, "the page cannot know its own prefix; it must be injected"
+
+
+def test_unknown_route_is_a_404(client) -> None:
+    status, payload = client.json("/api/nope")
+    assert status == 404 and "error" in payload
+
+
+# --- listing --------------------------------------------------------------------
+
+
+def test_listing_puts_directories_first_and_flags_repos_and_skips(client) -> None:
+    status, payload = client.json("/api/list?path=")
+    assert status == 200
+    names = [e["name"] for e in payload["entries"]]
+    kinds = [e["kind"] for e in payload["entries"]]
+    assert kinds == sorted(kinds, key=lambda k: k != "dir"), names
+
+    by_name = {e["name"]: e for e in payload["entries"]}
+    assert ".hidden" not in by_name, "dotfiles are noise in a review view"
+    assert by_name["repo"]["repo"] is True
+    assert by_name["node_modules"]["skip"] is True
+    assert by_name["README.md"]["size"] == len("# hello\n\nsome prose\n")
+
+
+def test_listing_a_file_is_a_400_not_a_crash(client) -> None:
+    status, payload = client.json("/api/list?path=README.md")
+    assert status == 400 and "directory" in payload["error"]
+
+
+def test_listing_a_missing_path_is_a_404(client) -> None:
+    status, payload = client.json("/api/list?path=nope")
+    assert status == 404
+
+
+# --- file renderers -------------------------------------------------------------
+
+
+def test_source_file_uses_the_code_renderer(client) -> None:
+    status, payload = client.json("/api/file?path=main.py")
+    assert status == 200
+    assert payload["renderer"] == "code"
+    assert payload["body"] == "print('hi')\n"
+    assert payload["lines"] == 2
+
+
+@pytest.mark.parametrize("name", ["README.md", "NOTES.markdown"])
+def test_markdown_gets_its_own_renderer(client, workspace: Path, name: str) -> None:
+    # Markdown is parsed in the browser, where the sanitizer is; the server's whole
+    # job here is to say which of the page's renderers the body belongs to.
+    (workspace / name).write_text("# hi\n")
+    _, payload = client.json(f"/api/file?path={name}")
+    assert payload["renderer"] == "markdown"
+
+
+def test_binary_is_reported_not_rendered(client) -> None:
+    _, payload = client.json("/api/file?path=blob.bin")
+    assert payload["renderer"] == "binary"
+    assert payload["body"] == ""
+    assert payload["size"] == 300
+
+
+def test_a_file_past_the_read_cap_is_metadata_only(client, workspace: Path) -> None:
+    (workspace / "huge.log").write_bytes(b"x" * (server.MAX_READ_BYTES + 1))
+    _, payload = client.json("/api/file?path=huge.log")
+    assert payload["renderer"] == "too-large"
+    assert payload["body"] == ""
+
+
+def test_reading_a_directory_is_a_400(client) -> None:
+    status, payload = client.json("/api/file?path=repo")
+    assert status == 400 and "file" in payload["error"]
+
+
+def test_invalid_utf8_is_replaced_rather_than_failing_the_request(
+    client, workspace: Path
+) -> None:
+    (workspace / "latin.txt").write_bytes("café\n".encode("latin-1"))
+    status, payload = client.json("/api/file?path=latin.txt")
+    assert status == 200 and payload["renderer"] == "code"
+    assert "�" in payload["body"]
+
+
+# --- raw bytes for rendered documents -------------------------------------------
+
+
+def test_raw_serves_an_image_with_its_content_type(client, workspace: Path) -> None:
+    # <img src="diagram.png"> in a rendered document is the only reason this exists.
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    (workspace / "diagram.png").write_bytes(png)
+    status, body = client("/api/raw?path=diagram.png")
+    assert status == 200
+    assert body == png
+
+
+def test_raw_refuses_file_types_outside_the_image_set(client) -> None:
+    # Otherwise the route quietly becomes a download endpoint for the workspace.
+    status, payload = client.json("/api/raw?path=main.py")
+    assert status == 400 and "image" in payload["error"]
+
+
+def test_raw_is_confined_to_the_workspace(client, workspace: Path) -> None:
+    (workspace.parent / "outside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    status, _ = client("/api/raw?path=../outside.png")
+    assert status == 400
+
+
+def test_raw_serves_svg_inert(client, workspace: Path) -> None:
+    # An SVG is a document: served with a CSP so opening one cannot run script in
+    # the viewer's origin, which is where the rendered page's sanitizing happens.
+    (workspace / "d.svg").write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+    httpd_status, _ = client("/api/raw?path=d.svg")
+    assert httpd_status == 200
+
+
+# --- vendored browser assets ------------------------------------------------------
+
+
+@pytest.fixture
+def vendored(workspace: Path, tmp_path: Path):
+    """A viewer whose pinned assets were built (as the image ships them)."""
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    (vendor / "markdown-it.min.js").write_text("/* markdown-it */\n")
+    return server.Config(root=workspace, base="/c/conv-test/files", port=0, vendor=vendor)
+
+
+def test_vendor_assets_are_served_from_their_own_store_path(vendored, client_for) -> None:
+    # They are built separately from this source tree, so they are NOT under static/.
+    with client_for(vendored) as get:
+        status, body = get("/static/vendor/markdown-it.min.js")
+        assert status == 200 and b"markdown-it" in body
+
+
+def test_vendor_asset_cannot_be_escaped(vendored, client_for) -> None:
+    with client_for(vendored) as get:
+        status, _ = get("/static/vendor/../../etc/passwd")
+        assert status in (400, 404)
+
+
+def test_missing_vendor_dir_is_a_404_so_the_page_falls_back(client) -> None:
+    # The default fixture has no vendor dir — how `python server.py` runs out of a
+    # checkout. A 404 is what the page keys on to render plain text instead.
+    status, payload = client.json("/static/vendor/markdown-it.min.js")
+    assert status == 404 and "vendor" in payload["error"]
+
+
+def test_health_reports_whether_the_rich_renderers_are_available(
+    client, vendored, client_for
+) -> None:
+    # First thing to check when a document renders as plain text.
+    _, payload = client.json("/api/health")
+    assert payload["vendor"] is False
+    with client_for(vendored) as get:
+        _, payload = get.json("/api/health")
+        assert payload["vendor"] is True
+
+
+def test_the_page_requests_the_vendor_assets(client) -> None:
+    _, body = client("/")
+    text = body.decode()
+    for asset in ("markdown-it.min.js", "purify.min.js", "highlight.min.js", "highlight-nix.min.js"):
+        assert f"/static/vendor/{asset}" in text
+
+
+# --- config ---------------------------------------------------------------------
+
+
+def test_config_reads_the_environment_the_unit_sets(workspace: Path) -> None:
+    cfg = server.Config.from_env(
+        {
+            "SCOOTER_FILES_ROOT": str(workspace),
+            "SCOOTER_FILES_BASE": "/c/abc/files/",
+            "SCOOTER_FILES_PORT": "7801",
+        }
+    )
+    assert cfg.root == workspace
+    assert cfg.base == "/c/abc/files", "a trailing slash would double up in every route"
+    assert cfg.port == 7801
+
+
+def test_config_without_a_base_serves_at_the_root(workspace: Path) -> None:
+    # How it runs under `python server.py` on a developer's laptop.
+    cfg = server.Config.from_env({"SCOOTER_FILES_ROOT": str(workspace)})
+    assert cfg.base == ""

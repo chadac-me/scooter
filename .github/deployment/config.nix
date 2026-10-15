@@ -10,6 +10,7 @@
     brave.enable = true;
     datadog.enable = true;
     duckduckgo.enable = true;
+    files.enable = true;
     github.enable = true;
     gitlab.enable = true;
     grafana.enable = true;

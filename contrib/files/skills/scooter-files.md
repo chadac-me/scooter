@@ -1,0 +1,79 @@
+---
+name: scooter-files
+type: knowledge
+version: 1.0.0
+triggers:
+- show me the file
+- open the file
+- let me see the code
+- browse the workspace
+- look at the repo together
+- review this file with me
+- file viewer
+- share a file
+- walk me through the code
+- read along
+---
+
+# Showing the user a file in the workspace (scooter-files)
+
+You can give the user a **read-only view of your workspace in their browser** at
+`https://<host>/c/$CONVERSATION_ID/files/`. It is a web service like the terminal
+or marimo — same Services panel, same `scooter-service` commands — but scoped to
+one job: looking at a file together.
+
+Use it when the subject of the conversation **is a file**: a document you drafted,
+a module you are about to change, a config the user needs to eyeball. Pasting a
+400-line file into chat buries the conversation; a link keeps the file beside it.
+
+## Opening it
+
+```bash
+scooter-service start files          # also survives a suspend/resume
+```
+
+Then give the user the link. Deep-link straight to what you are talking about
+rather than dropping them at the root — the viewer takes the file as a query
+parameter:
+
+```
+https://<host>/c/$CONVERSATION_ID/files/?path=docs/design.md
+```
+
+`$CONVERSATION_URL` has the origin if you need to build the whole URL. You do not
+have to pre-start it: if the user opens a declared service that isn't running, the
+platform auto-starts it.
+
+## What it shows
+
+- A tree of `/workspace`, directories first, with dotfiles hidden and heavy
+  directories (`node_modules`, `.git`, `__pycache__`, `result`) dimmed rather than
+  walked. Git repositories are badged.
+- Any text file with line numbers and syntax highlighting.
+- **Markdown as a rendered document** — headings, tables, task lists, images, and
+  highlighted code fences — with a `raw` toggle for the source. So link a design
+  doc or a README when you want it *read*, not inspected.
+- Binaries and files past 2 MB report themselves instead of rendering — say so
+  rather than retrying.
+
+Two things worth using in a link, because they land the user where you mean:
+
+- A heading anchor: `?path=docs/design.md#failure-modes` opens that section.
+- Links *inside* a rendered document resolve against the workspace, so a user who
+  follows a doc's reference to `../contrib/files/sandbox.nix` stays in the viewer.
+
+## It is read-only, and it is not your own file access
+
+The viewer has no write path. If the user asks for a change while looking at it,
+**you** make the edit with your normal tools and tell them to reload.
+
+Nor is it a way for *you* to read files — you have the filesystem directly. Open
+the viewer only to show the **user** something. Reading a file into your own
+context to answer a question, and showing it to a human, are different jobs.
+
+## Context cost
+
+When you *do* need a file in your own context, read the whole file rather than a
+slice of it. A truncated document is the expensive failure here: you answer
+confidently from the half you saw. If a file is genuinely too large to hold, say
+which part you read and which you did not.
