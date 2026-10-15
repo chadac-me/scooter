@@ -8,6 +8,12 @@
 -- NOTE: the optional OpenFGA store uses its OWN database (`openfga`) whose schema
 -- is owned by the OpenFGA migrator, not Atlas — it is intentionally not modelled
 -- here. See todo/draft/DECLARATIVE_SCHEMA_ATLAS.md.
+--
+-- Two tables here belong to a CONTRIB, not to the broker: `permission_requests`
+-- (contrib/aws) and `annotations` (contrib/files). Only their ownership row moves
+-- into the contrib (`scooter.db.broker.tables.*` in its deployment.nix); the DDL
+-- stays here because one database is one linear Atlas history. Letting a contrib
+-- declare its own schema fragment is tracked in #777.
 
 -- Per-conversation sandbox size spec (sandbox/store.py).
 CREATE TABLE "sandbox_size" (
@@ -92,3 +98,29 @@ CREATE TABLE "static_share_versions" (
   PRIMARY KEY ("id")
 );
 CREATE INDEX "ix_static_share_versions_share_uuid" ON "static_share_versions" ("share_uuid");
+
+-- Comments and answers a human anchors to a location in a sandbox file, owned by
+-- the files contrib (contrib/files/scooter_contrib_files/store.py). The viewer
+-- resolves the anchor against live content and pushes an already-validated record
+-- here, so this table is a dumb, correct store.
+-- `id` is supplied by the caller, not minted here: the viewer retries a failed push
+-- from an outbox, and a broker-minted id would turn every lost ack into a duplicate.
+CREATE TABLE "annotations" (
+  "id"              character varying NOT NULL,
+  "conversation_id" character varying NOT NULL,
+  "path"            character varying NOT NULL,
+  "anchor_line"     integer NOT NULL,
+  "anchor_quote"    text NOT NULL,
+  "kind"            character varying NOT NULL,
+  "question_id"     character varying NULL,
+  "thread"          character varying NOT NULL,
+  "author"          character varying NOT NULL,
+  "body"            text NOT NULL,
+  "resolved"        boolean NOT NULL,
+  "created_at"      character varying NOT NULL,
+  "updated_at"      character varying NOT NULL,
+  PRIMARY KEY ("id")
+);
+CREATE INDEX "ix_annotations_conversation_id" ON "annotations" ("conversation_id");
+CREATE INDEX "ix_annotations_thread" ON "annotations" ("thread");
+CREATE INDEX "ix_annotations_path" ON "annotations" ("path");

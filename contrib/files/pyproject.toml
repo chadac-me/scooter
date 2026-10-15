@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scooter-contrib-files"
+version = "0.0.0"
+license = "MIT"
+description = "The files contrib's broker half: the durable annotation store the sandbox viewer syncs to"
+requires-python = ">=3.11"
+# The extension surface only, never the broker app.
+dependencies = [
+  "fastapi",
+  "httpx",        # the agent-host wake
+  "sqlalchemy",   # the annotation store's row model
+]
+
+[project.optional-dependencies]
+broker = ["scooter-broker-lib", "scooter-lib"]
+
+[project.entry-points."agent_broker.providers"]
+files = "scooter_contrib_files.broker_provider:files"
+
+# The viewer itself is not packaged: it ships in the sandbox image as a store path
+# (sandbox.nix) and runs on the stdlib, so nothing here is installed in a sandbox.
+[tool.hatch.build.targets.wheel]
+packages = ["scooter_contrib_files"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "httpx"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
