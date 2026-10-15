@@ -60,7 +60,10 @@ definition there is "option does not exist" in two of the three (#615, #607) —
 is exactly the split: `contrib.nix` *declares* `contribs.<name>.siteUrl`, and
 `deployment.nix` is what reads it and writes `scooter.broker.extraEnv`.
 
-`contrib/aws` is the only contrib with all three. `contrib/echo` has `contrib.nix` +
+`contrib/aws` and `contrib/files` are the two contribs with all three — aws because
+a grant needs a human and the sandbox needs the CLIs, files because the review
+surface is split across both sides (a viewer in the sandbox, the annotation store
+in the broker). `contrib/echo` has `contrib.nix` +
 `sandbox.nix`, which was the whole shape of a contrib before the deployment half
 existed (#607 added the sandbox half, #636 the deployment half three days later). A
 contrib with only a deployment half is the common case — every broker integration.

@@ -3,11 +3,35 @@
 
 from typing import Optional
 
-from sqlalchemy import Index, Integer, PrimaryKeyConstraint, String, Text
+from sqlalchemy import Boolean, Index, Integer, PrimaryKeyConstraint, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
     pass
+
+
+class Annotations(Base):
+    __tablename__ = 'annotations'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='annotations_pkey'),
+        Index('ix_annotations_conversation_id', 'conversation_id'),
+        Index('ix_annotations_path', 'path'),
+        Index('ix_annotations_thread', 'thread')
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String, nullable=False)
+    path: Mapped[str] = mapped_column(String, nullable=False)
+    anchor_line: Mapped[int] = mapped_column(Integer, nullable=False)
+    anchor_quote: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    thread: Mapped[str] = mapped_column(String, nullable=False)
+    author: Mapped[str] = mapped_column(String, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    question_id: Mapped[Optional[str]] = mapped_column(String)
 
 
 class ModuleRegistry(Base):
