@@ -356,3 +356,136 @@ func TestPgNotifyPayloadCarriesOpAndOwner(t *testing.T) {
 		}
 	})
 }
+
+// The trigger is the only thing deciding which changes reach the sidebar at all, and now also
+// which of them may be delayed by the coalescer. Replays the real migrations, so a WHEN clause
+// or `kind` expression that drifts from change.activityOnly fails here.
+func TestPgNotifyKindSeparatesActivityFromMeta(t *testing.T) {
+	pool := startPG(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	listen := func(t *testing.T) *pgxpool.Conn {
+		t.Helper()
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(conn.Release)
+		if _, err := conn.Exec(ctx, "listen conversations_changed"); err != nil {
+			t.Fatal(err)
+		}
+		return conn
+	}
+
+	// next returns what the router would parse from the first notification naming id.
+	next := func(t *testing.T, conn *pgxpool.Conn, id string) change {
+		t.Helper()
+		for {
+			n, err := conn.Conn().WaitForNotification(ctx)
+			if err != nil {
+				t.Fatalf("%s: no notification arrived: %v", id, err)
+			}
+			c, ok := notifyDecision(n.Payload)
+			if !ok {
+				t.Fatalf("the router would drop its own trigger's payload: %q", n.Payload)
+			}
+			if c.ID == id {
+				return c
+			}
+		}
+	}
+
+	t.Run("a last_activity_at bump notifies, and is throttleable", func(t *testing.T) {
+		// Before #776 this fired no notification at all, which is why the list poll could not go.
+		insertConv(t, pool, "c-busy", "", "")
+		conn := listen(t)
+		if _, err := pool.Exec(ctx,
+			`UPDATE conversations SET last_activity_at = last_activity_at + 1000 WHERE id = 'c-busy'`); err != nil {
+			t.Fatal(err)
+		}
+		c := next(t, conn, "c-busy")
+		if !c.activityOnly() {
+			t.Fatalf("an activity-only bump must be throttleable, got kind=%q", c.Kind)
+		}
+	})
+
+	t.Run("a title edit is meta even when activity moves with it", func(t *testing.T) {
+		// saveMeta writes every column at once, so the real mixed update must not be throttled:
+		// a rename delayed behind an activity window is a visibly laggy sidebar.
+		insertConv(t, pool, "c-named", "", "")
+		conn := listen(t)
+		if _, err := pool.Exec(ctx,
+			`UPDATE conversations SET title = 'renamed', last_activity_at = last_activity_at + 1000
+			  WHERE id = 'c-named'`); err != nil {
+			t.Fatal(err)
+		}
+		if c := next(t, conn, "c-named"); c.activityOnly() {
+			t.Fatalf("a title edit must push immediately, got kind=%q", c.Kind)
+		}
+	})
+
+	t.Run("a phase change notifies as meta", func(t *testing.T) {
+		// The sidebar's status dot reads phase; before #776 it was not pushed at all.
+		insertConv(t, pool, "c-phase", "", "")
+		conn := listen(t)
+		if _, err := pool.Exec(ctx,
+			`UPDATE conversations SET phase = 'Suspended' WHERE id = 'c-phase'`); err != nil {
+			t.Fatal(err)
+		}
+		if c := next(t, conn, "c-phase"); c.activityOnly() {
+			t.Fatalf("a phase change must push immediately, got kind=%q", c.Kind)
+		}
+	})
+
+	t.Run("starred, user_titled and owner stay meta", func(t *testing.T) {
+		for col, val := range map[string]string{
+			"starred":     "true",
+			"user_titled": "true",
+			"owner":       "'alice'",
+		} {
+			id := "c-meta-" + col
+			insertConv(t, pool, id, "", "")
+			conn := listen(t)
+			if _, err := pool.Exec(ctx,
+				`UPDATE conversations SET `+col+` = `+val+` WHERE id = $1`, id); err != nil {
+				t.Fatal(err)
+			}
+			if c := next(t, conn, id); c.activityOnly() {
+				t.Errorf("%s must push immediately, got kind=%q", col, c.Kind)
+			}
+		}
+	})
+
+	t.Run("an insert and a delete are never activity", func(t *testing.T) {
+		conn := listen(t)
+		insertConv(t, pool, "c-life", "", "")
+		if c := next(t, conn, "c-life"); c.activityOnly() || c.deleted() {
+			t.Fatalf("an insert must be an un-throttled upsert, got %+v", c)
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM conversations WHERE id = 'c-life'`); err != nil {
+			t.Fatal(err)
+		}
+		c := next(t, conn, "c-life")
+		if !c.deleted() || c.activityOnly() {
+			t.Fatalf("a delete must be an un-throttled removal, got %+v", c)
+		}
+	})
+
+	t.Run("an unrelated column still pushes nothing", func(t *testing.T) {
+		// host_pod churns on every reassignment and is invisible to the sidebar; adding it to
+		// the WHEN clause would be the firehose the activity columns are not.
+		insertConv(t, pool, "c-quiet", "", "")
+		conn := listen(t)
+		setHost(t, pool, "c-quiet", "pod-x")
+		// Follow it with a title edit, which does notify, so the test fails on the extra frame
+		// rather than waiting out the context. A host_pod frame would arrive first and would be
+		// 'activity', since the trigger's kind test sees every sidebar column unchanged.
+		if _, err := pool.Exec(ctx, `UPDATE conversations SET title = 'fence' WHERE id = 'c-quiet'`); err != nil {
+			t.Fatal(err)
+		}
+		if c := next(t, conn, "c-quiet"); c.activityOnly() {
+			t.Fatalf("host_pod must not notify; first frame was %+v", c)
+		}
+	})
+}

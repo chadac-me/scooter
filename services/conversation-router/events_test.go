@@ -36,6 +36,24 @@ func TestNotifyDecision(t *testing.T) {
 		}
 	})
 
+	t.Run("kind decides whether a change may be throttled", func(t *testing.T) {
+		activity, ok := notifyDecision(`{"id":"uuid-busy","op":"upsert","kind":"activity"}`)
+		if !ok || !activity.activityOnly() {
+			t.Fatalf("want an activity-only change, got (%+v,%v)", activity, ok)
+		}
+		for _, p := range []string{
+			`{"id":"uuid-named","op":"upsert","kind":"meta"}`,
+			// A pre-#776 database sends no kind at all; those must not be throttled, since a
+			// title edit arriving as a bare upsert has to reach the sidebar at once.
+			`{"id":"uuid-named","op":"upsert"}`,
+		} {
+			c, ok := notifyDecision(p)
+			if !ok || c.activityOnly() {
+				t.Errorf("payload %q must take the un-throttled path, got (%+v,%v)", p, c, ok)
+			}
+		}
+	})
+
 	t.Run("unparseable / empty-id payloads are dropped", func(t *testing.T) {
 		for _, p := range []string{`not json`, `{}`, `{"op":"upsert"}`, `{"op":"delete"}`, ``} {
 			if _, ok := notifyDecision(p); ok {
