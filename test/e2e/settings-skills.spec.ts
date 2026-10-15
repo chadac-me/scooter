@@ -5,10 +5,17 @@
  * Every skill is named per-run (`e2e-skill-<n>`) and deleted at the end, because the stack
  * is shared and the owner+name pair is unique: a leftover row would fail the next run's
  * create rather than its own.
+ *
+ * Runs on both targets, and the full one is not redundant: only there do the requests pass
+ * through the production nginx, whose proxy allowlist is a different file from the vite dev
+ * proxy the fast stack uses — a path missing from it answers the SPA with a 200 and the
+ * feature is inert while every unit test stays green. The full-only block at the bottom
+ * covers what a real conversation start adds on top.
  */
 
 import { type Page } from "@playwright/test";
-import { test, expect } from "./fixtures.js";
+import { test, expect, snapshot, assertConsistent } from "./fixtures.js";
+import { fullOnly } from "./target.js";
 
 /** A name no other run holds, since one owner cannot have two skills with the same name. */
 const uniqueName = () => `e2e-skill-${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
@@ -105,5 +112,48 @@ test.describe("settings — personal skills", () => {
     await page.locator('[data-testid="skill-name"]').fill("scooter-intro");
     await expect(page.locator('[data-testid="skill-shadow-warning"]')).toBeVisible({ timeout: 20_000 });
     await page.locator('[data-testid="skill-cancel"]').click();
+  });
+});
+
+/**
+ * What a real cluster adds: the production nginx in front of the routes, and a conversation
+ * start that actually boots an agent while a personal skill is in the owner's row set.
+ *
+ * On the fast stack the agent is a script that never reads a prompt, so "injection did not
+ * break the run" is a statement only this target can make.
+ */
+fullOnly("needs the production nginx and a real agent boot")("personal skills on a real cluster", () => {
+  test("a conversation still starts and answers with a personal skill injected", async ({ chat, page }) => {
+    // A cold sandbox boot plus a turn, on top of the CRUD round trip.
+    test.setTimeout(300_000);
+
+    const name = uniqueName();
+    await openSkills(page);
+    await expect(page.locator('[data-testid="skill-new"]'), "personal skills need the agent_host DB").toBeVisible({
+      timeout: 30_000,
+    });
+    await page.locator('[data-testid="skill-new"]').click();
+    await fillForm(page, {
+      name,
+      description: `Test skill ${name}. Use when the user mentions ${name}.`,
+      body: `# ${name}\n\nThis skill exists to prove injection does not break a conversation.`,
+    });
+    await expect(rowFor(page, name)).toBeVisible({ timeout: 30_000 });
+
+    try {
+      // The host reads the owner's skills and writes them before the agent is built, so a
+      // failure in that path shows up here as a conversation that never answers.
+      await chat.open();
+      await chat.completeTurn("say hello");
+      const after = await snapshot(page);
+      expect(after.assistantMessages, "the agent answered with a personal skill injected").toBeGreaterThan(0);
+      assertConsistent(after, "turn with a personal skill injected");
+    } finally {
+      // Always clean up: the name is unique per run, but rows accumulate on a live cluster.
+      await openSkills(page);
+      page.once("dialog", (d) => void d.accept());
+      await rowFor(page, name).locator('[data-testid="skill-delete"]').click();
+      await expect(rowFor(page, name)).toHaveCount(0, { timeout: 30_000 });
+    }
   });
 });

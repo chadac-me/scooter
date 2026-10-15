@@ -23,6 +23,7 @@
   "revive.spec.ts",
   "scroll-lock.spec.ts",
   "sessions.spec.ts",
+  "settings-skills.spec.ts",
   "settings-tabs.spec.ts",
   "stop-run.spec.ts",
   "suspended-recovery.spec.ts",
