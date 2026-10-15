@@ -1,13 +1,16 @@
 /**
- * Conversation-list stream client: subscribes to the agent-host's GET /conversations/events
- * so new conversations appear in the sidebar without waiting for the poll. The server emits
- * an initial `snapshot` (the visible list, same scope as GET /conversations), then `upsert`
- * frames as conversations are created or change and `remove` frames as they end; the UI folds
- * each upsert in via the same sessionStore.mergeFromServer the poll uses, and the poll remains
- * the backstop.
+ * Conversation-list stream client: subscribes to GET /conversations/events, which is the
+ * sidebar's ONLY source of the conversation list — there is no longer a periodic full-list
+ * fetch behind it. The server emits an initial `snapshot` (the visible list, same scope and
+ * shape as GET /conversations), then `upsert` frames as conversations are created or change
+ * and `remove` frames as they end.
+ *
+ * Because nothing else reconciles the list, every failure path has to end in a reconnect, and
+ * a reconnect re-snapshots: a dropped connection, a stale socket the watchdog below kills, and
+ * the server's own "you fell behind" resync all converge on a fresh full list. Why: PR #780.
  */
 
-import type { AgentHostConfig, ConversationView } from "./client.js";
+import type { AgentHostConfig, ConversationScope, ConversationView } from "./client.js";
 
 /** Frames the /conversations/events SSE emits. */
 export type ConversationStreamFrame =
@@ -30,16 +33,25 @@ export interface ConversationSubscription {
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * How long the stream may be silent before it is treated as dead and reconnected. The server
+ * sends a heartbeat comment every 25s, so silence past this is the connection, not the server
+ * having nothing to say — a TCP connection black-holed by a dropped NAT mapping or a proxy
+ * restart stays readable forever and never errors. Why: PR #780.
+ */
+const STALE_AFTER_MS = 60_000;
+
 /** Open the conversation-list stream for `scope` ("mine" | "all"); it reconnects on drop and returns a handle to close. */
 export function subscribeConversations(
   config: AgentHostConfig,
-  scope: "mine" | "all",
+  scope: ConversationScope,
   callbacks: ConversationStreamCallbacks,
-  deps?: { fetchImpl?: typeof fetch },
+  deps?: { fetchImpl?: typeof fetch; staleAfterMs?: number },
 ): ConversationSubscription {
   const base = config.baseUrl.replace(/\/$/, "");
   const url = `${base}/conversations/events?scope=${encodeURIComponent(scope)}`;
   const doFetch = deps?.fetchImpl ?? fetch;
+  const staleAfterMs = deps?.staleAfterMs ?? STALE_AFTER_MS;
 
   let closed = false;
   let controller: AbortController | undefined;
@@ -50,16 +62,31 @@ export function subscribeConversations(
     else if (frame.kind === "remove" && frame.id) callbacks.onRemove(frame.id);
   };
 
+  // The watchdog aborts the fetch, which surfaces as a read error and reconnects through the
+  // loop below — and a reconnect re-snapshots, so a hung socket also repairs whatever it missed.
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  const armWatchdog = (c: AbortController) => {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+    watchdog = setTimeout(() => c.abort(), staleAfterMs);
+  };
+  const disarmWatchdog = () => {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+    watchdog = undefined;
+  };
+
   const run = async () => {
     while (!closed) {
-      controller = new AbortController();
+      const c = new AbortController();
+      controller = c;
+      // Armed before the fetch: a connect that never responds is as dead as one that stops.
+      armWatchdog(c);
       try {
         const res = await doFetch(url, {
           headers: {
             Accept: "text/event-stream",
             ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}),
           },
-          signal: controller.signal,
+          signal: c.signal,
         });
         if (!res.ok || !res.body) {
           await delay(1000);
@@ -71,6 +98,8 @@ export function subscribeConversations(
         while (!closed) {
           const { value, done } = await reader.read();
           if (done) break;
+          // Any byte counts, heartbeat comments included: the point is liveness, not content.
+          armWatchdog(c);
           buf += decoder.decode(value, { stream: true });
           let idx: number;
           while ((idx = buf.indexOf("\n\n")) !== -1) {
@@ -89,8 +118,9 @@ export function subscribeConversations(
           }
         }
       } catch {
-        /* network drop or abort: reconnect */
+        /* network drop, stale-socket abort or close(): reconnect unless closed */
       }
+      disarmWatchdog();
       if (!closed) await delay(500);
     }
   };
@@ -100,6 +130,7 @@ export function subscribeConversations(
   return {
     close() {
       closed = true;
+      disarmWatchdog();
       controller?.abort();
     },
   };

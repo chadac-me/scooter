@@ -84,6 +84,8 @@ type State = {
   pendingSelect?: string;
   /** The conversation whose title is being renamed inline, during which mergeFromServer does not run; transient. */
   editingId?: string;
+  /** Server ids whose `remove` frame arrived while the rename lock held, applied when it clears; transient. */
+  pendingRemovals?: string[];
 };
 
 /** A brand-new, untouched conversation (default title, no messages yet). */
@@ -247,6 +249,14 @@ const setState = (next: State) => {
   emit();
 };
 
+/** Apply the removals that arrived while the rename lock held; called wherever that lock clears. */
+const flushPendingRemovals = () => {
+  const queued = state.pendingRemovals;
+  if (!queued?.length) return;
+  setState({ ...state, pendingRemovals: undefined });
+  for (const id of queued) sessionStore.removeFromServer(id);
+};
+
 export const sessionStore = {
   subscribe(l: () => void) {
     listeners.add(l);
@@ -315,6 +325,7 @@ export const sessionStore = {
       // The lock only holds while the editing row is still rendered, because nothing else could clear it once the row is gone.
       if (filteredSessions(state).some((s) => s.id === state.editingId)) return;
       setState({ ...state, editingId: undefined });
+      flushPendingRemovals();
     }
     const serverIds = new Set(convs.map((c) => c.id));
     // Index by the server id, which is what `convs` is keyed by.
@@ -390,8 +401,15 @@ export const sessionStore = {
 
   /** Drop a conversation the server says is gone, keyed by SERVER id; a no-op for one we never had. */
   removeFromServer(serverId: string) {
-    // An open rename input would be detached by the re-render, and the poll reconciles the row.
-    if (state.editingId !== undefined) return;
+    // An open rename input would be detached by the re-render, so the removal waits for the
+    // lock to clear. It cannot simply be skipped: the stream sends a remove frame once, and
+    // with no poll behind it a dropped one leaves a dead row in the sidebar. Why: PR #780.
+    if (state.editingId !== undefined) {
+      if (!state.pendingRemovals?.includes(serverId)) {
+        setState({ ...state, pendingRemovals: [...(state.pendingRemovals ?? []), serverId] });
+      }
+      return;
+    }
     const gone = state.sessions.find((s) => serverKeyOf(s) === serverId);
     if (!gone) return;
     sessionStore.deleteSession(gone.id);
@@ -441,6 +459,7 @@ export const sessionStore = {
     if (state.editingId === undefined) return;
     if (id !== undefined && state.editingId !== id) return;
     setState({ ...state, editingId: undefined });
+    flushPendingRemovals();
   },
 
   /** Optimistically set a user-chosen title and lock it against agent titles; the caller persists via renameConversation. */

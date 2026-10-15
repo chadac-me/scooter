@@ -800,14 +800,62 @@ describe("removeFromServer (the stream's remove frame)", () => {
     expect(sessionStore.get()).toBe(before); // same reference: no re-render
   });
 
-  it("honors the rename lock, leaving the removal to the poll", () => {
-    // Reconciling mid-rename detaches the inline input, which is why mergeFromServer pauses too.
+  it("defers the removal while a rename is open, then applies it when the lock clears", () => {
+    // Reconciling mid-rename detaches the inline input, which is why mergeFromServer pauses
+    // too — but the frame cannot be discarded: the stream sends it once and nothing polls.
     sessionStore.mergeFromServer([{ id: "r-1" }, { id: "r-2" }]);
     const target = sessionStore.get().sessions.find((s) => s.serverId === "r-1")!;
     sessionStore.setEditing(target.id);
     sessionStore.removeFromServer("r-1");
-    expect(sessionStore.get().sessions.some((s) => s.serverId === "r-1")).toBe(true);
+    expect(sessionStore.get().sessions.some((s) => s.serverId === "r-1"), "the input must survive").toBe(true);
+
     sessionStore.clearEditing();
+    expect(
+      sessionStore.get().sessions.some((s) => s.serverId === "r-1"),
+      "a deferred removal must not be lost when the rename ends",
+    ).toBe(false);
+  });
+
+  it("defers a removal for a DIFFERENT row than the one being renamed", () => {
+    // The lock is about re-rendering the sidebar at all, not about which row is gone.
+    sessionStore.mergeFromServer([{ id: "r-3" }, { id: "r-4" }]);
+    const editing = sessionStore.get().sessions.find((s) => s.serverId === "r-3")!;
+    sessionStore.setEditing(editing.id);
+    sessionStore.removeFromServer("r-4");
+    expect(sessionStore.get().sessions.some((s) => s.serverId === "r-4")).toBe(true);
+    sessionStore.clearEditing();
+    expect(sessionStore.get().sessions.some((s) => s.serverId === "r-4")).toBe(false);
+  });
+
+  it("applies every deferred removal, and a repeat of one only once", () => {
+    sessionStore.mergeFromServer([{ id: "r-5" }, { id: "r-6" }, { id: "r-7" }]);
+    const editing = sessionStore.get().sessions.find((s) => s.serverId === "r-5")!;
+    sessionStore.setEditing(editing.id);
+    sessionStore.removeFromServer("r-6");
+    sessionStore.removeFromServer("r-7");
+    sessionStore.removeFromServer("r-6"); // a reconnect can re-deliver the same removal
+    sessionStore.clearEditing();
+    const ids = sessionStore.get().sessions.map((s) => s.serverId);
+    expect(ids).not.toContain("r-6");
+    expect(ids).not.toContain("r-7");
+    expect(ids).toContain("r-5");
+  });
+
+  it("applies deferred removals when a merge is what releases the lock", () => {
+    // The lock also clears from mergeFromServer, once the row being renamed is no longer
+    // rendered; a removal queued behind it must drain there too, not only via clearEditing.
+    sessionStore.mergeFromServer([{ id: "r-8" }, { id: "r-9" }]);
+    const editing = sessionStore.get().sessions.find((s) => s.serverId === "r-8")!;
+    sessionStore.setEditing(editing.id);
+    sessionStore.removeFromServer("r-9");
+    // The renamed row stops being rendered, so the next merge releases the lock. The merge is
+    // a single-row upsert, which says nothing about r-9's membership — only the queued remove
+    // frame does, so the flush is the one thing that can drop it.
+    sessionStore.deleteSession(editing.id);
+    sessionStore.mergeFromServer([{ id: "r-10" }], { fullList: false });
+    const ids = sessionStore.get().sessions.map((s) => s.serverId);
+    expect(ids).not.toContain("r-9");
+    expect(ids, "the upsert that released the lock still applies").toContain("r-10");
   });
 
   it("never empties the list, so the UI always has a conversation to show", () => {

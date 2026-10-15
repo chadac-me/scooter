@@ -94,7 +94,8 @@ func TestSSEHubUnsubscribeStopsDelivery(t *testing.T) {
 	}
 }
 
-// A subscriber whose buffer is full must not block the fan-out; the excess frame is dropped.
+// A subscriber whose buffer is full must not block the fan-out; the excess frame is dropped,
+// and TestSSEHubAsksASlowSubscriberToResync covers what replaces it.
 func TestSSEHubDropsWhenBufferFull(t *testing.T) {
 	hub := newSSEHub()
 	s := hub.subscribe("", "all")
@@ -202,4 +203,78 @@ func TestSSEHubBroadcastRemoveUnowned(t *testing.T) {
 	if !received(all) {
 		t.Error("scope=all must receive an unowned conversation's removal")
 	}
+}
+
+// A subscriber whose buffer fills must be told to resync: with no list poll behind the stream,
+// a silently dropped frame is a sidebar that stays wrong until the tab is reloaded.
+func TestSSEHubAsksASlowSubscriberToResync(t *testing.T) {
+	hub := newSSEHub()
+	s := hub.subscribe("", "all")
+
+	// Up to capacity, nothing is dropped and nothing needs resyncing.
+	for i := 0; i < subBuffer; i++ {
+		hub.broadcast(listRow{ID: "x", Owner: sp("alice")})
+	}
+	if len(s.resync) != 0 {
+		t.Fatal("a subscriber keeping up must not be asked to resync")
+	}
+
+	// Past capacity the frame cannot be queued, so a resync is owed.
+	hub.broadcast(listRow{ID: "x", Owner: sp("alice")})
+	if len(s.resync) != 1 {
+		t.Fatal("a dropped frame must ask the serve loop for a snapshot")
+	}
+	if got := len(s.ch); got != subBuffer {
+		t.Fatalf("the queue must stay capped at %d, got %d", subBuffer, got)
+	}
+
+	// Further drops collapse into the one pending request rather than queueing N snapshots.
+	for i := 0; i < 10; i++ {
+		hub.broadcast(listRow{ID: "x", Owner: sp("alice")})
+	}
+	if len(s.resync) != 1 {
+		t.Fatalf("one pending resync covers every drop, got %d", len(s.resync))
+	}
+}
+
+// A removal is the frame a slow subscriber can least afford to lose, so it takes the same path.
+func TestSSEHubRemoveAlsoAsksToResync(t *testing.T) {
+	hub := newSSEHub()
+	s := hub.subscribe("", "all")
+	for i := 0; i < subBuffer+1; i++ {
+		hub.broadcastRemove("gone", sp("alice"))
+	}
+	if len(s.resync) != 1 {
+		t.Fatal("a dropped remove frame must ask for a snapshot")
+	}
+}
+
+// A subscriber the frame is not visible to is not slow, so it must not be resynced by someone
+// else's traffic — the resync costs a full list read per subscriber it reaches.
+func TestSSEHubResyncOnlyTheSubscriberThatDropped(t *testing.T) {
+	hub := newSSEHub()
+	slow := hub.subscribe("alice", "mine")
+	bystander := hub.subscribe("bob", "mine")
+	for i := 0; i < subBuffer+5; i++ {
+		hub.broadcast(listRow{ID: "x", Owner: sp("alice")})
+	}
+	if len(slow.resync) != 1 {
+		t.Fatal("the subscriber that dropped a frame must be resynced")
+	}
+	if len(bystander.resync) != 0 {
+		t.Fatal("a subscriber the row was never visible to must not pay for a resync")
+	}
+}
+
+// drain must leave the queue empty so a re-sent snapshot is not followed by the frames it
+// already accounts for, and must not block when the queue is already empty.
+func TestDrainEmptiesTheQueue(t *testing.T) {
+	ch := make(chan []byte, 4)
+	ch <- []byte("a")
+	ch <- []byte("b")
+	drain(ch)
+	if len(ch) != 0 {
+		t.Fatalf("drain must empty the queue, %d left", len(ch))
+	}
+	drain(ch) // must not block
 }

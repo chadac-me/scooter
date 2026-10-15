@@ -107,11 +107,9 @@ describe("pollWhileVisible", () => {
 });
 
 describe("the UI's repeating polls are visibility-gated", () => {
-  // These two are 85% of the browser's request volume; a bare setInterval here is the
-  // regression this module exists to prevent.
+  // A bare setInterval here is the regression this module exists to prevent.
   const sources = {
     "SandboxPanel.tsx": "the sandbox status + web-services poll",
-    "main.tsx": "the conversation-list poll",
   };
 
   for (const [file, what] of Object.entries(sources)) {
@@ -121,4 +119,13 @@ describe("the UI's repeating polls are visibility-gated", () => {
       expect(src, "a raw setInterval re-polls hidden tabs").not.toMatch(/setInterval\(/);
     });
   }
+
+  it("main.tsx polls the conversation list NOT AT ALL — the stream is its only source", () => {
+    // This was the UI's largest source of requests (6/min/tab, every tab, forever). The
+    // stream replaced it, so the regression to guard is a poll coming BACK, under either
+    // name. Why: PR #780.
+    const src = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
+    expect(src, "the conversation list has one source: the stream").not.toMatch(/pollWhileVisible|setInterval\(/);
+    expect(src, "a periodic full-list read is what this removed").not.toMatch(/loadConversations/);
+  });
 });

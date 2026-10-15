@@ -8,9 +8,8 @@ import "./theme.js";
 import { App } from "./App.js";
 import { viewStore } from "./view.js";
 import { currentConversation, sessionStore } from "./sessions.js";
-import { loadConversations, loadConversationsResult, loadWhoami } from "./client.js";
+import { loadWhoami } from "./client.js";
 import { subscribeConversations } from "./conversationStream.js";
-import { pollWhileVisible } from "./visiblePoll.js";
 import { initTelemetryFromServer, installGlobalErrorHandlers } from "./telemetry.js";
 import { loadContribManifest } from "./contribManifest.js";
 import { installTitleSync } from "./pageTitle.js";
@@ -23,36 +22,15 @@ installGlobalErrorHandlers();
 
 const BASE_URL = (import.meta.env.VITE_AGENT_HOST_URL ?? "").replace(/\/$/, "");
 
-// Load all conversations; the Mine/All toggle filters client-side by owner, so
-// toggling needs no refetch.
-const refreshConversations = () =>
-  void loadConversations({ baseUrl: BASE_URL }, "all").then((convs) => {
-    sessionStore.mergeFromServer(convs);
-  });
-
 // The ingress identity: labels conversations "mine" and names the signed-in user in
 // the header.
 void loadWhoami({ baseUrl: BASE_URL }).then((me) => sessionStore.setCurrentUser(me));
 
-// The initial load retries with backoff so a tab opened during an agent-host restart
-// paints the sidebar as soon as it is back rather than on the 10s poll.
-const initialLoad = async () => {
-  for (let delay = 500; delay <= 8000; delay *= 2) {
-    const { ok, conversations } = await loadConversationsResult({ baseUrl: BASE_URL }, "all");
-    if (ok) {
-      sessionStore.mergeFromServer(conversations);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, delay));
-  }
-};
-void initialLoad();
-// Visibility-gated: a backgrounded tab polls nothing and re-reads once on return.
-pollWhileVisible(refreshConversations, 10000);
-
-// Live sidebar push: the conversation-list stream folds through the same
-// mergeFromServer as the poll, with scope "all" to match it, and the poll stays as
-// the backstop.
+// The conversation list has exactly one source: the stream's `snapshot` on connect, then its
+// upsert/remove frames. There is no periodic GET /conversations behind it — a tab opened
+// during an agent-host restart paints when the stream connects (it retries until it does),
+// and every divergence is repaired by a reconnect, which re-snapshots. Why: PR #780.
+// Scope "all"; the Mine/All toggle filters client-side by owner, so it needs no refetch.
 subscribeConversations({ baseUrl: BASE_URL }, "all", {
   onSnapshot: (list) => sessionStore.mergeFromServer(list),
   // An upsert carries the row's whole link set, re-read when it was pushed, so it owns its own
@@ -62,7 +40,7 @@ subscribeConversations({ baseUrl: BASE_URL }, "all", {
 });
 
 // Deep-link support (?thread=<id>): requestSelect's pending target selects the
-// conversation once the poll/stream delivers it.
+// conversation once the stream delivers it.
 const threadParam = new URLSearchParams(globalThis.location?.search ?? "").get("thread");
 if (threadParam) sessionStore.requestSelect(threadParam);
 else if (viewStore.get() === "chat") sessionStore.startFresh();
