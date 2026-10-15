@@ -4,7 +4,9 @@
 // subscribers entitled to see it, so the push and the GET /conversations snapshot can never
 // disagree. The UI contract is an initial `snapshot` then `upsert` and `remove` frames. A
 // removal carries the owner in the NOTIFY payload, because its row is gone before the re-read
-// and that owner is the only thing the visibility filter could use.
+// and that owner is the only thing the visibility filter could use. The payload's `kind`
+// separates activity-only bumps, which coalesce.go throttles per conversation, from meta
+// changes, which must not be delayed behind them.
 package main
 
 import (
@@ -101,6 +103,12 @@ func runConversationListener(ctx context.Context, store *Store, links *LinkStore
 		return
 	}
 	log := logger("events-listen")
+	// Built once, outside the reconnect loop: a window open when the LISTEN connection drops
+	// still owes its trailing push, and its emit must outlive the per-notification context.
+	coal := newCoalescer(activityWindow, func(id string) {
+		pushUpsert(ctx, id, store, links, hub, log)
+	}, nil)
+	defer coal.stop()
 	for ctx.Err() == nil {
 		conn, err := store.NewListenConn(ctx)
 		if err != nil {
@@ -132,7 +140,7 @@ func runConversationListener(ctx context.Context, store *Store, links *LinkStore
 				}
 				break
 			}
-			handleNotification(ctx, n.Payload, store, links, hub, log)
+			handleNotification(ctx, n.Payload, store, links, hub, log, coal)
 		}
 		// Close with a background context, since a Close on a cancelled ctx would skip the teardown.
 		_ = conn.Close(context.Background())
@@ -146,6 +154,9 @@ func runConversationListener(ctx context.Context, store *Store, links *LinkStore
 type change struct {
 	ID string `json:"id"`
 	Op string `json:"op"`
+	// Kind is "activity" when only last_activity_at moved and "meta" otherwise; an empty
+	// Kind is a pre-#776 payload, which must take the un-throttled path.
+	Kind string `json:"kind"`
 	// Owner is the only copy of a deleted row's owner, since the row is gone before the re-read.
 	Owner *string `json:"owner"`
 }
@@ -153,7 +164,10 @@ type change struct {
 // deleted reports whether this change removed the conversation.
 func (c change) deleted() bool { return c.Op == "delete" }
 
-// notifyDecision parses a NOTIFY payload ({id, op, owner}), dropping unparseable payloads and those naming no conversation.
+// activityOnly reports whether this change may be throttled; it mirrors the trigger's `kind` test.
+func (c change) activityOnly() bool { return c.Kind == "activity" }
+
+// notifyDecision parses a NOTIFY payload ({id, op, kind, owner}), dropping unparseable payloads and those naming no conversation.
 func notifyDecision(payload string) (change, bool) {
 	var c change
 	if err := json.Unmarshal([]byte(payload), &c); err != nil || c.ID == "" {
@@ -163,16 +177,29 @@ func notifyDecision(payload string) (change, bool) {
 }
 
 // handleNotification turns one NOTIFY payload into an upsert broadcast by re-reading the row and its links, or into a removal when the row is gone.
-func handleNotification(ctx context.Context, payload string, store *Store, links *LinkStore, hub *sseHub, log *slog.Logger) {
+func handleNotification(ctx context.Context, payload string, store *Store, links *LinkStore, hub *sseHub, log *slog.Logger, coal *coalescer) {
 	c, proceed := notifyDecision(payload)
 	if !proceed {
 		return
 	}
 	id := c.ID
 	if c.deleted() {
+		// Before the removal, so a window's trailing push cannot re-add the row behind it.
+		if coal != nil {
+			coal.forget(id)
+		}
 		hub.broadcastRemove(id, c.Owner)
 		return
 	}
+	if coal != nil && c.activityOnly() {
+		coal.submit(id)
+		return
+	}
+	pushUpsert(ctx, id, store, links, hub, log)
+}
+
+// pushUpsert re-reads a conversation and its links and fans the row out, dropping the push rather than emitting a row the snapshot would disagree with.
+func pushUpsert(ctx context.Context, id string, store *Store, links *LinkStore, hub *sseHub, log *slog.Logger) {
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	m, err := store.ConversationByID(rctx, id)
