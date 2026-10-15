@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,6 +24,8 @@ type Link struct {
 // LinkStore is a read-only handle on the webhooks database's resource_links table, nil when not configured.
 type LinkStore struct {
 	pool *pgxpool.Pool
+	// connConfig is what the link LISTEN loop opens its own connection from, since a LISTEN would otherwise hold one of the pool's few connections open forever.
+	connConfig *pgx.ConnConfig
 }
 
 // OpenLinkStore connects the read-only links pool, which the caller must Close.
@@ -35,7 +38,12 @@ func OpenLinkStore(ctx context.Context, dsn string) (*LinkStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &LinkStore{pool: pool}, nil
+	return &LinkStore{pool: pool, connConfig: cfg.ConnConfig}, nil
+}
+
+// NewListenConn opens a dedicated read-only connection for the link LISTEN loop, which the caller must Close.
+func (s *LinkStore) NewListenConn(ctx context.Context) (*pgx.Conn, error) {
+	return pgx.ConnectConfig(ctx, s.connConfig)
 }
 
 // linkStoreDSNFromEnv assembles the webhooks DSN from WEBHOOKS_DB_*, "" when not configured.

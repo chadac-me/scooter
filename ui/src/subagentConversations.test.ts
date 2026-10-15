@@ -125,7 +125,7 @@ describe("a live SSE upsert must not evict subagents", () => {
     // A single-row upsert for an unrelated conversation says nothing about sub-1, so
     // its absence is not evidence the subagent ended.
     sessionStore.mergeFromServer([{ id: "other-1", title: "Other renamed" }], {
-      sourcesAuthoritative: false,
+      fullList: false,
     });
 
     const ids = sessionStore.get().sessions.map((x) => x.id);
@@ -155,7 +155,7 @@ describe("a live SSE upsert must not evict subagents", () => {
     expect(sessionStore.get().sessions.find((x) => x.id === "sub-3")?.status).toBe("running");
 
     sessionStore.mergeFromServer([{ id: "sub-3", title: "research", parentId: "parent-3", status: "ended" }], {
-      sourcesAuthoritative: false,
+      fullList: false,
     });
 
     const sub = sessionStore.get().sessions.find((x) => x.id === "sub-3");
@@ -179,7 +179,7 @@ describe("the whole path: a chat started in THIS TAB spawns a subagent", () => {
     //    the parent's server id.
     sessionStore.mergeFromServer(
       [{ id: "srv-sub", title: "research the thing", parentId: "srv-parent", status: "running" }],
-      { sourcesAuthoritative: false },
+      { fullList: false },
     );
 
     // 3. The sidebar shows it as a child of the active (so expanded) parent, not as a
@@ -199,7 +199,7 @@ describe("the whole path: a chat started in THIS TAB spawns a subagent", () => {
     ]);
 
     // 5. An unrelated upsert (another chat retitled) must not evict the subagent.
-    sessionStore.mergeFromServer([{ id: "srv-other", title: "Unrelated" }], { sourcesAuthoritative: false });
+    sessionStore.mergeFromServer([{ id: "srv-other", title: "Unrelated" }], { fullList: false });
     expect(sessionStore.get().sessions.map((x) => x.id)).toContain("srv-sub");
   });
 });

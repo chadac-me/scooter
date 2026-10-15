@@ -89,27 +89,46 @@ describe("merge reference stability (sidebar re-render / flake root)", () => {
   });
 });
 
-describe("link sources ownership (poll owns them; an SSE upsert must not clobber)", () => {
+describe("link sources ownership (an upsert owns its own row's links, and only its own)", () => {
   const sourcesOf = (id: string) => sessionStore.get().sessions.find((s) => s.id === id)?.sources;
+  const linksOf = (id: string) => sessionStore.get().sessions.find((s) => s.id === id)?.links;
 
-  it("a []-sources single-row upsert does NOT wipe poll-populated sources (the sidebar-icon flake)", () => {
-    // A single-row upsert always carries `sources: []`, which must not clobber the poll-populated sources.
-    sessionStore.mergeFromServer([{ id: "conv-1", sources: ["github"] }]); // authoritative poll
+  it("an upsert ADDS the links it carries, so an attached resource shows without a full-list read", () => {
+    // The router re-reads the whole link set for every upsert it pushes, including the ones the
+    // webhooks database's own trigger fires, so the frame is the complete answer for that row.
+    sessionStore.mergeFromServer([{ id: "conv-1", sources: [] }]);
+    sessionStore.mergeFromServer(
+      [{ id: "conv-1", sources: ["github"], links: [{ source: "github", url: "u", title: "A PR" }] }],
+      { fullList: false },
+    );
     expect(sourcesOf("conv-1")).toEqual(["github"]);
-    sessionStore.mergeFromServer([{ id: "conv-1", sources: [] }], { sourcesAuthoritative: false });
-    expect(sourcesOf("conv-1")).toEqual(["github"]);
+    expect(linksOf("conv-1")).toHaveLength(1);
   });
 
-  it("an authoritative poll STILL clears sources when a link is removed (poll owns them)", () => {
+  it("an upsert CLEARS links when the last one is detached", () => {
+    // The removal has no other way to reach the sidebar once the poll is gone: an upsert that
+    // kept the old links would leave a provider icon for a link that no longer exists.
     sessionStore.mergeFromServer([{ id: "conv-2", sources: ["github"] }]);
-    // An authoritative poll reflecting the link removal must take effect.
-    sessionStore.mergeFromServer([{ id: "conv-2", sources: [] }]);
+    sessionStore.mergeFromServer([{ id: "conv-2", sources: [] }], { fullList: false });
     expect(sourcesOf("conv-2")).toEqual([]);
   });
 
-  it("a NEW conversation arriving only via upsert has no sources (poll/snapshot fills them later)", () => {
-    sessionStore.mergeFromServer([{ id: "conv-3", sources: [] }], { sourcesAuthoritative: false });
-    expect(sourcesOf("conv-3") ?? []).toEqual([]);
+  it("an upsert for ONE row leaves another row's links alone", () => {
+    sessionStore.mergeFromServer([
+      { id: "conv-3", sources: ["github"] },
+      { id: "conv-4", sources: ["slack"] },
+    ]);
+    sessionStore.mergeFromServer([{ id: "conv-3", sources: [] }], { fullList: false });
+    expect(sourcesOf("conv-3")).toEqual([]);
+    expect(sourcesOf("conv-4"), "a single-row upsert says nothing about other rows").toEqual(["slack"]);
+  });
+
+  it("a row the read mentions without `sources` keeps the ones it has", () => {
+    // Field ownership is "what this row's frame says", not "everything absent is empty", so a
+    // reader that never populates sources cannot blank them.
+    sessionStore.mergeFromServer([{ id: "conv-5", sources: ["jira"] }]);
+    sessionStore.mergeFromServer([{ id: "conv-5" }]);
+    expect(sourcesOf("conv-5")).toEqual(["jira"]);
   });
 });
 

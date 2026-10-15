@@ -55,9 +55,9 @@ pollWhileVisible(refreshConversations, 10000);
 // the backstop.
 subscribeConversations({ baseUrl: BASE_URL }, "all", {
   onSnapshot: (list) => sessionStore.mergeFromServer(list),
-  // A single-row upsert is not authoritative for sources/links, so an empty `sources: []`
-  // must not clobber the poll-populated provider icon.
-  onUpsert: (c) => sessionStore.mergeFromServer([c], { sourcesAuthoritative: false }),
+  // An upsert carries the row's whole link set, re-read when it was pushed, so it owns its own
+  // sources/links — but it says nothing about any other row, so it cannot prune. Why: PR #779.
+  onUpsert: (c) => sessionStore.mergeFromServer([c], { fullList: false }),
   onRemove: (id) => sessionStore.removeFromServer(id),
 });
 
