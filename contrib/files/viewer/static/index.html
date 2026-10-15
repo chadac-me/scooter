@@ -669,10 +669,23 @@ document.addEventListener("selectionchange", () => {
   selbar.style.left = `${box.left + window.scrollX}px`;
 });
 
+// The anchor is read on mousedown rather than on click: WebKit collapses a selection
+// as soon as a button takes the mouse, so by click time there is nothing left to read
+// and the button looks dead. preventDefault also keeps the highlight on screen.
+let barAnchor = null;
+selbar.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+  barAnchor = anchorFromSelection(document.getSelection());
+});
+
 el("selcomment").addEventListener("click", () => {
-  const anchor = anchorFromSelection(document.getSelection());
+  const anchor = barAnchor || anchorFromSelection(document.getSelection());
+  barAnchor = null;
   selbar.style.display = "none";
-  if (!anchor) return;
+  // Never silent: a bail here is indistinguishable from a broken button.
+  if (!anchor) {
+    return showError("Nothing to anchor to — select a line of the file and try again.");
+  }
   if (!anchor.line) {
     // The rendered text does not appear in the source, so there is nothing to anchor
     // to and raw mode is where the matched bytes are.
