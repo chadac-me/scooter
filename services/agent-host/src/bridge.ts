@@ -1089,7 +1089,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       // Always deferred to a tool-call boundary, even with nothing in flight: a run that
       // has not reached its first tool call is indistinguishable from one idling between
       // them, and cancelling there throws away work the user never asked to stop (Stop is
-      // the explicit way). Why: PR #765.
+      // the explicit way). Why: PR #766.
       run.cancelWhenToolsIdle = true;
       armTimeoutFallback(head); // ...but don't wait forever on a non-yielding tool
       return;

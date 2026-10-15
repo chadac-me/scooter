@@ -852,7 +852,7 @@ export class IntegrityAgent extends AbstractAgent {
    * the run queue by the time a prompt ARRIVES, so concurrent requests (a burst of sends
    * typed while a run is in flight) can be queued out of the order the user sent them.
    * Waiting for the previous response head means the host has already read that body.
-   * A slow POST must not wedge the next send, so the wait is capped. Why: PR #765.
+   * A slow POST must not wedge the next send, so the wait is capped. Why: PR #766.
    */
   private async postAgui(body: Record<string, unknown>): Promise<void> {
     const prior = this.sendChain;
