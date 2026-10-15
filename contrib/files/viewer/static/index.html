@@ -680,9 +680,14 @@ el("selcomment").addEventListener("click", () => {
   }
   pendingAnchor = anchor;
   el("cquote").textContent = anchor.quote;
+  // The section is hidden while a file carries no threads, so opening the composer
+  // has to reveal it: otherwise the form is laid out inside display:none and the
+  // click looks like it did nothing at all.
+  el("comments").classList.remove("empty");
   el("cform").style.display = "block";
   el("cerror").textContent = "";
   el("ctext").focus();
+  el("cform").scrollIntoView({ block: "nearest" });
 });
 
 function showError(message) {
