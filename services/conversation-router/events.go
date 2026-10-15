@@ -2,8 +2,9 @@
 // LISTEN/NOTIFY. A single dedicated connection listens on 'conversations_changed'; each
 // notification names one conversation id, whose row the loop re-reads and fans out to the
 // subscribers entitled to see it, so the push and the GET /conversations snapshot can never
-// disagree. The UI contract is an initial `snapshot` then `upsert` frames; removals are not
-// pushed and are reconciled by the poll.
+// disagree. The UI contract is an initial `snapshot` then `upsert` and `remove` frames. A
+// removal carries the owner in the NOTIFY payload, because its row is gone before the re-read
+// and that owner is the only thing the visibility filter could use.
 package main
 
 import (
@@ -64,11 +65,27 @@ func (h *sseHub) broadcast(row listRow) {
 	if err != nil {
 		return
 	}
-	msg := sseData(frame)
+	h.fanOut(row.Owner, sseData(frame))
+}
+
+// broadcastRemove tells the subscribers a conversation was visible to that it is gone, so the sidebar drops it without waiting for the poll.
+func (h *sseHub) broadcastRemove(id string, owner *string) {
+	frame, err := json.Marshal(struct {
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	}{Kind: "remove", ID: id})
+	if err != nil {
+		return
+	}
+	h.fanOut(owner, sseData(frame))
+}
+
+// fanOut delivers one pre-serialized frame to every subscriber the owner is visible to, skipping rather than blocking on a full buffer.
+func (h *sseHub) fanOut(owner *string, msg []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for s := range h.subs {
-		if !visible(row.Owner, s.callerOwner, s.scope) {
+		if !visible(owner, s.callerOwner, s.scope) {
 			continue
 		}
 		select {
@@ -125,22 +142,35 @@ func runConversationListener(ctx context.Context, store *Store, links *LinkStore
 	}
 }
 
-// notifyDecision parses a NOTIFY payload ({id, op}) and returns the conversation id to read and whether to proceed, dropping unparseable payloads and op=delete.
-func notifyDecision(payload string) (string, bool) {
-	var p struct {
-		ID string `json:"id"`
-		Op string `json:"op"`
-	}
-	if err := json.Unmarshal([]byte(payload), &p); err != nil || p.ID == "" || p.Op == "delete" {
-		return "", false
-	}
-	return p.ID, true
+// change is one parsed NOTIFY payload: which conversation changed, whether it was removed, and the owner it was visible to.
+type change struct {
+	ID string `json:"id"`
+	Op string `json:"op"`
+	// Owner is the only copy of a deleted row's owner, since the row is gone before the re-read.
+	Owner *string `json:"owner"`
 }
 
-// handleNotification turns one NOTIFY payload into an upsert broadcast by re-reading the row and its links.
+// deleted reports whether this change removed the conversation.
+func (c change) deleted() bool { return c.Op == "delete" }
+
+// notifyDecision parses a NOTIFY payload ({id, op, owner}), dropping unparseable payloads and those naming no conversation.
+func notifyDecision(payload string) (change, bool) {
+	var c change
+	if err := json.Unmarshal([]byte(payload), &c); err != nil || c.ID == "" {
+		return change{}, false
+	}
+	return c, true
+}
+
+// handleNotification turns one NOTIFY payload into an upsert broadcast by re-reading the row and its links, or into a removal when the row is gone.
 func handleNotification(ctx context.Context, payload string, store *Store, links *LinkStore, hub *sseHub, log *slog.Logger) {
-	id, proceed := notifyDecision(payload)
+	c, proceed := notifyDecision(payload)
 	if !proceed {
+		return
+	}
+	id := c.ID
+	if c.deleted() {
+		hub.broadcastRemove(id, c.Owner)
 		return
 	}
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)

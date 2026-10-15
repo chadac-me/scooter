@@ -751,3 +751,62 @@ describe("a bare URL starts on a new conversation (startFresh)", () => {
     expect(sessionStore.get().sessions).toHaveLength(rows);
   });
 });
+
+describe("removeFromServer (the stream's remove frame)", () => {
+  it("drops the row the server says is gone, keyed by SERVER id", () => {
+    sessionStore.mergeFromServer([{ id: "keep-1" }, { id: "gone-1" }]);
+    sessionStore.removeFromServer("gone-1");
+    // The store is a module singleton, so assert on these two rows rather than the whole list.
+    const ids = sessionStore.get().sessions.map((s) => s.serverId);
+    expect(ids).toContain("keep-1");
+    expect(ids).not.toContain("gone-1");
+  });
+
+  it("matches a conversation created locally, whose key is NOT its server id", () => {
+    // A conversation created on first send keys by a local id and carries serverId separately.
+    const local = sessionStore.get().currentId;
+    sessionStore.mergeFromServer([{ id: "server-xyz" }]);
+    const row = sessionStore.get().sessions.find((s) => s.serverId === "server-xyz");
+    expect(row?.id).toBeDefined();
+
+    sessionStore.removeFromServer("server-xyz");
+    expect(sessionStore.get().sessions.some((s) => s.serverId === "server-xyz")).toBe(false);
+    expect(local).toBeDefined();
+  });
+
+  it("is a no-op for a conversation it never had", () => {
+    sessionStore.mergeFromServer([{ id: "a" }, { id: "b" }]);
+    const before = sessionStore.get();
+    sessionStore.removeFromServer("never-seen");
+    expect(sessionStore.get()).toBe(before); // same reference: no re-render
+  });
+
+  it("honors the rename lock, leaving the removal to the poll", () => {
+    // Reconciling mid-rename detaches the inline input, which is why mergeFromServer pauses too.
+    sessionStore.mergeFromServer([{ id: "r-1" }, { id: "r-2" }]);
+    const target = sessionStore.get().sessions.find((s) => s.serverId === "r-1")!;
+    sessionStore.setEditing(target.id);
+    sessionStore.removeFromServer("r-1");
+    expect(sessionStore.get().sessions.some((s) => s.serverId === "r-1")).toBe(true);
+    sessionStore.clearEditing();
+  });
+
+  it("never empties the list, so the UI always has a conversation to show", () => {
+    sessionStore.mergeFromServer([{ id: "only-1" }]);
+    for (const s of [...sessionStore.get().sessions]) {
+      if (s.serverId) sessionStore.removeFromServer(s.serverId);
+    }
+    expect(sessionStore.get().sessions.length).toBeGreaterThan(0);
+  });
+
+  it("re-selects when the removed conversation was the current one", () => {
+    sessionStore.mergeFromServer([{ id: "cur" }, { id: "other" }]);
+    const cur = sessionStore.get().sessions.find((s) => s.serverId === "cur")!;
+    sessionStore.switchTo(cur.id);
+    expect(sessionStore.get().currentId).toBe(cur.id);
+
+    sessionStore.removeFromServer("cur");
+    expect(sessionStore.get().currentId).not.toBe(cur.id);
+    expect(sessionStore.get().sessions.some((s) => s.serverId === "cur")).toBe(false);
+  });
+});

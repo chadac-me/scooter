@@ -56,6 +56,7 @@ subscribeConversations({ baseUrl: BASE_URL }, "all", {
   // A single-row upsert is not authoritative for sources/links, so an empty `sources: []`
   // must not clobber the poll-populated provider icon.
   onUpsert: (c) => sessionStore.mergeFromServer([c], { sourcesAuthoritative: false }),
+  onRemove: (id) => sessionStore.removeFromServer(id),
 });
 
 // Deep-link support (?thread=<id>): requestSelect's pending target selects the

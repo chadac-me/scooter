@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -8,20 +9,35 @@ import (
 // notifyDecision is the pure gate on the LISTEN loop, deciding from a NOTIFY payload alone whether to read and push a row.
 func TestNotifyDecision(t *testing.T) {
 	t.Run("a valid upsert proceeds", func(t *testing.T) {
-		id, ok := notifyDecision(`{"id":"uuid-live","op":"upsert"}`)
-		if !ok || id != "uuid-live" {
-			t.Fatalf("want proceed, got (%q,%v)", id, ok)
+		c, ok := notifyDecision(`{"id":"uuid-live","op":"upsert"}`)
+		if !ok || c.ID != "uuid-live" || c.deleted() {
+			t.Fatalf("want a live upsert, got (%+v,%v)", c, ok)
 		}
 	})
 
-	t.Run("delete is dropped (removals ride the poll)", func(t *testing.T) {
-		if _, ok := notifyDecision(`{"id":"uuid-live","op":"delete"}`); ok {
-			t.Error("a delete must not push an upsert")
+	t.Run("a delete proceeds, flagged as a removal", func(t *testing.T) {
+		c, ok := notifyDecision(`{"id":"uuid-gone","op":"delete","owner":"alice"}`)
+		if !ok {
+			t.Fatal("a delete must reach the fan-out so the sidebar drops the row")
+		}
+		if !c.deleted() || c.ID != "uuid-gone" {
+			t.Fatalf("want a removal of uuid-gone, got %+v", c)
+		}
+		if c.Owner == nil || *c.Owner != "alice" {
+			t.Fatalf("the payload's owner is the only copy a removal can be filtered by, got %v", c.Owner)
+		}
+	})
+
+	t.Run("an unowned conversation's owner stays nil rather than empty", func(t *testing.T) {
+		// "" is a real caller identity to visible(), so a missing owner must not decay into it.
+		c, ok := notifyDecision(`{"id":"uuid-free","op":"delete","owner":null}`)
+		if !ok || c.Owner != nil {
+			t.Fatalf("want a nil owner, got (%+v,%v)", c, ok)
 		}
 	})
 
 	t.Run("unparseable / empty-id payloads are dropped", func(t *testing.T) {
-		for _, p := range []string{`not json`, `{}`, `{"op":"upsert"}`, ``} {
+		for _, p := range []string{`not json`, `{}`, `{"op":"upsert"}`, `{"op":"delete"}`, ``} {
 			if _, ok := notifyDecision(p); ok {
 				t.Errorf("payload %q should be dropped", p)
 			}
@@ -104,5 +120,68 @@ func received(s *sseSub) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// A removal must obey the same visibility rule as an upsert, using the owner from the payload.
+func TestSSEHubBroadcastRemoveVisibility(t *testing.T) {
+	hub := newSSEHub()
+	alice := hub.subscribe("alice", "mine")
+	bob := hub.subscribe("bob", "mine")
+	all := hub.subscribe("carol", "all")
+
+	hub.broadcastRemove("x", sp("alice"))
+
+	if !received(alice) {
+		t.Error("owner (alice) must learn her own conversation is gone")
+	}
+	if received(bob) {
+		t.Error("bob (scope=mine) must NOT learn an id he could never see")
+	}
+	if !received(all) {
+		t.Error("scope=all must receive every removal")
+	}
+}
+
+// The remove frame must match the UI contract: `data: {kind:"remove", id:"…"}`, with no row attached.
+func TestSSEHubRemoveFrameShape(t *testing.T) {
+	hub := newSSEHub()
+	s := hub.subscribe("", "all")
+	hub.broadcastRemove("c9", sp("alice"))
+
+	msg := <-s.ch
+	if got := string(msg[:6]); got != "data: " {
+		t.Fatalf("frame must start with the SSE data envelope, got %q", got)
+	}
+	body := msg[6 : len(msg)-2]
+	var frame struct {
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &frame); err != nil {
+		t.Fatalf("frame not valid JSON: %v (%q)", err, string(body))
+	}
+	if frame.Kind != "remove" || frame.ID != "c9" {
+		t.Fatalf("unexpected remove frame: %+v", frame)
+	}
+	// A removal names only the id; the row is already gone.
+	if bytes.Contains(body, []byte(`"conversation"`)) {
+		t.Errorf("a remove frame must carry no conversation row: %s", body)
+	}
+}
+
+// An unowned conversation's removal reaches a named caller only under scope=all, exactly as its upsert would.
+func TestSSEHubBroadcastRemoveUnowned(t *testing.T) {
+	hub := newSSEHub()
+	mine := hub.subscribe("alice", "mine")
+	all := hub.subscribe("alice", "all")
+
+	hub.broadcastRemove("x", nil)
+
+	if received(mine) {
+		t.Error("scope=mine must not receive an unowned conversation's removal")
+	}
+	if !received(all) {
+		t.Error("scope=all must receive an unowned conversation's removal")
 	}
 }
