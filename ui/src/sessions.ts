@@ -39,6 +39,25 @@ export interface Session {
   starred?: boolean;
 }
 
+/** One conversation as the server describes it — a snapshot row or an upsert frame, whose id is always the SERVER id. */
+export type ServerConversation = {
+  id: string;
+  title?: string;
+  createdAt?: number;
+  lastActivityAt?: number;
+  model?: string;
+  sources?: string[];
+  links?: SessionLink[];
+  owner?: string;
+  status?: Session["status"];
+  parentId?: string;
+  userTitled?: boolean;
+  starred?: boolean;
+};
+
+/** What a merge may claim beyond the rows themselves: list membership, and per-row link ownership. */
+export type MergeOpts = { fullList?: boolean; sourcesAuthoritative?: boolean };
+
 /** One linked external resource, as summarized in the conversation list. */
 export interface SessionLink {
   source: string; // "github" | "gitlab" | "slack" | "jira" | …
@@ -84,9 +103,15 @@ type State = {
   pendingSelect?: string;
   /** The conversation whose title is being renamed inline, during which mergeFromServer does not run; transient. */
   editingId?: string;
-  /** Server ids whose `remove` frame arrived while the rename lock held, applied when it clears; transient. */
-  pendingRemovals?: string[];
+  /** Stream frames that arrived while the rename lock held, replayed in order once it clears; transient.
+   *  A frame the lock drops is lost for good, since nothing re-reads the list. Why: PR #783. */
+  pendingFrames?: PendingFrame[];
 };
+
+/** One deferred stream frame: a merge with the opts it arrived with, or a removal by server id. */
+type PendingFrame =
+  | { kind: "merge"; convs: ServerConversation[]; opts?: MergeOpts }
+  | { kind: "remove"; serverId: string };
 
 /** A brand-new, untouched conversation (default title, no messages yet). */
 const isPristine = (s: Session) => s.title === DEFAULT_TITLE;
@@ -249,12 +274,33 @@ const setState = (next: State) => {
   emit();
 };
 
-/** Apply the removals that arrived while the rename lock held; called wherever that lock clears. */
-const flushPendingRemovals = () => {
-  const queued = state.pendingRemovals;
+/** Queue a frame the rename lock is holding back: newest wins per conversation, and a full-list
+ *  frame supersedes the queue — which is also what bounds it. Why: PR #783. */
+const queueFrame = (frame: PendingFrame) => {
+  const queued = state.pendingFrames ?? [];
+  const ids =
+    frame.kind === "remove" ? [frame.serverId] : frame.convs.map((c) => c.id);
+  const supersedesAll = frame.kind === "merge" && (frame.opts?.fullList ?? true);
+  const kept = supersedesAll
+    ? []
+    : queued.filter((q) =>
+        (q.kind === "remove" ? [q.serverId] : q.convs.map((c) => c.id)).every(
+          (id) => !ids.includes(id),
+        ),
+      );
+  setState({ ...state, pendingFrames: [...kept, frame] });
+};
+
+/** Replay the frames that arrived while the rename lock held; called wherever that lock clears. */
+const flushPendingFrames = () => {
+  const queued = state.pendingFrames;
   if (!queued?.length) return;
-  setState({ ...state, pendingRemovals: undefined });
-  for (const id of queued) sessionStore.removeFromServer(id);
+  // Cleared first so the replay, which re-enters the store, cannot re-queue behind itself.
+  setState({ ...state, pendingFrames: undefined });
+  for (const frame of queued) {
+    if (frame.kind === "remove") sessionStore.removeFromServer(frame.serverId);
+    else sessionStore.mergeFromServer(frame.convs, frame.opts);
+  }
 };
 
 export const sessionStore = {
@@ -310,12 +356,12 @@ export const sessionStore = {
 
   /** Merge conversations loaded from the agent-host into the list, deduping by server id, sorting and keeping the current selection. */
   mergeFromServer(
-    convs: Array<{ id: string; title?: string; createdAt?: number; lastActivityAt?: number; model?: string; sources?: string[]; links?: SessionLink[]; owner?: string; status?: Session["status"]; parentId?: string; userTitled?: boolean; starred?: boolean }>,
+    convs: ServerConversation[],
     // `fullList` is membership: only a full-list read (the poll or the SSE snapshot) can say a
     // row is gone. `sourcesAuthoritative` is per-row content: whether this read's
     // `sources`/`links` replace what is held. A single-row upsert is the one case where they
     // differ — it owns its own row's links but says nothing about any other row. Why: PR #779.
-    opts?: { fullList?: boolean; sourcesAuthoritative?: boolean },
+    opts?: MergeOpts,
   ) {
     const fullList = opts?.fullList ?? true;
     const authoritative = opts?.sourcesAuthoritative ?? true;
@@ -323,9 +369,13 @@ export const sessionStore = {
     // While an inline rename input is open, the merge must not re-render the sidebar at all, since reconciliation can detach the input.
     if (state.editingId !== undefined) {
       // The lock only holds while the editing row is still rendered, because nothing else could clear it once the row is gone.
-      if (filteredSessions(state).some((s) => s.id === state.editingId)) return;
+      if (filteredSessions(state).some((s) => s.id === state.editingId)) {
+        // Deferred, not dropped: the stream sends each change once. Why: PR #783.
+        queueFrame({ kind: "merge", convs, opts });
+        return;
+      }
       setState({ ...state, editingId: undefined });
-      flushPendingRemovals();
+      flushPendingFrames();
     }
     const serverIds = new Set(convs.map((c) => c.id));
     // Index by the server id, which is what `convs` is keyed by.
@@ -405,9 +455,7 @@ export const sessionStore = {
     // lock to clear. It cannot simply be skipped: the stream sends a remove frame once, and
     // with no poll behind it a dropped one leaves a dead row in the sidebar. Why: PR #780.
     if (state.editingId !== undefined) {
-      if (!state.pendingRemovals?.includes(serverId)) {
-        setState({ ...state, pendingRemovals: [...(state.pendingRemovals ?? []), serverId] });
-      }
+      queueFrame({ kind: "remove", serverId });
       return;
     }
     const gone = state.sessions.find((s) => serverKeyOf(s) === serverId);
@@ -459,7 +507,7 @@ export const sessionStore = {
     if (state.editingId === undefined) return;
     if (id !== undefined && state.editingId !== id) return;
     setState({ ...state, editingId: undefined });
-    flushPendingRemovals();
+    flushPendingFrames();
   },
 
   /** Optimistically set a user-chosen title and lock it against agent titles; the caller persists via renameConversation. */

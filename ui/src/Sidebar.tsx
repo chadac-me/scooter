@@ -72,6 +72,11 @@ function InfoTip({ text }: { text: string }) {
   );
 }
 
+/** Whether a blurred inline-rename input stays open: only focus moving WITHIN its row keeps it,
+ *  since an input left open with nothing focused strands the rename lock. Why: PR #783. */
+export const renameStaysOpen = (hasNextTarget: boolean, nextIsInRow: boolean): boolean =>
+  hasNextTarget && nextIsInRow;
+
 /** One conversation row: select, inline rename (double-click the title), star
  *  toggle, and delete-with-confirm. memo()'d so a stream merge, which reuses an
  *  unchanged Session object, does not re-render a row mid-interaction. */
@@ -151,13 +156,11 @@ const SessionRow = memo(function SessionRow({
           autoFocus
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          // Commit only when focus moved outside this row; a reconcile-induced blur onto a
-          // sibling button is not a click-away.
           onBlur={(e) => {
-            const movedOutOfRow =
-              e.relatedTarget instanceof Node &&
-              !e.currentTarget.closest('[data-testid="session-item"]')?.contains(e.relatedTarget);
-            if (movedOutOfRow) commitRename();
+            const row = e.currentTarget.closest('[data-testid="session-item"]');
+            const hasNextTarget = e.relatedTarget instanceof Node;
+            const nextIsInRow = hasNextTarget && (row?.contains(e.relatedTarget) ?? false);
+            if (!renameStaysOpen(hasNextTarget, nextIsInRow)) commitRename();
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") commitRename();

@@ -858,6 +858,49 @@ describe("removeFromServer (the stream's remove frame)", () => {
     expect(ids, "the upsert that released the lock still applies").toContain("r-10");
   });
 
+  it("applies a deferred UPSERT, so a rename elsewhere is not lost behind the lock", () => {
+    // A rename in another tab arrives as an upsert frame. The lock suppresses the re-render,
+    // but the stream sends that frame once and nothing polls behind it, so dropping it leaves
+    // this tab showing the old title for as long as the lock holds — which, for an input left
+    // open, is until a reload.
+    sessionStore.mergeFromServer([{ id: "u-1", title: "Old name" }, { id: "u-2" }]);
+    const editing = sessionStore.get().sessions.find((s) => s.serverId === "u-2")!;
+    sessionStore.setEditing(editing.id);
+    sessionStore.mergeFromServer([{ id: "u-1", title: "New name", userTitled: true }], { fullList: false });
+    expect(
+      sessionStore.get().sessions.find((s) => s.serverId === "u-1")!.title,
+      "the merge is held back while the input is open",
+    ).toBe("Old name");
+    sessionStore.clearEditing();
+    expect(sessionStore.get().sessions.find((s) => s.serverId === "u-1")!.title).toBe("New name");
+  });
+
+  it("keeps only the NEWEST queued frame per conversation", () => {
+    // An upsert and a removal of one row are contradictory; replaying both in arrival order
+    // would resurrect a deleted row (or bury a live one), so the later frame is the truth.
+    sessionStore.mergeFromServer([{ id: "u-3", title: "First" }, { id: "u-4" }]);
+    const editing = sessionStore.get().sessions.find((s) => s.serverId === "u-4")!;
+    sessionStore.setEditing(editing.id);
+    sessionStore.removeFromServer("u-3");
+    sessionStore.mergeFromServer([{ id: "u-3", title: "Back again", userTitled: true }], { fullList: false });
+    sessionStore.clearEditing();
+    const row = sessionStore.get().sessions.find((s) => s.serverId === "u-3");
+    expect(row, "the re-add came after the removal, so the row lives").toBeDefined();
+    expect(row!.title).toBe("Back again");
+  });
+
+  it("lets a queued SNAPSHOT supersede the frames it already accounts for", () => {
+    // A reconnect's snapshot is complete truth, so anything queued before it is stale; the
+    // queue is also what bounds growth while a lock is held open.
+    sessionStore.mergeFromServer([{ id: "u-5" }, { id: "u-6" }]);
+    const editing = sessionStore.get().sessions.find((s) => s.serverId === "u-6")!;
+    sessionStore.setEditing(editing.id);
+    sessionStore.mergeFromServer([{ id: "u-5", title: "Mid-flight", userTitled: true }], { fullList: false });
+    sessionStore.mergeFromServer([{ id: "u-5", title: "Snapshot title", userTitled: true }, { id: "u-6" }]);
+    sessionStore.clearEditing();
+    expect(sessionStore.get().sessions.find((s) => s.serverId === "u-5")!.title).toBe("Snapshot title");
+  });
+
   it("never empties the list, so the UI always has a conversation to show", () => {
     sessionStore.mergeFromServer([{ id: "only-1" }]);
     for (const s of [...sessionStore.get().sessions]) {

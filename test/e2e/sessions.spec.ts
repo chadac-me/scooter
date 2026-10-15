@@ -54,7 +54,7 @@ test.describe("session selector & titles", () => {
 
   // TODO(rename-e2e): re-enable once this runs on a non-CPU-starved runner; the rename-open
   // click intermittently misses Playwright's action window on the 2-core hosted runner, and
-  // ui/src/Sidebar.rename.test.tsx guards the interaction until then.
+  // ui/src/Sidebar.rename.test.ts guards the blur rule until then.
   test.skip("the user can rename a conversation, and the agent can't override it", async ({ chat, page }) => {
     await chat.open();
     await chat.send("help me refactor the parser");
