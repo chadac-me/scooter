@@ -26,6 +26,7 @@ import {
 } from "./client.js";
 import { agentHostConfig } from "./config.js";
 import { useSessions, currentConversation } from "./sessions.js";
+import { pollWhileVisible } from "./visiblePoll.js";
 import { ServiceRows } from "./ServicesPanel.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -76,17 +77,23 @@ export function useSandboxStatus() {
     if (svcs) setServices((prev) => (sameServices(prev, svcs) ? prev : svcs));
   }, [currentId]);
 
+  // Declared before the poll effect so the reset lands before the new conversation is read.
   useEffect(() => {
     setServerStatus(undefined); // reset on conversation switch
     setReady(false);
-    void refreshStatus();
-    void refreshServices();
-    const t = setInterval(() => {
+  }, [currentId]);
+
+  // A down pod has no services, and comes back only via Start, which refreshes directly.
+  const down = serverStatus === "suspended" || serverStatus === "ended";
+
+  useEffect(() => {
+    const read = () => {
       void refreshStatus();
-      void refreshServices();
-    }, 4000);
-    return () => clearInterval(t);
-  }, [refreshStatus, refreshServices]);
+      if (!down) void refreshServices();
+    };
+    read();
+    return pollWhileVisible(read, down ? 30_000 : 4_000);
+  }, [refreshStatus, refreshServices, down]);
 
   // The resume is done only when the pod is actually ready.
   useEffect(() => {
