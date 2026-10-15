@@ -473,6 +473,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   /** Drop the cached ready-session so the next attempt re-initializes a fresh one, since a
    *  wedged session fails identically on every retry. */
   const dropCachedSession = (why: string) => {
+    // Settle pending requests FIRST: the session that would receive the answer is going away.
+    abandonAgentPermissions(why);
     if (!currentProviderId) return;
     log.warn("dropping the cached agent session; the next attempt re-initializes", {
       provider: currentProviderId,
@@ -488,8 +490,29 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     resolve: (optionId: string | null) => void;
     validOptions: Set<string>;
     onExternal?: (optionId: string | null, approver?: ApproverIdentity) => void;
+    /** Set when the asking session is gone, so the answer is not treated as the user's. */
+    abandoned?: boolean;
   }
   const pendingPermissions = new Map<string, Pending>();
+
+  /** Settle every agent-session request awaiting an answer, since the session that asked is
+   *  gone and nothing would ever resolve it. An external (broker) interrupt outlives the
+   *  session, so it stays pending. Why: #763. */
+  const abandonAgentPermissions = (why: string) => {
+    const orphaned = [...pendingPermissions].filter(([, p]) => !p.onExternal && !p.abandoned);
+    if (orphaned.length === 0) return;
+    log.warn("abandoning permission requests awaiting an answer; the session that asked is gone", {
+      count: orphaned.length,
+      tool_call_ids: orphaned.map(([id]) => id),
+      reason: why,
+    });
+    for (const [, p] of orphaned) {
+      p.abandoned = true;
+      // Resolving unblocks the request handler, which deletes the entry and persists the
+      // PERMISSION_RESOLVED that clears the card.
+      p.resolve(null);
+    }
+  };
 
   const persistListeners = new Set<(event: AguiEvent) => void>();
   const titleListeners = new Set<(title: string) => void>();
@@ -637,16 +660,20 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     emit({ type: "TOOL_CALL_ARGS", toolCallId, delta: JSON.stringify(rawInput) });
   };
 
+  /** Disarm the dead-on-arrival watchdog on a run's first ACP traffic. A permission request
+   *  counts: the wait that follows is the user's, not the agent's. Why: #763. */
+  const noteActivity = (st: RunState) => {
+    if (st.sawActivity) return;
+    st.sawActivity = true;
+    if (st.activityTimer) {
+      clearTimeout(st.activityTimer);
+      st.activityTimer = undefined;
+    }
+  };
+
   const handleUpdate = (st: RunState, u: SessionUpdate) => {
     if (st.ended) return; // never reopen a message after the run is finishing
-    // The first ACP activity disarms the dead-on-arrival watchdog.
-    if (!st.sawActivity) {
-      st.sawActivity = true;
-      if (st.activityTimer) {
-        clearTimeout(st.activityTimer);
-        st.activityTimer = undefined;
-      }
-    }
+    noteActivity(st);
     switch (u.sessionUpdate) {
       case "agent_message_chunk": {
         // Reasoning and text are distinct streams; close reasoning first.
@@ -1239,6 +1266,9 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       client.onPermissionRequest(async (req) => {
         const run = currentRun;
         if (run) {
+          // Often a run's FIRST traffic (goose gates a first-turn tool), so it must disarm
+          // the DOA watchdog or a slow human answer kills the run.
+          noteActivity(run);
           closeOpenText(run);
           closeOpenReasoning(run);
         }
@@ -1265,10 +1295,12 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
             },
           });
         });
+        // Abandoned = settled by teardown, not the user; its run already ended, so don't reopen it.
+        const abandoned = pendingPermissions.get(req.toolCallId)?.abandoned === true;
         pendingPermissions.delete(req.toolCallId);
         // Persist-only record for history replay.
         persist({ type: "PERMISSION_RESOLVED", toolCallId: req.toolCallId, optionId });
-        if (run) {
+        if (run && !abandoned) {
           emit({ type: "RUN_STARTED", threadId: run.threadId, runId: run.runId });
           run.ended = false;
         }

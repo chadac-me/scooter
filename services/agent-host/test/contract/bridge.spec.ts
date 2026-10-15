@@ -1287,6 +1287,48 @@ describe("bridge dead-on-arrival watchdog (firstActivityTimeoutMs)", () => {
     await bridge.stop();
   });
 
+  it("does NOT fire while the run is PAUSED on a permission request that is its FIRST ACP traffic", async () => {
+    const agent = createFakeAcpAgent();
+    // The fake agent's "?<prompt>" directive (and goose's own tool gate on a first-turn
+    // tool) asks for the choice before emitting any session/update, so the request itself
+    // is this run's first and only ACP traffic — there is no update to disarm the watchdog.
+    agent.setScript([
+      {
+        requestPermission: {
+          toolCallId: "pick1",
+          title: "pick a color",
+          options: [
+            { optionId: "red", name: "Red", kind: "allow_once" },
+            { optionId: "green", name: "Green", kind: "allow_once" },
+          ],
+        },
+      },
+      { emit: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "you picked: green" } } },
+      { finish: { stopReason: "end_turn" } },
+    ]);
+    const bridge = mkBridge(agent, 30); // 30ms stands in for the 60s production window
+    const events = collect(bridge);
+    await bridge.start();
+    const run = bridge.prompt({ threadId: "t1", text: "?pick a color" });
+
+    // The user takes longer than the window to answer: human thinking time is not a wedge.
+    await tick(120);
+    const interrupt = events.find(
+      (e) => e.type === "RUN_FINISHED" && (e as { outcome?: { type?: string } }).outcome?.type === "interrupt",
+    );
+    expect(interrupt, "the run must pause as an interrupt").toBeDefined();
+    expect(events.find((e) => e.type === "RUN_ERROR"), "a paused run is not dead on arrival").toBeUndefined();
+
+    // …and the late answer still resumes the run, rather than resolving a killed session.
+    expect(bridge.answerPermission("pick1", "green")).toBe(true);
+    await run;
+    const shown = events
+      .filter((e): e is { type: "TEXT_MESSAGE_CONTENT"; messageId: string; delta: string } => e.type === "TEXT_MESSAGE_CONTENT")
+      .map((e) => e.delta)
+      .join("");
+    expect(shown).toContain("you picked: green");
+  });
+
   it("is disabled when firstActivityTimeoutMs is 0 (opt-out)", async () => {
     const agent = createFakeAcpAgent();
     agent.setScript([]);
@@ -1379,6 +1421,45 @@ describe("bridge liveness watchdog (livenessProbeMs)", () => {
     const interrupt = events.find((e) => e.type === "RUN_FINISHED" && (e as { outcome?: { type?: string } }).outcome?.type === "interrupt");
     expect(interrupt).toBeDefined();
     expect(events.some((e) => e.type === "RUN_ERROR")).toBe(false);
+  });
+
+  it("settles a PENDING permission request when the agent process dies (no dead card to answer)", async () => {
+    const agent = createFakeAcpAgent();
+    agent.setScript([
+      {
+        requestPermission: {
+          toolCallId: "pick1",
+          title: "pick a color",
+          options: [
+            { optionId: "red", name: "Red", kind: "allow_once" },
+            { optionId: "green", name: "Green", kind: "allow_once" },
+          ],
+        },
+      },
+      { finish: { stopReason: "end_turn" } },
+    ]);
+    const bridge = mkBridge(agent, 40);
+    const events = collect(bridge);
+    const persisted: AguiEvent[] = [];
+    bridge.onPersist((e) => persisted.push(e));
+    await bridge.start();
+    void bridge.prompt({ threadId: "t1", text: "?pick a color" });
+
+    await tick(20);
+    expect(events.some((e) => e.type === "RUN_FINISHED")).toBe(true); // paused on the request
+    agent.die(); // the subprocess holding this request exits
+    await tick(90);
+
+    expect((events.find((e) => e.type === "RUN_ERROR") as { code?: string } | undefined)?.code).toBe(
+      "agent_process_died",
+    );
+    // The card is settled rather than left pending, so the user cannot answer into the void.
+    expect(bridge.answerPermission("pick1", "green")).toBe(false);
+    const resolved = persisted.filter((e) => e.type === "PERMISSION_RESOLVED") as Array<{ optionId: string | null }>;
+    expect(resolved.length).toBe(1);
+    expect(resolved[0].optionId).toBe(null); // cancelled, not a pick the user never made
+    // The dead run is not reopened by the teardown's own answer.
+    expect(events.filter((e) => e.type === "RUN_STARTED").length).toBe(1);
   });
 
   it("is disabled when livenessProbeMs is 0 (opt-out) — even a dead agent isn't auto-terminated", async () => {
