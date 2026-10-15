@@ -12,6 +12,7 @@
     ./datadog/contrib.nix
     ./duckduckgo/contrib.nix
     ./echo/contrib.nix
+    ./files/contrib.nix
     ./github/contrib.nix
     ./gitlab/contrib.nix
     ./grafana/contrib.nix

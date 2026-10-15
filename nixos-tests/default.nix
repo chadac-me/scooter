@@ -28,6 +28,9 @@ in
   dev-env-service = runTest ./service.nix;
   # The webServices option: a proxyable unit, a discovery manifest, explicit start and sub-path serving.
   dev-env-web-services = runTest ./web-services.nix;
+  # contrib/files' sandbox half: the unit, the manifest entry and the base path the
+  # proxy forwards, with the viewer's own behaviour left to its pytest suite.
+  dev-env-contrib-files = runTest ./contrib-files.nix;
   # Web-service persistence across a pod recreate: the enabled set is recorded on the PVC and restored at boot.
   dev-env-service-persist = runTest ./service-persist.nix;
   # The mcpServers option: unit, discovery manifest, auto-assigned ports and the per-boot bearer token on loopback.
