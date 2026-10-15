@@ -153,6 +153,42 @@ section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
 .md h4:hover .anchor, .md h5:hover .anchor, .md h6:hover .anchor { opacity: 0.65; }
 .md :target { scroll-margin-top: 54px; }
 .md .xref { border-bottom: 1px dotted var(--brand); }
+
+/* --- comments (step 2: a flat list under the file; the tabbed rail is step 3) --- */
+/* Follows the selection, so the action is where the reader's eye already is. */
+#selbar {
+  position: absolute; z-index: 20; display: none;
+  background: var(--card); border: 1px solid var(--border); border-radius: 7px;
+  box-shadow: 0 2px 10px rgb(0 0 0 / 18%); padding: 3px;
+}
+#comments { border-top: 1px solid var(--border); padding: 14px 18px 26px; }
+#comments.empty { display: none; }
+.cbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.ann {
+  border: 1px solid var(--border); border-radius: 9px; background: var(--card);
+  padding: 9px 12px; margin-bottom: 9px;
+}
+.ann .top { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.ann blockquote {
+  margin: 0 0 6px; padding: 2px 9px; border-left: 3px solid var(--border);
+  color: var(--muted-foreground); font-size: 12.5px; white-space: pre-wrap;
+}
+.ann .text { white-space: pre-wrap; }
+.ann.resolved { opacity: 0.6; }
+/* Sync state is never implied: a comment the broker has not acked says so, because
+   the agent cannot wake on a comment that never left the pod. */
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
+.badge.pending { color: #b58900; border-color: #b58900; }
+.badge.failed, .badge.stale { color: #dc322f; border-color: #dc322f; }
+.badge.acked { color: #859900; border-color: #859900; }
+.badge.disabled { color: var(--muted-foreground); }
+#cform { display: none; margin-bottom: 12px; }
+#cform textarea {
+  width: 100%; box-sizing: border-box; min-height: 62px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--card);
+  color: var(--foreground); font: inherit; resize: vertical;
+}
+#cform .row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
 </style>
 </head>
 <body>
@@ -174,8 +210,27 @@ section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
       <span class="crumb mono" id="openpath">—</span>
     </div>
     <div class="body" id="view"><div class="note">Pick a file on the left.</div></div>
+    <section id="comments" class="empty">
+      <div class="cbar">
+        <span class="chip">comments</span>
+        <span class="crumb" id="ccount"></span>
+        <span class="spacer"></span>
+        <span class="crumb" id="csync"></span>
+      </div>
+      <form id="cform">
+        <blockquote class="mono" id="cquote"></blockquote>
+        <textarea id="ctext" placeholder="Leave a comment for the agent…"></textarea>
+        <div class="row">
+          <button class="btn" type="submit">comment</button>
+          <button class="btn" type="button" id="ccancel">cancel</button>
+          <span class="crumb" id="cerror"></span>
+        </div>
+      </form>
+      <div id="clist"></div>
+    </section>
   </section>
 </main>
+<div id="selbar"><button class="btn" id="selcomment">comment</button></div>
 
 <!-- Pinned, image-baked assets (contrib/files/viewer/deps.nix). Classic scripts,
      so they are in place before the inline module below runs; each is optional and
@@ -196,6 +251,18 @@ const api = (route, params) => {
     return body;
   });
 };
+
+// Writes go to the same /api/annotations tree; nothing else on the page mutates.
+const post = (route, body) =>
+  fetch(`${BASE}/api/${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body || {}),
+  }).then(async (r) => {
+    const parsed = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(parsed.error || r.statusText);
+    return parsed;
+  });
 
 const el = (id) => document.getElementById(id);
 const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -368,11 +435,20 @@ async function open(path) {
   try {
     current = await api("file", { path });
     draw_file(current);
+    await loadAnnotations(path);
   } catch (err) {
     current = null;
+    annotations = [];
+    el("comments").classList.add("empty");
     toggle.hidden = true;
     el("view").innerHTML = `<div class="note">${esc(err.message)}</div>`;
   }
+  // A half-written comment belongs to the file it was anchored against, not the
+  // next one, so switching files discards the form rather than re-targeting it.
+  pendingAnchor = null;
+  el("cform").style.display = "none";
+  el("ctext").value = "";
+  el("cerror").textContent = "";
 }
 
 function draw_file(f) {
@@ -523,6 +599,228 @@ function renderMarkdown(body, path) {
   article.className = "md";
   article.appendChild(frag);
   return article;
+}
+
+// --- comments -----------------------------------------------------------------
+// The quote is the anchor's identity and the line only a hint, so the server
+// re-places every anchor against the file on disk. Why: PR #779.
+
+let annotations = [];
+// The selection a comment is being written against, held because opening the form
+// collapses the selection it came from.
+let pendingAnchor = null;
+// The one follow-up poll for an in-flight push, cleared on every draw.
+let syncPoll = null;
+
+const SYNC_NOTE = {
+  pending: "not yet sent to the broker — the agent has not been woken",
+  acked: "stored by the broker",
+  failed: "could not be sent; the agent has not been woken",
+  disabled: "this deployment stores no annotations, so nothing was sent",
+};
+
+/** The quote plus a line hint, derived from what the reader highlighted. */
+function anchorFromSelection(sel) {
+  const raw = sel.toString().replace(/\s+$/, "");
+  if (!raw.trim() || !current || typeof current.body !== "string") return null;
+  // One line only: a multi-line quote is matched against the joined file text, and
+  // a selection dragged across a rendered document rarely reproduces it exactly.
+  const quote = raw.split("\n")[0].trim().slice(0, 240);
+  if (!quote) return null;
+  const lines = current.body.split("\n");
+  // Count the matches before the selection so the right one of several identical
+  // lines is chosen; the server searches from this hint outwards either way.
+  const before = rangeBefore(sel);
+  const nth = before === null ? 0 : countOf(before, quote);
+  const hits = lines.flatMap((line, i) => (line.includes(quote) ? [i + 1] : []));
+  if (!hits.length) return { quote, line: 0 };
+  return { quote, line: hits[Math.min(nth, hits.length - 1)] };
+}
+
+/** The view's text up to the selection's start, or null when it is not in the view. */
+function rangeBefore(sel) {
+  const view = el("view");
+  const at = sel.getRangeAt(0);
+  if (!view.contains(at.startContainer)) return null;
+  const range = document.createRange();
+  range.selectNodeContents(view);
+  try {
+    range.setEnd(at.startContainer, at.startOffset);
+  } catch {
+    return null;
+  }
+  return range.toString();
+}
+
+const countOf = (haystack, needle) => haystack.split(needle).length - 1;
+
+const selbar = el("selbar");
+
+document.addEventListener("selectionchange", () => {
+  const sel = document.getSelection();
+  if (!current || !sel || sel.isCollapsed || !el("view").contains(sel.anchorNode)) {
+    selbar.style.display = "none";
+    return;
+  }
+  const box = sel.getRangeAt(0).getBoundingClientRect();
+  if (!box.width && !box.height) return;
+  selbar.style.display = "block";
+  selbar.style.top = `${box.bottom + window.scrollY + 6}px`;
+  selbar.style.left = `${box.left + window.scrollX}px`;
+});
+
+el("selcomment").addEventListener("click", () => {
+  const anchor = anchorFromSelection(document.getSelection());
+  selbar.style.display = "none";
+  if (!anchor) return;
+  if (!anchor.line) {
+    // The rendered text does not appear in the source, so there is nothing to anchor
+    // to and raw mode is where the matched bytes are.
+    return showError("That selection is not in the file's text — switch to raw and select there.");
+  }
+  pendingAnchor = anchor;
+  el("cquote").textContent = anchor.quote;
+  el("cform").style.display = "block";
+  el("cerror").textContent = "";
+  el("ctext").focus();
+});
+
+function showError(message) {
+  el("comments").classList.remove("empty");
+  el("cerror").textContent = message;
+}
+
+el("ccancel").addEventListener("click", () => {
+  el("cform").style.display = "none";
+  el("ctext").value = "";
+  pendingAnchor = null;
+});
+
+el("cform").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = el("ctext").value;
+  if (!text.trim() || !pendingAnchor || !selected) return;
+  try {
+    await post("annotations", { path: selected, text, ...pendingAnchor });
+    el("cform").style.display = "none";
+    el("ctext").value = "";
+    pendingAnchor = null;
+    await loadAnnotations(selected);
+  } catch (err) {
+    showError(err.message);
+  }
+});
+
+async function loadAnnotations(path) {
+  if (!path) return;
+  try {
+    const body = await api("annotations", { path });
+    annotations = body.annotations;
+    drawAnnotations(body.counts);
+  } catch (err) {
+    // A viewer deployed without a store is a read-only file browser, not a failure.
+    annotations = [];
+    el("comments").classList.add("empty");
+  }
+}
+
+function drawAnnotations(counts) {
+  const section = el("comments");
+  const list = el("clist");
+  list.replaceChildren();
+  if (!annotations.length && el("cform").style.display !== "block") {
+    section.classList.add("empty");
+    return;
+  }
+  section.classList.remove("empty");
+  el("ccount").textContent = annotations.length ? `${annotations.length} on this file` : "";
+  const pending = (counts && counts.pending) || 0;
+  el("csync").textContent = pending ? `${pending} not yet synced` : "";
+  // The outbox acks on its own thread, so one follow-up per draw — and only while
+  // something is in flight — keeps the page off a stale "pending".
+  clearTimeout(syncPoll);
+  if (pending) syncPoll = setTimeout(() => loadAnnotations(selected), 1500);
+
+  for (const a of annotations) list.appendChild(card(a));
+}
+
+function card(a) {
+  const node = document.createElement("div");
+  node.className = `ann${a.resolved ? " resolved" : ""}`;
+
+  const top = document.createElement("div");
+  top.className = "top";
+  const where = document.createElement("span");
+  where.className = "crumb mono";
+  where.textContent = `line ${a.line}`;
+  top.appendChild(where);
+  // A moved anchor is worth saying: the comment is still on its sentence, which has
+  // drifted from the line the reader wrote it against.
+  if (a.anchor_state === "moved") top.appendChild(badge("moved", `written against line ${a.recorded_line}`));
+  if (a.anchor_state === "stale") top.appendChild(badge("stale", "the quoted text is no longer in the file"));
+  top.appendChild(badge(a.state, SYNC_NOTE[a.state] || ""));
+
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  top.appendChild(spacer);
+
+  // `disabled` is offered the retry too: it means the deployment stored nothing when
+  // the comment was written, and a re-applied broker makes the same push succeed.
+  if (a.state === "failed" || a.state === "disabled") top.appendChild(action("retry", () => retry(a.id)));
+  if (!a.resolved) top.appendChild(action("resolve", () => resolveThread(a.thread, true)));
+  else top.appendChild(action("reopen", () => resolveThread(a.thread, false)));
+
+  const quote = document.createElement("blockquote");
+  quote.className = "mono";
+  quote.textContent = a.quote;
+
+  const text = document.createElement("div");
+  text.className = "text";
+  text.textContent = a.text;
+
+  node.append(top, quote, text);
+  if (a.error) {
+    const why = document.createElement("div");
+    why.className = "crumb";
+    why.textContent = a.error;
+    node.appendChild(why);
+  }
+  return node;
+}
+
+function badge(kind, title) {
+  const span = document.createElement("span");
+  span.className = `badge ${kind}`;
+  span.textContent = kind;
+  if (title) span.title = title;
+  return span;
+}
+
+function action(label, onClick) {
+  const button = document.createElement("button");
+  button.className = "btn";
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+async function retry(id) {
+  try {
+    await post(`annotations/${encodeURIComponent(id)}/retry`, {});
+  } catch (err) {
+    showError(err.message);
+  }
+  await loadAnnotations(selected);
+}
+
+async function resolveThread(thread, resolved) {
+  try {
+    await post(`annotations/threads/${encodeURIComponent(thread)}/resolve`, { resolved });
+  } catch (err) {
+    showError(err.message);
+  }
+  await loadAnnotations(selected);
 }
 
 // Expand ancestors first, so a deep link opens showing where the file lives.
