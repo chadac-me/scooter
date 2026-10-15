@@ -905,8 +905,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         }
       }
       touch(entry);
-      // A priority prompt (a webhook @mention) preempts with the "thinking" policy, which
-      // interrupts idle text generation but lets an in-flight tool call finish.
+      // A priority prompt (a webhook @mention, or a send while a run is in flight) preempts
+      // with the "thinking" policy: it ends the turn at its next tool-call boundary rather
+      // than killing a tool call or discarding a turn that has not reached one. Why: PR #765.
       await entry.bridge?.prompt(
         { threadId, text, images, files, source },
         priority ? { priority, interrupt: "thinking" } : undefined,

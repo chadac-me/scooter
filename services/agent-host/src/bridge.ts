@@ -278,8 +278,9 @@ export interface SessionBridge {
    *  rejecting each drained prompt() and emitting a clearing QUEUE_UPDATED. */
   drainQueue(): Array<{ text: string; priority: number }>;
 
-  /** True when a PRIORITY_INTERRUPT item is waiting, which tells a provider's pre-tool
-   *  gate to deny the next tool so the run quiesces to a boundary. */
+  /** True when a PRIORITY_INTERRUPT item is waiting that outranks the running batch, which
+   *  tells a provider's pre-tool gate to deny the next tool so the run quiesces to a
+   *  boundary. */
   shouldYieldToQueue(): boolean;
 
   /** Record one raw agent-input frame under the current run for the transcript recorder
@@ -423,6 +424,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   // The batch the pump is currently running, which is no longer in `queue` but must still
   // survive a suspend via drainQueue().
   let runningBatch: QueueItem[] = [];
+  // The priority tier of that batch, which bounds what may preempt it (see preemptingItem).
+  let runningPriority = PRIORITY_NORMAL;
   // The run currently receiving ACP updates (set during runPrompt()).
   let currentRun: RunState | undefined;
   // terminalId -> the command goose asked to run in it, consumed by the tool_call_update
@@ -563,11 +566,11 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     cancelled?: boolean;
     // When the run began executing, for the queue's force-interrupt age check.
     startedAt?: number;
-    // Tool calls started but not yet finished; the "thinking" interrupt policy defers its
-    // cancel while this is > 0.
+    // Tool calls started but not yet finished; a "thinking" interrupt's cancel waits for
+    // this to drop to 0.
     inFlightTools: number;
-    // Set when a "thinking" interrupt deferred behind an in-flight tool call, so the cancel
-    // fires when inFlightTools hits 0.
+    // Set when a "thinking" interrupt is waiting, so the cancel fires the next time
+    // inFlightTools drops to 0 (never mid-tool, and never before the first tool call).
     cancelWhenToolsIdle?: boolean;
     // tool_call_ids whose last update handed off a live terminal handle, meaning the command
     // is still running and the real finish is a later update.
@@ -1059,28 +1062,36 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     if (priorityInterruptMs <= 0) return; // fallback disabled
     const remaining = Math.max(0, priorityInterruptMs - (Date.now() - head.enqueuedAt));
     interruptTimer = setTimeout(() => {
-      const stillWaiting = (topPriorityItem()?.priority ?? 0) >= PRIORITY_INTERRUPT;
-      if (currentRun && stillWaiting) void self.cancel().catch(() => {});
+      if (preemptingItem()) void self.cancel().catch(() => {});
     }, remaining);
     (interruptTimer as { unref?: () => void }).unref?.();
   };
+  /** The queued item entitled to preempt the running turn, or undefined if none is: a
+   *  priority item only preempts a run serving a STRICTLY lower tier, so a burst of
+   *  same-tier sends cannot cancel the turn spawned to answer the first of them. */
+  const preemptingItem = (): QueueItem | undefined => {
+    if (!currentRun) return undefined;
+    const head = topPriorityItem();
+    if (!head || head.priority < PRIORITY_INTERRUPT) return undefined;
+    return head.priority > runningPriority ? head : undefined;
+  };
   const applyPreemption = () => {
     clearInterruptTimer();
-    if (!currentRun) return;
-    const head = topPriorityItem();
-    if (!head || head.priority < PRIORITY_INTERRUPT) return;
+    const run = currentRun;
+    const head = preemptingItem();
+    if (!run || !head) return;
 
     if (head.interrupt === "tool-call") {
       void self.cancel().catch(() => {}); // immediate, kills the running tool call
       return;
     }
     if (head.interrupt === "thinking") {
-      if (currentRun.inFlightTools === 0) {
-        void self.cancel().catch(() => {}); // idle thinking — preempt now
-      } else {
-        currentRun.cancelWhenToolsIdle = true; // let the tool call finish, then cancel
-        armTimeoutFallback(head); // ...but don't wait forever on a non-yielding tool
-      }
+      // Always deferred to a tool-call boundary, even with nothing in flight: a run that
+      // has not reached its first tool call is indistinguishable from one idling between
+      // them, and cancelling there throws away work the user never asked to stop (Stop is
+      // the explicit way). Why: PR #765.
+      run.cancelWhenToolsIdle = true;
+      armTimeoutFallback(head); // ...but don't wait forever on a non-yielding tool
       return;
     }
     // "timeout": arm the timer (disabled when priorityInterruptMs <= 0).
@@ -1109,6 +1120,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           .sort((a, b) => a.enqueuedAt - b.enqueuedAt);
         for (const b of batch) queue.splice(queue.indexOf(b), 1);
         runningBatch = batch; // in-flight: not in `queue`, but must survive a suspend
+        runningPriority = item.priority;
         // Surface the shrunk queue; an empty queue emits items:[] so the UI clears its list.
         emitQueueSnapshot();
         clearInterruptTimer(); // the batch is now running, not waiting
@@ -1148,6 +1160,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           for (const b of batch) b.reject(err);
         } finally {
           runningBatch = [];
+          runningPriority = PRIORITY_NORMAL;
         }
         // A priority item may have queued during that run; re-evaluate preemption against
         // the next run.
@@ -1405,7 +1418,9 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     },
 
     shouldYieldToQueue() {
-      return (topPriorityItem()?.priority ?? 0) >= PRIORITY_INTERRUPT;
+      // Same tier rule as preemption: yielding a run that already serves this tier would
+      // just fragment a burst across turns.
+      return preemptingItem() !== undefined;
     },
 
     recordRawInput,

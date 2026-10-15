@@ -1014,9 +1014,12 @@ describe("bridge run queue + cancel", () => {
     expect(finishes.some((f) => f.cancelled === true)).toBe(true);
   });
 
-  it('interrupt "thinking" cancels IMMEDIATELY when NO tool call is in flight (idle thinking)', async () => {
+  it('interrupt "thinking" WAITS for a tool-call boundary even with nothing in flight, so a tool that starts after it survives', async () => {
+    // The flake in #764: a send landing before the run's first tool call read inFlightTools
+    // === 0 as "idle thinking" and cancelled, killing the long tool call that started a
+    // moment later — the one thing the "thinking" policy promises to let finish.
     const agent = createFakeAcpAgent();
-    // No tool call: the run is gated with nothing in flight.
+    // No tool call yet: the run is gated with nothing in flight.
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);
     agent.gate();
     const bridge = mkBridge(agent);
@@ -1028,10 +1031,52 @@ describe("bridge run queue + cancel", () => {
     void bridge.prompt({ threadId: "t1", text: "job done" }, { priority: 10, interrupt: "thinking" });
     await tick();
     await tick();
+    expect(agent.killCount()).toBe(0); // nothing cancelled yet
+    expect(events.some((e) => e.type === "RUN_FINISHED")).toBe(false);
 
-    // No tool in flight → preempt now.
-    const fin = events.find((e) => e.type === "RUN_FINISHED") as { cancelled?: boolean } | undefined;
-    expect(fin?.cancelled).toBe(true);
+    // The run reaches its first tool call AFTER the preemption was requested; it must run.
+    agent.emit({ sessionUpdate: "tool_call", toolCallId: "tc1", title: "run: sleep 60" } as never);
+    await tick();
+    await tick();
+    expect(agent.killCount()).toBe(0); // the tool call was not killed
+    expect(events.some((e) => e.type === "RUN_FINISHED")).toBe(false);
+
+    // Only its result releases the deferred cancel.
+    agent.emit({ sessionUpdate: "tool_call_update", toolCallId: "tc1", status: "completed", content: "ok" } as never);
+    await tick();
+    await tick();
+    expect(agent.killCount()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a same-tier priority item does NOT preempt the run already serving one", async () => {
+    // Otherwise a burst of mid-run sends cancels the very turn spawned to answer the first
+    // of them, fragmenting the burst across half-finished turns (#764).
+    const agent = createFakeAcpAgent();
+    agent.setScript([{ finish: { stopReason: "end_turn" } }]);
+    agent.gate();
+    const bridge = mkBridge(agent, 20);
+    const events = collect(bridge);
+    await bridge.start();
+    // The run in flight is itself serving a priority item (the first mid-run send).
+    void bridge.prompt({ threadId: "t1", text: "send 1" }, { priority: 10, interrupt: "tool-call" });
+    await tick();
+
+    // The rest of the burst lands while that run is in flight.
+    void bridge.prompt({ threadId: "t1", text: "send 2" }, { priority: 10, interrupt: "tool-call" });
+    void bridge.prompt({ threadId: "t1", text: "send 3" }, { priority: 10, interrupt: "tool-call" });
+    // Past the timeout fallback too, which must not fire against its own tier either.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(agent.killCount()).toBe(0);
+    expect(bridge.shouldYieldToQueue()).toBe(false); // no pre-tool back-pressure either
+    expect(events.some((e) => e.type === "RUN_FINISHED")).toBe(false);
+    expect(bridge.queueState().queued).toBe(2); // both still queued, to drain as one batch
+
+    agent.releaseGate();
+    await tick();
+    await tick();
+    await tick();
+    // Two runs: "send 1", then "send 2" + "send 3" coalesced.
+    expect(events.filter((e) => e.type === "RUN_STARTED").length).toBe(2);
   });
 
   // --- suspend / revive teardown of the queue ----------------------------------

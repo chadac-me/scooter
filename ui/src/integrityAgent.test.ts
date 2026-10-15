@@ -174,6 +174,53 @@ describe("IntegrityAgent", () => {
     agent.dispose();
   });
 
+  it("SERIALIZES a burst of sends, so the agent-host queues them in the order they were sent", async () => {
+    // The host's run queue is FIFO by arrival, so three concurrent POSTs could be queued in
+    // any order — "second" overtaking "first" in the user's own thread (#764).
+    const started: string[] = [];
+    const release: Array<() => void> = [];
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      started.push(JSON.parse(String(init!.body)).messages[0].content);
+      // Hold the response head open, as a request still in flight would.
+      await new Promise<void>((r) => release.push(r));
+      return new Response(new ReadableStream(), { status: 200 });
+    }) as unknown as typeof fetch;
+    const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: fetchSpy });
+
+    const sends = [agent.send("first"), agent.send("second"), agent.send("third")];
+    await new Promise((r) => setTimeout(r, 0));
+    // Only the first request has been issued; the rest wait their turn.
+    expect(started).toEqual(["first"]);
+
+    // Each completion lets exactly the next one go, in send order.
+    for (const expected of [["first", "second"], ["first", "second", "third"]]) {
+      release.shift()!();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(started).toEqual(expected);
+    }
+    release.shift()!();
+    await Promise.all(sends);
+    agent.dispose();
+  });
+
+  it("a send whose POST never answers does NOT wedge the next one (the chain is capped)", async () => {
+    const started: string[] = [];
+    const fetchSpy = vi.fn(async (_url: string, init?: RequestInit) => {
+      started.push(JSON.parse(String(init!.body)).messages[0].content);
+      if (started.length === 1) await new Promise(() => {}); // never answers
+      return new Response(new ReadableStream(), { status: 200 });
+    }) as unknown as typeof fetch;
+    const agent = createIntegrityAgent({
+      baseUrl: "http://host", conversationId: "c1", fetchImpl: fetchSpy, sendOrderTimeoutMs: 10,
+    });
+
+    void agent.send("stuck");
+    await agent.send("after");
+
+    expect(started).toEqual(["stuck", "after"]);
+    agent.dispose();
+  });
+
   it("submitResume() POSTs /agui with resume[] to answer an interrupt", async () => {
     const fetchSpy = vi.fn(async () => new Response(new ReadableStream(), { status: 200 })) as unknown as typeof fetch;
     const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: fetchSpy });

@@ -42,7 +42,7 @@ function QueuedMessageRow({ m }: { m: QueuedMessage }) {
           ? "border-warning/40 bg-warning/10 text-foreground"
           : "border-transparent text-muted-foreground")
       }
-      title={priority ? "Will interrupt the current turn" : "Waiting for the current turn to finish"}
+      title={priority ? "Will interrupt the current turn once it finishes what it is doing" : "Waiting for the current turn to finish"}
     >
       {/* Lightning bolt for a priority message, clock for a waiting one. */}
       <span aria-hidden className={"mt-0.5 shrink-0 " + (priority ? "text-warning" : "text-muted-foreground/70")}>

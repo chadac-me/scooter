@@ -24,6 +24,10 @@ test.describe("queue rendering while a run is in flight", () => {
     await expect(page.locator('[data-testid="queued-message-text"]').first()).toContainText("queued while busy");
   });
 
+  // Rests on two invariants a burst of mid-run sends needs (both #764): the priority send's
+  // preemption waits for the running turn's next tool-call boundary, so the `!sleep` run is
+  // not ended under the burst; and the UI serializes its POSTs, so the host's arrival-ordered
+  // queue sees them in the order they were sent.
   test("THREE messages sent mid-run all queue, in FIFO order", async ({ chat, page }) => {
     await chat.open();
     await chat.startLongRun(RUN_SEC);
@@ -59,7 +63,7 @@ test.describe("queue rendering while a run is in flight", () => {
     ).toEqual([0, 1, 2]);
   });
 
-  test("a mid-run message carries the PRIORITY pill (it preempts the running turn)", async ({ chat, page }) => {
+  test("a mid-run message carries the PRIORITY pill (it preempts at the turn's next tool boundary)", async ({ chat, page }) => {
     await chat.open();
     await chat.startLongRun(RUN_SEC);
     await chat.sendWhileRunning("urgent");

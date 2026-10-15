@@ -26,6 +26,8 @@ export interface IntegrityAgentConfig extends AgentHostConfig {
   idleReconnectMs?: number;
   /** Delay in ms between cancel() 404 retries. */
   cancelRetryDelayMs?: number;
+  /** How long one POST /agui may hold up the next one (default 5s); see the send chain in postAgui. */
+  sendOrderTimeoutMs?: number;
 }
 
 /** A resume answer to a pending interrupt (permission/option choice). */
@@ -64,6 +66,8 @@ export class IntegrityAgent extends AbstractAgent {
   private readonly controllers = new Set<AbortController>();
   /** Stops the render-pump reconnect loop (see renderPump), called on dispose. */
   private stopPump?: () => void;
+  /** Tail of the serialized POST /agui chain, so a burst of sends reaches the host in order (see postAgui). */
+  private sendChain: Promise<void> = Promise.resolve();
   /** Every unanswered interrupt the conversation is paused on, keyed by id; added on RUN_FINISHED(outcome=interrupt) and removed only by a matching PERMISSION_RESOLVED, never by run boundaries. */
   private pendingApprovals = new Map<string, PendingInterrupt>();
 
@@ -843,8 +847,28 @@ export class IntegrityAgent extends AbstractAgent {
     throw new Error(`cancel request failed: ${last}`);
   }
 
-  /** Fire-and-forget POST /agui that cancels the response body instead of reading it. */
+  /**
+   * Fire-and-forget POST /agui, serialized against the previous one: the agent-host orders
+   * the run queue by the time a prompt ARRIVES, so concurrent requests (a burst of sends
+   * typed while a run is in flight) can be queued out of the order the user sent them.
+   * Waiting for the previous response head means the host has already read that body.
+   * A slow POST must not wedge the next send, so the wait is capped. Why: PR #765.
+   */
   private async postAgui(body: Record<string, unknown>): Promise<void> {
+    const prior = this.sendChain;
+    const run = Promise.race([prior, delay(this.cfg.sendOrderTimeoutMs ?? 5_000)]).then(() =>
+      this.postAguiNow(body),
+    );
+    // Swallow on the chain only: the caller still sees this send's own rejection.
+    this.sendChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** The actual request, resolved once the response head lands. */
+  private async postAguiNow(body: Record<string, unknown>): Promise<void> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
