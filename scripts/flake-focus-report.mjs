@@ -277,15 +277,15 @@ export function renderMarkdown(summary, opts = {}) {
       L.push(
         control.strength === "tight"
           ? `The flake fires on the base at **${pct(control.baseRate)}** and not at all here. If this branch still flaked at that rate, ${plural(summary.runs, "clean run")} in a row would happen only about **${pct(control.pAllCleanAtBaseRate)}** of the time — so this is a real change in behaviour, bounded rather than proven.`
-          : `⚠️ **The control is too weak to conclude much.** The base only failed ${control.baseFailed}/${control.baseRuns} (**${pct(control.baseRate)}**), so even if this branch still flaked at exactly that rate, ${plural(summary.runs, "clean run")} in a row would happen about **${pct(control.pAllCleanAtBaseRate)}** of the time — luck explains this result almost as well as a fix does. Raise the repetition budget until the base fails often enough to make a clean run here meaningful.`,
+          : `⚠️ **The control is too weak to conclude much.** The base only failed ${control.baseFailed}/${control.baseRuns} (**${pct(control.baseRate)}**), so even if this branch still flaked at exactly that rate, ${plural(summary.runs, "clean run")} in a row would happen about **${pct(control.pAllCleanAtBaseRate)}** of the time — luck explains this result almost as well as a fix does. Raise the budget with \`flake-repeat: ${Math.min(40, Math.max(2 * summary.runs, 20))}\` in the PR description, until the base fails often enough to make a clean run here meaningful.`,
       );
     else if (control.kind === "inconclusive")
       // The remedy differs by target: a full run is already under the label the fast
       // nudge would name.
       L.push(
         target === "full"
-          ? `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". This is already the strongest target there is, so the budget is the only knob left: raise \`FULL_REPEAT_TARGETED\` / \`FULL_REPEAT_CONTENTION\` in the \`flake-focus-full\` job, or add \`flake-specs:\` so the test runs under cross-spec contention rather than alone.`
-          : `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". Raise the repetition budget, add \`flake-specs:\` so it runs under contention, or — if it was seen on the nightly \`e2e-full\` — use the \`e2e-full-flake-check\` label, since the fast stack cannot produce those conditions at all.`,
+          ? `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". This is already the strongest target there is, so the budget is the only knob left: put \`flake-repeat: ${Math.min(40, Math.max(2 * summary.runs, 20))}\` in the PR description and re-run. Note that \`flake-specs:\` is **not** the second knob it looks like — playwright runs \`workers: 1, fullyParallel: false\` and the \`cleanState\` fixture wipes every conversation before each test, so extra specs run strictly before this one rather than alongside it.`
+          : `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". Raise the budget with \`flake-repeat: ${Math.min(40, Math.max(2 * summary.runs, 20))}\` in the PR description, or — if it was seen on the nightly \`e2e-full\` — use the \`e2e-full-flake-check\` label, since the fast stack cannot produce those conditions at all.`,
       );
     else if (control.kind === "worse")
       L.push(

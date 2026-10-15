@@ -250,14 +250,28 @@ describe("renderMarkdown with a control run", () => {
   it("points a powerless full run at the budget, not at its own label", () => {
     const body = md(Array(5).fill("passed"), Array(5).fill("passed"), { target: "full" });
     expect(body).toContain("no power");
-    expect(body).toContain("FULL_REPEAT_TARGETED");
+    expect(body).toContain("flake-repeat: 20");
     expect(body).not.toContain("use the `e2e-full-flake-check` label");
+  });
+
+  // `flake-specs:` reads like the other knob but cannot add concurrent load, so the
+  // powerless-full advice must say so rather than send the next push down it.
+  it("warns that flake-specs is not a second knob on the full target", () => {
+    const body = md(Array(5).fill("passed"), Array(5).fill("passed"), { target: "full" });
+    expect(body).toContain("workers: 1");
+    expect(body).toContain("cleanState");
+  });
+
+  // The suggestion must clear the budget that just failed to prove anything.
+  it("suggests a budget above the one that came back powerless", () => {
+    const body = md(Array(30).fill("passed"), Array(30).fill("passed"), { target: "full" });
+    expect(body).toContain("flake-repeat: 40");
   });
 
   it("still offers the full target to a powerless fast run", () => {
     const body = md(Array(5).fill("passed"), Array(5).fill("passed"), { target: "fast" });
     expect(body).toContain("use the `e2e-full-flake-check` label");
-    expect(body).not.toContain("FULL_REPEAT_TARGETED");
+    expect(body).not.toContain("workers: 1");
   });
 });
 

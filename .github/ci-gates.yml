@@ -14,7 +14,7 @@
 
 gates:
   - id: flake-full
-    name: flake focus full (k3d, targeted ×5)
+    name: flake focus full (k3d, targeted)
     require: when_labelled
     label: e2e-full-flake-check
     # A reproduction is information, not a veto, but the answer must arrive before
@@ -32,7 +32,7 @@ gates:
     block_while_pending: false
 
   - id: flake-fast
-    name: flake focus (targeted ×20)
+    name: flake focus (targeted)
     require: when_labelled
     label: flake-check
     # Same reasoning as flake-full: the answer must arrive, the answer does not veto.

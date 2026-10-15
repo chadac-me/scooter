@@ -126,11 +126,24 @@ line the check fails loudly rather than passing on zero tests.
 ```
 flake-test: THREE messages sent mid-run       # playwright -g pattern (required)
 flake-specs: test/e2e/queue-durability.spec.ts test/e2e/ui-state-consistency.spec.ts
+flake-repeat: 20                              # repetitions (optional)
 ```
 
-`flake-specs:` is optional — give it when the flake only reproduces under
-cross-spec contention, and CI runs those files together instead of the lone `-g`
-match.
+`flake-specs:` is optional — give it when the flake needs the cluster to have
+been worked before the test runs, and CI runs those files together instead of
+the lone `-g` match. **It does not create concurrent load.** Playwright runs
+`workers: 1, fullyParallel: false` on both targets, and the `cleanState` fixture
+deletes every conversation and polls until the list is empty before each test, so
+the extra specs run strictly *before* the flaky one, never alongside it. What
+they buy is accumulated node wear — image layers, containerd state, a kubelet
+that has been churning — not contention. They also cost repetitions of the test
+you actually care about, so reach for `flake-repeat:` first.
+
+`flake-repeat:` is optional and overrides the job's repetition budget (fast:
+20 targeted / 5 contention; full: 5 / 3), capped at 40 because the control run
+pays the same budget a second time. It is the knob the report names when a run
+comes back with no power — raise it there rather than editing the job's defaults,
+which would re-budget every other PR's flake too.
 
 Both focused jobs report into **one shared PR comment**, a section each (fast /
 full), updated in place on every re-run — so a PR carrying both labels shows the
@@ -156,9 +169,10 @@ comment distinguishes:
   unlikely explanation — the strongest evidence this job can produce;
 - it fires on the base only rarely (say 2/20, leaving ~12% odds of 20 clean runs
   by chance) — reported as a **weak control**, not as a fix;
-- it fires on **neither** — the run had no power at all; raise the repetitions,
-  add `flake-specs:`, or move to the full target. (On the full target there is
-  nowhere further to move: the repeat budget is the only knob left.)
+- it fires on **neither** — the run had no power at all; raise the repetitions
+  with `flake-repeat:`, or move to the full target. (On the full target there is
+  nowhere further to move: the repeat budget is the only knob left — `flake-specs:`
+  is serial, see above.)
 
 The control costs roughly a second run of the job, so it is skipped when the PR's
 own run already reproduced the flake (the answer is in already).
@@ -182,8 +196,8 @@ with the PR skips the push — for a test-only fix, all of them.
 
 | Label | Job | Runs against |
 |---|---|---|
-| `flake-check` | flake focus (targeted ×20) | **fast** — fake stack |
-| `e2e-full-flake-check` | flake focus full (k3d, targeted ×5) | **full** — a real k3d cluster |
+| `flake-check` | flake focus (targeted) | **fast** — fake stack, 20 repetitions by default |
+| `e2e-full-flake-check` | flake focus full (k3d, targeted) | **full** — a real k3d cluster, 5 repetitions by default |
 | `e2e-full` | e2e full (k3d) | the whole full suite, once (the nightly sweeps it ×5) |
 
 Both full-target jobs run on the **self-hosted fleet**, the same runners as the
