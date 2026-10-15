@@ -27,7 +27,7 @@ const conversationsChannel = "conversations_changed"
 // sseHeartbeat keeps the SSE connection alive between upserts with a comment frame the UI parser ignores.
 const sseHeartbeat = 25 * time.Second
 
-// subBuffer bounds how many upserts a slow subscriber may queue before frames are dropped for it rather than blocking every other subscriber.
+// subBuffer bounds how many frames a slow subscriber may queue before it is resynced rather than blocking every other subscriber.
 const subBuffer = 64
 
 // sseSub is one connected /conversations/events client: its visibility scope and a buffered channel of pre-serialized frames.
@@ -35,6 +35,9 @@ type sseSub struct {
 	ch          chan []byte
 	callerOwner string
 	scope       string
+	// resync is signalled when a frame could not be queued for this subscriber, so the serve
+	// loop re-sends a snapshot; a dropped frame is otherwise invisible to the client.
+	resync chan struct{}
 }
 
 // sseHub is the set of live subscribers.
@@ -48,7 +51,13 @@ func newSSEHub() *sseHub {
 }
 
 func (h *sseHub) subscribe(callerOwner, scope string) *sseSub {
-	s := &sseSub{ch: make(chan []byte, subBuffer), callerOwner: callerOwner, scope: scope}
+	s := &sseSub{
+		ch:          make(chan []byte, subBuffer),
+		callerOwner: callerOwner,
+		scope:       scope,
+		// Capacity 1: one pending resync answers any number of dropped frames.
+		resync: make(chan struct{}, 1),
+	}
 	h.mu.Lock()
 	h.subs[s] = struct{}{}
 	h.mu.Unlock()
@@ -61,7 +70,7 @@ func (h *sseHub) unsubscribe(s *sseSub) {
 	h.mu.Unlock()
 }
 
-// broadcast serializes the upsert once and delivers it to every subscriber the row is visible to, skipping rather than blocking on a full buffer.
+// broadcast serializes the upsert once and delivers it to every subscriber the row is visible to, never blocking on a slow one.
 func (h *sseHub) broadcast(row listRow) {
 	frame, err := json.Marshal(struct {
 		Kind         string  `json:"kind"`
@@ -73,7 +82,7 @@ func (h *sseHub) broadcast(row listRow) {
 	h.fanOut(row.Owner, sseData(frame))
 }
 
-// broadcastRemove tells the subscribers a conversation was visible to that it is gone, so the sidebar drops it without waiting for the poll.
+// broadcastRemove tells the subscribers a conversation was visible to that it is gone, so the sidebar drops the row at once.
 func (h *sseHub) broadcastRemove(id string, owner *string) {
 	frame, err := json.Marshal(struct {
 		Kind string `json:"kind"`
@@ -85,7 +94,7 @@ func (h *sseHub) broadcastRemove(id string, owner *string) {
 	h.fanOut(owner, sseData(frame))
 }
 
-// fanOut delivers one pre-serialized frame to every subscriber the owner is visible to, skipping rather than blocking on a full buffer.
+// fanOut delivers one pre-serialized frame to every subscriber the owner is visible to, asking a subscriber whose buffer is full to resync instead of blocking or silently losing the frame.
 func (h *sseHub) fanOut(owner *string, msg []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -95,7 +104,13 @@ func (h *sseHub) fanOut(owner *string, msg []byte) {
 		}
 		select {
 		case s.ch <- msg:
-		default: // buffer full; the poll reconciles this subscriber
+		default:
+			// Buffer full. Nothing else corrects a dropped frame now the list has no poll, so
+			// ask the serve loop for a fresh snapshot. Why: PR #780.
+			select {
+			case s.resync <- struct{}{}:
+			default: // one already pending, which covers this drop too
+			}
 		}
 	}
 }
@@ -224,6 +239,20 @@ func serveConversationEvents(w http.ResponseWriter, r *http.Request, store *Stor
 		select {
 		case <-r.Context().Done():
 			return
+		case <-sub.resync:
+			// Drain first, so the snapshot is read after the frames it supersedes; anything
+			// queued afterwards is at worst a duplicate upsert, which the UI merge absorbs.
+			drain(sub.ch)
+			snap := snapshotFrame(r.Context(), store, links, callerOwner, scope, log)
+			if snap == nil {
+				continue // the read failed; the next change or a reconnect corrects it
+			}
+			log.Warn("subscriber fell behind; re-sent the snapshot",
+				slog.String("scope", scope))
+			if _, err := w.Write(snap); err != nil {
+				return
+			}
+			flusher.Flush()
 		case msg := <-sub.ch:
 			if _, err := w.Write(msg); err != nil {
 				return // client hung up
@@ -267,6 +296,17 @@ func snapshotFrame(ctx context.Context, store *Store, links *LinkStore, callerOw
 		return nil
 	}
 	return sseData(frame)
+}
+
+// drain empties a subscriber's queue without blocking, so a re-sent snapshot is not followed by the stale frames it already accounts for.
+func drain(ch chan []byte) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
 }
 
 // sseData wraps a JSON frame in the SSE `data:` envelope.

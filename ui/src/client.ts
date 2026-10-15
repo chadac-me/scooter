@@ -780,29 +780,11 @@ export async function deleteUserSkill(config: AgentHostConfig, id: string): Prom
 /** Which conversations to list: the caller's own ("mine", default) or all. */
 export type ConversationScope = "mine" | "all";
 
-/** Load the conversations the sidebar lists. */
-export async function loadConversations(
-  config: AgentHostConfig,
-  scope: ConversationScope = "mine",
-): Promise<ConversationView[]> {
-  return (await loadConversationsResult(config, scope)).conversations;
-}
-
-/** Like loadConversations, but also reports whether the server was reachable so a caller can retry only while it is down. */
-export async function loadConversationsResult(
-  config: AgentHostConfig,
-  scope: ConversationScope = "mine",
-): Promise<{ ok: boolean; conversations: ConversationView[] }> {
-  try {
-    const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/conversations?scope=${scope}`, {
-      headers: config.token ? { Authorization: `Bearer ${config.token}` } : undefined,
-    });
-    if (!res.ok) return { ok: false, conversations: [] };
-    return { ok: true, conversations: (await res.json()) as ConversationView[] };
-  } catch {
-    return { ok: false, conversations: [] };
-  }
-}
+// There is deliberately no loadConversations() here. The sidebar's list comes from the
+// /conversations/events stream only (see conversationStream.ts); a second, periodic reader of
+// GET /conversations is the thing PR #780 removed, and re-adding one would restore both the
+// request volume and the two-sources-of-truth it cost. GET /conversations itself stays for
+// non-UI callers.
 
 /** An image attached to a replayed message, rendered via its `url`. */
 export interface MessageImage {

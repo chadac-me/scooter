@@ -73,7 +73,7 @@ function InfoTip({ text }: { text: string }) {
 }
 
 /** One conversation row: select, inline rename (double-click the title), star
- *  toggle, and delete-with-confirm. memo()'d so the 10s merge poll, which reuses an
+ *  toggle, and delete-with-confirm. memo()'d so a stream merge, which reuses an
  *  unchanged Session object, does not re-render a row mid-interaction. */
 const SessionRow = memo(function SessionRow({
   session: s,
@@ -88,7 +88,7 @@ const SessionRow = memo(function SessionRow({
   childCount: number;
   active: boolean;
   // Owned by the store (editingId), not local state, so the row re-derives it on every
-  // render and survives a poll-triggered remount.
+  // render and survives a merge-triggered remount.
   editing: boolean;
   labelMode: LabelMode;
 }) {

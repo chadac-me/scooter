@@ -1,7 +1,8 @@
 /**
- * The conversation-list stream's frame contract. A dropped or misread frame leaves the
- * sidebar disagreeing with the server until the backstop poll happens to run, so every
- * frame kind — and every malformed one — is pinned here.
+ * The conversation-list stream's frame contract and its recovery paths. The stream is the
+ * sidebar's only source of the list, so a dropped or misread frame leaves it disagreeing with
+ * the server until something reconnects — every frame kind, every malformed one, and the
+ * stale-socket watchdog that turns silence into a reconnect are pinned here.
  */
 import { describe, it, expect, vi } from "vitest";
 
@@ -106,5 +107,127 @@ describe("subscribeConversations frames", () => {
     await new Promise((r) => setTimeout(r, 0));
     sub.close();
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://host/conversations/events?scope=mine");
+  });
+});
+
+describe("the stale-socket watchdog (silence is not health)", () => {
+  /**
+   * A fetch stub whose body never ends and never yields on its own, which is what a
+   * black-holed TCP connection looks like from the client: readable forever, no error, no
+   * bytes. Each call exposes its abort state and a push() so a test can feed bytes later.
+   */
+  function hangingFetch(perCall: Array<unknown[]>) {
+    const enc = new TextEncoder();
+    const calls: Array<{ aborted: () => boolean; push: (text: string) => void }> = [];
+    const impl = (async (_url: string, init?: RequestInit) => {
+      const frames = perCall[Math.min(calls.length, perCall.length - 1)] ?? [];
+      const signal = init?.signal;
+      let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          ctrl = c;
+          for (const f of frames) {
+            c.enqueue(enc.encode(typeof f === "string" ? f : `data: ${JSON.stringify(f)}\n\n`));
+          }
+          // Deliberately never closed: as far as the client can tell, the connection is up.
+        },
+      });
+      // Only an abort ends it, exactly as fetch does: the pending read rejects.
+      signal?.addEventListener("abort", () => {
+        try {
+          ctrl.error(new Error("aborted"));
+        } catch {
+          /* already errored or closed */
+        }
+      });
+      calls.push({
+        aborted: () => signal?.aborted === true,
+        push: (text: string) => ctrl.enqueue(enc.encode(text)),
+      });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+    return { impl, calls };
+  }
+
+  it("reconnects — and so re-snapshots — when the server goes silent past the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const { impl, calls } = hangingFetch([
+        [{ kind: "snapshot", conversations: [conv("a")] }],
+        [{ kind: "snapshot", conversations: [conv("a"), conv("b")] }],
+      ]);
+      const seen: ConversationView[][] = [];
+      const sub = subscribeConversations(
+        { baseUrl: "https://host" },
+        "all",
+        { onSnapshot: (l) => void seen.push(l), onUpsert: () => {}, onRemove: () => {} },
+        { fetchImpl: impl, staleAfterMs: 1000 },
+      );
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(seen, "the first snapshot arrives normally").toHaveLength(1);
+      expect(calls).toHaveLength(1);
+
+      // Silence past the deadline. The server's 25s heartbeat is not arriving and the read
+      // will never return or throw, so the watchdog is the only thing that can notice.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(calls[0].aborted(), "a silent stream must be aborted").toBe(true);
+
+      // The reconnect re-snapshots, which is what repairs whatever the dead socket missed.
+      await vi.advanceTimersByTimeAsync(600);
+      expect(calls.length, "the client must reconnect after the abort").toBeGreaterThan(1);
+      expect(seen).toHaveLength(2);
+      expect(seen[1].map((c) => c.id)).toEqual(["a", "b"]);
+      sub.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a heartbeat comment counts as liveness, so an idle-but-healthy stream is left alone", async () => {
+    vi.useFakeTimers();
+    try {
+      // On an idle deployment the server sends `: ping` every 25s and no data frames at all.
+      // Counting only data frames as liveness would reconnect every tab, forever.
+      const { impl, calls } = hangingFetch([[{ kind: "snapshot", conversations: [conv("a")] }]]);
+      const sub = subscribeConversations(
+        { baseUrl: "https://host" },
+        "all",
+        { onSnapshot: () => {}, onUpsert: () => {}, onRemove: () => {} },
+        { fetchImpl: impl, staleAfterMs: 1000 },
+      );
+      await vi.advanceTimersByTimeAsync(1);
+
+      // Three windows' worth of time, each with a heartbeat before the deadline.
+      for (let i = 0; i < 3; i++) {
+        await vi.advanceTimersByTimeAsync(800);
+        calls[0].push(": ping\n\n");
+        await vi.advanceTimersByTimeAsync(1);
+        expect(calls[0].aborted(), "a heartbeat must reset the deadline").toBe(false);
+      }
+      expect(calls, "a healthy stream must not reconnect").toHaveLength(1);
+      sub.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("close() stops the watchdog, so a closed subscription never reconnects", async () => {
+    vi.useFakeTimers();
+    try {
+      const { impl, calls } = hangingFetch([[]]);
+      const sub = subscribeConversations(
+        { baseUrl: "https://host" },
+        "all",
+        { onSnapshot: () => {}, onUpsert: () => {}, onRemove: () => {} },
+        { fetchImpl: impl, staleAfterMs: 1000 },
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      sub.close();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(calls, "a closed subscription must not re-open the stream").toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
