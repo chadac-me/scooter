@@ -301,9 +301,13 @@ export const sessionStore = {
   /** Merge conversations loaded from the agent-host into the list, deduping by server id, sorting and keeping the current selection. */
   mergeFromServer(
     convs: Array<{ id: string; title?: string; createdAt?: number; lastActivityAt?: number; model?: string; sources?: string[]; links?: SessionLink[]; owner?: string; status?: Session["status"]; parentId?: string; userTitled?: boolean; starred?: boolean }>,
-    // Only an authoritative full-list read (the poll or the SSE connect snapshot) owns `sources`/`links` and can say a row is gone; a single-row upsert keeps the existing ones.
-    opts?: { sourcesAuthoritative?: boolean },
+    // `fullList` is membership: only a full-list read (the poll or the SSE snapshot) can say a
+    // row is gone. `sourcesAuthoritative` is per-row content: whether this read's
+    // `sources`/`links` replace what is held. A single-row upsert is the one case where they
+    // differ — it owns its own row's links but says nothing about any other row. Why: PR #779.
+    opts?: { fullList?: boolean; sourcesAuthoritative?: boolean },
   ) {
+    const fullList = opts?.fullList ?? true;
     const authoritative = opts?.sourcesAuthoritative ?? true;
     if (convs.length === 0) return;
     // While an inline rename input is open, the merge must not re-render the sidebar at all, since reconciliation can detach the input.
@@ -352,7 +356,7 @@ export const sessionStore = {
     let sessions = [...byId.values()].filter((s) => {
       if (serverIds.has(serverKeyOf(s))) return true;
       // Absence is only evidence in a full-list read.
-      if (!authoritative) return true;
+      if (!fullList) return true;
       if (s.parentId) return false; // an ended subagent
       if (s.id === state.currentId) return true;
       // A row the server never created can only shadow the real conversation it was meant to become.

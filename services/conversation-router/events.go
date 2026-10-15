@@ -21,6 +21,9 @@ import (
 // listenBackoff paces reconnects after the LISTEN connection drops or fails to open.
 const listenBackoff = 2 * time.Second
 
+// conversationsChannel is the agent_host NOTIFY channel the conversation rows arrive on.
+const conversationsChannel = "conversations_changed"
+
 // sseHeartbeat keeps the SSE connection alive between upserts with a comment frame the UI parser ignores.
 const sseHeartbeat = 25 * time.Second
 
@@ -109,45 +112,9 @@ func runConversationListener(ctx context.Context, store *Store, links *LinkStore
 		pushUpsert(ctx, id, store, links, hub, log)
 	}, nil)
 	defer coal.stop()
-	for ctx.Err() == nil {
-		conn, err := store.NewListenConn(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Warn("listen connect failed; retrying",
-				slog.Int("retry_in_ms", int(listenBackoff.Milliseconds())), errAttr(err))
-			sleep(ctx, listenBackoff)
-			continue
-		}
-		if _, err := conn.Exec(ctx, "listen conversations_changed"); err != nil {
-			if ctx.Err() != nil {
-				_ = conn.Close(context.Background())
-				return
-			}
-			log.Warn("LISTEN failed; retrying",
-				slog.Int("retry_in_ms", int(listenBackoff.Milliseconds())), errAttr(err))
-			_ = conn.Close(context.Background())
-			sleep(ctx, listenBackoff)
-			continue
-		}
-		log.Info("listening for conversation changes")
-		for ctx.Err() == nil {
-			n, err := conn.WaitForNotification(ctx)
-			if err != nil {
-				if ctx.Err() == nil {
-					log.Warn("notification wait failed; reconnecting", errAttr(err))
-				}
-				break
-			}
-			handleNotification(ctx, n.Payload, store, links, hub, log, coal)
-		}
-		// Close with a background context, since a Close on a cancelled ctx would skip the teardown.
-		_ = conn.Close(context.Background())
-		if ctx.Err() == nil {
-			sleep(ctx, listenBackoff)
-		}
-	}
+	listenLoop(ctx, log, conversationsChannel, store.NewListenConn, func(payload string) {
+		handleNotification(ctx, payload, store, links, hub, log, coal)
+	})
 }
 
 // change is one parsed NOTIFY payload: which conversation changed, whether it was removed, and the owner it was visible to.
@@ -212,11 +179,14 @@ func pushUpsert(ctx context.Context, id string, store *Store, links *LinkStore, 
 	}
 	var ls []Link
 	if links != nil {
-		if got, err := links.LinksForConversation(rctx, id); err != nil {
-			log.Warn("link re-read failed on notify; pushing bare row", convAttr(id), errAttr(err))
-		} else {
-			ls = got
+		got, err := links.LinksForConversation(rctx, id)
+		if err != nil {
+			// The UI takes an upsert's links as authoritative, so a bare row here would clear
+			// the sidebar's link icons. Drop the frame instead. Why: PR #779.
+			log.Warn("link re-read failed on notify; dropping upsert", convAttr(id), errAttr(err))
+			return
 		}
+		ls = got
 	}
 	hub.broadcast(makeListRow(*m, ls, time.Now().UnixMilli()))
 }

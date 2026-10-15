@@ -163,9 +163,12 @@ func main() {
 		log.Error("no write store: conversations cannot be assigned, routing to any pod")
 	}
 
-	// The live conversation-list push: one LISTEN connection fans NOTIFYs out to SSE subscribers (see events.go).
+	// The live conversation-list push: one LISTEN connection per source database fans NOTIFYs
+	// out to SSE subscribers — conversation rows from agent_host (events.go), link changes from
+	// webhooks (linkevents.go), both re-read and pushed as the same upsert frame.
 	hub := newSSEHub()
 	go runConversationListener(ctx, store, links, hub)
+	go runLinkListener(ctx, store, links, hub)
 
 	srv := &http.Server{Addr: cfg.listenAddr, Handler: newRouter(ctx, cfg, resolver, creator, trusted, store, writeStore, links, hub)}
 	go func() {

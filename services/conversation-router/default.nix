@@ -13,9 +13,11 @@ buildGoModule {
 
   # No cgo needed.
   env.CGO_ENABLED = "0";
-  # The claim and trigger tests run against a real Postgres.
+  # The claim and trigger tests run against a real Postgres, replaying the migrations of both
+  # databases the list stream listens on.
   nativeCheckInputs = [ postgresql_16 ];
   env.AGENT_HOST_MIGRATIONS = "${../../lib/sql/agent_host/migrations}";
+  env.WEBHOOKS_MIGRATIONS = "${../../lib/sql/webhooks/migrations}";
 
   meta.description = "Scooter conversation router (hostPod reverse-proxy)";
 }
