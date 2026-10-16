@@ -392,6 +392,8 @@ export function createAguiServer(): AguiServer {
             write(res, {
               type: "RUN_ERROR",
               message: `No such conversation: ${sessionId}. Create one first (POST /conversations) and prompt the id it returns.`,
+              // Webhooks start a replacement conversation only on this code (issue #802).
+              code: "UNKNOWN_CONVERSATION",
             });
           } catch {
             /* stream already torn down */

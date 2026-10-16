@@ -132,9 +132,14 @@ async def lookup_conversation(source: str, resource_type: str, resource_id: str)
 
 
 async def store_conversation(
-    source: str, resource_type: str, resource_id: str, conversation_id: str
+    source: str,
+    resource_type: str,
+    resource_id: str,
+    conversation_id: str,
+    *,
+    previous_conversation_id: str | None = None,
 ) -> None:
-    """Upsert the mapping from an external resource to a conversation."""
+    """Upsert the mapping from an external resource to a conversation; `previous_conversation_id` records the one being replaced, and None leaves the recorded one as is."""
     async with get_session() as session:
         existing = (
             await session.execute(
@@ -148,12 +153,15 @@ async def store_conversation(
 
         if existing:
             existing.conversation_id = conversation_id
+            if previous_conversation_id is not None:
+                existing.previous_conversation_id = previous_conversation_id
         else:
             session.add(ConversationMap(
                 source=source,
                 resource_type=resource_type,
                 resource_id=resource_id,
                 conversation_id=conversation_id,
+                previous_conversation_id=previous_conversation_id,
             ))
 
     logger.info(
@@ -164,6 +172,7 @@ async def store_conversation(
             "resource_type": resource_type,
             "resource_id": resource_id,
             "conversation_id": conversation_id,
+            "previous_conversation_id": previous_conversation_id,
         },
     )
 

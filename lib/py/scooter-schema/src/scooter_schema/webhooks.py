@@ -32,6 +32,7 @@ class ConversationMap(Base):
     last_status: Mapped[Optional[str]] = mapped_column(String)
     slack_channel: Mapped[Optional[str]] = mapped_column(String)
     slack_ts: Mapped[Optional[str]] = mapped_column(String)
+    previous_conversation_id: Mapped[Optional[str]] = mapped_column(String)
 
 
 class PendingMessages(Base):

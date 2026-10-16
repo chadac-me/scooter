@@ -7,6 +7,8 @@ finishes. The conversation_id is the threadId, so it is known up front.
 
 from __future__ import annotations
 
+import asyncio
+import enum
 import json
 import logging
 import uuid
@@ -166,7 +168,22 @@ async def create_conversation(
     return {"conversation_id": conversation_id, "result": result_text}
 
 
-async def send_message(
+class SendOutcome(enum.Enum):
+    """What happened to a follow-up message; only NOT_FOUND means the conversation is gone."""
+
+    DELIVERED = "delivered"
+    # The agent-host accepted the message, then the run errored or the stream dropped.
+    RUN_FAILED = "run_failed"
+    NOT_FOUND = "not_found"
+    # Never accepted, even after retries.
+    UNREACHABLE = "unreachable"
+
+
+# Backoff before each retry of a message the agent-host never accepted.
+SEND_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0)
+
+
+async def deliver_message(
     conversation_id: str,
     message: str,
     *,
@@ -174,8 +191,8 @@ async def send_message(
     images: list[dict] | None = None,
     files: list[dict] | None = None,
     source: str | None = None,
-) -> bool:
-    """Send a follow-up message into an existing conversation; `priority=True` lets the agent-host interrupt a stuck turn."""
+) -> SendOutcome:
+    """Send a follow-up into an existing conversation. Only a request that was never accepted is retried; retrying after acceptance would duplicate the message."""
     payload = {
         "threadId": conversation_id,
         "runId": str(uuid.uuid4()),
@@ -185,23 +202,75 @@ async def send_message(
         payload["source"] = source
     if priority:
         payload["priority"] = 10  # PRIORITY_INTERRUPT in the agent-host bridge
-    try:
-        await _run_and_collect(payload)
-        return True
-    except Exception:
-        logger.exception(
-            "send message failed",
-            extra={**_C, "conversation_id": conversation_id},
-        )
-        return False
+    log_extra = {**_C, "conversation_id": conversation_id}
+    delays = (*SEND_RETRY_DELAYS_S, None)
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            await _run_and_collect(payload)
+            return SendOutcome.DELIVERED
+        except ConversationNotFound as e:
+            logger.warning("conversation not found", extra={**log_extra, "error": format_error(e)})
+            return SendOutcome.NOT_FOUND
+        except RunRejected as e:
+            if delay is None:
+                logger.error(
+                    "send message not accepted, giving up",
+                    extra={**log_extra, "attempts": attempt, "error": format_error(e)},
+                )
+                return SendOutcome.UNREACHABLE
+            logger.warning(
+                "send message not accepted, retrying",
+                extra={**log_extra, "attempt": attempt, "delay_s": delay, "error": format_error(e)},
+            )
+            await asyncio.sleep(delay)
+        except (RunErrored, RunInterrupted) as e:
+            logger.warning(
+                "send message accepted but the run failed",
+                extra={**log_extra, "error": format_error(e)},
+            )
+            return SendOutcome.RUN_FAILED
+        except Exception:
+            logger.exception("send message failed", extra=log_extra)
+            return SendOutcome.RUN_FAILED
+    return SendOutcome.UNREACHABLE  # not reached: the last delay is None
+
+
+async def send_message(
+    conversation_id: str,
+    message: str,
+    *,
+    priority: bool = False,
+    images: list[dict] | None = None,
+    files: list[dict] | None = None,
+    source: str | None = None,
+) -> bool:
+    """Send a follow-up message into an existing conversation, True only when the run finished; `priority=True` lets the agent-host interrupt a stuck turn."""
+    outcome = await deliver_message(
+        conversation_id, message, priority=priority, images=images, files=files, source=source,
+    )
+    return outcome is SendOutcome.DELIVERED
 
 
 class RunInterrupted(Exception):
     """The /agui stream dropped before RUN_FINISHED; transient, since the agent-host resumes interrupted conversations on boot."""
 
 
+class RunRejected(RunInterrupted):
+    """The agent-host never accepted the request (connection failure or non-2xx), so retrying cannot duplicate it."""
+
+
 class RunErrored(Exception):
     """A RUN_ERROR arrived on the /agui stream; the conversation exists and did work before the agent crashed."""
+
+
+class ConversationNotFound(Exception):
+    """The agent-host has no such conversation; the only failure that justifies starting a new one."""
+
+
+# The RUN_ERROR code agent-host's /agui sets (services/agent-host/src/agui/server.ts).
+UNKNOWN_CONVERSATION_CODE = "UNKNOWN_CONVERSATION"
+# Matched for an agent-host that predates the codes.
+_UNKNOWN_CONVERSATION_PREFIX = "No such conversation:"
 
 
 def _sa_token() -> str | None:
@@ -215,9 +284,15 @@ def _sa_token() -> str | None:
 
 
 async def _run_and_collect(payload: dict) -> str:
-    """POST a RunAgentInput to /agui and return the final assistant text, raising RunInterrupted on a dropped stream and RunErrored on RUN_ERROR."""
+    """POST a RunAgentInput to /agui and return the final assistant text.
+
+    Raises ConversationNotFound if the conversation does not exist, RunRejected if the
+    request was never accepted, RunInterrupted if an accepted stream dropped, and
+    RunErrored on any other RUN_ERROR.
+    """
     text_parts: list[str] = []
     saw_finished = False
+    accepted = False
     headers = {"Accept": "text/event-stream"}
     token = _sa_token()
     if token:
@@ -227,7 +302,11 @@ async def _run_and_collect(payload: dict) -> str:
             async with client.stream(
                 "POST", _agui_url(), json=payload, headers=headers
             ) as resp:
-                resp.raise_for_status()
+                if resp.status_code in (404, 410):
+                    raise ConversationNotFound(f"agent-host returned {resp.status_code}")
+                if resp.status_code >= 300:
+                    raise RunRejected(f"agent-host returned {resp.status_code}")
+                accepted = True
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -242,8 +321,13 @@ async def _run_and_collect(payload: dict) -> str:
                         saw_finished = True
                         break
                     elif etype == "RUN_ERROR":
-                        raise RunErrored(event.get("message", "agent run error"))
+                        message = event.get("message") or "agent run error"
+                        if event.get("code") == UNKNOWN_CONVERSATION_CODE or message.startswith(_UNKNOWN_CONVERSATION_PREFIX):
+                            raise ConversationNotFound(message)
+                        raise RunErrored(message)
     except httpx.HTTPError as e:
+        if not accepted:
+            raise RunRejected(str(e)) from e
         raise RunInterrupted(str(e)) from e
     if not saw_finished:
         raise RunInterrupted("stream ended before RUN_FINISHED")
