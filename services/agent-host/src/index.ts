@@ -1340,6 +1340,8 @@ export async function main(
         sessions,
         resolvePodTarget: (ref) => resolvePodTarget(ref),
         registry: webServices,
+        // Who is calling, handed to the in-pod service (auth/identity.ts withHandoffIdentity).
+        resolveUser,
         publicHost: (() => {
           try {
             return process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).host : "";

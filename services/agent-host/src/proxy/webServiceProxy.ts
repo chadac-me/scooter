@@ -3,7 +3,14 @@
  * the conversation's sandbox pod over HTTP and WebSocket. It lives in the agent-host
  * because only the agent-host can resolve <id> to a pod IP. It attaches to
  * agui/server.ts as an HTTP fallback before the 404 and as the `upgrade` listener.
- * Auth is whatever the ingress already applied; there is no extra per-conversation check.
+ *
+ * Access: the ingress authenticates the caller, and any authenticated user may open any
+ * conversation's services. That is deliberate (PR #778): sharing a conversation, and
+ * what it is serving, is part of the point. Who is calling is handed to the service
+ * instead: inbound identity headers are stripped and the proxy's own set in their place,
+ * on HTTP and on the WebSocket upgrade, so a service that wants to scope by user reads an
+ * identity that came from here rather than from the caller. Inside the pod that is a
+ * hint, not proof, since the agent controls the sandbox.
  * Nothing on the forwarding path execs into the pod: liveness is read off the
  * connection. Why: PR #791.
  */
@@ -12,6 +19,7 @@ import { request as httpRequest, type IncomingMessage, type ServerResponse } fro
 import { connect, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
+import { withHandoffIdentity, type UserContext } from "../auth/identity.js";
 import type { SessionManager } from "../session/manager.js";
 import type { SandboxRef } from "../types.js";
 
@@ -77,6 +85,8 @@ export interface WebServiceProxyDeps {
   registry: WebServiceRegistry;
   /** The external host from PUBLIC_URL, for absolute-URL correctness. */
   publicHost: string;
+  /** The ingress identity of a request, the same resolver /whoami and conversation creation use (index.ts). */
+  resolveUser: (req: IncomingMessage) => UserContext | Promise<UserContext>;
 }
 
 /** Parsed shape of a proxy path: /c/<id>/<service>/<rest...> */
@@ -160,7 +170,16 @@ export function renderLoadingPage(service: string, basePath: string): string {
 }
 
 export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProxy {
-  const { sessions, resolvePodTarget, registry } = deps;
+  const { sessions, resolvePodTarget, registry, resolveUser } = deps;
+
+  /** The caller's identity for the handoff; a failing resolver hands off nobody rather than failing the request. */
+  const userFor = async (req: IncomingMessage): Promise<UserContext | undefined> => {
+    try {
+      return await resolveUser(req);
+    } catch {
+      return undefined;
+    }
+  };
 
   const matches = (pathname: string): boolean => parseProxyPath(pathname) !== null;
 
@@ -275,7 +294,9 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     // Preserve the full external path for a sub-path-aware service, or forward only the
     // remainder when stripBasePath is set so the service serves at root.
     const upstreamPath = (r.stripBasePath ? r.rest : url.pathname) + (url.search ?? "");
-    const headers = { ...req.headers, host: `${r.podIP}:${r.port}` };
+    // Strip the ingress's identity headers and stamp the proxy's own, so the caller
+    // cannot tell the service who is calling.
+    const headers = withHandoffIdentity({ ...req.headers, host: `${r.podIP}:${r.port}` }, await userFor(req));
     const upstream = httpRequest(
       { host: r.podIP, port: r.port, method: req.method, path: upstreamPath, headers },
       (up) => {
@@ -317,12 +338,15 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     // Splice: open a raw TCP connection to the pod, replay the upgrade handshake with
     // the Host rewritten, forward the buffered head, then pipe both ways.
     const upstreamPath = (r.stripBasePath ? r.rest : url.pathname) + (url.search ?? "");
+    const handoff = withHandoffIdentity(req.headers, await userFor(req));
     const upstream: Socket = connect(r.port, r.podIP, () => {
       const lines = [
         `${req.method ?? "GET"} ${upstreamPath} HTTP/1.1`,
         `Host: ${r.podIP}:${r.port}`,
       ];
-      for (const [k, v] of Object.entries(req.headers)) {
+      // The same strip-and-stamp as HTTP: the upgrade is where marimo and the terminal live,
+      // so a handoff set only on HTTP would be forgeable where it matters.
+      for (const [k, v] of Object.entries(handoff)) {
         if (k === "host") continue;
         for (const val of Array.isArray(v) ? v : [v]) if (val != null) lines.push(`${k}: ${val}`);
       }

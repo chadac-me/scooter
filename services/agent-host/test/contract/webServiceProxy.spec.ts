@@ -18,14 +18,37 @@ import {
   type WebServiceRegistry,
 } from "../../src/proxy/webServiceProxy.js";
 
-// A fake in-pod service that echoes HTTP requests and raw bytes on an `upgrade`.
+/** What the in-pod service saw of the caller's identity: the proxy's handoff, and whether anything inbound leaked through. */
+interface IdentEcho {
+  handoff: string | null;
+  handoffEmail: string | null;
+  ingress: string | null;
+  oidcToken: string | null;
+}
+
+/** The identity-bearing headers an in-pod service actually received, for the strip/handoff assertions. */
+function identEcho(headers: Record<string, unknown>): string {
+  return JSON.stringify({
+    handoff: headers["x-scooter-user"] ?? null,
+    handoffEmail: headers["x-scooter-user-email"] ?? null,
+    ingress: headers["x-auth-user"] ?? null,
+    oidcToken: headers["x-amzn-oidc-accesstoken"] ?? null,
+  });
+}
+
+// A fake in-pod service that echoes HTTP requests and raw bytes on an `upgrade`, plus the
+// identity headers it was handed (both paths, since the proxy must strip and stamp on each).
 function fakeInPodService(): Promise<{ server: Server; port: number }> {
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", () => {
-        res.writeHead(200, { "content-type": "text/plain", "x-echo-path": req.url ?? "" });
+        res.writeHead(200, {
+          "content-type": "text/plain",
+          "x-echo-path": req.url ?? "",
+          "x-echo-ident": identEcho(req.headers as Record<string, unknown>),
+        });
         res.end(`${req.method} ${req.url} ${body}`);
       });
     });
@@ -33,6 +56,8 @@ function fakeInPodService(): Promise<{ server: Server; port: number }> {
       socket.write(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
       );
+      // The handshake's identity headers, so an upgrade can be asserted on the same way.
+      socket.write(`IDENT ${identEcho(req.headers as Record<string, unknown>)}\n`);
       if (head?.length) socket.write(head);
       socket.on("data", (d) => socket.write(d));
     });
@@ -131,10 +156,20 @@ describe("web-service proxy", () => {
     expect(parseProxyPath("/conversations/conv-1")).toBeNull();
   });
 
+  /** Anonymous = no ingress identity = single-user mode, which is what the shipped dev stack looks like. */
+  const ANON = { id: "anonymous", anonymous: true };
+
   function makeProxy(
     registry: WebServiceRegistry,
     target?: Partial<PodTarget>,
     touchById: (id: string) => void = () => {},
+    opts: {
+      /** The conversation's owner, undefined = unowned. */
+      owner?: string;
+      /** The caller the resolver reports, or a throwing resolver via `resolveUser`. */
+      user?: { id: string; email?: string; anonymous: boolean };
+      resolveUser?: () => never;
+    } = {},
   ): WebServiceProxy {
     const resolvePodTarget = async () => ({
       name: "conv-1-pod",
@@ -142,10 +177,14 @@ describe("web-service proxy", () => {
       ...target,
     });
     return createWebServiceProxy({
-      sessions: { get: () => ({ id: "conv-1", threadId: "conv-1" }), touchById } as never,
+      sessions: {
+        get: () => ({ id: "conv-1", threadId: "conv-1", owner: opts.owner }),
+        touchById,
+      } as never,
       resolvePodTarget: resolvePodTarget as never,
       registry,
       publicHost: "scooter.example.com",
+      resolveUser: opts.resolveUser ?? (() => opts.user ?? ANON),
     });
   }
 
@@ -181,6 +220,7 @@ describe("web-service proxy", () => {
       resolvePodTarget: (async () => { throw new Error("no ready pod"); }) as never,
       registry: fakeRegistry(svc.port),
       publicHost: "scooter.example.com",
+      resolveUser: () => ANON,
     });
     const { status } = await proxyGet(proxy, "/c/conv-1/marimo/x");
     expect(status).toBe(503);
@@ -217,6 +257,7 @@ describe("web-service proxy", () => {
       }) as never,
       registry: fakeRegistry(svc.port),
       publicHost: "scooter.example.com",
+      resolveUser: () => ANON,
     });
     const { status } = await proxyGet(proxy, "/c/conv-1/marimo/x");
     expect(status).toBe(503);
@@ -311,6 +352,78 @@ describe("web-service proxy", () => {
     expect(statusLine).toContain("101");
     expect(echoed).toContain("ping");
   });
+
+  // --- access: shared by default (PR #778) ------------------------------------
+  // Any authenticated user may open any conversation's services; the ingress keeps
+  // strangers out, and the service learns who is calling from the handoff below.
+
+  const ALICE = { id: "alice", email: "alice@example.com", anonymous: false };
+  const BOB = { id: "bob", email: "bob@example.com", anonymous: false };
+
+  it("another signed-in user reaches the service, and the service is told it is them", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: BOB });
+    const { status, ident } = await proxyGet(proxy, "/c/conv-1/marimo/app");
+    expect(status).toBe(200);
+    expect(ident).toMatchObject({ handoff: "bob", handoffEmail: "bob@example.com" });
+  });
+
+  it("another signed-in user's WebSocket upgrade is spliced through too", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: BOB });
+    const { statusLine, echoed } = await proxyUpgrade(proxy, "/c/conv-1/marimo/ws", "ping");
+    expect(statusLine).toContain("101");
+    expect(echoed).toContain("ping");
+  });
+
+  it("a FAILING resolver still serves, handing off nobody rather than a guess", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, {
+      owner: "alice",
+      resolveUser: () => { throw new Error("identity store down"); },
+    });
+    const { status, ident } = await proxyGet(proxy, "/c/conv-1/marimo/app", {
+      headers: { "x-scooter-user": "root" },
+    });
+    expect(status).toBe(200);
+    // The forged inbound copy is still stripped.
+    expect(ident).toMatchObject({ handoff: null });
+  });
+
+  // --- identity handoff -------------------------------------------------------
+
+  it("strips the ingress's identity headers and stamps its own (HTTP)", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app", {
+      headers: {
+        // What an ingress sets for the agent-host, plus a forged handoff.
+        "x-auth-user": "alice",
+        "x-amzn-oidc-accesstoken": "a-real-bearer-token",
+        "x-scooter-user": "root",
+      },
+    });
+    expect(ident).toEqual({
+      handoff: "alice",
+      handoffEmail: "alice@example.com",
+      ingress: null,
+      // A live access token has no business inside a pod the agent controls.
+      oidcToken: null,
+    });
+  });
+
+  it("strips and stamps on the UPGRADE handshake as well", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { raw } = await proxyUpgrade(proxy, "/c/conv-1/marimo/ws", "ping", {
+      headers: { "x-scooter-user": "root", "x-auth-user": "alice" },
+    });
+    const ident = JSON.parse(raw.slice(raw.indexOf("IDENT ") + 6, raw.indexOf("\n", raw.indexOf("IDENT "))));
+    expect(ident.handoff).toBe("alice");
+    expect(ident.ingress).toBeNull();
+  });
+
+  it("an anonymous caller hands off NO identity (not the string \"anonymous\")", async () => {
+    // "nobody said" and "a user literally called anonymous" must not look the same in the pod.
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { user: ANON });
+    const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app");
+    expect(ident).toMatchObject({ handoff: null, handoffEmail: null });
+  });
 });
 
 // ---- helpers: run the proxy through a throwaway front server ------------------
@@ -340,20 +453,25 @@ async function withFront(
 function proxyGet(
   proxy: WebServiceProxy,
   path: string,
-  opts: { accept?: string } = {},
-): Promise<{ status: number; body: string; echoPath: string }> {
+  opts: { accept?: string; headers?: Record<string, string> } = {},
+): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null }> {
   return new Promise((resolve, reject) => {
     void withFront(proxy, (port) =>
       new Promise<void>((done) => {
-        const headers = opts.accept ? { accept: opts.accept } : undefined;
+        const headers = {
+          ...(opts.accept ? { accept: opts.accept } : {}),
+          ...(opts.headers ?? {}),
+        };
         const req = request({ host: "127.0.0.1", port, path, method: "GET", headers }, (res) => {
           let body = "";
           res.on("data", (c) => (body += c));
           res.on("end", () => {
+            const raw = res.headers["x-echo-ident"];
             resolve({
               status: res.statusCode ?? 0,
               body,
               echoPath: String(res.headers["x-echo-path"] ?? ""),
+              ident: raw ? (JSON.parse(String(raw)) as IdentEcho) : null,
             });
             done();
           });
@@ -369,14 +487,18 @@ function proxyUpgrade(
   proxy: WebServiceProxy,
   path: string,
   payload: string,
-): Promise<{ statusLine: string; echoed: string }> {
+  opts: { headers?: Record<string, string> } = {},
+): Promise<{ statusLine: string; echoed: string; raw: string }> {
   return new Promise((resolve, reject) => {
     void withFront(proxy, (port) =>
       new Promise<void>((done) => {
+        const extra = Object.entries(opts.headers ?? {})
+          .map(([k, v]) => `${k}: ${v}\r\n`)
+          .join("");
         const sock: Socket = connect(port, "127.0.0.1", () => {
           sock.write(
             `GET ${path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n` +
-              `Connection: Upgrade\r\nSec-WebSocket-Key: x\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+              `Connection: Upgrade\r\nSec-WebSocket-Key: x\r\nSec-WebSocket-Version: 13\r\n${extra}\r\n`,
           );
         });
         let buf = "";
@@ -388,10 +510,16 @@ function proxyUpgrade(
             sock.write(payload);
           } else if (sentPayload && buf.includes(payload)) {
             const statusLine = buf.split("\r\n")[0];
-            resolve({ statusLine, echoed: payload });
+            resolve({ statusLine, echoed: payload, raw: buf });
             sock.destroy();
             done();
           }
+        });
+        // A REFUSED upgrade answers with a status line and closes, so close is a real
+        // outcome here, not a failure; `resolve` after a successful echo is a no-op.
+        sock.on("close", () => {
+          resolve({ statusLine: buf.split("\r\n")[0] ?? "", echoed: "", raw: buf });
+          done();
         });
         sock.on("error", reject);
         sock.setTimeout(2000, () => {
