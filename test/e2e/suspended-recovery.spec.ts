@@ -185,7 +185,7 @@ test.describe("recovered conversation — sending a message revives it", () => {
       .toBeGreaterThanOrEqual(2);
   });
 
-  test("the message sent to a suspended conversation does NOT get stuck in the Queue tab", async ({
+  test("the message sent to a suspended conversation does NOT get stuck as a queued message", async ({
     chat,
     page,
     baseURL,
@@ -203,7 +203,6 @@ test.describe("recovered conversation — sending a message revives it", () => {
 
     await chat.send("this must not get stuck"); // see the sendTurn note above
 
-    await chat.openQueueTab();
     // On the full target the row clears only after the revive's fresh sandbox boot.
     await expect(
       chat.queuedMessages(),
@@ -224,7 +223,6 @@ test.describe("recovered conversation — sending a message revives it", () => {
     // exec waits for a ready pod before the sleep starts.
     await chat.startLongRun(60);
     await chat.sendWhileRunning("queued before the suspend");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
 
     const id = await currentConversationId(page, request, base);
@@ -261,7 +259,6 @@ test.describe("recovered conversation — sending a message revives it", () => {
 
     // Only now assert the queue is empty: while the re-enqueued message is draining the
     // count is transiently 1, and a phantom row survives any budget.
-    await chat.openQueueTab();
     await expect(
       chat.queuedMessages(),
       "no phantom queued row may survive the suspend/revive",

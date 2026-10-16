@@ -111,7 +111,6 @@ test.describe("whole-UI consistency around the QUEUE", () => {
     expect(before.running).toBe(true);
 
     await chat.sendWhileRunning("alpha");
-    await chat.openQueueTab();
     const one = await step(page, "one message queued");
     // The row's innerText includes the "PRIORITY" pill, so assert containment rather than equality.
     expect(one.queued.join("|"), "the queued text must render in the queue").toContain("alpha");
@@ -138,8 +137,6 @@ test.describe("whole-UI consistency around the QUEUE", () => {
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     const start = await step(page, "run started");
     await chat.sendWhileRunning("drains into the thread");
-    // The queued rows only mount while the Queue tab is selected.
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 20_000 });
     const queued = await step(page, "queued");
     expect(queued.queued.join("|")).toContain("drains into the thread");
@@ -167,11 +164,9 @@ test.describe("whole-UI consistency around the QUEUE", () => {
     await chat.send("!sleep 60");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     await chat.sendWhileRunning("survives with full state");
-    await chat.openQueueTab();
     const pre = await step(page, "before reload");
 
     await page.reload();
-    await chat.openQueueTab();
     // The reload re-derives the conversation from the integrity log, which on a cluster
     // round-trips the router to the owning pod.
     // A pod restart mid-test kills the run this asserts on, and its recovery prose can land

@@ -1,17 +1,15 @@
 /**
- * RightPanel: the single right-side panel hosting the Sandbox, Approvals, Queue,
+ * RightPanel: the single right-side panel hosting the Sandbox, Approvals,
  * Subagents and Shares tabs. Approvals is a gate the user cannot miss, so a new
- * interrupt auto-focuses that tab; the queue never steals focus. Each tab carries a
+ * interrupt auto-focuses that tab. (Queued messages render inline in the thread.) Each tab carries a
  * count badge, and a tab with an empty backing list is still selectable. The tab
- * bodies are the existing components InterruptList (data-testid `interrupt-panel`)
- * and QueuedMessages (data-testid `queued-messages`), so the e2e specs still find them.
+ * bodies are existing components, e.g. InterruptList (data-testid `interrupt-panel`).
  */
 
 import { useEffect, useRef, useState } from "react";
 
 import { mobileNav, useDrawer } from "./mobileNav.js";
 import { InterruptList } from "./InterruptPanel.js";
-import { QueuedMessages } from "./QueuedMessages.js";
 import { SandboxPanelView, useSandboxStatus } from "./SandboxPanel.js";
 import { SubagentsPanel, subagentsOf } from "./SubagentsPanel.js";
 import { PublishedShares, useShares } from "./PublishedShares.js";
@@ -20,7 +18,7 @@ import { useConversationInterrupts } from "./RuntimeProvider.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-type Tab = "sandbox" | "approvals" | "queue" | "subagents" | "shares";
+type Tab = "sandbox" | "approvals" | "subagents" | "shares";
 
 function TabButton({
   active,
@@ -71,11 +69,10 @@ function TabButton({
 }
 
 export function RightPanel() {
-  const { interrupts, queuedMessages } = useConversationInterrupts();
+  const { interrupts } = useConversationInterrupts();
   const sandbox = useSandboxStatus();
   const { sessions, currentId } = useSessions();
   const nInterrupts = interrupts.length;
-  const nQueued = queuedMessages.length;
   const subagents = subagentsOf(sessions, currentId);
   const nSubagents = subagents.length;
   // `configured` is false when the broker path is not wired, which hides the Shares tab.
@@ -110,7 +107,7 @@ export function RightPanel() {
         drawer === "panel" && "translate-x-0",
       )}
       data-testid="right-panel"
-      aria-label="Sandbox status + services, approvals, and queued messages"
+      aria-label="Sandbox status + services and approvals"
     >
       <div className="flex border-b" role="tablist">
         {/* Mobile-only: dismiss the drawer (backdrop tap also closes it). */}
@@ -135,12 +132,6 @@ export function RightPanel() {
           label="Approvals"
           count={nInterrupts}
           alert // a pending approval is a gate, so its badge is red
-        />
-        <TabButton
-          active={active === "queue"}
-          onClick={() => setActive("queue")}
-          label="Queue"
-          count={nQueued}
         />
         {nSubagents > 0 && (
           <TabButton
@@ -183,14 +174,8 @@ export function RightPanel() {
           )
         ) : active === "subagents" ? (
           <SubagentsPanel />
-        ) : active === "shares" ? (
-          <PublishedShares shares={publishedShares} />
-        ) : nQueued > 0 ? (
-          <QueuedMessages />
         ) : (
-          <p className="text-sm text-muted-foreground" data-testid="queue-empty">
-            No queued messages.
-          </p>
+          <PublishedShares shares={publishedShares} />
         )}
       </div>
     </aside>

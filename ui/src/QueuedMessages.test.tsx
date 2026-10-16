@@ -1,4 +1,4 @@
-/** The queued-messages strip renders the durable queue from RuntimeProvider context, which rides the integrity stream. */
+/** The inline queued-messages list renders the durable queue from RuntimeProvider context, which rides the integrity stream. */
 
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
@@ -63,6 +63,24 @@ describe("QueuedMessages", () => {
   it("clamps a message to a few lines (Show more/less appears once it overflows)", () => {
     // The text is line-clamped by default; the overflow measurement and the toggle are DOM-only.
     const html = render([{ id: "q1", text: "line\n".repeat(20), priority: 0 }]);
-    expect(html).toContain("line-clamp-4");
+    expect(html).toContain("line-clamp-6");
+  });
+
+  it("renders as a faded user bubble with a progress spinner and status", () => {
+    const html = render([{ id: "q1", text: "waiting", priority: 0 }]);
+    expect(html).toContain("opacity-60");
+    expect(html).toContain("animate-spin");
+    expect(html).toContain('data-testid="queued-message-status"');
+    expect(html).toContain("Queued");
+  });
+
+  it("labels a not-yet-acknowledged optimistic send as Sending", () => {
+    const html = render([{ id: "optimistic-abc", text: "just sent", priority: 0 }]);
+    expect(html).toContain("Sending…");
+  });
+
+  it("labels a priority message as interrupting", () => {
+    const html = render([{ id: "q1", text: "stop that", priority: 10 }]);
+    expect(html).toContain("Interrupting current turn");
   });
 });

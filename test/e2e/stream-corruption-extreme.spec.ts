@@ -46,7 +46,6 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("extreme stream c
     await chat.send("!sleep 3");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     await chat.sendWhileRunning("queued behind a duplicated terminal");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 20_000 });
 
     // The terminal event that ends a run, delivered 3x while a message waits in the queue.

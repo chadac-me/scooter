@@ -15,7 +15,6 @@ const panel = {
   cancel: '[data-testid="interrupt-cancel"]',
   approvalsTab: '[data-testid="right-panel-tab-approvals"]',
   approvalsBadge: '[data-testid="right-panel-badge-approvals"]',
-  queueTab: '[data-testid="right-panel-tab-queue"]',
 };
 
 // On the full target a fresh conversation provisions a real sandbox, and answering an
@@ -55,7 +54,6 @@ test.describe("interrupt + queue coexistence", () => {
 
     // The run is paused awaiting the pick, so a message sent now must queue.
     await chat.sendWhileRunning("queued behind the approval");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
     await expect(page.locator('[data-testid="queued-message-text"]').first()).toContainText("queued behind the approval");
   });
@@ -65,7 +63,6 @@ test.describe("interrupt + queue coexistence", () => {
     await chat.send("?pick a color");
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
     await chat.sendWhileRunning("run after I approve");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
 
     // Switch back to the Approvals tab so the interrupt options are visible, then answer.
@@ -78,13 +75,11 @@ test.describe("interrupt + queue coexistence", () => {
       timeout: ANSWER_BUDGET_MS,
     });
 
-    // Re-open the Queue tab first, since its contents are unmounted when it is not selected
-    // and `queuedMessages()` would resolve to 0 vacuously.
-    await chat.openQueueTab();
+    // The queued bubble solidified into the real user turn above, so the inline queue is empty.
     await expect(chat.queuedMessages()).toHaveCount(0, { timeout: 30_000 });
   });
 
-  test("the interrupt panel + queue tab are BOTH reachable (badges reflect their counts)", async ({ chat, page }) => {
+  test("the interrupt panel + inline queued messages are BOTH visible", async ({ chat, page }) => {
     await chat.open();
     await chat.send("?pick a color");
     await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
@@ -92,8 +87,9 @@ test.describe("interrupt + queue coexistence", () => {
     await expect(page.locator(panel.approvalsBadge)).toBeVisible({ timeout: 15_000 });
     await chat.sendWhileRunning("q1");
     await chat.sendWhileRunning("q2");
-    // The queue tab badge counts the queued items independently of the interrupt.
-    await expect(page.locator('[data-testid="right-panel-badge-queue"]')).toHaveText(/2/, { timeout: 15_000 });
+    // The queued items render inline in the thread, independently of the interrupt.
+    await expect(chat.queuedMessages()).toHaveCount(2, { timeout: 15_000 });
+    await expect(page.locator(panel.root)).toBeVisible();
   });
 });
 

@@ -51,11 +51,11 @@ describe("RightPanel", () => {
     expect(html).toMatch(/aria-selected="true"[^>]*right-panel-tab-sandbox/);
   });
 
-  it("shows the Queue badge count; approvals badge absent when there are none", () => {
+  it("has no Queue tab (queued messages render inline in the thread); approvals badge absent when there are none", () => {
     const html = render({ queuedMessages: [{ id: "q1", text: "hello queued", priority: 0 }] });
     expect(html).toContain('data-testid="right-panel-tab-approvals"');
-    expect(html).toContain('data-testid="right-panel-tab-queue"');
-    expect(html).toContain('data-testid="right-panel-badge-queue"');
+    expect(html).not.toContain('data-testid="right-panel-tab-queue"');
+    expect(html).not.toContain("hello queued");
     expect(html).not.toContain('data-testid="right-panel-badge-approvals"');
   });
 

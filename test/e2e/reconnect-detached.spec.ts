@@ -35,11 +35,9 @@ fastOnly("needs the SSE fault proxy to kill the stream mid-run")("reload mid-run
     await chat.send("!sleep 4");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     await chat.sendWhileRunning("queued across a reload");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
 
     await page.reload();
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 20_000 }); // survived the reload
     // Eventually the sleep and the queued run both finish, so the queue empties and a reply lands.
     await expect(chat.queuedMessages()).toHaveCount(0, { timeout: 45_000 });
