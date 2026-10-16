@@ -86,10 +86,19 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
         if (timer) clearTimeout(timer);
       };
 
-      const exitPromise = api
+      // A user kill settles the terminal at once rather than waiting for `execute` to notice
+      // the abort: in production `execute` first waits (up to 90s, signal-blind) for a ready
+      // sandbox pod, so a Stop pressed during a cold start would otherwise do nothing until the
+      // pod came up. The late execute then sees an already-aborted signal and never runs.
+      let killed = false;
+      let resolveKilled: (r: { exitCode: number }) => void = () => {};
+      const killedPromise = new Promise<{ exitCode: number }>((r) => (resolveKilled = r));
+
+      const execPromise = api
         .execute(req, controller.signal)
         .then((res): { exitCode: number } => {
           clearTimer();
+          if (killed) return exit!;
           const chunk = res.stdout + (res.stderr ? res.stderr : "");
           buffered += chunk;
           for (const cb of outputCbs) cb(chunk);
@@ -98,6 +107,7 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
         })
         .catch((err): { exitCode: number } => {
           clearTimer();
+          if (killed) return exit!;
           // A failed exec must not reject (goose's terminal/wait_for_exit would lose the
           // run), so surface it as terminal output plus a non-zero exit.
           const formatted = formatError(err);
@@ -112,6 +122,7 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
           exit = { exitCode: timedOut ? 124 : 1 }; // 124 = the conventional timeout exit code
           return exit;
         });
+      const exitPromise = Promise.race([execPromise, killedPromise]);
 
       return {
         id,
@@ -127,6 +138,11 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
           // Close this exec's WebSocket, which SIGTERMs the command's shell; idempotent.
           clearTimer();
           controller.abort();
+          if (exit || killed) return;
+          killed = true;
+          // 130 = killed by SIGINT/SIGTERM-style interrupt, the same code the exec layer uses.
+          exit = { exitCode: 130 };
+          resolveKilled(exit);
         },
         async release() {
           clearTimer();

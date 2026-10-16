@@ -256,3 +256,49 @@ describe("refreshSandbox() un-freezes a hydrated snapshot", () => {
     expect(sessions.get("eps" as SessionId)!.sandbox.namespace).toBe("");
   });
 });
+
+describe("on-demand hydration under concurrent first requests", () => {
+  it("a later hydrate does not replace the entry a prompt already revived (a Stop must find the live bridge)", async () => {
+    // A conversation's first requests after it lands on this pod (prompt, history, stream) hydrate
+    // concurrently. The second hydrate's reconcile resolves only after the prompt's run is live; it
+    // used to overwrite the revived entry with a bridgeless "suspended" one, so Stop found no bridge.
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((r) => (releaseSecond = r));
+    let reconciles = 0;
+    const prov = fakeProvisioner();
+    prov.reconcile = vi.fn(async () => {
+      if (++reconciles === 2) await secondGate;
+      return [];
+    });
+    const bridgePrompt = vi.fn(async () => "run-x");
+    const bridgeFactory = () =>
+      ({
+        start: vi.fn(async () => {}),
+        prompt: bridgePrompt,
+        stop: vi.fn(async () => {}),
+        cancel: vi.fn(async () => {}),
+        onEvent: () => () => {},
+        onPersist: () => () => {},
+        onTitle: () => () => {},
+      }) as never;
+    const store = inMemoryStore();
+    await store.saveMeta!({ id: "delta", threadId: "delta", title: "", createdAt: 0, lastActivityAt: 0 } as never);
+    const sessions = createSessionManager({
+      provisioner: prov,
+      store,
+      bridgeFactory,
+      conversationRegistry: registryWith([cr("delta")]) as never,
+      selfPod: SELF,
+    } as never);
+
+    const prompted = sessions.promptByThread("delta" as never, "!sleep 20");
+    const readable = sessions.ensureReadable("delta" as never);
+    await vi.waitFor(() => expect(bridgePrompt).toHaveBeenCalledOnce());
+    releaseSecond();
+    expect(await readable).toBe(true);
+    await prompted;
+
+    expect(sessions.get("delta")?.bridge, "the entry Stop reads still holds the live bridge").toBeDefined();
+    expect(sessions.get("delta")?.status).toBe("running");
+  });
+});
