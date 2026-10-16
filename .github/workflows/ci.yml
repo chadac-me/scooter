@@ -61,8 +61,8 @@ jobs:
 
       # Building .#agentHost under nix resolves @scooter/schema through the nix
       # symlink, which the workspace-resolving `just typecheck` cannot exercise.
-      - name: agent-host + byoc-controller + generated Drizzle schema (nix)
-        run: nix build .#scooter-schema-js .#agentHost .#byoc-controller --print-build-logs
+      - name: agent-host + byoc-controller + generated Drizzle schema + sandbox VS Code pieces (nix)
+        run: nix build .#scooter-schema-js .#agentHost .#byoc-controller .#scooter-vscode-ahp .#code-server-bin --print-build-logs
 
       # This job is the 'fast' gate and reports itself; always() so a red run still
       # resolves the gate for `ci-summary`.

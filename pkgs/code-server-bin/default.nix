@@ -1,0 +1,54 @@
+# code-server from coder's prebuilt release tarball, patched for NixOS. Replaces nixpkgs'
+# source build: the agent-host bridge (--agent-host-bridge-port) needs VS Code >= 1.141,
+# ahead of nixpkgs, and a prebuilt tarball materialises in seconds on first use.
+{ lib, stdenv, fetchurl, autoPatchelfHook, makeWrapper, krb5, libsecret, ... }:
+
+let
+  version = "4.141.0"; # bundles VS Code 1.141.0
+  srcs = {
+    x86_64-linux = fetchurl {
+      url = "https://github.com/coder/code-server/releases/download/v${version}/code-server-${version}-linux-amd64.tar.gz";
+      hash = "sha256-ZbzSC1JNA+sbWtt/NgJEWZ7w5bdAiaRqmC0ywHS5eik=";
+    };
+    aarch64-linux = fetchurl {
+      url = "https://github.com/coder/code-server/releases/download/v${version}/code-server-${version}-linux-arm64.tar.gz";
+      hash = "sha256-5cx42h1jHGz2Fi+bGO6qjunTI54aiLuZ0GAs3F+hhS0=";
+    };
+  };
+in
+stdenv.mkDerivation {
+  pname = "code-server";
+  inherit version;
+  src = srcs.${stdenv.hostPlatform.system} or (throw "code-server-bin: unsupported system ${stdenv.hostPlatform.system}");
+
+  nativeBuildInputs = [ autoPatchelfHook makeWrapper ];
+  buildInputs = [ stdenv.cc.cc.lib krb5 libsecret ];
+  # The microsoft-authentication extension's native broker is a desktop GUI component that a
+  # headless server never loads; without it the extension falls back to browser sign-in.
+  autoPatchelfIgnoreMissingDeps = [
+    "libX11.so.6" "libdbus-1.so.3" "libcurl.so.4" "libcrypto.so.3"
+    "libwebkit2gtk-4.1.so.0" "libgtk-3.so.0" "libgdk-3.so.0" "libsoup-3.0.so.0"
+  ];
+
+  dontConfigure = true;
+  dontBuild = true;
+  dontStrip = true; # node and its native addons ship stripped; restripping only risks them
+
+  installPhase = ''
+    runHook preInstall
+    mkdir -p $out/libexec/code-server $out/bin
+    cp -r . $out/libexec/code-server
+    # The release launcher only resolves its own root, using coreutils; call the bundled node directly.
+    makeWrapper $out/libexec/code-server/lib/node $out/bin/code-server \
+      --add-flags $out/libexec/code-server
+    runHook postInstall
+  '';
+
+  meta = {
+    description = "VS Code in the browser (prebuilt release)";
+    homepage = "https://github.com/coder/code-server";
+    license = lib.licenses.mit;
+    platforms = builtins.attrNames srcs;
+    mainProgram = "code-server";
+  };
+}
