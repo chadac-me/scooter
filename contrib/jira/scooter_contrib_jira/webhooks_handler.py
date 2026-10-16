@@ -153,9 +153,7 @@ async def _handle_comment(payload: dict):
             },
         )
 
-    await db.store_conversation(
-        "jira", "issue", issue_key, PENDING_CONVERSATION_ID, previous_conversation_id=existing,
-    )
+    await db.store_conversation("jira", "issue", issue_key, PENDING_CONVERSATION_ID)
     await db.link_resource(PENDING_CONVERSATION_ID, "jira", "issue", issue_key)
 
     conv_title = f"Jira {issue_key}: {issue_summary}"

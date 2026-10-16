@@ -239,9 +239,7 @@ async def _handle_comment(payload: dict):
             },
         )
 
-    await db.store_conversation(
-        "github", res_type, res_id, PENDING_CONVERSATION_ID, previous_conversation_id=existing,
-    )
+    await db.store_conversation("github", res_type, res_id, PENDING_CONVERSATION_ID)
 
     kind = "PR" if is_pr else "Issue"
     conv_title = f"{kind} #{issue_number}: {issue_title}"

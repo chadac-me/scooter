@@ -25,9 +25,6 @@ CREATE TABLE "conversation_map" (
   "last_status"     character varying NULL,
   "slack_channel"   character varying NULL,
   "slack_ts"        character varying NULL,
-  -- The conversation this row pointed at before a webhook replaced it with a new
-  -- one, so a misroute can be undone. Why: issue #802.
-  "previous_conversation_id" character varying NULL,
   "created_at"      timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY ("id"),
   CONSTRAINT "conversation_map_source_resource_type_resource_id_key" UNIQUE ("source", "resource_type", "resource_id")

@@ -268,9 +268,7 @@ async def _handle_note(payload: dict):
             },
         )
 
-    await db.store_conversation(
-        "gitlab", res_type, res_id, PENDING_CONVERSATION_ID, previous_conversation_id=existing,
-    )
+    await db.store_conversation("gitlab", res_type, res_id, PENDING_CONVERSATION_ID)
 
     if noteable_type == "MergeRequest":
         conv_title = f"MR !{mr_iid}: {mr_title}"

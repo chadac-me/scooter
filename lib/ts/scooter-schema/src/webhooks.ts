@@ -19,7 +19,6 @@ export const conversationMap = pgTable("conversation_map", {
 	lastStatus: varchar("last_status"),
 	slackChannel: varchar("slack_channel"),
 	slackTs: varchar("slack_ts"),
-	previousConversationId: varchar("previous_conversation_id"),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	unique("conversation_map_source_resource_type_resource_id_key").on(table.source, table.resourceType, table.resourceId),

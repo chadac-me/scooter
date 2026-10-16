@@ -45,13 +45,12 @@ async def test_a_conversation_that_still_exists_keeps_its_mapping(linked, outcom
     assert not create.called, "no memoryless replacement conversation"
 
 
-async def test_a_missing_conversation_is_replaced_and_the_old_id_kept(linked):
+async def test_a_missing_conversation_is_replaced(linked):
     deliver, store, create = linked
     deliver.return_value = gh.SendOutcome.NOT_FOUND
     await gh._handle_comment(_comment())
     store.assert_awaited_once_with(
         "github", "pull_request", "chadac/scooter#799", gh.PENDING_CONVERSATION_ID,
-        previous_conversation_id="conv-old",
     )
     # Let the create task scheduled by the handler run.
     await asyncio.sleep(0)
