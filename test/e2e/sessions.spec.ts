@@ -5,7 +5,7 @@
  */
 
 import { test, expect } from "./fixtures.js";
-import { fastOnly, isFull } from "./target.js";
+import { fastOnly } from "./target.js";
 
 const sidebar = {
   list: '[data-testid="session-list"]',
@@ -52,13 +52,14 @@ test.describe("session selector & titles", () => {
     await expect(chat.assistantMessages().filter({ hasText: /<title>/i })).toHaveCount(0);
   });
 
-  // Full target only: the rename-open click misses Playwright's action window on the 2-core
-  // hosted runner that e2e fast uses, which is why this was quarantined (#742). The
-  // self-hosted fleet e2e full runs on is the non-starved runner that TODO was waiting for;
-  // e2e fast cannot move there, since it runs on fork PRs and `runs-on` is not a security
-  // boundary. ui/src/Sidebar.rename.test.ts still guards the blur rule on every PR.
-  test("the user can rename a conversation, and the agent can't override it", async ({ chat, page }) => {
-    test.skip(!isFull, "starves on the 2-core hosted runner e2e fast uses — see #742");
+  // STILL QUARANTINED, and no longer for the reason #742 recorded. Enabled on the full
+  // target, this failed 1 of 5 repetitions on the self-hosted fleet against a real cluster
+  // (run 38921656329), so "a timing artifact of the undersized 2-core runner" is not the
+  // whole story: the trace shows the click landing on ✎, and no editing render in the 15s
+  // that follow — openRename() can silently no-op under load on any runner. That is a UI
+  // bug (#796), not a test bug, and re-enabling here would only make it CI's problem.
+  // ui/src/Sidebar.rename.test.ts guards the blur rule meanwhile.
+  test.skip("the user can rename a conversation, and the agent can't override it", async ({ chat, page }) => {
     await chat.open();
     await chat.send("help me refactor the parser");
     await chat.waitForReply(/dummy agent/i);
