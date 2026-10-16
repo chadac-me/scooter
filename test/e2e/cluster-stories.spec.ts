@@ -97,3 +97,31 @@ fullOnly("needs kubectl access to delete the owner pod mid-run")(
     });
   },
 );
+
+fullOnly("needs a real sandbox pod and its declared web services behind the router")(
+  "opening a web service from the browser",
+  () => {
+    test("the services list is right and a stopped service lands in the app", async ({ chat, page, request, baseURL }) => {
+      // The first start of `terminal` builds ttyd in-pod, on top of a real sandbox boot. PR #799.
+      test.setTimeout(420_000);
+      const base = (baseURL ?? "").replace(/\/$/, "");
+
+      await chat.open();
+      await chat.completeTurn("bring the sandbox up", 100_000);
+      const thread = new URL(page.url()).searchParams.get("thread");
+      expect(thread, "the URL must name a conversation").toBeTruthy();
+
+      // Whichever pod answers must list the image's services, not a stale empty set.
+      for (let i = 0; i < 5; i++) {
+        const res = await request.get(`${base}/conversations/${encodeURIComponent(thread!)}/web-services`);
+        expect(res.ok(), `web-services answered ${res.status()}`).toBeTruthy();
+        const names = ((await res.json()) as { services: Array<{ name: string }> }).services.map((s) => s.name);
+        expect(names).toContain("terminal");
+      }
+
+      // A stopped service gets the loading page, whose poll starts it and reloads into ttyd.
+      await page.goto(`${base}/c/${encodeURIComponent(thread!)}/terminal/`);
+      await expect(page.locator(".xterm")).toBeVisible({ timeout: 300_000 });
+    });
+  },
+);

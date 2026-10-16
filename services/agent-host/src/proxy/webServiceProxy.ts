@@ -12,8 +12,8 @@ import { request as httpRequest, type IncomingMessage, type ServerResponse } fro
 import { connect, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
-import type { SessionManager } from "../session/manager.js";
-import type { SandboxRef } from "../types.js";
+import type { SandboxProvisioner, SessionManager } from "../session/manager.js";
+import type { SandboxRef, SessionId } from "../types.js";
 
 // --- pod target resolution ----------------------------------------------------
 
@@ -123,6 +123,23 @@ const htmlEscape = (s: string) =>
 /** Whether this request is a top-level browser navigation (wants HTML) rather than an XHR/asset fetch. */
 export function wantsHtml(accept: string | undefined): boolean {
   return (accept ?? "").includes("text/html");
+}
+
+/** The proxy's `wake`: what the UI's "Start sandbox" does (revive), unless the entry is already
+ *  running and only its pod is gone, where a Sandbox resume suffices and a revive would rebuild a
+ *  live bridge. */
+export function createWake(deps: {
+  sessions: SessionManager;
+  provisioner: Pick<SandboxProvisioner, "resume">;
+  registry: Pick<WebServiceRegistry, "invalidate">;
+}): (conversationId: string) => Promise<void> {
+  return async (id) => {
+    const conv = deps.sessions.get(id as SessionId);
+    if (!conv) return;
+    if (conv.status === "running") await deps.provisioner.resume(conv.sandbox, conv.threadId);
+    else await deps.sessions.revive(id as SessionId);
+    deps.registry.invalidate(id);
+  };
 }
 
 /** The `/c/<id>/<service>` prefix exactly as the browser addressed it. Not the manifest's basePath, which carries an unexpanded `${CONVERSATION_ID}`. */

@@ -284,6 +284,10 @@ jobs:
               # the converge spec.
               - 'services/agent-host/src/session/k8sProvisioner.ts'
               - 'test/support/cluster.ts'
+              # The web-service bring-up path: proxy, registry, and the stale-entry refresh.
+              - 'test/cluster/web-services-bringup.spec.ts'
+              - 'services/agent-host/src/proxy/**'
+              - 'services/agent-host/src/session/manager.ts'
             # `example` and `platform` are separate outputs so the platform smoke and
             # the sandbox-image specs can run independently.
             example:
@@ -390,6 +394,14 @@ jobs:
           nix shell nixpkgs#k3d nixpkgs#kubectl -c k3d cluster create scooter-ci --no-lb --wait
           nix shell nixpkgs#k3d -c k3d kubeconfig merge scooter-ci --kubeconfig-merge-default
 
+      # The web-service specs reach pods by IP, as agent-host does in production; route the
+      # k3s pod CIDR to the server node container so the runner can.
+      - name: route the pod network to the runner
+        run: |
+          set -euo pipefail
+          node_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' k3d-scooter-ci-server-0)
+          sudo ip route add 10.42.0.0/16 via "$node_ip"
+
       # `<attr>.copyTo docker-daemon:<name>:<tag>` loads the nix2container image
       # straight into Docker, and k3d then imports it by name.
       - name: build + import sandbox image
@@ -410,7 +422,7 @@ jobs:
           CI: "1"
         # --no-file-parallelism: each spec boots a privileged systemd-PID-1 pod, and
         # two at once on single-node k3d contend for resources and share the namespace.
-        run: nix develop --command bash -c 'npm install && npm run test:cluster -- sandbox-os overlay-store scooter-converge scooterRebuildTwice warm-store --no-file-parallelism'
+        run: nix develop --command bash -c 'npm install && npm run test:cluster -- sandbox-os overlay-store scooter-converge scooterRebuildTwice warm-store web-services-bringup --no-file-parallelism'
 
       - name: tear down k3d
         if: always()
