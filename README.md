@@ -103,9 +103,10 @@ agent-sandbox controller:  warm pools · suspend (drop Pod, keep PVCs) / resume
 ## Subsystems
 
 - **Web services** — declarative in-pod services (marimo, browser VS Code via
-  code-server, an xterm terminal via ttyd) that the platform reverse-proxies at
-  `https://<host>/c/<id>/<service>/`. Discovered from an in-pod manifest; started
-  and stopped at runtime with the `scooter-service` CLI (or from the UI).
+  code-server from contrib/code-server, an xterm terminal via ttyd) that the
+  platform reverse-proxies at `https://<host>/c/<id>/<service>/`. Discovered
+  from an in-pod manifest; started and stopped at runtime with the
+  `scooter-service` CLI (or from the UI).
 - **Broker + provider tools** — a credential vault and transparent proxy. Typed MCP
   tools (`slack_respond`, `slack_react`, `github_comment`, `gitlab_comment`,
   `jira_comment`, `brave_web_search`, `web_fetch`) wrap it; anything else uses the raw

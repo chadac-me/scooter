@@ -85,7 +85,6 @@ let
     # demand, with mkDefault so a deployment can turn one off.
     webServices.marimo.enable = lib.mkDefault true;
     webServices.terminal.enable = lib.mkDefault true;
-    webServices.vscode.enable = lib.mkDefault true;
   });
 
   toplevel = nixos.config.system.build.toplevel;

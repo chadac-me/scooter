@@ -1,10 +1,13 @@
-# webServices.vscode: a browser VS Code (code-server) served under
-# /c/<id>/vscode/, with the proxy stripping that prefix because code-server has
-# no base-path flag. `pkgs.code-server` is a nix-stubs shim built on first
-# start. When the pod has router self-access (SCOOTER_SELF_URL), VS Code's chat is
-# bridged to this conversation through scooter-vscode-ahp (services/vscode-ahp).
-# This module only supplies mkDefault values and must not gate on
-# `cfg.enable` (infinite recursion); web-services.nix filters on `.enable`.
+# code-server's sandbox half: a browser VS Code (code-server) served as
+# webServices.vscode under /c/<id>/vscode/, with the proxy stripping that prefix
+# because code-server has no base-path flag. `pkgs.code-server` is a nix-stubs shim
+# (./code-server-bin, declared in modules/sandbox-os/stubs.nix) built on first start.
+# When the pod has router self-access (SCOOTER_SELF_URL), VS Code's chat is bridged to
+# this conversation through scooter-vscode-ahp (./ahp). Like every web service the unit
+# is explicit-start, so declaring it costs a manifest entry and no running process.
+#
+# Supplies mkDefault values only and must not gate on `cfg.enable` (infinite
+# recursion); web-services.nix filters on `.enable` when it renders units.
 
 { config, lib, pkgs, ... }:
 
@@ -13,15 +16,16 @@ let
   # Loopback port of the AHP server code-server bridges to.
   ahpPort = 8765;
   # A stub (stubs.nix) where the stub overlay applies; built directly in evals without it (nixosTests).
-  vscodeAhp = pkgs.scooter-vscode-ahp or (pkgs.callPackage ../../../services/vscode-ahp { });
+  vscodeAhp = pkgs.scooter-vscode-ahp or (pkgs.callPackage ./ahp { });
 in
 {
   # The code-server shim on PATH, so the agent can run it by hand.
   environment.systemPackages = lib.mkIf cfg.enable [ pkgs.code-server ];
 
   webServices.vscode = {
+    enable = lib.mkDefault true;
     port = lib.mkDefault 8443;
-    displayName = lib.mkDefault "VS Code";
+    displayName = lib.mkDefault "Code";
     # Root, like the agent's own exec'd shell, so the editor operates on the /workspace PVC.
     user = lib.mkDefault "root";
     workingDirectory = lib.mkDefault "/workspace";

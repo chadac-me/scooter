@@ -429,14 +429,14 @@ typecheck:
     npm -w @scooter/schema run build
     npm -w services/agent-host run typecheck
     npm -w ui run typecheck
-    npm -w services/vscode-ahp run typecheck
+    npm -w contrib/code-server/ahp run typecheck
     # The generated Drizzle schema (catches broken/drifted generation at the type level).
     npm -w @scooter/schema run typecheck
 
 lint: typecheck
 
 # Guard against a stale stubs.lock: re-evaluate stubs.nix and fail if any recorded .drv
-# differs. An in-repo stub (services/vscode-ahp) changes its .drv with every source edit, and a
+# differs. An in-repo stub (contrib/code-server/ahp) changes its .drv with every source edit, and a
 # stale lock would silently ship the old build. Fix: nix run --inputs-from . nix-stubs#nix-stubs --
 # gen --system x86_64-linux --system aarch64-linux --lock modules/sandbox-os/stubs.lock
 check-stubs:
@@ -453,8 +453,8 @@ check-lockfiles:
     npm install --package-lock-only --prefix services/byoc-controller --workspaces=false
     npm install --package-lock-only --prefix lib/ts/scooter-schema --workspaces=false
     npm install --package-lock-only --prefix contrib/files/viewer-ui --workspaces=false
-    npm install --package-lock-only --prefix services/vscode-ahp --workspaces=false
-    @git diff --exit-code -- package-lock.json ui/package-lock.json services/agent-host/package-lock.json services/byoc-controller/package-lock.json lib/ts/scooter-schema/package-lock.json contrib/files/viewer-ui/package-lock.json services/vscode-ahp/package-lock.json \
+    npm install --package-lock-only --prefix contrib/code-server/ahp --workspaces=false
+    @git diff --exit-code -- package-lock.json ui/package-lock.json services/agent-host/package-lock.json services/byoc-controller/package-lock.json lib/ts/scooter-schema/package-lock.json contrib/files/viewer-ui/package-lock.json contrib/code-server/ahp/package-lock.json \
       || (echo "❌ lockfile drift: a package.json changed without regenerating the lockfile. Run 'nix develop -c just check-lockfiles' and commit the result." && exit 1)
     @echo "✅ lockfiles are in sync with package.json"
 
@@ -478,7 +478,7 @@ check-npm-hashes:
     check services/byoc-controller/package-lock.json services/byoc-controller/default.nix
     check lib/ts/scooter-schema/package-lock.json lib/ts/scooter-schema/default.nix
     check contrib/files/viewer-ui/package-lock.json contrib/files/viewer-ui/default.nix
-    check services/vscode-ahp/package-lock.json services/vscode-ahp/default.nix
+    check contrib/code-server/ahp/package-lock.json contrib/code-server/ahp/default.nix
     [ "$fail" -eq 0 ] && echo "✅ npmDepsHash values match their lockfiles"
     exit "$fail"
 

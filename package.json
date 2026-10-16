@@ -11,7 +11,7 @@
     "services/claude-sdk-provider",
     "services/marimo-mcp",
     "services/remote-agent",
-    "services/vscode-ahp",
+    "contrib/code-server/ahp",
     "ui"
   ],
   "scripts": {

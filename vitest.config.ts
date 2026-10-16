@@ -48,7 +48,7 @@ export default defineConfig({
         // The in-sandbox Agent Host Protocol server VS Code bridges to: AG-UI -> AHP mapping.
         test: {
           name: "vscode-ahp",
-          include: ["services/vscode-ahp/test/**/*.spec.ts"],
+          include: ["contrib/code-server/ahp/test/**/*.spec.ts"],
           environment: "node",
         },
       },

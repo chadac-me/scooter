@@ -9,6 +9,7 @@
     ./airtable/contrib.nix
     ./aws/contrib.nix
     ./brave/contrib.nix
+    ./code-server/contrib.nix
     ./datadog/contrib.nix
     ./duckduckgo/contrib.nix
     ./echo/contrib.nix

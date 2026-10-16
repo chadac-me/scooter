@@ -8,6 +8,7 @@
     airtable.enable = true;
     aws.enable = true;
     brave.enable = true;
+    code-server.enable = true;
     datadog.enable = true;
     duckduckgo.enable = true;
     files.enable = true;

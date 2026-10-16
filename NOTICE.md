@@ -31,7 +31,7 @@ terms — see [Proprietary components](#proprietary-components).
 | [Goose](https://github.com/block/goose) (`goose-cli`) | The ACP agent Scooter runs (bundled in the agent-host image) | Apache-2.0 |
 | [`@zed-industries/agent-client-protocol`](https://github.com/zed-industries/agent-client-protocol) | ACP client library (agent-host) | Apache-2.0 |
 | [`@ag-ui/*`](https://github.com/ag-ui-protocol/ag-ui) | AG-UI protocol client/core/encoder (UI + agent-host) | MIT |
-| [hydra-ahp](https://github.com/smagnuso/hydra-ahp) protocol core | **Vendored** into `services/vscode-ahp/src/vendor/hydra-ahp` (Agent Host Protocol server core; see its LICENSE and README there) | MIT |
+| [hydra-ahp](https://github.com/smagnuso/hydra-ahp) protocol core | **Vendored** into `contrib/code-server/ahp/src/vendor/hydra-ahp` (Agent Host Protocol server core; see its LICENSE and README there) | MIT |
 | [`@microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) | Agent Host Protocol types and reducers (vscode-ahp) | MIT |
 | [code-server](https://github.com/coder/code-server) (prebuilt release, bundling VS Code OSS) | Browser VS Code, fetched into the sandbox on first use | MIT |
 | [assistant-ui](https://github.com/assistant-ui/assistant-ui) (`@assistant-ui/*`) | Conversation UI framework | MIT |
