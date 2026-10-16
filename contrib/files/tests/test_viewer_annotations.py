@@ -384,10 +384,6 @@ def test_the_state_file_is_valid_json_a_human_can_read(store, tmp_path):
 
 
 # --- telling the agent ------------------------------------------------------------
-#
-# A stored remark is announced to the conversation through the router's self-access
-# listener, as a second outbox step after the broker ack. These pin when that
-# happens, that it happens once, and that a burst of remarks is one message.
 
 
 class FakeNotifier:
@@ -431,7 +427,7 @@ def test_the_agent_is_told_only_after_the_broker_has_the_remark(told):
     record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="why this?")
     assert record.notify == "pending"
 
-    # The push fails: nothing is announced for a remark the broker does not have.
+    # Nothing is announced before the broker has it.
     store.transport.fail = ann.TransportError("broker down", status=503)
     store.transport.sticky = True
     store.flush()
@@ -443,7 +439,7 @@ def test_the_agent_is_told_only_after_the_broker_has_the_remark(told):
     clock.advance(60)
     store.flush()  # the push lands
     assert store.get(record.id).state == "acked"
-    assert store.notifier.sent == []  # the notify waits a moment for company
+    assert store.notifier.sent == []  # still inside the batching delay
 
     _past_the_delay(clock)
     store.flush()
@@ -461,8 +457,7 @@ def test_the_agent_is_told_only_after_the_broker_has_the_remark(told):
 
 
 def test_a_burst_of_remarks_is_one_message(told):
-    # The listener allows a handful of messages a minute per conversation, and each
-    # message costs the agent a turn, so a reviewer's run of comments goes as one.
+    # One message per burst: one agent turn, under the rate limit.
     store, clock = told
     first = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="one")
     store.add(content=DOC, path="doc.md", line=4, quote="delta", text="two")
@@ -475,7 +470,7 @@ def test_a_burst_of_remarks_is_one_message(told):
     assert message.startswith("3 new review remarks")
     assert "one" in message and "two" in message
     assert f"In reply to thread {first.id}" in message
-    # Ordered as they read in the file, not as they were typed.
+    # Ordered by position in the file.
     assert message.index(":1.") < message.index(":2.") < message.index(":4.")
 
 
@@ -487,7 +482,7 @@ def test_a_failed_notify_backs_off_and_never_touches_the_stored_state(told):
     _past_the_delay(clock)
     store.flush()
 
-    # The remark is stored whatever the notify does; only the notify is owed.
+    # A failed notify never touches the stored state.
     assert store.get(record.id).state == "acked"
     assert store.get(record.id).error == ""
     assert store.get(record.id).notify == "pending"
@@ -517,8 +512,7 @@ def test_a_rate_limited_notify_waits_as_told_without_spending_an_attempt(told):
 
 
 def test_a_refused_notify_gives_up_at_once_and_the_card_can_retry_it(told):
-    # 403 is the router saying this pod does not run this conversation, which no
-    # amount of retrying changes.
+    # A 403 means this pod doesn't own the conversation.
     store, clock = told
     record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x")
     store.flush()
@@ -528,7 +522,7 @@ def test_a_refused_notify_gives_up_at_once_and_the_card_can_retry_it(told):
     assert store.get(record.id).notify == "failed"
     assert not [op for op in store.queue if op.kind == "notify"]
 
-    # Retrying an acked record re-sends only the notify, never the push.
+    # Retry re-sends only the notify, never the push.
     store.retry(record.id)
     store.flush()
     assert len(store.transport.puts) == 1
@@ -590,9 +584,7 @@ def test_with_no_self_access_remarks_are_stored_and_nothing_is_owed(tmp_path: Pa
 
 
 def test_the_self_transport_posts_to_its_own_conversation_with_its_token(tmp_path: Path):
-    # The real client against a stand-in listener: the full conversation id in the
-    # path (the router's self-access check is on that id), the pod's token as bearer,
-    # and the listener's Retry-After carried back for the backoff.
+    # The real client against a stand-in self-access listener.
     import http.server
 
     seen: list[tuple[str, str, dict]] = []

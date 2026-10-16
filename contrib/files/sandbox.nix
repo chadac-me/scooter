@@ -44,13 +44,7 @@ in
       # Without this the root is a "frontend not built" note; /api/health reports
       # which of the two a viewer is serving.
       export SCOOTER_FILES_STATIC="${frontend}"
-      # A systemd unit inherits nothing from the pod, so the broker's address, and the
-      # router self-access listener a stored remark is announced through, are read
-      # from PID 1's environ the way carry-over.nix reads it.
-      #
-      # Empty is supported: with no broker the viewer records comments locally and
-      # reports them as never committed; with no self-access it stores them but does
-      # not tell the agent.
+      # Units inherit no pod env, so read these from PID 1.
       for var in BROKER_URL SCOOTER_SELF_URL SCOOTER_SELF_TOKEN_PATH CONVERSATION_ID; do
         if [ -z "''${!var:-}" ]; then
           value=$(${pkgs.coreutils}/bin/tr '\0' '\n' < /proc/1/environ \

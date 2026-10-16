@@ -26,8 +26,7 @@ in
       scooter.broker.extraEnv = [
         # Annotations reach the shared `broker` database through the BROKER_DB_*
         # components the broker already passes every provider, so there is no DSN here.
-        # Nothing here wakes the conversation: the sandbox viewer does that itself
-        # through the router's self-access listener once the broker acks a remark.
+        # The sandbox viewer, not the broker, wakes the conversation.
         { name = "FILES_ANNOTATIONS_ENABLED"; value = "true"; }
       ];
     })

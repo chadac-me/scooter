@@ -101,8 +101,7 @@ class Annotations(Transport):
     """Routes over an AnnotationStore, which the provider injects."""
 
     name: str = "annotations"
-    # Injected by the provider via set_store, so a test can drive the real routes
-    # against SQLite.
+    # Injected via set_store, so tests can use SQLite.
     store: AnnotationStore | None = field(default=None)
 
     def set_store(self, store: AnnotationStore) -> None:
@@ -130,10 +129,7 @@ class Annotations(Transport):
             except PermissionError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-            # Storing is all the broker does. The viewer announces a remark to its
-            # conversation itself, through the router's sandbox self-access listener,
-            # once this ack arrives; the broker identifies a sandbox only by its short
-            # id, which is not the conversation's.
+            # Only stores; the viewer wakes the conversation after this ack.
             return {"annotation": stored.payload(), "created": created}
 
         @router.get("")

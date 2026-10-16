@@ -88,9 +88,7 @@ class Config:
     # empty URL leaves annotations local and reported as never committed.
     broker_url: str = ""
     token_path: str = "/var/run/secrets/broker/token"
-    # The router's sandbox self-access listener and the pod's token for it, through
-    # which a stored remark is announced to this conversation; any of the three
-    # missing leaves remarks stored but unannounced.
+    # Self-access listener; any missing leaves remarks unannounced.
     self_url: str = ""
     self_token_path: str = ""
     conversation_id: str = ""

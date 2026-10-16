@@ -171,7 +171,7 @@ async def test_put_stores_the_annotation(store):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["created"] is True
-    # Waking the conversation is the viewer's job now; the broker only stores.
+    # The broker only stores; the viewer wakes the agent.
     assert "woke" not in body
     assert body["annotation"]["author"] == {"conversation": "conv-alice"}
     # A remark with no thread of its own starts one.
