@@ -75,6 +75,9 @@ func TestSelfRouteAllowlist(t *testing.T) {
 		ok           bool
 	}{
 		{"GET", "/conversations/c/events", true},
+		{"GET", "/conversations/c/events.integrity", true},
+		{"POST", "/conversations/c/events.integrity", false},
+		{"GET", "/conversations/c/eventsXintegrity", false},
 		{"GET", "/conversations/c/history", true},
 		{"POST", "/conversations/c/messages", true},
 		{"POST", "/conversations/c/cancel", true},
@@ -116,7 +119,7 @@ func TestSandboxIDFromUsername(t *testing.T) {
 
 func TestSelfAccessAdmitsOwnConversation(t *testing.T) {
 	s, _, _ := selfFixture(t)
-	for _, path := range []string{"/conversations/conv-1/events", "/conversations/sub-1/history"} {
+	for _, path := range []string{"/conversations/conv-1/events", "/conversations/conv-1/events.integrity", "/conversations/sub-1/history"} {
 		code, got := do(s, "GET", path, "good", nil)
 		if code != http.StatusAccepted || !got.called {
 			t.Fatalf("%s: code %d called %v, want proxied", path, code, got.called)
