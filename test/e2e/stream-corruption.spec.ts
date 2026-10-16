@@ -139,7 +139,6 @@ fastOnly("needs the SSE fault proxy to corrupt stream frames")("integrity stream
     await chat.send("!sleep 4");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     await chat.sendWhileRunning("queued through the corruption");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 20_000 });
 
     // Corrupt the stream while a message waits in the queue.

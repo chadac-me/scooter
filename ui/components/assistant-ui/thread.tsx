@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/src/ModelPicker";
 import { useConversationInterrupts, parseSystemMessage } from "@/src/RuntimeProvider";
 import { InlineRunStatus, ContextFillBar } from "@/src/RunStatusBar";
+import { QueuedMessages } from "@/src/QueuedMessages";
 import { cn } from "@/lib/utils";
 import {
   ActionBarMorePrimitive,
@@ -316,6 +317,8 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
           >
             <ThreadPrimitive.Messages>{renderMessage}</ThreadPrimitive.Messages>
+            {/* Messages sent mid-run, shown faded at the tail until the agent picks them up. */}
+            <QueuedMessages />
           </div>
 
           <ThreadPrimitive.ViewportFooter

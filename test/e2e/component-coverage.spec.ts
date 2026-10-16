@@ -25,10 +25,8 @@ const sb = {
 const panel = {
   root: '[data-testid="right-panel"]',
   sandboxTab: '[data-testid="right-panel-tab-sandbox"]',
-  queueTab: '[data-testid="right-panel-tab-queue"]',
   sandboxPanel: '[data-testid="sandbox-panel"]',
   sandboxState: '[data-testid="sandbox-state"]',
-  queueEmpty: '[data-testid="queue-empty"]',
 };
 
 test.describe("sidebar / session components", () => {
@@ -186,12 +184,12 @@ test.describe("right panel: tabs + sandbox surface", () => {
     await expect(page.locator(panel.sandboxPanel)).toBeVisible({ timeout: 20_000 });
     assertConsistent(await snapshot(page), "sandbox tab selected");
 
-    // Queue tab: empty, and it says so rather than rendering a blank list.
-    await page.locator(panel.queueTab).click();
-    await expect(page.locator(panel.queueTab)).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator(panel.queueEmpty)).toBeVisible({ timeout: 20_000 });
+    // There is no Queue tab: queued messages render inline in the thread, and nothing
+    // is queued here, so no faded queued bubbles either.
+    await expect(page.locator('[data-testid="right-panel-tab-queue"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="queued-message"]')).toHaveCount(0);
     const after = await snapshot(page);
-    assertConsistent(after, "queue tab selected");
+    assertConsistent(after, "after tab switching");
     expect(after.userMessages, "switching tabs must not disturb the thread").toBe(before.userMessages);
   });
 

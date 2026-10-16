@@ -176,7 +176,7 @@ export function App() {
                 <ConversationArea />
               </div>
             </main>
-            {/* Right-side tabbed panel (Approvals + Queue); collapses entirely when both are empty. */}
+            {/* Right-side tabbed panel (Sandbox, Approvals, Subagents, Shares). */}
             <RightPanel />
           </div>
         )}

@@ -97,11 +97,10 @@ test.describe("two tabs on the same conversation", () => {
     const chatB = new Chat(pageB);
     await expect(chatB.input()).toBeVisible({ timeout: 20_000 });
 
-    // A queues a message behind a long run; B must see it in its queue tab.
+    // A queues a message behind a long run; B must see it inline in its thread.
     await chat.send("!sleep 6");
     await expect(page.locator('[data-testid="run-status-bar"]')).toBeVisible({ timeout: 30_000 });
     await chat.sendWhileRunning("queued in A, visible in B");
-    await chatB.openQueueTab();
     await expect
       .poll(async () => (await snapshot(pageB)).queued.join("|"), { timeout: 45_000 })
       .toContain("queued in A, visible in B");

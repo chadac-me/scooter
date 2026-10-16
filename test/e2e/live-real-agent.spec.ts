@@ -112,7 +112,6 @@ maybe("live deployment, real agent", () => {
       .catch(() => {});
     await shot(page, "long-real-run-in-flight");
     await chat.sendWhileRunning("QUEUED-LIVE: reply with exactly QUEUED-OK");
-    await chat.openQueueTab();
     // It must appear in the queue while the real run is still going.
     await expect
       .poll(async () => (await snapshot(page)).queued.join("|"), { timeout: 60_000 })

@@ -158,11 +158,6 @@ export class Chat {
     await this.waitForIdle(timeout);
   }
 
-  /** Open the right panel's Queue tab (so queued rows are visible to assert on). */
-  async openQueueTab() {
-    const tab = this.page.locator('[data-testid="right-panel-tab-queue"]');
-    if (await tab.isVisible().catch(() => false)) await tab.click();
-  }
 }
 
 type Fixtures = {
@@ -439,7 +434,6 @@ export interface UiSnapshot {
   authError: boolean;
   // queue
   queued: string[];          // queued row texts, in render order
-  queueBadge: string | null;
   // approvals
   interruptOpen: boolean;
   interruptOptions: number;
@@ -487,13 +481,11 @@ export async function snapshot(page: Page): Promise<UiSnapshot> {
     })),
     runError: await text('[data-testid="run-error-message"]'),
     authError: await visible('[data-testid="stream-auth-error-bar"]'),
-    // One evaluate keeps the badge, rows and selected tab mutually consistent.
+    // One evaluate keeps the inline queued rows and selected tab mutually consistent.
     ...(await page.evaluate(() => {
-      const txt = (sel: string) => document.querySelector(sel)?.textContent?.trim() || null;
       return {
         queued: Array.from(document.querySelectorAll('[data-testid="queued-message-text"]'))
           .map((e) => (e.textContent || "").trim()),
-        queueBadge: txt('[data-testid="right-panel-badge-queue"]'),
         selectedTab:
           document
             .querySelector('[data-testid^="right-panel-tab-"][aria-selected="true"]')
@@ -530,10 +522,6 @@ export function assertConsistent(s: UiSnapshot, when: string) {
   // A terminal error and an in-flight run are mutually exclusive states.
   if (s.runError) {
     expect(s.running, `${when}: showing a terminal run error WHILE claiming to run`).toBe(false);
-  }
-  // The badge must match the rows it counts, but the rows only mount while the Queue tab is selected.
-  if (s.queueBadge && s.selectedTab === "right-panel-tab-queue") {
-    expect(Number(s.queueBadge.replace(/\D/g, "")), `${when}: queue badge != queued rows`).toBe(s.queued.length);
   }
   // An interrupt panel with no options is un-answerable.
   if (s.interruptOpen) {

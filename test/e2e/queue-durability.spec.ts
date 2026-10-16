@@ -19,7 +19,6 @@ test.describe("queue rendering while a run is in flight", () => {
     await chat.open();
     await chat.startLongRun(RUN_SEC);
     await chat.sendWhileRunning("queued while busy");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
     await expect(page.locator('[data-testid="queued-message-text"]').first()).toContainText("queued while busy");
   });
@@ -30,7 +29,6 @@ test.describe("queue rendering while a run is in flight", () => {
     await chat.sendWhileRunning("first queued");
     await chat.sendWhileRunning("second queued");
     await chat.sendWhileRunning("third queued");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(3, { timeout: 15_000 });
 
     // Rows render by (priority DESC, arrival ASC) and a send's priority is derived from the
@@ -63,19 +61,19 @@ test.describe("queue rendering while a run is in flight", () => {
     await chat.open();
     await chat.startLongRun(RUN_SEC);
     await chat.sendWhileRunning("urgent");
-    await chat.openQueueTab();
     // The UI marks a send-while-running as priority, so the pill must render.
     await expect(page.locator('[data-testid="queued-priority-pill"]').first()).toBeVisible({ timeout: 15_000 });
   });
 
-  test("the Queue tab BADGE counts queued messages (0 → n)", async ({ chat, page }) => {
+  test("queued messages render inline in the thread, faded, with a status (0 → n)", async ({ chat, page }) => {
     await chat.open();
     await chat.startLongRun(RUN_SEC);
     await chat.sendWhileRunning("q1");
     await chat.sendWhileRunning("q2");
-    const badge = page.locator('[data-testid="right-panel-badge-queue"]');
-    await expect(badge).toBeVisible({ timeout: 15_000 });
-    await expect(badge).toHaveText(/2/, { timeout: 15_000 });
+    await expect(chat.queuedMessages()).toHaveCount(2, { timeout: 15_000 });
+    // They sit after the real thread messages, not in a side panel.
+    await expect(page.locator('[data-testid="right-panel-tab-queue"]')).toHaveCount(0);
+    await expect(chat.queuedMessages().first().locator('[data-testid="queued-message-status"]')).toBeVisible();
   });
 
   test("a long queued message clamps + can be expanded (Show more)", async ({ chat, page }) => {
@@ -83,7 +81,6 @@ test.describe("queue rendering while a run is in flight", () => {
     await chat.startLongRun(RUN_SEC);
     const longText = Array.from({ length: 20 }, (_, i) => `line-${i} of a very long queued message`).join(" ");
     await chat.sendWhileRunning(longText);
-    await chat.openQueueTab();
     const toggle = page.locator('[data-testid="queued-message-toggle"]').first();
     // The clamp toggle is present for an overflowing message.
     await expect(toggle).toBeVisible({ timeout: 15_000 });
@@ -100,11 +97,9 @@ test.describe("queue durability across refresh + drain", () => {
     // outlast send → queue → reload → re-derive.
     await chat.startLongRun(60);
     await chat.sendWhileRunning("survive the reload");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
 
     await page.reload();
-    await chat.openQueueTab();
     // The queued message is re-derived from the server's QUEUE_UPDATED snapshot on replay,
     // which on a cluster round-trips the router.
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 60_000 });
@@ -122,7 +117,6 @@ test.describe("queue durability across refresh + drain", () => {
     // Once the sleep run and the queued run both complete there are more assistant messages
     // and the queued item leaves the queue.
     await expect.poll(async () => chat.assistantMessages().count(), { timeout: 90_000 }).toBeGreaterThan(before);
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(0, { timeout: 20_000 });
     await expect(chat.userMessages().filter({ hasText: "run me after the sleep" })).toHaveCount(1);
   });
@@ -143,7 +137,6 @@ test.describe("queue durability across refresh + drain", () => {
   test("an empty queue shows NO queued rows (badge absent / zero)", async ({ chat, page }) => {
     await chat.open();
     await chat.sendTurn("just one normal turn");
-    await chat.openQueueTab();
     await expect(chat.queuedMessages()).toHaveCount(0);
   });
 });
