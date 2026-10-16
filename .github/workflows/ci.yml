@@ -1517,6 +1517,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           # Absent when the control was skipped; the comment then has no control section.
@@ -1530,10 +1531,15 @@ jobs:
             hist+=(--history "$f")
             hist+=(--history-label "$(cat "$(dirname "$f")/label" 2>/dev/null || true)")
           done < <(find history -name report.json 2>/dev/null | sort)
-          nix develop --command node scripts/flake-focus-report.mjs "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
+          # The redirect sits inside the devshell: the shellHook's banner goes to
+          # the outer stdout and would otherwise land at the top of the comment.
+          # The history window is always the default branch's nightly, whatever
+          # this PR is based on.
+          nix develop --command bash -c 'node scripts/flake-focus-report.mjs "$@" > flake-comment.md' _ \
+            "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
             --pattern "$FLAKE_PATTERN" --target full --mode "$FLAKE_MODE" \
-            --specs "$FLAKE_SPECS" --run-url "$RUN_URL" --history-ref "$BASE_REF" \
-            "${base[@]}" "${hist[@]}" > flake-comment.md
+            --specs "$FLAKE_SPECS" --run-url "$RUN_URL" --history-ref "$DEFAULT_BRANCH" \
+            "${base[@]}" "${hist[@]}"
           cat flake-comment.md >> "$GITHUB_STEP_SUMMARY"
           # One section of the shared CI comment; advisory per .github/ci-gates.yml,
           # but the gate blocks while it is pending.
