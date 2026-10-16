@@ -563,8 +563,10 @@ jobs:
           # shard's selection equals the inventory exactly once.
           # The JSON goes to a file because `nix develop` prints a banner to stdout
           # that $(...) would capture.
+          # Listing the cluster project imports agent-host sources, and those resolve
+          # @scooter/schema through its built dist/, which a fresh checkout does not have.
           nix develop --command bash -c \
-            "npm install --silent && PRIOR_REPORT='$report' SHARDS='$E2E_FULL_SHARDS' REPEAT='$E2E_FULL_REPEAT' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
+            "npm install --silent && npm -w @scooter/schema run build --silent && PRIOR_REPORT='$report' SHARDS='$E2E_FULL_SHARDS' REPEAT='$E2E_FULL_REPEAT' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
           matrix=$(cat /tmp/matrix.json)
           # Fail now on a banner or stray log line rather than downstream.
           echo "$matrix" | jq -e 'has("include")' >/dev/null \
