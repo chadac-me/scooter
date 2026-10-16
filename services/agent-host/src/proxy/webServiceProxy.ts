@@ -6,7 +6,8 @@
  * Any authenticated user may open any conversation's services (shared by design, #798).
  * The caller's identity is passed on as x-scooter-user.
  * Nothing on the forwarding path execs into the pod: liveness is read off the
- * connection. Why: PR #791.
+ * connection. Why: PR #791. The pod address is cached briefly rather than listed
+ * from the API server per request. Why: PR #799.
  */
 
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
@@ -14,8 +15,11 @@ import { connect, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
 import { inboundIdentityHeaders, withHandoffIdentity, type UserContext } from "../auth/identity.js";
-import type { SessionManager } from "../session/manager.js";
+import { logger } from "../log.js";
+import type { Conversation, SessionManager } from "../session/manager.js";
 import type { SandboxRef } from "../types.js";
+
+const log = logger("webServiceProxy");
 
 // --- pod target resolution ----------------------------------------------------
 
@@ -112,7 +116,7 @@ export interface WebServiceProxy {
 
 /** A proxy request resolved to its pod target, or an error; `notRunning` means the service exists but its unit is down, so it carries what the auto-start and loading page need. */
 type Resolution =
-  | { ok: true; conversationId: string; podIP: string; port: number; rest: string; stripBasePath: boolean; threadId: string; service: string; basePath: string }
+  | { ok: true; conversationId: string; podIP: string; port: number; rest: string; stripBasePath: boolean; threadId: string; service: string; basePath: string; podTargetCached: boolean }
   | { ok: false; kind: "notRunning"; conversationId: string; service: string; basePath: string; threadId: string }
   | { ok: false; kind: "error"; status: 404 | 503; service: string; threadId: string };
 
@@ -121,6 +125,12 @@ export const STATUS_SEGMENT = "__scooter_status";
 
 const USER_CACHE_TTL_MS = 60_000;
 const USER_CACHE_MAX = 1000;
+
+/** How long a resolved pod address is reused; also dropped on a status change or any upstream connect error. Why: PR #799. */
+export const POD_TARGET_TTL_MS = 15_000;
+
+/** A proxied request whose time to the pod's first byte is at least this logs at info, below it at debug. */
+export const SLOW_REQUEST_MS = 250;
 
 const htmlEscape = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] ?? c));
@@ -189,6 +199,41 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     }
   };
 
+  // Pod address per conversation: a lookup is a `list pods` against the API server,
+  // which otherwise sits in front of every forwarded request.
+  const targets = new Map<string, { target: PodTarget; status: Conversation["status"]; at: number }>();
+  const lookups = new Map<string, Promise<PodTarget>>();
+
+  async function podTargetFor(conv: Conversation): Promise<{ target: PodTarget; cached: boolean }> {
+    const hit = targets.get(conv.id);
+    if (hit && hit.status === conv.status && Date.now() - hit.at < POD_TARGET_TTL_MS) {
+      return { target: hit.target, cached: true };
+    }
+    // One lookup per conversation however many requests are waiting (a page load fans out).
+    let pending = lookups.get(conv.id);
+    if (!pending) {
+      const status = conv.status;
+      const p: Promise<PodTarget> = resolvePodTarget(conv.sandbox).then(
+        (target) => {
+          // A drop while this was in flight wins over its answer.
+          if (lookups.get(conv.id) === p) targets.set(conv.id, { target, status, at: Date.now() });
+          return target;
+        },
+      ).finally(() => {
+        if (lookups.get(conv.id) === p) lookups.delete(conv.id);
+      });
+      lookups.set(conv.id, p);
+      pending = p;
+    }
+    return { target: await pending, cached: false };
+  }
+
+  /** Forget a conversation's pod address so the next request looks it up again. */
+  function dropTarget(conversationId: string): void {
+    targets.delete(conversationId);
+    lookups.delete(conversationId);
+  }
+
   const matches = (pathname: string): boolean => parseProxyPath(pathname) !== null;
 
   // Proxy traffic marks the conversation active so the idle-suspend sweep does not pull
@@ -218,14 +263,14 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
 
     // Deliberately no liveness check: a refused connection below is the answer, and
     // asking first costs a pod exec (~0.7s). Why: PR #791.
-    let target: PodTarget;
+    let resolved: { target: PodTarget; cached: boolean };
     try {
-      target = await resolvePodTarget(conv.sandbox);
+      resolved = await podTargetFor(conv);
     } catch {
       // Pod suspended, not ready, or without an IP.
       return { ok: false, kind: "error", status: 503, service, threadId };
     }
-    return { ok: true, conversationId: conv.id, podIP: target.podIP, port: desc.port, rest, stripBasePath: desc.stripBasePath ?? false, threadId, service, basePath: desc.basePath };
+    return { ok: true, conversationId: conv.id, podIP: resolved.target.podIP, port: desc.port, rest, stripBasePath: desc.stripBasePath ?? false, threadId, service, basePath: desc.basePath, podTargetCached: resolved.cached };
   }
 
   /** The readiness/log endpoint the loading page polls; returns true if it handled the request. */
@@ -274,12 +319,14 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
   }
 
   async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const startedAt = Date.now();
     const url = new URL(req.url ?? "/", "http://localhost");
 
     // Answer the loading page's poll before the normal resolve, which would 502 while the unit is down.
     if (await handleStatus(url.pathname, res)) return;
 
     const r = await resolve(url.pathname);
+    const resolvedAt = Date.now();
     if (!r) {
       res.writeHead(404).end();
       return;
@@ -306,11 +353,26 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     const upstream = httpRequest(
       { host: r.podIP, port: r.port, method: req.method, path: upstreamPath, headers },
       (up) => {
+        const now = Date.now();
+        const fields = {
+          conversation_id: r.conversationId,
+          service: r.service,
+          method: req.method,
+          status: up.statusCode,
+          pod_target: r.podTargetCached ? "cached" : "lookup",
+          resolve_ms: resolvedAt - startedAt,
+          upstream_ms: now - resolvedAt,
+          total_ms: now - startedAt,
+        };
+        if (fields.total_ms >= SLOW_REQUEST_MS) log.info("slow web-service request", fields);
+        else log.debug("web-service request", fields);
         res.writeHead(up.statusCode ?? 502, up.headers);
         up.pipe(res);
       },
     );
     upstream.on("error", (err: NodeJS.ErrnoException) => {
+      // Any failure may mean the cached pod address is stale (resume, reschedule); re-look it up next time.
+      dropTarget(r.conversationId);
       // Nothing listening means the unit is down; the stale descriptors go with it.
       if (!res.headersSent && nothingListening(err)) {
         registry.invalidate(r.conversationId);
@@ -366,6 +428,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     const teardown = () => { socket.destroy(); upstream.destroy(); };
     upstream.on("error", (err: NodeJS.ErrnoException) => {
       // As before the socket just fails; the navigation owns the auto-start.
+      dropTarget(conversationId);
       if (nothingListening(err)) registry.invalidate(conversationId);
       teardown();
     });
