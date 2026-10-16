@@ -707,22 +707,43 @@ const SYNC_NOTE = {
   disabled: "this deployment stores no annotations, so nothing was sent",
 };
 
+// The view keeps the source's hard wraps as newlines, so what a reader selects is
+// never byte-equal to what is on disk.
+const squash = (text) => text.replace(/\s+/g, " ").trim();
+
+// Below this a quote identifies nothing: a stray word anchors to whichever line
+// happens to contain it.
+const MIN_QUOTE = 12;
+
+/** The longest prefix of `norm` that lives inside one source line, and which line. */
+function clipToSourceLine(norm, lines) {
+  let best = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    let len = 0;
+    while (len < norm.length && line.includes(norm.slice(0, len + 1))) len++;
+    const quote = norm.slice(0, len).trim();
+    if (quote && (!best || quote.length > best.quote.length)) best = { quote, line: i + 1 };
+  }
+  return best;
+}
+
 /** The quote plus a line hint, derived from what the reader highlighted. */
 function anchorFromSelection(sel) {
-  const raw = sel.toString().replace(/\s+$/, "");
-  if (!raw.trim() || !current || typeof current.body !== "string") return null;
-  // One line only: a multi-line quote is matched against the joined file text, and
-  // a selection dragged across a rendered document rarely reproduces it exactly.
-  const quote = raw.split("\n")[0].trim().slice(0, 240);
-  if (!quote) return null;
+  const norm = squash(sel.toString()).slice(0, 240);
+  if (!norm || !current || typeof current.body !== "string") return null;
   const lines = current.body.split("\n");
+  const best = clipToSourceLine(norm, lines);
+  if (!best || best.quote.length < Math.min(MIN_QUOTE, norm.length)) {
+    return { quote: norm.slice(0, 80), line: 0 };
+  }
   // Count the matches before the selection so the right one of several identical
   // lines is chosen; the server searches from this hint outwards either way.
   const before = rangeBefore(sel);
-  const nth = before === null ? 0 : countOf(before, quote);
-  const hits = lines.flatMap((line, i) => (line.includes(quote) ? [i + 1] : []));
-  if (!hits.length) return { quote, line: 0 };
-  return { quote, line: hits[Math.min(nth, hits.length - 1)] };
+  const nth = before === null ? 0 : countOf(squash(before), best.quote);
+  const hits = lines.flatMap((line, i) => (line.includes(best.quote) ? [i + 1] : []));
+  return { quote: best.quote, line: hits.length ? hits[Math.min(nth, hits.length - 1)] : best.line };
 }
 
 /** The view's text up to the selection's start, or null when it is not in the view. */
@@ -757,10 +778,22 @@ document.addEventListener("selectionchange", () => {
   selbar.style.left = `${box.left + window.scrollX}px`;
 });
 
+// Read on mousedown: WebKit collapses a selection as soon as a button takes the
+// mouse, so by click time there is nothing left to anchor to.
+let barAnchor = null;
+selbar.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+  barAnchor = anchorFromSelection(document.getSelection());
+});
+
 el("selcomment").addEventListener("click", () => {
-  const anchor = anchorFromSelection(document.getSelection());
+  const anchor = barAnchor || anchorFromSelection(document.getSelection());
+  barAnchor = null;
   selbar.style.display = "none";
-  if (!anchor) return;
+  // Never silent: a bail here is indistinguishable from a broken button otherwise.
+  if (!anchor) {
+    return showError("Nothing to anchor to — select a line of the file and try again.");
+  }
   if (!anchor.line) {
     // The rendered text does not appear in the source, so there is nothing to anchor
     // to and raw mode is where the matched bytes are.
