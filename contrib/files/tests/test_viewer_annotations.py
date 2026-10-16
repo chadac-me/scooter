@@ -44,7 +44,7 @@ class FakeTransport:
                 self.fail = None
             raise error
         self.puts.append(payload)
-        return {"created": True, "woke": True}
+        return {"created": True}
 
     def resolve(self, thread: str, resolved: bool) -> None:
         if self.fail is not None:
@@ -381,6 +381,249 @@ def test_the_state_file_is_valid_json_a_human_can_read(store, tmp_path):
     written = json.loads(store.state_path.read_text())
     assert written["version"] == 1
     assert written["records"][0]["text"] == "x"
+
+
+# --- telling the agent ------------------------------------------------------------
+
+
+class FakeNotifier:
+    """The self-access listener: records each message, fails on demand."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.fail: Exception | None = None
+        self.sticky = False
+        self.configured = True
+
+    def send(self, text: str) -> None:
+        if self.fail is not None:
+            error = self.fail
+            if not self.sticky:
+                self.fail = None
+            raise error
+        self.sent.append(text)
+
+
+@pytest.fixture
+def told(tmp_path: Path):
+    """A store with a notifier, and the clock its outbox runs on."""
+    clock = FakeClock()
+    store = ann.Annotations(
+        state_path=tmp_path / "annotations.json",
+        root=Path("/workspace"),
+        transport=FakeTransport(),
+        notifier=FakeNotifier(),
+        clock=clock,
+    )
+    return store, clock
+
+
+def _past_the_delay(clock: FakeClock) -> None:
+    clock.advance(ann.NOTIFY_DELAY_SECONDS + 0.1)
+
+
+def test_the_agent_is_told_only_after_the_broker_has_the_remark(told):
+    store, clock = told
+    record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="why this?")
+    assert record.notify == "pending"
+
+    # Nothing is announced before the broker has it.
+    store.transport.fail = ann.TransportError("broker down", status=503)
+    store.transport.sticky = True
+    store.flush()
+    _past_the_delay(clock)
+    store.flush()
+    assert store.notifier.sent == []
+
+    store.transport.fail = None
+    clock.advance(60)
+    store.flush()  # the push lands
+    assert store.get(record.id).state == "acked"
+    assert store.notifier.sent == []  # still inside the batching delay
+
+    _past_the_delay(clock)
+    store.flush()
+    (message,) = store.notifier.sent
+    assert "/workspace/doc.md:2" in message
+    assert "'bravo'" in message
+    assert "why this?" in message
+    assert "?path=doc.md" in message
+    assert store.get(record.id).notify == "sent"
+
+    # And never again.
+    clock.advance(600)
+    store.flush()
+    assert len(store.notifier.sent) == 1
+
+
+def test_a_burst_of_remarks_is_one_message(told):
+    # One message per burst: one agent turn, under the rate limit.
+    store, clock = told
+    first = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="one")
+    store.add(content=DOC, path="doc.md", line=4, quote="delta", text="two")
+    store.add(content=DOC, path="doc.md", line=1, text="reply", thread=first.id)
+    store.flush()
+    _past_the_delay(clock)
+    store.flush()
+
+    (message,) = store.notifier.sent
+    assert message.startswith("3 new review remarks")
+    assert "one" in message and "two" in message
+    assert f"In reply to thread {first.id}" in message
+    # Ordered by position in the file.
+    assert message.index(":1.") < message.index(":2.") < message.index(":4.")
+
+
+def test_a_failed_notify_backs_off_and_never_touches_the_stored_state(told):
+    store, clock = told
+    record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x")
+    store.flush()
+    store.notifier.fail = ann.TransportError("router down", status=503)
+    _past_the_delay(clock)
+    store.flush()
+
+    # A failed notify never touches the stored state.
+    assert store.get(record.id).state == "acked"
+    assert store.get(record.id).error == ""
+    assert store.get(record.id).notify == "pending"
+
+    clock.advance(ann.BACKOFF_SECONDS)
+    store.flush()
+    assert len(store.notifier.sent) == 1
+    assert store.get(record.id).notify == "sent"
+
+
+def test_a_rate_limited_notify_waits_as_told_without_spending_an_attempt(told):
+    store, clock = told
+    store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x")
+    store.flush()
+    store.notifier.fail = ann.TransportError("slow down", status=429, retry_after=45)
+    _past_the_delay(clock)
+    store.flush()
+
+    (op,) = [op for op in store.queue if op.kind == "notify"]
+    assert op.attempts == 0
+    clock.advance(44)
+    store.flush()
+    assert store.notifier.sent == []
+    clock.advance(1)
+    store.flush()
+    assert len(store.notifier.sent) == 1
+
+
+def test_a_refused_notify_gives_up_at_once_and_the_card_can_retry_it(told):
+    # A 403 means this pod doesn't own the conversation.
+    store, clock = told
+    record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x")
+    store.flush()
+    store.notifier.fail = ann.TransportError("forbidden", status=403)
+    _past_the_delay(clock)
+    store.flush()
+    assert store.get(record.id).notify == "failed"
+    assert not [op for op in store.queue if op.kind == "notify"]
+
+    # Retry re-sends only the notify, never the push.
+    store.retry(record.id)
+    store.flush()
+    assert len(store.transport.puts) == 1
+    assert len(store.notifier.sent) == 1
+    assert store.get(record.id).notify == "sent"
+
+
+def test_a_remark_deleted_before_its_notify_is_not_announced(told):
+    store, clock = told
+    record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x")
+    store.transport.delete = lambda _id: None
+    store.flush()
+    store.delete(record.id)
+    _past_the_delay(clock)
+    store.flush()
+    assert store.notifier.sent == []
+
+
+def test_an_owed_notify_survives_a_restart_and_a_pulled_thread_is_never_announced(
+    tmp_path: Path,
+):
+    path = tmp_path / "annotations.json"
+    clock = FakeClock()
+    first = ann.Annotations(
+        state_path=path, transport=FakeTransport(), notifier=FakeNotifier(), clock=clock
+    )
+    mine = first.add(content=DOC, path="doc.md", line=2, quote="bravo", text="mine")
+    first.flush()  # acked, notify still owed
+
+    transport = FakeTransport()
+    transport.remote = [
+        {"id": "old", "path": "/workspace/doc.md", "anchor": {"line": 4}, "text": "old news"}
+    ]
+    second = ann.Annotations(
+        state_path=path, transport=transport, notifier=FakeNotifier(), clock=clock
+    )
+    second.pull()
+    second.flush()
+    (message,) = second.notifier.sent
+    assert "mine" in message and "old news" not in message
+    assert second.get(mine.id).notify == "sent"
+    assert second.get("old").notify == ""
+
+
+def test_with_no_self_access_remarks_are_stored_and_nothing_is_owed(tmp_path: Path):
+    notifier = FakeNotifier()
+    notifier.configured = False
+    store = ann.Annotations(
+        state_path=tmp_path / "annotations.json",
+        transport=FakeTransport(),
+        notifier=notifier,
+        clock=FakeClock(),
+    )
+    record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x")
+    store.flush()
+    assert store.get(record.id).state == "acked"
+    assert record.notify == ""
+    assert not store.queue
+
+
+def test_the_self_transport_posts_to_its_own_conversation_with_its_token(tmp_path: Path):
+    # The real client against a stand-in self-access listener.
+    import http.server
+
+    seen: list[tuple[str, str, dict]] = []
+    status = {"code": 202}
+
+    class Listener(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            seen.append((self.path, self.headers["authorization"], body))
+            self.send_response(status["code"])
+            if status["code"] == 429:
+                self.send_header("Retry-After", "60")
+            self.send_header("content-length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Listener)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        token = tmp_path / "token"
+        token.write_text("pod-token\n")
+        conv = "952b7375-aa3c-403b-b91f-81d1473e8b06"
+        client = ann.SelfTransport(f"http://127.0.0.1:{httpd.server_address[1]}/", str(token), conv)
+        assert client.configured
+        client.send("hello")
+        assert seen == [(f"/conversations/{conv}/messages", "Bearer pod-token", {"text": "hello"})]
+
+        status["code"] = 429
+        with pytest.raises(ann.TransportError) as caught:
+            client.send("again")
+        assert caught.value.status == 429 and caught.value.retry_after == 60.0
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert not ann.SelfTransport("", str(token), conv).configured
+    assert not ann.SelfTransport("http://x", str(token), "").configured
 
 
 # --- over HTTP ------------------------------------------------------------------

@@ -88,6 +88,10 @@ class Config:
     # empty URL leaves annotations local and reported as never committed.
     broker_url: str = ""
     token_path: str = "/var/run/secrets/broker/token"
+    # Self-access listener; any missing leaves remarks unannounced.
+    self_url: str = ""
+    self_token_path: str = ""
+    conversation_id: str = ""
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
@@ -105,6 +109,9 @@ class Config:
             state=Path(state) if state else root / ".scooter/files/annotations.json",
             broker_url=env.get("BROKER_URL", ""),
             token_path=env.get("BROKER_TOKEN_PATH", "/var/run/secrets/broker/token"),
+            self_url=env.get("SCOOTER_SELF_URL", ""),
+            self_token_path=env.get("SCOOTER_SELF_TOKEN_PATH", ""),
+            conversation_id=env.get("CONVERSATION_ID", ""),
         )
 
 
@@ -519,6 +526,7 @@ def make_server(cfg: Config, store: ann.Annotations | None = None) -> Server:
             state_path=cfg.state,
             root=cfg.root,
             transport=ann.BrokerTransport(cfg.broker_url, cfg.token_path),
+            notifier=ann.SelfTransport(cfg.self_url, cfg.self_token_path, cfg.conversation_id),
         )
     return Server(cfg, store)
 

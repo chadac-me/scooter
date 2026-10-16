@@ -2,7 +2,8 @@
 
 The contract these pin down is the sync one. The viewer pushes from an outbox and
 retries, so the two properties that decide whether a human's comment is ever seen
-are: a retry must not duplicate, and a retry must not wake the agent twice.
+are: a retry must not duplicate, and a retry must not re-scope. Waking the agent is
+the viewer's job (tests/test_viewer_annotations.py), not the broker's.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from scooter_broker_lib.types import Identity, Provider
 
 from scooter_contrib_files import store as files_store
 from scooter_contrib_files.annotations_transport import Annotations
-from scooter_contrib_files.notify import wake_message
 from scooter_contrib_files.store import Anchor, Annotation, AnnotationStore
 
 from conftest import create_schema, sqlite_config
@@ -42,22 +42,10 @@ async def store():
     return s
 
 
-class _Wakes:
-    """A stand-in for the agent-host notify that records what it was asked to send."""
-
-    def __init__(self, accept: bool = True) -> None:
-        self.calls: list[Annotation] = []
-        self.accept = accept
-
-    async def __call__(self, annotation, **kw):
-        self.calls.append(annotation)
-        return self.accept
-
-
-def _client(store, conv="conv-alice", wakes=None):
+def _client(store, conv="conv-alice"):
     """The real transport, mounted the way the broker mounts it: /{provider}/annotations."""
     transport = Annotations()
-    transport.set_store(store, agent_host_url="http://host", notify=wakes or _Wakes())
+    transport.set_store(store)
 
     app = FastAPI()
     app.include_router(
@@ -178,39 +166,27 @@ async def test_delete_is_conversation_scoped(store):
 
 
 @pytest.mark.asyncio
-async def test_put_stores_and_wakes_the_conversation(store):
-    wakes = _Wakes()
-    r = _client(store, wakes=wakes).put("/files/annotations/a1", json=_payload())
+async def test_put_stores_the_annotation(store):
+    r = _client(store).put("/files/annotations/a1", json=_payload())
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["created"] is True and body["woke"] is True
+    assert body["created"] is True
+    # The broker only stores; the viewer wakes the agent.
+    assert "woke" not in body
     assert body["annotation"]["author"] == {"conversation": "conv-alice"}
     # A remark with no thread of its own starts one.
     assert body["annotation"]["thread"] == "a1"
-    assert len(wakes.calls) == 1
+    assert await store.get("a1") is not None
 
 
 @pytest.mark.asyncio
-async def test_a_retried_push_does_not_wake_the_agent_again(store):
-    wakes = _Wakes()
-    client = _client(store, wakes=wakes)
+async def test_a_retried_push_is_not_a_second_annotation(store):
+    client = _client(store)
     client.put("/files/annotations/a1", json=_payload())
     again = client.put("/files/annotations/a1", json=_payload())
 
     # The lost-ack case: the viewer believes the push failed and sends it again.
-    # Waking here would cost a turn per retry.
-    assert again.json()["created"] is False and again.json()["woke"] is False
-    assert len(wakes.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_failed_wake_still_stores_the_annotation(store):
-    wakes = _Wakes(accept=False)
-    r = _client(store, wakes=wakes).put("/files/annotations/a1", json=_payload())
-
-    # Stored but silent is a real state the viewer renders differently; it is not an error.
-    assert r.status_code == 200 and r.json()["woke"] is False
-    assert await store.get("a1") is not None
+    assert again.status_code == 200 and again.json()["created"] is False
 
 
 @pytest.mark.asyncio
@@ -282,14 +258,3 @@ def test_an_unconfigured_transport_serves_503_rather_than_crashing():
     )
     app.dependency_overrides[authenticate] = lambda: _identity("conv-alice")
     assert TestClient(app).get("/files/annotations").status_code == 503
-
-
-def test_the_wake_message_names_the_place_and_the_text():
-    # The agent wakes into a fresh turn with no memory of the document, so "someone
-    # commented" would make it re-read the file to find out where.
-    msg = wake_message(
-        _annotation(text="why is this a string?", anchor=Anchor(line=41, quote="kind: str"))
-    )
-    assert "/workspace/docs/design.md:41" in msg
-    assert "kind: str" in msg
-    assert "why is this a string?" in msg

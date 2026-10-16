@@ -32,20 +32,7 @@ def files(ctx: BrokerContext) -> Provider:
     if not settings.files_annotations_enabled:
         return Provider(name="files", transports=[transport], enabled=False)
 
-    transport.set_store(
-        AnnotationStore(ctx.store_config),
-        agent_host_url=settings.files_agent_host_url,
-        notify_attempts=settings.files_notify_attempts,
-        notify_backoff=settings.files_notify_backoff,
-    )
-
-    # An empty agent-host URL leaves annotations durable but silent, which is a
-    # deployment choice the viewer can render — so it is logged, not an error.
-    if not settings.files_agent_host_url:
-        logger.warning(
-            "annotations will be stored but will NOT wake their conversation "
-            "(files_agent_host_url is unset)",
-        )
+    transport.set_store(AnnotationStore(ctx.store_config))
 
     # No credential: nothing here is proxied to a third party, and the only secret
     # in the flow is the caller's own SA token, which the core already validates.

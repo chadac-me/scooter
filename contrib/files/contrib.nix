@@ -13,8 +13,11 @@
       description = ''
         Mount the annotation store (PUT/GET /files/annotations/*) the viewer syncs
         a reviewer's comments and answers to, persisted in the shared `broker`
-        database. Storing one prompts its conversation through the broker's
-        `agentHostUrl`, so the agent wakes on a review remark.
+        database. Once the broker stores a remark, the viewer prompts its
+        conversation through the conversation router's sandbox self-access
+        listener, so the agent wakes on it; that needs
+        `scooter.conversationController.selfAccess.enable`, and without it remarks are
+        stored but the agent is not told.
 
         On by default: a viewer whose comments are not durable loses them with the
         sandbox, and the agent never hears them. Set false to ship the viewer as a

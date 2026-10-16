@@ -46,10 +46,7 @@ def test_annotations_off_means_the_provider_is_absent(_settings):
 
 
 def test_the_store_uses_the_database_the_broker_handed_it(_settings):
-    bp = _settings(
-        FILES_ANNOTATIONS_ENABLED="true",
-        FILES_AGENT_HOST_URL="http://agent-host.svc:8080",
-    )
+    bp = _settings(FILES_ANNOTATIONS_ENABLED="true")
     dsn = "sqlite+aiosqlite:///:memory:"
     provider = bp.files(_context(dsn))
     transport = provider.transports[0]
@@ -57,16 +54,3 @@ def test_the_store_uses_the_database_the_broker_handed_it(_settings):
     assert provider.enabled is True and provider.name == "files"
     assert transport.store is not None
     assert transport.store._engine.url.render_as_string() == dsn
-    assert transport.agent_host_url == "http://agent-host.svc:8080"
-
-
-def test_no_agent_host_url_still_stores_but_warns(_settings, caplog):
-    bp = _settings(FILES_ANNOTATIONS_ENABLED="true")
-    with caplog.at_level("WARNING"):
-        provider = bp.files(_context("sqlite+aiosqlite:///:memory:"))
-
-    # Durable but silent is a deployment choice, not a failure — but a silent
-    # review surface is worth one line in the log.
-    assert provider.enabled is True
-    assert provider.transports[0].agent_host_url == ""
-    assert any("will NOT wake" in r.message for r in caplog.records)

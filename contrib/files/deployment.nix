@@ -26,10 +26,8 @@ in
       scooter.broker.extraEnv = [
         # Annotations reach the shared `broker` database through the BROKER_DB_*
         # components the broker already passes every provider, so there is no DSN here.
+        # The sandbox viewer, not the broker, wakes the conversation.
         { name = "FILES_ANNOTATIONS_ENABLED"; value = "true"; }
-        # Storing an annotation wakes its conversation, at the platform's one
-        # cluster-internal agent-host URL.
-        { name = "FILES_AGENT_HOST_URL"; value = bcfg.agentHostUrl; }
       ];
     })
   ];
