@@ -111,13 +111,16 @@ fullOnly("needs a real sandbox pod and its declared web services behind the rout
       const thread = new URL(page.url()).searchParams.get("thread");
       expect(thread, "the URL must name a conversation").toBeTruthy();
 
-      // Whichever pod answers must list the image's services, not a stale empty set.
-      for (let i = 0; i < 5; i++) {
+      const serviceNames = async () => {
         const res = await request.get(`${base}/conversations/${encodeURIComponent(thread!)}/web-services`);
         expect(res.ok(), `web-services answered ${res.status()}`).toBeTruthy();
-        const names = ((await res.json()) as { services: Array<{ name: string }> }).services.map((s) => s.name);
-        expect(names).toContain("terminal");
-      }
+        return ((await res.json()) as { services: Array<{ name: string }> }).services.map((s) => s.name);
+      };
+      // The sandbox has no readiness probe, so the turn can finish before boot has rendered the
+      // manifest; the list legitimately starts empty, as the UI's poll also sees.
+      await expect.poll(serviceNames, { timeout: 60_000 }).toContain("terminal");
+      // From then on whichever pod answers must keep listing it, not a stale empty set.
+      for (let i = 0; i < 5; i++) expect(await serviceNames()).toContain("terminal");
 
       // A stopped service gets the loading page, whose poll starts it and reloads into ttyd.
       await page.goto(`${base}/c/${encodeURIComponent(thread!)}/terminal/`);

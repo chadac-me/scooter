@@ -5,7 +5,8 @@
  * sandbox image's own `terminal` service, so the manifest carries the literal
  * `${CONVERSATION_ID}` basePath that web-services.nix writes. The SessionManager hydrates the
  * conversation before its Sandbox exists, the state a replica the router picks can be in.
- * Gated on RUN_CLUSTER_TESTS=1; the pod network must be routable from the test host.
+ * Gated on RUN_CLUSTER_TESTS=1 and needs the platform (Sandbox CRD + controller), so it runs under
+ * `just test-cluster`, not the image-boot CI job; the pod network must be routable from the host.
  */
 
 import { createServer, request, type Server } from "node:http";
