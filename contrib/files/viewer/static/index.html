@@ -159,12 +159,12 @@ section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
 .md input[type="checkbox"] { margin-right: 0.45em; }
 .md .task-list-item { list-style: none; margin-left: -1.2em; }
 /* Heading anchors appear on hover, so the user can link a colleague to a section. */
-.md .anchor {
+.md a.anchor {
   float: left; margin-left: -0.85em; padding-right: 0.25em;
   color: var(--muted-foreground); opacity: 0; font-weight: 400; text-decoration: none;
 }
-.md h1:hover .anchor, .md h2:hover .anchor, .md h3:hover .anchor,
-.md h4:hover .anchor, .md h5:hover .anchor, .md h6:hover .anchor { opacity: 0.65; }
+.md h1:hover a.anchor, .md h2:hover a.anchor, .md h3:hover a.anchor,
+.md h4:hover a.anchor, .md h5:hover a.anchor, .md h6:hover a.anchor { opacity: 0.65; }
 .md :target { scroll-margin-top: 54px; }
 .md .xref { border-bottom: 1px dotted var(--brand); }
 
@@ -197,11 +197,11 @@ section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
 .codewrap .gutter .ln { cursor: pointer; }
 .codewrap .gutter .ln:hover { color: var(--brand); opacity: 1; text-decoration: underline; }
 
-mark.anchor {
+mark.qmark {
   background: color-mix(in srgb, var(--warning) 28%, transparent);
   color: inherit; border-radius: 3px; padding: 0 1px; cursor: pointer;
 }
-mark.anchor.focus { background: color-mix(in srgb, var(--brand) 32%, transparent); }
+mark.qmark.focus { background: color-mix(in srgb, var(--brand) 32%, transparent); }
 
 #rail {
   border-right: 1px solid var(--border); background: var(--sidebar);
@@ -1110,11 +1110,16 @@ function questionCard(field) {
   if (field.answered) {
     // Answered is a record, not a control: the agent materializes the decision into
     // the prose on its next turn, and the viewer never writes the file.
-    for (const answer of field.answers) {
-      const given = document.createElement("div");
-      given.className = "given";
-      given.textContent = `answered: ${answer.text}`;
-      node.appendChild(given);
+    const answer = field.answers[field.answers.length - 1];
+    const given = document.createElement("div");
+    given.className = "given";
+    given.textContent = `answered: ${answer.text}`;
+    node.appendChild(given);
+    if (field.answers.length > 1) {
+      const note = document.createElement("div");
+      note.className = "given";
+      note.textContent = `(${field.answers.length - 1} earlier answer(s) on record)`;
+      node.appendChild(note);
     }
     return node;
   }
@@ -1152,12 +1157,17 @@ function questionCard(field) {
   row.append(submit, error);
   form.appendChild(row);
 
+  let sending = false;
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const picked = free
       ? free.value
       : [...form.querySelectorAll("input:checked")].map((i) => i.value).join("\n");
-    if (!picked.trim()) return;
+    if (sending || !picked.trim()) return;
+    sending = true;
+    submit.disabled = true;
+    submit.textContent = "answering…";
+    error.textContent = "";
     try {
       // The block's own line is the anchor and there is no quote: the question is
       // identified by its id, so a reworded prompt does not orphan the answer.
@@ -1170,7 +1180,12 @@ function questionCard(field) {
       });
       await loadRail(selected);
     } catch (err) {
+      // Only on failure is the button handed back: on success the panel is redrawn
+      // from the reloaded answer, and this form is gone.
       error.textContent = err.message;
+      sending = false;
+      submit.disabled = false;
+      submit.textContent = "answer";
     }
   });
 
@@ -1414,7 +1429,7 @@ async function resolveThread(thread, resolved) {
 /** Wrap each thread's quote in the rendered file, so the text itself is clickable. */
 function markAnchors() {
   const view = el("view");
-  for (const old of view.querySelectorAll("mark.anchor")) {
+  for (const old of view.querySelectorAll("mark.qmark")) {
     old.replaceWith(...old.childNodes);
   }
   view.normalize();
@@ -1440,7 +1455,7 @@ function markQuote(root, quote, nth, thread) {
   let seen = 0;
   let node;
   while ((node = walker.nextNode())) {
-    if (node.parentElement.closest("mark.anchor")) continue;
+    if (node.parentElement.closest("mark.qmark")) continue;
     let from = 0;
     for (;;) {
       const at = node.data.indexOf(quote, from);
@@ -1451,7 +1466,7 @@ function markQuote(root, quote, nth, thread) {
         const target = node.splitText(at);
         target.splitText(quote.length);
         const mark = document.createElement("mark");
-        mark.className = "anchor";
+        mark.className = "qmark";
         mark.dataset.thread = thread;
         mark.addEventListener("click", () => focus(thread, { scroll: false }));
         target.replaceWith(mark);
@@ -1466,11 +1481,11 @@ function markQuote(root, quote, nth, thread) {
 /** Focus a thread: the text it is attached to and its card, together. */
 function focus(thread, { scroll }) {
   focused = thread;
-  for (const node of document.querySelectorAll("mark.anchor, #clist .ann")) {
+  for (const node of document.querySelectorAll("mark.qmark, #clist .ann")) {
     node.classList.toggle("focus", node.dataset.thread === thread);
   }
   if (!scroll) return;
-  const mark = el("view").querySelector(`mark.anchor[data-thread="${CSS.escape(thread)}"]`);
+  const mark = el("view").querySelector(`mark.qmark[data-thread="${CSS.escape(thread)}"]`);
   if (mark) mark.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 

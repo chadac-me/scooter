@@ -156,7 +156,37 @@ try {
   const written = await mine();
   const threads = new Set(written.map((a) => a.thread));
   check("the reply shares its parent's thread", written.length === 2 && threads.size === 1, `${written.length} records, ${threads.size} thread(s)`);
-  const marks = await page.$$eval("#view mark.anchor", (nodes) => nodes.map((n) => n.dataset.thread));
+  const painted = await page.evaluate(() => {
+    const m = document.querySelector("mark.qmark");
+    if (!m) return null;
+    const cs = getComputedStyle(m);
+    return { opacity: cs.opacity, display: cs.display, visibility: cs.visibility, text: m.textContent };
+  });
+  check(
+    "the quote highlight is actually painted, not invisible",
+    painted && painted.opacity === "1" && painted.display === "inline" && painted.visibility === "visible",
+    JSON.stringify(painted && { ...painted, text: painted.text.slice(0, 24) }),
+  );
+
+  // Every marked paragraph still says what the file says. Checked against the file's
+  // own bytes rather than a hard-coded sentence, so it holds for whichever paragraph
+  // the run commented on: a mark that hides or eats text leaves a paragraph that is
+  // no longer a substring of the source.
+  // Inline markdown is stripped from both sides: the renderer turns `failed` into
+  // failed, which is a difference in syntax, not in words.
+  const plain = (text) => text.replace(/[`*_]/g, "").replace(/\s+/g, " ").trim();
+  const source = (await (await fetch(`${BASE}/api/file?path=${encodeURIComponent(DOC_PATH)}`)).json()).body;
+  const flat = plain(source);
+  const paras = await page.$$eval("#view p", (nodes) =>
+    nodes.filter((n) => n.querySelector("mark.qmark")).map((n) => n.textContent));
+  const orphan = paras.map(plain).find((text) => !flat.includes(text));
+  check(
+    "every commented paragraph still reads as the file does",
+    paras.length > 0 && !orphan,
+    orphan ? `lost text: "${orphan.slice(0, 60)}…"` : `${paras.length} marked paragraph(s) intact`,
+  );
+
+  const marks = await page.$$eval("#view mark.qmark", (nodes) => nodes.map((n) => n.dataset.thread));
   check(
     "a reply does not add a second anchor mark",
     marks.filter((t) => t === parent).length === 1,
@@ -211,7 +241,15 @@ try {
   // Only when a stub broker is reachable: against a real broker the viewer's own view
   // of what synced is the assertable half.
   if (BROKER) {
-    const held = new Set((await (await fetch(`${BROKER}/files/annotations`)).json()).annotations.map((a) => a.id));
+    // Polled, not read once: the push and the delete are queued work, so a single
+    // read races them and fails on a slow machine while the viewer is behaving.
+    const brokerIds = async () =>
+      new Set((await (await fetch(`${BROKER}/files/annotations`)).json()).annotations.map((a) => a.id));
+    let held = await brokerIds();
+    for (let i = 0; i < 40 && !(held.has(lineRecord.id) && !held.has(doomed.id)); i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      held = await brokerIds();
+    }
     check(
       "the broker holds the surviving comment and forgot the deleted ones",
       held.has(lineRecord.id) && !held.has(doomed.id),
