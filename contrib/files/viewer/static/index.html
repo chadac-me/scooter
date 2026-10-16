@@ -8,6 +8,9 @@
 /* Warm Paper / Solarized Dark, the same tokens as the conversation UI. */
 :root {
   --radius: 0.625rem;
+  /* Every column header is this tall, border included, so their bottom rules line up
+     across the columns instead of each ending wherever its own content does. */
+  --head: 41px;
   --background: #faf8f3; --foreground: #1c1917;
   --card: #fffefa; --secondary: #f0ece1; --muted-foreground: #57534e;
   --accent: #e6e1d3; --border: #d2ccbc; --input: #948d80;
@@ -55,12 +58,20 @@ header {
   border: 1px solid var(--border); color: var(--muted-foreground);
 }
 .chip.warn { border-color: var(--warning); color: var(--warning); }
-main { flex: 1; display: grid; grid-template-columns: 300px 1fr 340px; min-height: 0; }
-/* The gutter goes first and the tree second, because the Comments tab is the only
-   view that cannot be reached another way. */
-@media (max-width: 1250px) { #gutter { display: none; } }
-@media (max-width: 1050px) { main { grid-template-columns: 300px 1fr; } #rail { display: none; } }
-@media (max-width: 820px) { main { grid-template-columns: 1fr; } nav, #rail { display: none; } }
+main { flex: 1; display: grid; grid-template-columns: 300px 320px 1fr; min-height: 0; }
+/* One thing per column: the tree, the conversation with the agent, and the file --
+   with the comments on the file inside the file's own column, in its right margin.
+   They are still said once: a comment lives here and nowhere else. A panel of its
+   own, in its own colour across a border, put a card an inch of empty page away from
+   the sentence it was about and made the reader match them up by reading both.
+   Ordered rather than placed in explicit columns, so dropping one at a narrow width
+   leaves the others where they are. */
+nav { order: 1; }
+#rail { order: 2; }
+main > section { order: 3; }
+/* What goes first as the window narrows: the conversation rail, which the chat also
+   has; then the tree, which the file is reachable without. The comments column is the
+   last to go, because it is the only place a comment can be written or answered. */
 nav {
   border-right: 1px solid var(--border); background: var(--sidebar);
   overflow-y: auto; padding: 8px 0 40px;
@@ -79,8 +90,8 @@ nav {
 section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
 .filebar {
   position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 9px;
-  padding: 7px 13px; background: var(--card); border-bottom: 1px solid var(--border);
-  font-size: 12px; flex: 0 0 auto;
+  padding: 0 13px; background: var(--card); border-bottom: 1px solid var(--border);
+  font-size: 12px; flex: 0 0 var(--head); height: var(--head);
 }
 .body { flex: 1; min-height: 0; }
 .note {
@@ -149,50 +160,82 @@ section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
 .md input[type="checkbox"] { margin-right: 0.45em; }
 .md .task-list-item { list-style: none; margin-left: -1.2em; }
 /* Heading anchors appear on hover, so the user can link a colleague to a section. */
-.md .anchor {
+.md a.anchor {
   float: left; margin-left: -0.85em; padding-right: 0.25em;
   color: var(--muted-foreground); opacity: 0; font-weight: 400; text-decoration: none;
 }
-.md h1:hover .anchor, .md h2:hover .anchor, .md h3:hover .anchor,
-.md h4:hover .anchor, .md h5:hover .anchor, .md h6:hover .anchor { opacity: 0.65; }
+.md h1:hover a.anchor, .md h2:hover a.anchor, .md h3:hover a.anchor,
+.md h4:hover a.anchor, .md h5:hover a.anchor, .md h6:hover a.anchor { opacity: 0.65; }
 .md :target { scroll-margin-top: 54px; }
 .md .xref { border-bottom: 1px dotted var(--brand); }
 
-/* --- the margin gutter and the tabbed rail ----------------------------------- */
-/* Cards sit beside the text they are attached to, the convention a reviewer already
-   knows from Word and PDF. */
-.docwrap { display: flex; align-items: flex-start; flex: 1; min-height: 0; }
-.docwrap .body { flex: 1; min-width: 0; }
-#gutter {
-  position: relative; flex: 0 0 250px; align-self: stretch;
-  border-left: 1px solid var(--border); background: var(--sidebar);
+/* --- the comments column and the tabbed rail --------------------------------- */
+.docwrap { display: flex; align-items: flex-start; gap: 18px; flex: 1; min-height: 0; }
+/* The text is held to its measure so the margin begins where the prose ends, rather
+   than across whatever empty page a wide window leaves. Code is read in long lines,
+   so a code file takes the room back. */
+.docwrap .body { flex: 0 1 54rem; min-width: 0; }
+.docwrap .body:has(.codewrap) { flex: 1 1 auto; }
+/* On the same paper as the text, with no border and no colour of its own: the cards
+   are the only thing drawn here, and each is beside what it is about. */
+#cpane { flex: 0 1 340px; min-width: 232px; align-self: stretch; }
+#cpane .cbody { position: relative; height: 100%; padding-top: 26px; }
+/* Each card is placed against its anchor rather than stacked in file order, so the
+   column scrolls with the document and a card stays beside its sentence. */
+#cpane .cbody .ann, #cpane .cbody #cform {
+  position: absolute; left: 0; right: 14px; margin-bottom: 0;
 }
-#gutter .gcard {
-  position: absolute; left: 9px; right: 9px; font-size: 12px;
-  border: 1px solid var(--border); border-radius: 8px; background: var(--card);
-  padding: 7px 9px; cursor: pointer; transition: top 0.12s ease-out;
+#cpane .cbody #cform {
+  background: var(--card); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px;
 }
-#gutter .gcard.focus { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
-#gutter .gcard .who { font-size: 11px; color: var(--muted-foreground); margin-bottom: 3px; }
-#gutter .gcard .text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-/* A thread whose quote is gone has no position to align to, so it collects at the
-   top rather than pointing at text that no longer says it. */
-#gutter .gcard.stale { border-style: dashed; }
+/* An error about a comment is the one thing in this column that is not placed against
+   the text, so it is kept above the cards rather than behind whichever one happens to
+   be anchored to the first line. */
+#cpane .cbar { position: relative; z-index: 2; background: var(--background); }
+/* Empty space in this column is not dead space: clicking it comments on the line it
+   sits beside, so the pointer says so. */
+#cpane .cbody { cursor: crosshair; }
+#cpane .cbody .ann, #cpane .cbody #cform, #cpane .cbody .note { cursor: auto; }
+.ann.focus { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
+/* The affordance for the other way in: hovering a block offers a comment on its line,
+   for a reader who wants to mark a paragraph without quoting a phrase out of it. */
+#linebtn {
+  position: absolute; z-index: 30; display: none; padding: 0 7px; line-height: 20px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--muted-foreground); cursor: pointer; font: inherit; font-size: 13px;
+}
+#linebtn:hover { color: var(--foreground); border-color: var(--brand); }
+/* Code is read by line number, so in a code file the number itself is the target. */
+.codewrap .gutter .ln { cursor: pointer; }
+.codewrap .gutter .ln:hover { color: var(--brand); opacity: 1; text-decoration: underline; }
 
-mark.anchor {
+/* A comment on a line quotes nothing, so until now it left no trace in the document
+   at all: the card existed in the margin and the paragraph it was about looked
+   untouched. A tick in the left margin marks any block that carries a comment, which
+   is also what a comment whose quote has gone stale falls back to. */
+.md .commented { position: relative; }
+.md .cmark {
+  position: absolute; left: -17px; top: 3px; bottom: 3px; width: 3px; padding: 0;
+  border: 0; border-radius: 2px; cursor: pointer;
+  background: color-mix(in srgb, var(--warning) 45%, transparent);
+}
+.md .cmark:hover, .md .cmark.focus { background: var(--warning); }
+/* A code file is read by line number, so the number itself carries the mark. */
+.codewrap .gutter .ln.commented { color: var(--warning); opacity: 1; font-weight: 650; }
+mark.qmark {
   background: color-mix(in srgb, var(--warning) 28%, transparent);
   color: inherit; border-radius: 3px; padding: 0 1px; cursor: pointer;
 }
-mark.anchor.focus { background: color-mix(in srgb, var(--brand) 32%, transparent); }
+mark.qmark.focus { background: color-mix(in srgb, var(--brand) 32%, transparent); }
 
 #rail {
-  border-left: 1px solid var(--border); background: var(--sidebar);
+  border-right: 1px solid var(--border); background: var(--sidebar);
   display: flex; flex-direction: column; min-width: 0; overflow: hidden;
 }
-#tabs { display: flex; flex: 0 0 auto; border-bottom: 1px solid var(--border); }
+#tabs { display: flex; flex: 0 0 var(--head); height: var(--head); border-bottom: 1px solid var(--border); }
 #tabs .tab {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
-  font: inherit; font-size: 12.5px; padding: 9px 4px; cursor: pointer;
+  font: inherit; font-size: 12.5px; padding: 0 4px; cursor: pointer;
   background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted-foreground);
 }
 #tabs .tab.on { color: var(--foreground); border-bottom-color: var(--brand); background: var(--card); }
@@ -234,20 +277,45 @@ mark.anchor.focus { background: color-mix(in srgb, var(--brand) 32%, transparent
 }
 .ann .text { white-space: pre-wrap; }
 .ann.resolved { opacity: 0.6; }
-/* Sync state is never implied: a comment the broker has not acked says so, because
-   the agent cannot wake on a comment that never left the pod. */
+/* A comment that did not get out says so, because the agent cannot wake on a comment
+   that never left the pod. A comment that did get out says nothing: it is the
+   ordinary case, and a green tick beside the agent's own document would claim the
+   agent had read it. */
 .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
-.badge.pending { color: #b58900; border-color: #b58900; }
+.badge.pending, .badge.sending { color: #b58900; border-color: #b58900; }
 .badge.failed, .badge.stale { color: #dc322f; border-color: #dc322f; }
-.badge.acked { color: #859900; border-color: #859900; }
 .badge.disabled { color: var(--muted-foreground); }
-#cform { display: none; margin-bottom: 12px; }
+#cform { display: none; }
+#cform .cwhere { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; font-size: 12px; }
+#cform blockquote {
+  margin: 0 0 6px; padding: 2px 9px; border-left: 3px solid var(--border);
+  color: var(--muted-foreground); font-size: 12.5px; white-space: pre-wrap;
+}
 #cform textarea {
   width: 100%; box-sizing: border-box; min-height: 62px; padding: 8px 10px;
   border: 1px solid var(--border); border-radius: 8px; background: var(--card);
   color: var(--foreground); font: inherit; resize: vertical;
 }
 #cform .row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+/* A reply is inside its thread's card, indented under the comment it answers. */
+.ann .reply { margin: 8px 0 0 10px; padding-top: 7px; border-top: 1px solid var(--border); }
+.ann .reply .top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.replybox { margin-top: 9px; }
+.replybox textarea {
+  width: 100%; box-sizing: border-box; min-height: 40px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--card);
+  color: var(--foreground); font: inherit; resize: vertical;
+}
+.replybox .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 0; cursor: default; }
+/* The card drawn the instant a comment is submitted, before the store has it. */
+.ann.sending { opacity: 0.7; }
+.badge.sending { color: var(--muted-foreground); }
+/* The columns go one at a time as the window narrows, widest-first by what a reader
+   can do without: the conversation, then the tree, then the margin -- and the margin
+   last, because it is the half of a review that is being written. */
+@media (max-width: 1400px) { main { grid-template-columns: 300px 1fr; } #rail { display: none; } }
+@media (max-width: 950px) { main { grid-template-columns: 1fr; } nav { display: none; } }
+@media (max-width: 720px) { #cpane { display: none; } }
 </style>
 </head>
 <body>
@@ -267,20 +335,37 @@ mark.anchor.focus { background: color-mix(in srgb, var(--brand) 32%, transparent
     <div class="filebar">
       <span class="chip" id="renderer">listing</span>
       <span class="crumb mono" id="openpath">—</span>
+      <span class="spacer"></span>
+      <span class="crumb" id="csync"></span>
+      <span class="crumb">comments</span>
+      <span class="count neutral" id="ccount">0</span>
     </div>
     <div class="docwrap">
       <div class="body" id="view"><div class="note">Pick a file on the left.</div></div>
-      <div id="gutter"></div>
+    <aside id="cpane">
+      <div class="cbody" id="cbody">
+        <form id="cform">
+          <div class="cwhere"><span class="crumb mono" id="cwhere"></span></div>
+          <blockquote class="mono" id="cquote"></blockquote>
+          <textarea id="ctext" placeholder="Leave a comment for the agent…"></textarea>
+          <div class="row">
+            <button class="btn" type="submit" id="csubmit">comment</button>
+            <button class="btn" type="button" id="ccancel">cancel</button>
+          </div>
+        </form>
+        <div class="cbar">
+          <span class="crumb" id="cerror"></span>
+        </div>
+        <div id="clist"></div>
+      </div>
+    </aside>
     </div>
   </section>
   <aside id="rail">
     <div id="tabs">
       <button class="tab" type="button" data-tab="conversation">conversation</button>
-      <button class="tab" type="button" data-tab="questions">
+      <button class="tab on" type="button" data-tab="questions">
         questions <span class="count neutral" id="qcount">0</span>
-      </button>
-      <button class="tab on" type="button" data-tab="comments">
-        comments <span class="count neutral" id="ccount">0</span>
       </button>
     </div>
     <div class="panel" id="panel-conversation">
@@ -289,28 +374,13 @@ mark.anchor.focus { background: color-mix(in srgb, var(--brand) 32%, transparent
         message history and a trusted identity from the proxy. Use the chat for now.
       </div>
     </div>
-    <div class="panel" id="panel-questions">
+    <div class="panel on" id="panel-questions">
       <div id="qlist"></div>
-    </div>
-    <div class="panel on" id="panel-comments">
-      <form id="cform">
-        <blockquote class="mono" id="cquote"></blockquote>
-        <textarea id="ctext" placeholder="Leave a comment for the agent…"></textarea>
-        <div class="row">
-          <button class="btn" type="submit">comment</button>
-          <button class="btn" type="button" id="ccancel">cancel</button>
-        </div>
-      </form>
-      <div class="cbar">
-        <span class="crumb" id="csync"></span>
-        <span class="spacer"></span>
-        <span class="crumb" id="cerror"></span>
-      </div>
-      <div id="clist"></div>
     </div>
   </aside>
 </main>
 <div id="selbar"><button class="btn" id="selcomment">comment</button></div>
+<button class="btn" id="linebtn" type="button" title="Comment on this line">+</button>
 
 <!-- Pinned, image-baked assets (contrib/files/viewer/deps.nix). Classic scripts,
      so they are in place before the inline module below runs; each is optional and
@@ -339,6 +409,14 @@ const post = (route, body) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body || {}),
   }).then(async (r) => {
+    const parsed = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(parsed.error || r.statusText);
+    return parsed;
+  });
+
+// Deleting is the one destructive thing the page can do; same error shape as post().
+const del = (route) =>
+  fetch(`${BASE}/api/${route}`, { method: "DELETE" }).then(async (r) => {
     const parsed = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(parsed.error || r.statusText);
     return parsed;
@@ -567,7 +645,16 @@ function renderCode(body, path) {
 
   const gutter = document.createElement("div");
   gutter.className = "gutter mono";
-  gutter.textContent = lines.map((_, i) => i + 1).join("\n");
+  // A number per element rather than one block of text: in a code file the line
+  // number is what a reader points at to say "this line", so it has to be clickable
+  // and has to carry which line it is.
+  for (let i = 0; i < lines.length; i++) {
+    const n = document.createElement("span");
+    n.className = "ln";
+    n.dataset.line = String(i + 1);
+    n.textContent = String(i + 1);
+    gutter.append(n, document.createTextNode("\n"));
+  }
 
   const pre = document.createElement("pre");
   const code = document.createElement("code");
@@ -592,6 +679,21 @@ const md = window.markdownit
       highlight: (str, lang) => highlight(str, lang, { allowAuto: false }) ?? "",
     })
   : null;
+
+// markdown-it knows which source lines each block came from and then throws it away
+// in the HTML. Kept as data-line, it is what lets a reader comment on a paragraph
+// without quoting it, and what a click in the comments column measures against.
+if (md) {
+  md.core.ruler.push("source_lines", (state) => {
+    for (const token of state.tokens) {
+      const anchorable = token.type.endsWith("_open") || token.type === "fence" || token.type === "hr";
+      if (token.level === 0 && token.map && anchorable) {
+        token.attrSet("data-line", String(token.map[0] + 1));
+      }
+    }
+    return true;
+  });
+}
 
 const slug = (text) =>
   text.toLowerCase().trim().replace(/[^\w\- ]+/g, "").replace(/\s+/g, "-").replace(/^-+|-+$/g, "") || "section";
@@ -696,33 +798,63 @@ let questions = [];
 // The selection a comment is being written against, held because opening the form
 // collapses the selection it came from.
 let pendingAnchor = null;
-// The one follow-up poll for an in-flight push, cleared on every draw.
+// The follow-up poll for an in-flight push, cleared on every draw, and how long the
+// next one waits.
 let syncPoll = null;
+let syncDelay = 0;
 let focused = null;
 
+// "acked" is deliberately absent: a stored comment draws no badge at all. What the
+// reader wants to know is whether it got out, not that the broker wrote a row.
 const SYNC_NOTE = {
   pending: "not yet sent to the broker — the agent has not been woken",
-  acked: "stored by the broker",
   failed: "could not be sent; the agent has not been woken",
   disabled: "this deployment stores no annotations, so nothing was sent",
 };
 
+/** The badge for a sync state, or nothing when there is nothing to say. */
+function syncBadge(state) {
+  if (!state || state === "acked") return null;
+  return badge(state, SYNC_NOTE[state] || "");
+}
+
+// The view keeps the source's hard wraps as newlines, so what a reader selects is
+// never byte-equal to what is on disk.
+const squash = (text) => text.replace(/\s+/g, " ").trim();
+
+// Below this a quote identifies nothing: a stray word anchors to whichever line
+// happens to contain it.
+const MIN_QUOTE = 12;
+
+/** The longest prefix of `norm` that lives inside one source line, and which line. */
+function clipToSourceLine(norm, lines) {
+  let best = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    let len = 0;
+    while (len < norm.length && line.includes(norm.slice(0, len + 1))) len++;
+    const quote = norm.slice(0, len).trim();
+    if (quote && (!best || quote.length > best.quote.length)) best = { quote, line: i + 1 };
+  }
+  return best;
+}
+
 /** The quote plus a line hint, derived from what the reader highlighted. */
 function anchorFromSelection(sel) {
-  const raw = sel.toString().replace(/\s+$/, "");
-  if (!raw.trim() || !current || typeof current.body !== "string") return null;
-  // One line only: a multi-line quote is matched against the joined file text, and
-  // a selection dragged across a rendered document rarely reproduces it exactly.
-  const quote = raw.split("\n")[0].trim().slice(0, 240);
-  if (!quote) return null;
+  const norm = squash(sel.toString()).slice(0, 240);
+  if (!norm || !current || typeof current.body !== "string") return null;
   const lines = current.body.split("\n");
+  const best = clipToSourceLine(norm, lines);
+  if (!best || best.quote.length < Math.min(MIN_QUOTE, norm.length)) {
+    return { quote: norm.slice(0, 80), line: 0 };
+  }
   // Count the matches before the selection so the right one of several identical
   // lines is chosen; the server searches from this hint outwards either way.
   const before = rangeBefore(sel);
-  const nth = before === null ? 0 : countOf(before, quote);
-  const hits = lines.flatMap((line, i) => (line.includes(quote) ? [i + 1] : []));
-  if (!hits.length) return { quote, line: 0 };
-  return { quote, line: hits[Math.min(nth, hits.length - 1)] };
+  const nth = before === null ? 0 : countOf(squash(before), best.quote);
+  const hits = lines.flatMap((line, i) => (line.includes(best.quote) ? [i + 1] : []));
+  return { quote: best.quote, line: hits.length ? hits[Math.min(nth, hits.length - 1)] : best.line };
 }
 
 /** The view's text up to the selection's start, or null when it is not in the view. */
@@ -757,25 +889,138 @@ document.addEventListener("selectionchange", () => {
   selbar.style.left = `${box.left + window.scrollX}px`;
 });
 
+// Read on mousedown: WebKit collapses a selection as soon as a button takes the
+// mouse, so by click time there is nothing left to anchor to.
+let barAnchor = null;
+selbar.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+  barAnchor = anchorFromSelection(document.getSelection());
+});
+
 el("selcomment").addEventListener("click", () => {
-  const anchor = anchorFromSelection(document.getSelection());
+  const anchor = barAnchor || anchorFromSelection(document.getSelection());
+  barAnchor = null;
   selbar.style.display = "none";
-  if (!anchor) return;
+  // Never silent: a bail here is indistinguishable from a broken button otherwise.
+  if (!anchor) {
+    return showError("Nothing to anchor to — select a line of the file and try again.");
+  }
   if (!anchor.line) {
     // The rendered text does not appear in the source, so there is nothing to anchor
     // to and raw mode is where the matched bytes are.
     return showError("That selection is not in the file's text — switch to raw and select there.");
   }
+  openComposer(anchor);
+});
+
+/** Open the composer against an anchor, whether or not it quotes anything. */
+function openComposer(anchor) {
   pendingAnchor = anchor;
-  el("cquote").textContent = anchor.quote;
+  el("cform").dataset.line = String(anchor.line ?? 0);
+  el("cwhere").textContent = `line ${anchor.line}`;
+  const quote = el("cquote");
+  quote.textContent = anchor.quote;
+  // A line comment has nothing to quote, and an empty blockquote above the box reads
+  // as something that failed to load.
+  quote.style.display = anchor.quote ? "block" : "none";
   el("cform").style.display = "block";
   el("cerror").textContent = "";
-  showTab("comments");
+  layoutNotes();
   el("ctext").focus();
+}
+
+// --- commenting on a line, without quoting it -----------------------------------
+
+/** Comment on a source line, with no quote: the line is the whole anchor. */
+function commentOnLine(line) {
+  if (!line || !current || typeof current.body !== "string") {
+    return showError("Open a file first, then pick a line to comment on.");
+  }
+  openComposer({ line, quote: "" });
+}
+
+/** The rendered block nearest a viewport y — how a click in the margin picks a line. */
+function blockNearest(y) {
+  let best = null;
+  for (const node of el("view").querySelectorAll("[data-line]")) {
+    const box = node.getBoundingClientRect();
+    if (!box.height && !box.width) continue;
+    const gap = y < box.top ? box.top - y : y > box.bottom ? y - box.bottom : 0;
+    if (!best || gap < best.gap) best = { node, gap };
+  }
+  return best && best.node;
+}
+
+// Empty space in the comments column is beside a line of the file, so a click in it
+// means that line. Clicks on a card or the composer are the reader working on a
+// comment that already exists, and must not open a second one.
+el("cbody").addEventListener("click", (event) => {
+  if (event.target.closest(".ann, #cform, .cbar")) return;
+  const block = blockNearest(event.clientY);
+  if (!block) return showError("Open a file first, then pick a line to comment on.");
+  commentOnLine(Number(block.dataset.line));
+});
+
+// A code file is read by line number, so the number itself is the target.
+el("view").addEventListener("click", (event) => {
+  const number = event.target.closest(".ln");
+  if (number) commentOnLine(Number(number.dataset.line));
+});
+
+// The same offer over prose: a block under the pointer gets a "+" in the margin
+// between it and the comments column.
+const linebtn = el("linebtn");
+let hoverLine = 0;
+// The region the pointer may move through without losing the offer. The button sits
+// in the margin 8px clear of the text, so reaching it means crossing ground that is
+// not the paragraph -- and hiding on "not over a block" pulled the button out from
+// under a pointer that was on its way to press it. The offer survives anywhere in the
+// band that spans the block and the button.
+let keep = null;
+
+function offerLine(block) {
+  const box = block.getBoundingClientRect();
+  hoverLine = Number(block.dataset.line);
+  linebtn.style.display = "block";
+  linebtn.style.top = `${box.top + window.scrollY}px`;
+  linebtn.style.left = `${Math.min(box.right + 8, window.innerWidth - 40) + window.scrollX}px`;
+  const btn = linebtn.getBoundingClientRect();
+  keep = {
+    left: Math.min(box.left, btn.left) - 4,
+    right: Math.max(box.right, btn.right) + 8,
+    top: Math.min(box.top, btn.top) - 6,
+    bottom: Math.max(box.bottom, btn.bottom) + 6,
+  };
+}
+
+function hideOffer() {
+  linebtn.style.display = "none";
+  keep = null;
+}
+
+// One handler on the document rather than one on the text and one outside it: the
+// two used to disagree, and the one bound to the text won the moment the pointer
+// entered the margin.
+document.addEventListener("mousemove", (event) => {
+  const block = event.target.closest?.(".md [data-line]");
+  if (block) {
+    offerLine(block);
+    return;
+  }
+  if (event.target.closest?.("#linebtn")) return;
+  if (keep && event.clientX >= keep.left && event.clientX <= keep.right
+      && event.clientY >= keep.top && event.clientY <= keep.bottom) return;
+  hideOffer();
+});
+// Positioned from measured geometry, so scrolling hides it rather than leaving a "+"
+// beside a paragraph that has moved.
+document.querySelector("section")?.addEventListener("scroll", hideOffer, { passive: true });
+linebtn.addEventListener("click", () => {
+  hideOffer();
+  commentOnLine(hoverLine);
 });
 
 function showError(message) {
-  showTab("comments");
   el("cerror").textContent = message;
 }
 
@@ -783,22 +1028,72 @@ el("ccancel").addEventListener("click", () => {
   el("cform").style.display = "none";
   el("ctext").value = "";
   pendingAnchor = null;
+  layoutNotes();
 });
+
+// One submission at a time. The handler used to leave the composer untouched until
+// a POST and a full rail reload had both come back, which under the proxy is a
+// second or more of a button that looks like it did nothing — so it got pressed
+// again, and every press left another copy of the same comment.
+let submitting = false;
 
 el("cform").addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = el("ctext").value;
-  if (!text.trim() || !pendingAnchor || !selected) return;
+  if (submitting || !text.trim() || !pendingAnchor || !selected) return;
+  const anchor = pendingAnchor;
+  const path = selected;
+
+  submitting = true;
+  el("csubmit").disabled = true;
+  // Closed and drawn now, not when the round trip returns: the reader gets their
+  // comment on screen immediately, marked as still being recorded.
+  el("cform").style.display = "none";
+  el("ctext").value = "";
+  el("cerror").textContent = "";
+  pendingAnchor = null;
+  drawSending(anchor, text);
+
   try {
-    await post("annotations", { path: selected, text, ...pendingAnchor });
-    el("cform").style.display = "none";
-    el("ctext").value = "";
-    pendingAnchor = null;
-    await loadRail(selected);
+    await post("annotations", { path, text, ...anchor });
+    await loadRail(path);
   } catch (err) {
+    // Hand the reader their words back in the box they typed them in, rather than
+    // dropping the comment on the floor with an error beside it.
+    clearSending();
+    openComposer(anchor);
+    el("ctext").value = text;
     showError(err.message);
+  } finally {
+    submitting = false;
+    el("csubmit").disabled = false;
   }
 });
+
+/** The comment as it looks between pressing the button and the store having it. */
+function drawSending(anchor, text) {
+  clearSending();
+  const node = document.createElement("div");
+  node.className = "ann sending";
+  node.id = "csending";
+  node.dataset.line = String(anchor.line ?? 0);
+  const top = document.createElement("div");
+  top.className = "top";
+  const where = document.createElement("span");
+  where.className = "crumb mono";
+  where.textContent = `line ${anchor.line}`;
+  top.append(where, badge("sending", "being recorded"));
+  node.appendChild(top);
+  if (anchor.quote) node.appendChild(quoteOf(anchor.quote));
+  node.appendChild(textOf(text));
+  const list = el("clist");
+  // The empty-state note is not something to prepend a comment above.
+  if (list.firstElementChild?.classList.contains("note")) list.replaceChildren();
+  list.prepend(node);
+  layoutNotes();
+}
+
+const clearSending = () => el("csending")?.remove();
 
 // --- tabs -----------------------------------------------------------------------
 
@@ -848,7 +1143,10 @@ function drawRail(counts) {
   drawQuestions();
   drawComments(counts);
   markAnchors();
-  drawGutter();
+  // A redraw builds new marks, new ticks and new cards, so the thread the reader had
+  // focused has to be lit again on them. Without this a sync poll landing a second
+  // after a click quietly dropped the highlight the reader had just asked for.
+  if (focused) focus(focused, { scroll: false });
 }
 
 // --- questions ------------------------------------------------------------------
@@ -878,11 +1176,16 @@ function questionCard(field) {
   if (field.answered) {
     // Answered is a record, not a control: the agent materializes the decision into
     // the prose on its next turn, and the viewer never writes the file.
-    for (const answer of field.answers) {
-      const given = document.createElement("div");
-      given.className = "given";
-      given.textContent = `answered: ${answer.text}`;
-      node.appendChild(given);
+    const answer = field.answers[field.answers.length - 1];
+    const given = document.createElement("div");
+    given.className = "given";
+    given.textContent = `answered: ${answer.text}`;
+    node.appendChild(given);
+    if (field.answers.length > 1) {
+      const note = document.createElement("div");
+      note.className = "given";
+      note.textContent = `(${field.answers.length - 1} earlier answer(s) on record)`;
+      node.appendChild(note);
     }
     return node;
   }
@@ -920,12 +1223,17 @@ function questionCard(field) {
   row.append(submit, error);
   form.appendChild(row);
 
+  let sending = false;
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const picked = free
       ? free.value
       : [...form.querySelectorAll("input:checked")].map((i) => i.value).join("\n");
-    if (!picked.trim()) return;
+    if (sending || !picked.trim()) return;
+    sending = true;
+    submit.disabled = true;
+    submit.textContent = "answering…";
+    error.textContent = "";
     try {
       // The block's own line is the anchor and there is no quote: the question is
       // identified by its id, so a reworded prompt does not orphan the answer.
@@ -938,7 +1246,12 @@ function questionCard(field) {
       });
       await loadRail(selected);
     } catch (err) {
+      // Only on failure is the button handed back: on success the panel is redrawn
+      // from the reloaded answer, and this form is gone.
       error.textContent = err.message;
+      sending = false;
+      submit.disabled = false;
+      submit.textContent = "answer";
     }
   });
 
@@ -954,27 +1267,79 @@ function drawComments(counts) {
   if (!annotations.length) {
     const note = document.createElement("div");
     note.className = "note";
-    note.textContent = "Select text in the file to comment on it.";
+    note.textContent =
+      "Select text in the file to comment on it, or click in this column beside a line.";
     list.appendChild(note);
   }
   const pending = counts.pending || 0;
   el("csync").textContent = pending ? `${pending} not yet synced` : "";
-  // The outbox acks on its own thread, so one follow-up per draw — and only while
-  // something is in flight — keeps the page off a stale "pending".
+  // The outbox acks on its own thread, so the rail has to come back and look. One
+  // follow-up at a fixed 1.5s was not enough: a push that needed its backoff left
+  // the badge reading "pending" until something else happened to redraw the page.
+  // Only a push still trying is worth waiting on — a failed one has a retry button
+  // and would otherwise poll for the life of the page.
+  const inFlight = annotations.filter((a) => a.state === "pending").length;
   clearTimeout(syncPoll);
-  if (pending) syncPoll = setTimeout(() => loadRail(selected), 1500);
+  if (inFlight) {
+    syncDelay = Math.min(syncDelay ? syncDelay * 2 : 700, 5000);
+    syncPoll = setTimeout(() => loadRail(selected), syncDelay);
+  } else {
+    syncDelay = 0;
+  }
 
+  // Grouped by thread: a reply belongs under the comment it answers, not beside it
+  // as a second thread. The server's order (line, then creation) puts the comment
+  // that opened a thread first, which is the one carrying the anchor.
+  const threads = new Map();
   for (const a of annotations) {
     if (a.kind === "answer") continue;
-    list.appendChild(card(a));
+    const found = threads.get(a.thread);
+    if (found) found.push(a);
+    else threads.set(a.thread, [a]);
   }
+  for (const [thread, items] of threads) list.appendChild(card(thread, items));
+  layoutNotes();
 }
 
-function card(a) {
+/** One thread: the comment that opened it, its replies, and a box for another. */
+function card(thread, items) {
+  const [head, ...replies] = items;
   const node = document.createElement("div");
-  node.className = `ann${a.resolved ? " resolved" : ""}`;
-  node.dataset.thread = a.thread;
+  node.className = `ann${head.resolved ? " resolved" : ""}`;
+  node.dataset.thread = thread;
+  node.dataset.line = String(head.line ?? 0);
 
+  node.append(headTop(head, replies));
+  // A line comment quotes nothing, and an empty blockquote is not a quote.
+  if (head.quote) node.appendChild(quoteOf(head.quote));
+  node.appendChild(textOf(head.text));
+  if (head.error) node.appendChild(why(head.error));
+
+  for (const reply of replies) {
+    const row = document.createElement("div");
+    row.className = "reply";
+    // No quote and no line: a reply is anchored to the same text as its parent, so
+    // repeating the quote under it is noise.
+    const top = document.createElement("div");
+    top.className = "top";
+    const replyState = syncBadge(reply.state);
+    if (replyState) top.appendChild(replyState);
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    top.appendChild(spacer);
+    if (reply.state === "failed") top.appendChild(action("retry", () => retry(reply.id)));
+    top.appendChild(action("delete", () => remove(reply, 0)));
+    row.append(top, textOf(reply.text));
+    if (reply.error) row.appendChild(why(reply.error));
+    node.appendChild(row);
+  }
+
+  if (!head.resolved) node.appendChild(replyBox(head, thread));
+  node.addEventListener("click", () => focus(thread, { scroll: true }));
+  return node;
+}
+
+function headTop(a, replies) {
   const top = document.createElement("div");
   top.className = "top";
   const where = document.createElement("span");
@@ -985,33 +1350,97 @@ function card(a) {
   // drifted from the line the reader wrote it against.
   if (a.anchor_state === "moved") top.appendChild(badge("moved", `written against line ${a.recorded_line}`));
   if (a.anchor_state === "stale") top.appendChild(badge("stale", "the quoted text is no longer in the file"));
-  top.appendChild(badge(a.state, SYNC_NOTE[a.state] || ""));
+  const state = syncBadge(a.state);
+  if (state) top.appendChild(state);
+  if (replies.length) {
+    const count = document.createElement("span");
+    count.className = "crumb";
+    count.textContent = replies.length === 1 ? "1 reply" : `${replies.length} replies`;
+    top.appendChild(count);
+  }
 
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   top.appendChild(spacer);
 
   if (a.state === "failed") top.appendChild(action("retry", () => retry(a.id)));
+  // Delete and resolve are different acts: resolving says the discussion is finished
+  // and keeps it, deleting says it should never have been written.
+  top.appendChild(action("delete", () => remove(a, replies.length)));
   if (!a.resolved) top.appendChild(action("resolve", () => resolveThread(a.thread, true)));
   else top.appendChild(action("reopen", () => resolveThread(a.thread, false)));
+  return top;
+}
 
+function quoteOf(text) {
   const quote = document.createElement("blockquote");
   quote.className = "mono";
-  quote.textContent = a.quote;
+  quote.textContent = text;
+  return quote;
+}
 
+function textOf(body) {
   const text = document.createElement("div");
   text.className = "text";
-  text.textContent = a.text;
+  text.textContent = body;
+  return text;
+}
 
-  node.append(top, quote, text);
-  if (a.error) {
-    const why = document.createElement("div");
-    why.className = "crumb";
-    why.textContent = a.error;
-    node.appendChild(why);
-  }
-  node.addEventListener("click", () => focus(a.thread, { scroll: true }));
+function why(message) {
+  const node = document.createElement("div");
+  node.className = "crumb";
+  node.textContent = message;
   return node;
+}
+
+/** The box that adds another comment to an existing thread. */
+function replyBox(head, thread) {
+  const form = document.createElement("form");
+  form.className = "replybox";
+  const text = document.createElement("textarea");
+  text.placeholder = "Reply…";
+  const row = document.createElement("div");
+  row.className = "row";
+  const send = document.createElement("button");
+  send.className = "btn";
+  send.type = "submit";
+  send.textContent = "reply";
+  const error = document.createElement("span");
+  error.className = "crumb";
+  row.append(send, error);
+  form.append(text, row);
+
+  // Typing in the box is not a click on the card: the card's handler scrolls the
+  // document to the anchor, which would move the text out from under the reader.
+  form.addEventListener("click", (event) => event.stopPropagation());
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = text.value;
+    if (send.disabled || !body.trim() || !selected) return;
+    // Locked and labelled before the round trip, for the same reason the composer is.
+    send.disabled = true;
+    send.textContent = "sending…";
+    error.textContent = "";
+    try {
+      // The parent's anchor, so the reply hangs off the same text; recorded_line is
+      // where the comment was written, which is what the store re-resolves against.
+      await post("annotations", {
+        path: selected,
+        line: head.recorded_line || head.line,
+        quote: head.quote,
+        text: body,
+        thread,
+      });
+      // The redraw replaces this form, so the box needs no clearing of its own.
+      await loadRail(selected);
+    } catch (err) {
+      error.textContent = err.message;
+      send.disabled = false;
+      send.textContent = "reply";
+    }
+  });
+  return form;
 }
 
 function badge(kind, title) {
@@ -1043,6 +1472,19 @@ async function retry(id) {
   await loadRail(selected);
 }
 
+async function remove(a, replies) {
+  const also = replies ? ` and its ${replies === 1 ? "reply" : `${replies} replies`}` : "";
+  // Deleting is not undoable here and the broker is told to forget it too, so it
+  // asks first — and says what else goes with it.
+  if (!window.confirm(`Delete this comment${also}? This cannot be undone.`)) return;
+  try {
+    await del(`annotations/${encodeURIComponent(a.id)}`);
+  } catch (err) {
+    showError(err.message);
+  }
+  await loadRail(selected);
+}
+
 async function resolveThread(thread, resolved) {
   try {
     await post(`annotations/threads/${encodeURIComponent(thread)}/resolve`, { resolved });
@@ -1057,19 +1499,72 @@ async function resolveThread(thread, resolved) {
 /** Wrap each thread's quote in the rendered file, so the text itself is clickable. */
 function markAnchors() {
   const view = el("view");
-  for (const old of view.querySelectorAll("mark.anchor")) {
+  for (const old of view.querySelectorAll("mark.qmark")) {
     old.replaceWith(...old.childNodes);
   }
   view.normalize();
   if (!current || typeof current.body !== "string") return;
 
   const lines = current.body.split("\n");
+  const marked = new Set();
   for (const a of annotations) {
     if (a.resolved || a.anchor_state === "stale" || !a.quote) continue;
+    // One mark per thread: a reply carries its parent's quote, and marking it twice
+    // would skip the text already wrapped and highlight the wrong occurrence.
+    if (marked.has(a.thread)) continue;
+    marked.add(a.thread);
     // Which occurrence of the quote this anchor is: the same count the write path
     // used, so a repeated line marks the one the comment was left on.
     const before = lines.slice(0, Math.max(0, a.line - 1)).join("\n");
     markQuote(view, a.quote, countOf(before, a.quote), a.thread);
+  }
+  markCommentedBlocks();
+  // The marks are what the cards are placed against, so the notes are re-placed once
+  // the highlights exist rather than against the bare blocks.
+  layoutNotes();
+}
+
+/** A tick beside every block that carries a comment, quoted or not. */
+function markCommentedBlocks() {
+  const view = el("view");
+  for (const old of view.querySelectorAll(".cmark")) old.remove();
+  for (const block of view.querySelectorAll(".commented")) {
+    block.classList.remove("commented");
+    delete block.dataset.threads;
+  }
+
+  // Threads per block, in the order the file has them: a block can carry several, and
+  // a reply is not a second comment on it.
+  const byBlock = new Map();
+  for (const a of annotations) {
+    if (a.kind === "answer" || a.resolved) continue;
+    const block = blockForLine(a.line);
+    if (!block) continue;
+    const threads = byBlock.get(block) || [];
+    if (!threads.includes(a.thread)) threads.push(a.thread);
+    byBlock.set(block, threads);
+  }
+
+  for (const [block, threads] of byBlock) {
+    block.classList.add("commented");
+    block.dataset.threads = threads.join(" ");
+    // In a code file the line number is the mark; a button inside the gutter would
+    // break the column the numbers are read in.
+    if (block.classList.contains("ln")) continue;
+    const tick = document.createElement("button");
+    tick.type = "button";
+    tick.className = "cmark";
+    tick.dataset.thread = threads[0];
+    // No text: this sits inside the rendered document, and what the paragraph reads
+    // as has to stay what the file says.
+    const label = threads.length === 1 ? "1 comment on this line" : `${threads.length} comments on this line`;
+    tick.title = label;
+    tick.setAttribute("aria-label", label);
+    tick.addEventListener("click", (event) => {
+      event.stopPropagation();
+      focus(threads[0], { scroll: false });
+    });
+    block.appendChild(tick);
   }
 }
 
@@ -1078,7 +1573,7 @@ function markQuote(root, quote, nth, thread) {
   let seen = 0;
   let node;
   while ((node = walker.nextNode())) {
-    if (node.parentElement.closest("mark.anchor")) continue;
+    if (node.parentElement.closest("mark.qmark")) continue;
     let from = 0;
     for (;;) {
       const at = node.data.indexOf(quote, from);
@@ -1089,7 +1584,7 @@ function markQuote(root, quote, nth, thread) {
         const target = node.splitText(at);
         target.splitText(quote.length);
         const mark = document.createElement("mark");
-        mark.className = "anchor";
+        mark.className = "qmark";
         mark.dataset.thread = thread;
         mark.addEventListener("click", () => focus(thread, { scroll: false }));
         target.replaceWith(mark);
@@ -1101,75 +1596,90 @@ function markQuote(root, quote, nth, thread) {
   }
 }
 
-// --- the margin gutter ----------------------------------------------------------
-
-function drawGutter() {
-  const gutter = el("gutter");
-  gutter.replaceChildren();
-  const threads = new Map();
-  for (const a of annotations) {
-    if (a.kind === "answer" || a.resolved) continue;
-    if (!threads.has(a.thread)) threads.set(a.thread, a);
-  }
-  if (!threads.size) return;
-
-  const wrapTop = gutter.getBoundingClientRect().top;
-  const placed = [];
-  for (const [thread, a] of threads) {
-    const mark = el("view").querySelector(`mark.anchor[data-thread="${CSS.escape(thread)}"]`);
-    const node = gutterCard(a);
-    gutter.appendChild(node);
-    // A thread whose quote is gone has nothing to align to, so it collects at the top
-    // rather than pointing at text that no longer says what it quoted.
-    const stale = !mark;
-    if (stale) node.classList.add("stale");
-    const want = stale ? 0 : mark.getBoundingClientRect().top - wrapTop;
-    placed.push({ node, want, stale });
-  }
-
-  // Aligned, then displaced: a card prefers its anchor's position, and overlapping
-  // cards are worse than slightly misaligned ones.
-  placed.sort((a, b) => (a.stale === b.stale ? a.want - b.want : a.stale ? -1 : 1));
-  let floor = 8;
-  for (const card of placed) {
-    const top = Math.max(card.want, floor);
-    card.node.style.top = `${top}px`;
-    floor = top + card.node.offsetHeight + 8;
-  }
+// --- margin notes -----------------------------------------------------------------
+// A card is placed against the text it is about: the top of its quote, or failing
+// that the line it names. Cards cannot overlap, so one is pushed down by whatever the
+// card above it needs -- the usual margin-note stacking, and the reason a card is
+// sometimes below its sentence but never above it.
+function anchorTop(node) {
+  const view = el("view");
+  const thread = node.dataset.thread;
+  const mark = thread ? view.querySelector(`mark.qmark[data-thread="${CSS.escape(thread)}"]`) : null;
+  // A quote that no longer matches leaves the comment on its line, which is still a
+  // place in the document; only a file with no lines at all leaves it unplaced.
+  const target = mark || blockForLine(node.dataset.line);
+  return target ? target.getBoundingClientRect().top : null;
 }
 
-function gutterCard(a) {
-  const node = document.createElement("div");
-  node.className = "gcard";
-  node.dataset.thread = a.thread;
-  const who = document.createElement("div");
-  who.className = "who";
-  who.textContent = a.state === "acked" ? `line ${a.line}` : `line ${a.line} · ${a.state}`;
-  const text = document.createElement("div");
-  text.className = "text";
-  text.textContent = a.text;
-  node.append(who, text);
-  node.addEventListener("click", () => focus(a.thread, { scroll: true }));
-  return node;
+/** The block a line falls in. A rendered block carries the line it starts at, so a
+    comment on the third line of a paragraph belongs to the block that opened before
+    it -- looking for an exact match found nothing and left the card stacked in list
+    order, nowhere near its text. */
+function blockForLine(line) {
+  const want = Number(line);
+  if (!want) return null;
+  let best = null;
+  for (const block of el("view").querySelectorAll("[data-line]")) {
+    const at = Number(block.dataset.line);
+    if (at <= want && (!best || at > Number(best.dataset.line))) best = block;
+  }
+  return best;
 }
 
-/** Focus a thread: its text, its gutter card, and its row in the rail, together. */
+function layoutNotes() {
+  const body = el("cbody");
+  const view = el("view");
+  if (!body.isConnected || !view.isConnected) return;
+  const base = body.getBoundingClientRect().top;
+  const notes = [...body.querySelectorAll(".ann")];
+  const form = el("cform");
+  if (form.style.display === "block") notes.push(form);
+  if (!notes.length) {
+    body.style.height = "";
+    return;
+  }
+  // Sorted by where they point, not by the order they were drawn in: a comment
+  // written last can belong to the first paragraph.
+  const placed = notes
+    .map((node) => ({ node, want: anchorTop(node) }))
+    .sort((a, b) => (a.want ?? Infinity) - (b.want ?? Infinity));
+  let y = 0;
+  for (const { node, want } of placed) {
+    const top = Math.max(want === null ? y : want - base, y);
+    node.style.top = `${Math.round(top)}px`;
+    y = top + node.offsetHeight + 10;
+  }
+  // The column is as long as its notes need, so the last card can be scrolled to even
+  // when it hangs past the end of a short file.
+  body.style.height = `${Math.max(Math.round(y), view.offsetHeight)}px`;
+}
+
+// Re-placed whenever the document's own geometry changes -- a window resize, a font
+// arriving, an image loading, a code block folding. Measured rather than predicted:
+// everything here is a real box on the page.
+const notesWatch = new ResizeObserver(() => layoutNotes());
+notesWatch.observe(el("view"));
+notesWatch.observe(el("cbody"));
+window.addEventListener("resize", layoutNotes);
+
+/** Focus a thread: the text it is attached to and its card, together. */
 function focus(thread, { scroll }) {
   focused = thread;
-  for (const node of document.querySelectorAll("mark.anchor, #gutter .gcard, #clist .ann")) {
+  for (const node of document.querySelectorAll("mark.qmark, #clist .ann")) {
     node.classList.toggle("focus", node.dataset.thread === thread);
   }
+  // A block can carry several threads, so the tick lights for any of them.
+  for (const tick of document.querySelectorAll("#view .cmark")) {
+    const threads = (tick.parentElement?.dataset.threads || "").split(" ");
+    tick.classList.toggle("focus", threads.includes(thread));
+  }
   if (!scroll) return;
-  const mark = el("view").querySelector(`mark.anchor[data-thread="${CSS.escape(thread)}"]`);
-  if (mark) mark.scrollIntoView({ block: "center", behavior: "smooth" });
+  // A line comment has no highlight to scroll to, and its block is where it is about.
+  const card = document.querySelector(`#clist .ann[data-thread="${CSS.escape(thread)}"]`);
+  const target = el("view").querySelector(`mark.qmark[data-thread="${CSS.escape(thread)}"]`)
+    || blockForLine(card?.dataset.line);
+  if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
 }
-
-// The gutter is positioned from measured geometry, so a resize has to re-measure.
-let relayout = null;
-window.addEventListener("resize", () => {
-  clearTimeout(relayout);
-  relayout = setTimeout(drawGutter, 120);
-});
 
 // Expand ancestors first, so a deep link opens showing where the file lives.
 const deepLink = new URLSearchParams(location.search).get("path");
