@@ -482,6 +482,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     } catch {
       /* treat as suspended */
     }
+    // Re-check after the awaits: concurrent first requests for one conversation (the prompt, its
+    // history read, the event stream) all pass the check above, and a later one would otherwise
+    // replace the entry an earlier one already revived. That orphans the live bridge: the run
+    // keeps going, but a Stop then finds a bridgeless "suspended" entry and does nothing.
+    const existing = entries.get(m.id);
+    if (existing) return existing;
+    if (endedIds.has(m.id)) return undefined;
     const hydrated = hydrateEntry(m, onCluster);
     // Settle any stranded run on every adoption path; owner-fenced, fire-and-forget, deduped by the
     // in-flight guard.
