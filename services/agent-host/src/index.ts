@@ -52,7 +52,7 @@ import { createSandboxExecBackend, connectSandbox } from "./exec/sandboxExec.js"
 import { createDeferredConnector } from "./exec/deferredConnect.js";
 import { createLocalSandboxApiClient } from "./exec/localExec.js";
 import { resolvePodTarget } from "./exec/k8sExec.js";
-import { createWebServiceProxy } from "./proxy/webServiceProxy.js";
+import { createWake, createWebServiceProxy } from "./proxy/webServiceProxy.js";
 import { createWebServiceRegistry } from "./proxy/webServiceRegistry.js";
 import { createModuleRegistry } from "./proxy/moduleRegistry.js";
 import {
@@ -1340,6 +1340,7 @@ export async function main(
         sessions,
         resolvePodTarget: (ref) => resolvePodTarget(ref),
         registry: webServices,
+        wake: createWake({ sessions, provisioner, registry: webServices }),
         resolveUser,
         publicHost: (() => {
           try {

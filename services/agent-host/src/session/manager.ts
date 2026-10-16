@@ -236,6 +236,10 @@ export interface SessionManager {
   /** Make a conversation's history readable on this pod without starting its sandbox or bridge;
    *  returns false when the conversation is genuinely unknown. */
   ensureReadable(id: SessionId): Promise<boolean>;
+  /** Re-read a bridgeless entry's Sandbox ref and status from the cluster, since a hydrated entry
+   *  freezes what reconcile saw at hydrate time (often a placeholder for a Sandbox mid-create);
+   *  throttled per conversation, and a no-op while a live bridge owns the ref. */
+  refreshSandbox?(id: SessionId): Promise<void>;
   /** Forward a user prompt into the conversation's goose session; a differing `model` rebuilds the
    *  session on the new model, and `priority` lets an @mention interrupt a running turn. */
   prompt(id: SessionId, text: string, model?: string, priority?: number, interrupt?: InterruptPolicy, images?: PromptImage[], files?: PromptFile[], source?: string): Promise<void>;
@@ -537,6 +541,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const fencedDrops = new Map<SessionId, number>();
   /** Dangling-run reconciliations in flight, so racing callers settle each conversation once. */
   const danglingReconciles = new Set<SessionId>();
+  // refreshSandbox throttle: conversation -> last cluster read.
+  const REFRESH_SANDBOX_MS = 5_000;
+  const lastSandboxRefresh = new Map<SessionId, number>();
   const wireEventLog = (e: Entry) => {
     if (!e.bridge) return;
     // Persist via onPersist only: it sees every event that should be logged exactly once, while
@@ -886,6 +893,23 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         log.errorWith("dangling-run check failed", err, { conversation_id: id });
       } finally {
         danglingReconciles.delete(id);
+      }
+    },
+
+    async refreshSandbox(id) {
+      const entry = entries.get(id);
+      // revive()/start() keep a bridged entry's ref current; only a hydrated snapshot goes stale.
+      if (!entry || entry.bridge || entry.status === "ended" || !provisioner.reconcile) return;
+      const now = nowMs();
+      if (now - (lastSandboxRefresh.get(id) ?? 0) < REFRESH_SANDBOX_MS) return;
+      lastSandboxRefresh.set(id, now);
+      try {
+        const found = (await provisioner.reconcile()).find((s) => s.ref.name === entry.sandbox.name);
+        if (!found) return; // still absent: keep the placeholder so revive() creates it
+        entry.sandbox = found.ref;
+        entry.status = found.running ? "running" : "suspended";
+      } catch {
+        /* keep the snapshot; the next call past the throttle retries */
       }
     },
 

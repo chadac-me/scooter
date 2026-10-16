@@ -17,6 +17,7 @@ import { createK8sProvisioner } from "../../services/agent-host/src/session/k8sP
 import { resolvePodTarget } from "../../services/agent-host/src/exec/k8sExec.js";
 import { connectSandbox } from "../../services/agent-host/src/exec/sandboxExec.js";
 import { createWebServiceProxy } from "../../services/agent-host/src/proxy/webServiceProxy.js";
+import { ANONYMOUS_USER } from "../../services/agent-host/src/auth/identity.js";
 import { createWebServiceRegistry } from "../../services/agent-host/src/proxy/webServiceRegistry.js";
 import type { SandboxProvisioner } from "../../services/agent-host/src/session/manager.js";
 import type { SandboxRef } from "../../services/agent-host/src/types.js";
@@ -97,6 +98,7 @@ maybe("web-service reverse proxy (real pod)", () => {
       resolvePodTarget: (r) => resolvePodTarget(r),
       registry,
       publicHost: "test.local",
+      resolveUser: () => ({ id: ANONYMOUS_USER, anonymous: true }),
     });
 
     proxyServer = createServer((req, res) => {

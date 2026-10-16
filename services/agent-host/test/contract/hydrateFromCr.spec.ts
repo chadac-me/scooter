@@ -215,6 +215,48 @@ describe("hydrate() adopts from the Conversation CR", () => {
   });
 });
 
+describe("refreshSandbox() un-freezes a hydrated snapshot", () => {
+  it("a placeholder hydrated while the Sandbox was mid-create picks up the real ref once it exists", async () => {
+    // Read-path hydration (the UI's first poll) can land before provisioning finishes, freezing a
+    // namespace-less placeholder and "suspended" on a pod that is about to run.
+    const live: string[] = [];
+    const prov = fakeProvisioner();
+    prov.reconcile = vi.fn(async () => live.map((n) => ({ ref: { name: n, namespace: "ns" }, running: true })));
+    const sessions = createSessionManager({
+      provisioner: prov,
+      store: inMemoryStore(),
+      conversationRegistry: registryWith([cr("delta")]) as never,
+      selfPod: SELF,
+    } as never);
+    expect(await sessions.ensureReadable("delta" as SessionId)).toBe(true);
+    const before = sessions.get("delta" as SessionId)!;
+    expect(before.status).toBe("suspended");
+    expect(before.sandbox.namespace).toBe("");
+
+    live.push(before.sandbox.name);
+    await sessions.refreshSandbox!("delta" as SessionId);
+    const after = sessions.get("delta" as SessionId)!;
+    expect(after.status).toBe("running");
+    expect(after.sandbox).toEqual({ name: before.sandbox.name, namespace: "ns" });
+  });
+
+  it("is throttled, and leaves the placeholder alone while the Sandbox is still absent", async () => {
+    const prov = provisionerWithLive([]);
+    const sessions = createSessionManager({
+      provisioner: prov,
+      store: inMemoryStore(),
+      conversationRegistry: registryWith([cr("eps")]) as never,
+      selfPod: SELF,
+    } as never);
+    await sessions.ensureReadable("eps" as SessionId);
+    const calls = (prov.reconcile as ReturnType<typeof vi.fn>).mock.calls.length;
+    await sessions.refreshSandbox!("eps" as SessionId);
+    await sessions.refreshSandbox!("eps" as SessionId);
+    expect((prov.reconcile as ReturnType<typeof vi.fn>).mock.calls.length).toBe(calls + 1);
+    expect(sessions.get("eps" as SessionId)!.sandbox.namespace).toBe("");
+  });
+});
+
 describe("on-demand hydration under concurrent first requests", () => {
   it("a later hydrate does not replace the entry a prompt already revived (a Stop must find the live bridge)", async () => {
     // A conversation's first requests after it lands on this pod (prompt, history, stream) hydrate
