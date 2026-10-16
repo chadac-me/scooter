@@ -551,7 +551,7 @@ db-validate:
 
 # Everything CI runs.
 ci: check-flake check-manifests check-image-coverage check-contrib-coverage check-conv-token-vector check-lockfiles check-npm-hashes check-shell-syntax lint db-generate-check db-migrate-check test-unit
-    @echo "✅ ci (fast) passed — run `just test` for cluster + e2e tiers"
+    @echo "✅ ci (fast) passed — run 'just test' for cluster + e2e tiers"
 
 # Build + serve the docs site locally (mkdocs + the generated kubenix option pages).
 docs:
