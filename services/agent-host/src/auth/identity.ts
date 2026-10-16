@@ -5,8 +5,7 @@
  * x-auth-user/x-auth-email; `alb-oidc` reads AWS ALB's OIDC headers). A missing
  * identity is the single `anonymous` user. The ingress is the trust boundary, so the
  * agent-host must not be exposed without one that sets and strips identity headers;
- * identity is used for conversation ownership (a view filter), not access control. The
- * web-service proxy also hands it into the sandbox (withHandoffIdentity, below).
+ * identity is used for conversation ownership (a view filter), not access control.
  */
 
 import type { IncomingMessage } from "node:http";
@@ -119,23 +118,14 @@ export function resolverFromEnv(): IdentityResolver {
   });
 }
 
-// --- handoff into a sandbox (the web-service proxy) --------------------------
+// --- handoff into a sandbox (web-service proxy) ------------------------------
 
-/** The header the proxy sets on an upstream request so an in-pod service knows who is calling. */
+/** Set by the proxy so an in-pod service knows who is calling. */
 export const HANDOFF_USER_HEADER = "x-scooter-user";
 /** The caller's email, when the ingress supplied one. */
 export const HANDOFF_EMAIL_HEADER = "x-scooter-user-email";
 
-/**
- * Headers the proxy must DROP before forwarding into a sandbox: everything an ingress
- * sets for the agent-host, plus the handoff headers themselves.
- *
- * Two reasons, and the second is the one that bites. The ingress headers are addressed
- * to the agent-host, and `x-amzn-oidc-accesstoken` in particular is a live bearer token
- * that has no business inside a pod the agent controls. And an inbound copy of a handoff
- * header would be indistinguishable from the one the proxy sets, so a caller could name
- * themselves anyone — the strip is what makes the injected value mean something.
- */
+/** Inbound headers dropped before forwarding: ingress identity (incl. a live OIDC token) and forged handoffs. */
 export function inboundIdentityHeaders(): string[] {
   const cfg = identityConfigFromEnv();
   return [
@@ -149,15 +139,7 @@ export function inboundIdentityHeaders(): string[] {
   ];
 }
 
-/**
- * `headers` with every inbound identity header stripped and this request's resolved
- * identity stamped on instead; an anonymous caller contributes no handoff header, so an
- * in-pod service sees "nobody said" rather than the literal string "anonymous".
- *
- * The proxy lets any authenticated user through (webServiceProxy.ts), so this is how a
- * service can tell them apart if it wants to. It is a hint about who is looking,
- * trustworthy only to the extent the sandbox is.
- */
+/** `headers` with inbound identity stripped and `user` stamped on; anonymous stamps nothing. */
 export function withHandoffIdentity<T extends Record<string, unknown>>(
   headers: T,
   user: UserContext | undefined,

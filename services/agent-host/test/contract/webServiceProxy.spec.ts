@@ -18,7 +18,7 @@ import {
   type WebServiceRegistry,
 } from "../../src/proxy/webServiceProxy.js";
 
-/** What the in-pod service saw of the caller's identity: the proxy's handoff, and whether anything inbound leaked through. */
+/** The identity headers the in-pod service received. */
 interface IdentEcho {
   handoff: string | null;
   handoffEmail: string | null;
@@ -26,7 +26,6 @@ interface IdentEcho {
   oidcToken: string | null;
 }
 
-/** The identity-bearing headers an in-pod service actually received, for the strip/handoff assertions. */
 function identEcho(headers: Record<string, unknown>): string {
   return JSON.stringify({
     handoff: headers["x-scooter-user"] ?? null,
@@ -36,8 +35,7 @@ function identEcho(headers: Record<string, unknown>): string {
   });
 }
 
-// A fake in-pod service that echoes HTTP requests and raw bytes on an `upgrade`, plus the
-// identity headers it was handed (both paths, since the proxy must strip and stamp on each).
+// A fake in-pod service that echoes HTTP requests, raw bytes on an `upgrade`, and identity headers.
 function fakeInPodService(): Promise<{ server: Server; port: number }> {
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
@@ -56,7 +54,6 @@ function fakeInPodService(): Promise<{ server: Server; port: number }> {
       socket.write(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
       );
-      // The handshake's identity headers, so an upgrade can be asserted on the same way.
       socket.write(`IDENT ${identEcho(req.headers as Record<string, unknown>)}\n`);
       if (head?.length) socket.write(head);
       socket.on("data", (d) => socket.write(d));
@@ -156,7 +153,7 @@ describe("web-service proxy", () => {
     expect(parseProxyPath("/conversations/conv-1")).toBeNull();
   });
 
-  /** Anonymous = no ingress identity = single-user mode, which is what the shipped dev stack looks like. */
+  /** No ingress identity: single-user mode. */
   const ANON = { id: "anonymous", anonymous: true };
 
   function makeProxy(
@@ -353,9 +350,7 @@ describe("web-service proxy", () => {
     expect(echoed).toContain("ping");
   });
 
-  // --- access: shared by default (PR #778) ------------------------------------
-  // Any authenticated user may open any conversation's services; the ingress keeps
-  // strangers out, and the service learns who is calling from the handoff below.
+  // --- access: shared by default (#798) -----------------------------------------
 
   const ALICE = { id: "alice", email: "alice@example.com", anonymous: false };
   const BOB = { id: "bob", email: "bob@example.com", anonymous: false };
@@ -372,6 +367,18 @@ describe("web-service proxy", () => {
     const { statusLine, echoed } = await proxyUpgrade(proxy, "/c/conv-1/marimo/ws", "ping");
     expect(statusLine).toContain("101");
     expect(echoed).toContain("ping");
+  });
+
+  it("resolves a repeat caller's identity once, not per request", async () => {
+    let calls = 0;
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, {
+      resolveUser: (() => { calls++; return BOB; }) as never,
+    });
+    const headers = { "x-auth-user": "bob" };
+    await proxyGet(proxy, "/c/conv-1/marimo/a.js", { headers });
+    const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/b.js", { headers });
+    expect(calls).toBe(1);
+    expect(ident).toMatchObject({ handoff: "bob" });
   });
 
   it("a FAILING resolver still serves, handing off nobody rather than a guess", async () => {
@@ -393,7 +400,6 @@ describe("web-service proxy", () => {
     const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
     const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app", {
       headers: {
-        // What an ingress sets for the agent-host, plus a forged handoff.
         "x-auth-user": "alice",
         "x-amzn-oidc-accesstoken": "a-real-bearer-token",
         "x-scooter-user": "root",
@@ -403,7 +409,6 @@ describe("web-service proxy", () => {
       handoff: "alice",
       handoffEmail: "alice@example.com",
       ingress: null,
-      // A live access token has no business inside a pod the agent controls.
       oidcToken: null,
     });
   });
@@ -419,7 +424,6 @@ describe("web-service proxy", () => {
   });
 
   it("an anonymous caller hands off NO identity (not the string \"anonymous\")", async () => {
-    // "nobody said" and "a user literally called anonymous" must not look the same in the pod.
     const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { user: ANON });
     const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app");
     expect(ident).toMatchObject({ handoff: null, handoffEmail: null });

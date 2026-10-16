@@ -76,13 +76,8 @@ Key rules for the `command`:
 - `--no-token` / disable the service's own auth: the platform proxy already gates
   access; an in-pod token would just block the user (and marimo-pair, below).
 
-**Who can open the link.** Anyone signed in to this Scooter deployment can open a
-conversation's services, not just the person who started it, so the URL can be shared
-with a colleague. Don't serve anything through a web service that shouldn't be seen by
-everyone on the deployment. The proxy tells the service who is calling in the
-`x-scooter-user` header (and `x-scooter-user-email` when known). It strips any copy
-the caller sent, so a service can use the header to tell users apart. With no
-authenticating ingress (single-user mode) the header is absent.
+**Who can open the link.** Any signed-in user, not just the owner, so links can be
+shared. Don't serve anything private. The caller's id arrives as `x-scooter-user`.
 
 ## Starting a service and giving the user the link
 
