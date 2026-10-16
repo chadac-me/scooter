@@ -9,9 +9,10 @@
  * Usage:
  *   node test/e2e/support/shard-tests.mjs <N>
  *   SHARDS=<N> PRIOR_REPORT=prev/report.json REPEAT=<r> node test/e2e/support/shard-tests.mjs
+ *   SHARDS=<N> PRIOR_REPORT_DIR=prior REPEAT=<r> node test/e2e/support/shard-tests.mjs
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, basename } from "node:path";
 import { combinedInventory, verify, escapeForGrep } from "./test-inventory.mjs";
@@ -41,7 +42,9 @@ function committedWeights() {
 }
 
 /** Per-test durations (seconds) from a prior merged report, keyed like the weights file.
- *  The merge tags the cluster smoke; an untagged spec is a browser story. */
+ *  The merge tags the cluster smoke; an untagged spec is a browser story. A sweep lists
+ *  each repetition as its own spec under the same key, so one pass's weight is the MAX
+ *  of them, not whichever repetition the report happens to list last. */
 export function reportWeights(report) {
   const out = {};
   const walk = (node, file) => {
@@ -51,8 +54,10 @@ export function reportWeights(report) {
       const ms = (spec.tests ?? [])
         .flatMap((t) => t.results ?? [])
         .reduce((a, r) => a + (Number(r.duration) || 0), 0);
-      if (ms > 0)
-        out[`${spec.kind ?? "e2e"} ${basename(spec.file ?? f)} ${spec.title}`] = ms / 1000;
+      if (ms > 0) {
+        const k = `${spec.kind ?? "e2e"} ${basename(spec.file ?? f)} ${spec.title}`;
+        out[k] = Math.max(out[k] ?? 0, ms / 1000);
+      }
     }
     for (const child of node.suites ?? []) walk(child, f);
   };
@@ -61,7 +66,7 @@ export function reportWeights(report) {
 }
 
 /** The same, read from the previous run's merged report; missing or unparseable yields {}. */
-function priorReportWeights(reportPath) {
+export function priorReportWeights(reportPath) {
   if (!reportPath || !existsSync(reportPath)) return {};
   try {
     return reportWeights(JSON.parse(readFileSync(reportPath, "utf8")));
@@ -70,8 +75,32 @@ function priorReportWeights(reportPath) {
   }
 }
 
+/** Per-test MAX across every report under `dir`, searched recursively because `gh run
+ *  download` nests a directory per run. MAX rather than a mean: a shard that died partway
+ *  under-reports the tests it reached, and averaging that in is what overloads a shard. */
+export function windowReportWeights(dir) {
+  if (!dir || !existsSync(dir)) return {};
+  const out = {};
+  const walkDir = (d) => {
+    for (const ent of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, ent.name);
+      if (ent.isDirectory()) walkDir(p);
+      else if (ent.name.endsWith(".json")) {
+        for (const [k, secs] of Object.entries(priorReportWeights(p))) {
+          if (secs > 0) out[k] = Math.max(out[k] ?? 0, secs);
+        }
+      }
+    }
+  };
+  walkDir(dir);
+  return out;
+}
+
 /**
- * One weight per test in seconds. `repeat` scales the e2e weights only: the cluster
+ * One weight per test in seconds: max(measured, committed, DEFAULT_WEIGHT). The committed
+ * table is a FLOOR on the measured value, not a fallback for when it is missing: every way
+ * a weight goes wrong here makes it too SMALL, and too-small is the one that overloads a
+ * shard. `repeat` scales the e2e weights only: the cluster
  * tests run once whatever the sweep asks for, so a shard holding them would otherwise
  * be packed as if they scaled too.
  */
@@ -80,7 +109,9 @@ export function resolveWeights(tests, { prior = {}, committed = {}, repeat = 1 }
   const weights = {};
   for (const t of tests) {
     const k = testKey(t);
-    const base = prior[k] ?? committed[k] ?? DEFAULT_WEIGHT;
+    const measured = prior[k] > 0 ? prior[k] : 0;
+    const floor = committed[k] > 0 ? committed[k] : DEFAULT_WEIGHT;
+    const base = Math.max(measured, floor);
     weights[k] = t.kind === "e2e" ? base * reps : base;
   }
   return weights;
@@ -161,7 +192,11 @@ function main() {
     process.exit(1);
   }
 
-  const prior = priorReportWeights(process.env.PRIOR_REPORT);
+  // PRIOR_REPORT_DIR is a window of recent runs (per-test max); PRIOR_REPORT is a single
+  // report. Either may be empty, in which case the committed table carries the plan.
+  const prior = process.env.PRIOR_REPORT_DIR
+    ? windowReportWeights(process.env.PRIOR_REPORT_DIR)
+    : priorReportWeights(process.env.PRIOR_REPORT);
   const committed = committedWeights();
   const repeat = Math.max(1, Number(process.env.REPEAT ?? 1) || 1);
   const weights = resolveWeights(all, { prior, committed, repeat });
