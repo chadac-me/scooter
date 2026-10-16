@@ -1143,6 +1143,10 @@ function drawRail(counts) {
   drawQuestions();
   drawComments(counts);
   markAnchors();
+  // A redraw builds new marks, new ticks and new cards, so the thread the reader had
+  // focused has to be lit again on them. Without this a sync poll landing a second
+  // after a click quietly dropped the highlight the reader had just asked for.
+  if (focused) focus(focused, { scroll: false });
 }
 
 // --- questions ------------------------------------------------------------------

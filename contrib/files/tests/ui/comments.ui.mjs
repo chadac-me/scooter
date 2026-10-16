@@ -288,6 +288,17 @@ try {
   }));
   check("pressing the tick lights the comment and its card", lit.tick && lit.card, JSON.stringify(lit));
 
+  // And it stays lit through a redraw. The sync poll rebuilds the marks, the ticks
+  // and the cards every time it lands, which used to drop the highlight the reader
+  // had just asked for a second after they asked for it.
+  await page.evaluate(() => document.getElementById("refresh").click());
+  await page.waitForTimeout(600);
+  const still = await page.evaluate(() => ({
+    tick: !!document.querySelector("#view .cmark.focus"),
+    card: !!document.querySelector("#clist .ann.focus"),
+  }));
+  check("the highlight survives a redraw", still.tick && still.card, JSON.stringify(still));
+
 
   // The rule under the column headers is one line across the window. Each header is a
   // separate element that used to be sized by its own padding and content, so the
