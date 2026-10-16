@@ -62,6 +62,11 @@ Two things worth using in a link, because they land the user where you mean:
 - Links *inside* a rendered document resolve against the workspace, so a user who
   follows a doc's reference to `../contrib/files/sandbox.nix` stays in the viewer.
 
+## Designing with the user
+
+For design work, readers can comment on lines and answer question fields in the
+viewer, and each remark wakes you. See the `scooter-design-review` skill.
+
 ## It is read-only, and it is not your own file access
 
 The viewer has no write path. If the user asks for a change while looking at it,

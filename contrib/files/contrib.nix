@@ -40,6 +40,7 @@
 
       sandbox.module = ./sandbox.nix;
       skills."scooter-files.md" = ./skills/scooter-files.md;
+      skills."scooter-design-review.md" = ./skills/scooter-design-review.md;
     };
   };
 }
