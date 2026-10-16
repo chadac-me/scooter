@@ -92,6 +92,54 @@ describe("ExecBackend (agent-sandbox SDK)", () => {
   });
 });
 
+describe("ExecBackend kill before the exec starts (Stop during a sandbox cold start)", () => {
+  // Production's execute() first waits for a ready sandbox pod, and that wait ignores the
+  // AbortSignal; model it as an execute that only settles when the test releases it.
+  function podWaitApi() {
+    let release: () => void = () => {};
+    const podReady = new Promise<void>((r) => (release = r));
+    let ran = false;
+    const api: SandboxApiClient = {
+      mode: "k8s-exec",
+      async execute(_req, signal): Promise<ExecResult> {
+        await podReady;
+        if (signal?.aborted) return { stdout: "", stderr: "aborted", exitCode: 130 };
+        ran = true;
+        return { stdout: "slept", stderr: "", exitCode: 0 };
+      },
+      async download() { return ""; },
+      async upload() {},
+      async uploadBinary() {},
+    };
+    return { api, release, ran: () => ran };
+  }
+
+  it("kill() settles the terminal without waiting for the pod", async () => {
+    const pod = podWaitApi();
+    const exec = createSandboxExecBackend(pod.api, { commandTimeoutMs: 0 });
+    const term = exec.spawn({ command: "sleep", args: ["20"] });
+    const exitP = term.waitForExit();
+    await term.kill();
+    // The pod is still not ready, yet the exit has already landed.
+    await expect(exitP).resolves.toEqual({ exitCode: 130 });
+    // When the pod does come up, the command never runs and the exit does not change.
+    pod.release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(pod.ran()).toBe(false);
+    await expect(term.waitForExit()).resolves.toEqual({ exitCode: 130 });
+  });
+
+  it("kill() after the command finished keeps the real exit code", async () => {
+    const pod = podWaitApi();
+    const exec = createSandboxExecBackend(pod.api, { commandTimeoutMs: 0 });
+    const term = exec.spawn({ command: "true", args: [] });
+    pod.release();
+    await expect(term.waitForExit()).resolves.toEqual({ exitCode: 0 });
+    await term.kill();
+    await expect(term.waitForExit()).resolves.toEqual({ exitCode: 0 });
+  });
+});
+
 describe("ExecBackend hard command timeout (P0 — runaway-command deadlock fix)", () => {
   /** An api whose execute() hangs until its AbortSignal fires, then rejects as the real pods/exec WS does on close. */
   function hangingApi(): SandboxApiClient {
