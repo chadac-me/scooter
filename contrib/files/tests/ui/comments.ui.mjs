@@ -46,22 +46,41 @@ const mine = async () => (await annotations()).filter((a) => !before.has(a.id));
 const baseCards = await page.$$eval("#clist .ann", (n) => n.length);
 const cards = (n) => page.waitForFunction((want) => document.querySelectorAll("#clist .ann").length === want, baseCards + n, { timeout: 8000 });
 
-// --- 1. one column per thing ----------------------------------------------------
+// --- 1. one place per thing -----------------------------------------------------
 // Comments used to be in the left rail *and* the document's right margin, saying
-// everything twice.
+// everything twice. They are now in the margin only -- inside the document's own
+// column, on the same paper, immediately right of the text.
 const boxes = await page.evaluate(() => {
   const r = (sel) => {
     const b = document.querySelector(sel)?.getBoundingClientRect();
     return b && { left: Math.round(b.left), right: Math.round(b.right) };
   };
-  return { tree: r("nav#tree"), rail: r("#rail"), doc: r("main > section"), cpane: r("#cpane"), gutter: r("#gutter") };
+  return {
+    tree: r("nav#tree"), rail: r("#rail"), doc: r("main > section"),
+    text: r("#view .md, #view .codewrap"), cpane: r("#cpane"), gutter: r("#gutter"),
+    stray: document.querySelectorAll(".ann").length - document.querySelectorAll("#cpane .ann").length,
+    bg: getComputedStyle(document.querySelector("#cpane")).backgroundColor,
+  };
 });
 check(
-  "tree, conversation, document, comments — in that order",
-  boxes.tree.right <= boxes.rail.left + 1 && boxes.rail.right <= boxes.doc.left + 1 && boxes.doc.right <= boxes.cpane.left + 1,
-  `tree ${boxes.tree.left}-${boxes.tree.right}, rail ${boxes.rail.left}-${boxes.rail.right}, doc ${boxes.doc.left}-${boxes.doc.right}, comments ${boxes.cpane.left}-${boxes.cpane.right}`,
+  "tree, conversation, text, comments — in that order",
+  boxes.tree.right <= boxes.rail.left + 1 && boxes.rail.right <= boxes.doc.left + 1 && boxes.text.right <= boxes.cpane.left + 1,
+  `tree ${boxes.tree.left}-${boxes.tree.right}, rail ${boxes.rail.left}-${boxes.rail.right}, text ${boxes.text.left}-${boxes.text.right}, comments ${boxes.cpane.left}-${boxes.cpane.right}`,
 );
-check("comments are not also in the document's margin", !boxes.gutter);
+check(
+  "the margin is inside the document's column, not a column of its own",
+  boxes.cpane.left >= boxes.doc.left && boxes.cpane.right <= boxes.doc.right + 1 && boxes.bg === "rgba(0, 0, 0, 0)",
+  `doc ${boxes.doc.left}-${boxes.doc.right}, margin ${boxes.cpane.left}-${boxes.cpane.right}, background ${boxes.bg}`,
+);
+// The margin begins where the prose ends. A wide window used to leave a gutter of
+// empty page between a sentence and the card about it, and the reader matched them
+// up by reading both.
+check(
+  "the comments start beside the text, not across the page",
+  boxes.cpane.left - boxes.text.right < 40,
+  `${boxes.cpane.left - boxes.text.right}px between the text and the first card`,
+);
+check("a comment is in the margin and nowhere else", !boxes.gutter && boxes.stray === 0, `${boxes.stray} card(s) outside the margin`);
 
 try {
   // Clicking the comments column itself picks the line beside the click.
@@ -69,14 +88,16 @@ try {
     const body = document.getElementById("cbody");
     const pane = body.getBoundingClientRect();
     const x = Math.round(pane.left + pane.width - 24);
-    // Empty column below the cards already in it — clicking a card is the reader
+    // Free space in the margin, found by looking down the visible column: the cards
+    // are placed against the text they are about, so the gaps between them are
+    // wherever the document has nothing commented on. Clicking a card is the reader
     // working on that comment, not asking for a new one.
-    // Scrolled to the end first: a column already full of comments has its free space
-    // under the last of them.
-    body.scrollTop = body.scrollHeight;
-    const cards = [...body.querySelectorAll(".ann")].map((n) => n.getBoundingClientRect().bottom);
-    const y = Math.round(Math.max(pane.top + 20, ...cards) + 40);
-    if (y > pane.bottom - 10) return null;
+    let y = null;
+    for (let probe = Math.round(Math.max(pane.top, 0)) + 12; probe < Math.min(pane.bottom, window.innerHeight) - 12; probe += 8) {
+      const at = document.elementFromPoint(x, probe);
+      if (at && body.contains(at) && !at.closest(".ann, #cform, .cbar")) { y = probe; break; }
+    }
+    if (y === null) return null;
     const hit = document.elementFromPoint(x, y);
     if (!hit || !body.contains(hit) || hit.closest(".ann, #cform, .cbar")) return null;
     // The line this point is beside, worked out here rather than asked of the page:
@@ -249,12 +270,41 @@ try {
   // separate element that used to be sized by its own padding and content, so the
   // three ended within a few pixels of each other -- close enough to look like a
   // rendering fault rather than a layout one.
+  // Two headers now, not three: the comments have no bar of their own since they
+  // moved into the document's margin, and their count sits in the file bar.
   const heads = await page.evaluate(() =>
-    ["#tabs", ".filebar", "#cpane .chead"]
+    ["#tabs", ".filebar"]
       .map((sel) => { const n = document.querySelector(sel); return n ? { sel, bottom: +n.getBoundingClientRect().bottom.toFixed(2) } : null; })
       .filter(Boolean));
   const spread = Math.max(...heads.map((h) => h.bottom)) - Math.min(...heads.map((h) => h.bottom));
-  check("the column headers end on one line", heads.length === 3 && spread < 0.5, `${spread.toFixed(2)}px apart: ${JSON.stringify(heads)}`);
+  check("the column headers end on one line", heads.length === 2 && spread < 0.5, `${spread.toFixed(2)}px apart: ${JSON.stringify(heads)}`);
+
+  // Each card is placed against the text it is about: at the top of its quote, or
+  // pushed down by the card above it, but never above its own anchor -- a card over
+  // the paragraph before it would point at the wrong text.
+  const placed = await page.evaluate(() => {
+    const cards = [...document.querySelectorAll("#cpane .ann")].map((c) => {
+      const t = c.dataset.thread;
+      const mark = t ? document.querySelector(`mark.qmark[data-thread="${CSS.escape(t)}"]`) : null;
+      // The block a comment's line falls inside, which is the block that opened at
+      // or before it -- a comment can be on the third line of a paragraph.
+      const want = Number(c.dataset.line || 0);
+      let block = null;
+      for (const b of document.querySelectorAll("#view [data-line]")) {
+        const at = Number(b.dataset.line);
+        if (at <= want && (!block || at > Number(block.dataset.line))) block = b;
+      }
+      const a = (mark || block)?.getBoundingClientRect();
+      const b = c.getBoundingClientRect();
+      return { line: c.dataset.line, top: Math.round(b.top), bottom: Math.round(b.bottom), drift: a ? Math.round(b.top - a.top) : null };
+    }).sort((x, y) => x.top - y.top);
+    let overlap = 0;
+    for (let i = 1; i < cards.length; i++) if (cards[i].top < cards[i - 1].bottom - 1) overlap++;
+    return { cards, overlap, above: cards.filter((c) => c.drift !== null && c.drift < -1).length };
+  });
+  check("no card sits above the text it is about", placed.above === 0, `${placed.above} of ${placed.cards.length} above their anchor`);
+  check("the cards do not overlap each other", placed.overlap === 0, `${placed.overlap} overlapping pair(s)`);
+  check("the first card is level with its own anchor", placed.cards[0] && placed.cards[0].drift !== null && placed.cards[0].drift <= 2, JSON.stringify(placed.cards[0]));
 
   // --- 5. deleting ----------------------------------------------------------------
   await page.click('#clist .ann .reply .top button:text-is("delete")');
