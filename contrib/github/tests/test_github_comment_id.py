@@ -43,7 +43,10 @@ def review_comment(cid=555):
 @pytest.fixture
 def forwarded():
     """Capture what would be sent to the already-linked conversation."""
-    with patch.object(gh, "send_message", new=AsyncMock(return_value=True)) as send, \
+    # A comment on a linked thread goes through deliver_message, everything else send_message.
+    send = AsyncMock(return_value=gh.SendOutcome.DELIVERED)
+    with patch.object(gh, "send_message", new=send), \
+         patch.object(gh, "deliver_message", new=send), \
          patch.object(gh.db, "lookup_conversation", new=AsyncMock(return_value="conv-1")), \
          patch.object(gh.db, "get_conversation_for_resource", new=AsyncMock(return_value=None)):
         yield send

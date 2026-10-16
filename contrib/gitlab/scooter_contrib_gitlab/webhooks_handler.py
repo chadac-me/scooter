@@ -15,7 +15,9 @@ from scooter_webhooks_lib import store as db
 from scooter_webhooks_lib.store import PENDING_CONVERSATION_ID, is_pending
 
 from .config import settings
-from scooter_webhooks_lib.agent_host_client import conversation_url, create_conversation, push_link, send_message
+from scooter_webhooks_lib.agent_host_client import (
+    SendOutcome, conversation_url, create_conversation, deliver_message, push_link, send_message,
+)
 from scooter_contrib_jira.issue_keys import extract_issue_keys
 from scooter_webhooks_lib import policy
 from scooter_webhooks_lib.identity import resolve_owner
@@ -239,11 +241,24 @@ async def _handle_note(payload: dict):
             comment_body, project_id, note_api_type, noteable_iid,
             discussion_id=discussion_id, has_mention=has_mention,
         )
-        ok = await send_message(existing, forward_msg, priority=has_mention, source="gitlab")
-        if ok:
+        outcome = await deliver_message(existing, forward_msg, priority=has_mention, source="gitlab")
+        if outcome is not SendOutcome.NOT_FOUND:
+            # The conversation still exists, so a failed run keeps its mapping (issue #802).
+            if outcome is not SendOutcome.DELIVERED:
+                logger.warning(
+                    "forward to existing conversation failed, keeping it",
+                    extra={
+                        **_C,
+                        "conversation_id": existing,
+                        "outcome": outcome.value,
+                        "source": "gitlab",
+                        "resource_type": res_type,
+                        "resource_id": res_id,
+                    },
+                )
             return
         logger.warning(
-            "send to existing conversation failed, creating a new one",
+            "existing conversation no longer exists, creating a new one",
             extra={
                 **_C,
                 "conversation_id": existing,

@@ -18,7 +18,9 @@ from scooter_webhooks_lib.resources import link_variants as _lib_link_variants
 from scooter_webhooks_lib.store import PENDING_CONVERSATION_ID, is_pending
 
 from .config import settings
-from scooter_webhooks_lib.agent_host_client import conversation_url, create_conversation, push_link, send_message
+from scooter_webhooks_lib.agent_host_client import (
+    SendOutcome, conversation_url, create_conversation, deliver_message, push_link, send_message,
+)
 from scooter_webhooks_lib import policy
 from scooter_webhooks_lib.identity import resolve_owner
 from .responses import get_app_login, post_github_comment
@@ -210,11 +212,24 @@ async def _handle_comment(payload: dict):
         forward_msg = _format_forwarded_message(
             comment_text, owner, repo, issue_number, is_pr, has_mention, comment_id,
         )
-        ok = await send_message(existing, forward_msg, priority=has_mention, source="github")
-        if ok:
+        outcome = await deliver_message(existing, forward_msg, priority=has_mention, source="github")
+        if outcome is not SendOutcome.NOT_FOUND:
+            # The conversation still exists, so a failed run keeps its mapping (issue #802).
+            if outcome is not SendOutcome.DELIVERED:
+                logger.warning(
+                    "forward to existing conversation failed, keeping it",
+                    extra={
+                        **_C,
+                        "conversation_id": existing,
+                        "outcome": outcome.value,
+                        "source": "github",
+                        "resource_type": res_type,
+                        "resource_id": res_id,
+                    },
+                )
             return
         logger.warning(
-            "send to existing conversation failed, creating a new one",
+            "existing conversation no longer exists, creating a new one",
             extra={
                 **_C,
                 "conversation_id": existing,

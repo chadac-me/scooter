@@ -15,7 +15,9 @@ from scooter_webhooks_lib.store import PENDING_CONVERSATION_ID, is_pending
 
 from .config import settings
 from scooter_webhooks_lib import policy
-from scooter_webhooks_lib.agent_host_client import conversation_url, create_conversation, push_link, send_message
+from scooter_webhooks_lib.agent_host_client import (
+    SendOutcome, conversation_url, create_conversation, deliver_message, push_link, send_message,
+)
 from .responses import post_jira_comment
 
 logger = logging.getLogger(__name__)
@@ -124,11 +126,24 @@ async def _handle_comment(payload: dict):
 
     if existing:
         forward_msg = _format_forwarded_message(comment_text, issue_key, has_mention)
-        ok = await send_message(existing, forward_msg, priority=has_mention, source="jira")
-        if ok:
+        outcome = await deliver_message(existing, forward_msg, priority=has_mention, source="jira")
+        if outcome is not SendOutcome.NOT_FOUND:
+            # The conversation still exists, so a failed run keeps its mapping (issue #802).
+            if outcome is not SendOutcome.DELIVERED:
+                logger.warning(
+                    "forward to existing conversation failed, keeping it",
+                    extra={
+                        **_C,
+                        "conversation_id": existing,
+                        "outcome": outcome.value,
+                        "source": "jira",
+                        "resource_type": "issue",
+                        "resource_id": issue_key,
+                    },
+                )
             return
         logger.warning(
-            "send to existing conversation failed, creating a new one",
+            "existing conversation no longer exists, creating a new one",
             extra={
                 **_C,
                 "conversation_id": existing,

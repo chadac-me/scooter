@@ -372,3 +372,114 @@ async def test_create_omits_owner_when_there_is_no_human_trigger(monkeypatch):
 
     # An empty-string owner would create a conversation owned by "", which is not unowned.
     assert "owner" not in captured["create_json"]
+
+
+# --- deliver_message: only a missing conversation may be replaced (issue #802) ---
+
+
+class _StatusStream(_FakeStream):
+    def __init__(self, status: int, body: bytes = b""):
+        super().__init__(body)
+        self.status_code = status
+
+
+def _patch_attempts(monkeypatch, *attempts):
+    """Stub /agui with one response per attempt: a _FakeStream, or an exception raised on connect; returns the attempt counter."""
+    calls = {"n": 0}
+
+    class _Raising:
+        def __init__(self, exc):
+            self._exc = exc
+
+        async def __aenter__(self):
+            raise self._exc
+
+        async def __aexit__(self, *a):
+            return False
+
+    def fake_stream(self, method, url, **kwargs):  # noqa: ANN001
+        a = attempts[min(calls["n"], len(attempts) - 1)]
+        calls["n"] += 1
+        return _Raising(a) if isinstance(a, Exception) else a
+
+    async def no_sleep(_s):
+        return None
+
+    monkeypatch.setattr(httpx.AsyncClient, "stream", fake_stream)
+    monkeypatch.setattr(ahc.asyncio, "sleep", no_sleep)
+    return calls
+
+
+_FINISHED = _sse('{"type":"RUN_FINISHED","threadId":"c1","runId":"r"}')
+
+
+async def test_deliver_finished_run_is_DELIVERED(monkeypatch):
+    calls = _patch_attempts(monkeypatch, _FakeStream(_FINISHED))
+    assert await ahc.deliver_message("c1", "hi") is ahc.SendOutcome.DELIVERED
+    assert calls["n"] == 1
+
+
+async def test_deliver_UNKNOWN_CONVERSATION_code_is_NOT_FOUND(monkeypatch):
+    body = _sse('{"type":"RUN_ERROR","message":"whatever","code":"UNKNOWN_CONVERSATION"}')
+    calls = _patch_attempts(monkeypatch, _FakeStream(body))
+    assert await ahc.deliver_message("c1", "hi") is ahc.SendOutcome.NOT_FOUND
+    assert calls["n"] == 1
+
+
+async def test_deliver_legacy_no_such_conversation_message_is_NOT_FOUND(monkeypatch):
+    # An agent-host from before the code still says so in the message.
+    body = _sse('{"type":"RUN_ERROR","message":"No such conversation: c1. Create one first."}')
+    _patch_attempts(monkeypatch, _FakeStream(body))
+    assert await ahc.deliver_message("c1", "hi") is ahc.SendOutcome.NOT_FOUND
+
+
+@pytest.mark.parametrize("status", [404, 410])
+async def test_deliver_404_or_410_is_NOT_FOUND(monkeypatch, status):
+    _patch_attempts(monkeypatch, _StatusStream(status))
+    assert await ahc.deliver_message("c1", "hi") is ahc.SendOutcome.NOT_FOUND
+
+
+async def test_deliver_RUN_ERROR_is_RUN_FAILED_and_NOT_retried(monkeypatch):
+    # The failure from the issue: the message was accepted and the run errored. The
+    # conversation still exists, and a retry would deliver the comment twice.
+    body = _sse(
+        '{"type":"RUN_STARTED","threadId":"c1","runId":"r"}',
+        '{"type":"RUN_ERROR","message":"Claude Code returned an error result"}',
+    )
+    calls = _patch_attempts(monkeypatch, _FakeStream(body))
+    assert await ahc.deliver_message("c1", "hi") is ahc.SendOutcome.RUN_FAILED
+    assert calls["n"] == 1
+
+
+async def test_deliver_stream_drop_after_accept_is_RUN_FAILED_and_NOT_retried(monkeypatch):
+    class _Dropping(_FakeStream):
+        async def aiter_lines(self):
+            yield 'data: {"type":"RUN_STARTED","threadId":"c1","runId":"r"}'
+            raise httpx.ReadError("agent-host restarted")
+
+    calls = _patch_attempts(monkeypatch, _Dropping(b""))
+    assert await ahc.deliver_message("c1", "hi") is ahc.SendOutcome.RUN_FAILED
+    assert calls["n"] == 1
+
+
+async def test_deliver_retries_a_request_that_was_never_accepted(monkeypatch):
+    calls = _patch_attempts(
+        monkeypatch,
+        httpx.ConnectError("connection refused"),
+        _StatusStream(503),
+        _FakeStream(_FINISHED),
+    )
+    assert await ahc.deliver_message("c1", "hi") is ahc.SendOutcome.DELIVERED
+    assert calls["n"] == 3
+
+
+async def test_deliver_gives_up_as_UNREACHABLE_after_the_retries(monkeypatch):
+    calls = _patch_attempts(monkeypatch, httpx.ConnectError("connection refused"))
+    assert await ahc.deliver_message("c1", "hi") is ahc.SendOutcome.UNREACHABLE
+    assert calls["n"] == len(ahc.SEND_RETRY_DELAYS_S) + 1
+
+
+async def test_send_message_is_true_only_when_delivered(monkeypatch):
+    body = _sse('{"type":"RUN_ERROR","message":"boom"}')
+    _patch_attempts(monkeypatch, _FakeStream(body))
+    assert await ahc.send_message("c1", "hi") is False
