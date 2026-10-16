@@ -137,14 +137,52 @@ export function summarizeHistory(reports, pattern, labels = []) {
     };
   });
   const executed = runs.filter((r) => r.ran);
+  const failedRuns = executed.reduce((n, r) => n + r.failedRuns, 0);
+  const totalRuns = executed.reduce((n, r) => n + r.totalRuns, 0);
   return {
     runs,
     ran: executed.length,
     failed: executed.filter((r) => r.failed).length,
+    // Repetition-level totals, so the window carries a rate the budget advice can
+    // be computed from — not just "it failed on 2 of 5 nights".
+    failedRuns,
+    totalRuns,
+    rate: totalRuns > 0 ? failedRuns / totalRuns : 0,
   };
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/**
+ * How many repetitions it takes before a clean run is unlikely (p ≤ alpha) at an
+ * observed failure rate — i.e. the budget this experiment needed to have power.
+ * This is the number the `⚠️ no power` / weak-control verdicts should name, since
+ * "raise the budget" without a target is what leaves a PR guessing.
+ */
+export function repetitionsFor(rate, alpha = 0.05) {
+  if (!(rate > 0) || rate >= 1) return null;
+  return Math.ceil(Math.log(alpha) / Math.log(1 - rate));
+}
+
+/** The PR-description key and cap that set this target's repetition budget (see .github/scripts/flake-focus-pattern.sh). */
+export function budgetKnob(target) {
+  return target === "full"
+    ? { key: "flake-full-repeat", cap: 20 }
+    : { key: "flake-repeat", cap: 100 };
+}
+
+/**
+ * The "raise the budget to N" clause, or the honest admission that N is past the
+ * cap — a 1-in-200 flake cannot be cornered by repetitions on a shared fleet.
+ */
+function budgetAdvice(target, rate, source) {
+  const { key, cap } = budgetKnob(target);
+  const need = repetitionsFor(rate);
+  if (!need) return `Raise the budget from the PR description with \`${key}: <n>\` (cap ${cap}).`;
+  return need <= cap
+    ? `At the ${source} rate of **${pct(rate)}**, a clean run only means something from about **${need} repetitions** up — put \`${key}: ${need}\` in the PR description (cap ${cap}) and re-run.`
+    : `At the ${source} rate of **${pct(rate)}** it would take about **${need} repetitions** for a clean run to be meaningful, which is past this target's cap of ${cap} — the budget alone cannot settle this one. Reproduce it locally, or argue the fix from the failure's mechanism (trace, logs) instead of from a count.`;
+}
 
 /**
  * The control: the same test with the same repetition budget on the PR's base
@@ -200,6 +238,9 @@ export function renderMarkdown(summary, opts = {}) {
   const targetLabel = target === "full" ? "full target — real k3d cluster" : "fast target — fake stack";
   const control = compareToBaseline(summary, baseline);
   const baseRefLabel = baselineRef ? ` (\`${baselineRef}\`)` : "";
+  // Set once the "raise it to N / N is past the cap" clause has been rendered, so
+  // the nightly-window warning below points back at it instead of repeating it.
+  let sized = false;
   // No marker: this body is one section of the shared comment, tagged by
   // scripts/comment-sections.mjs.
   const L = [];
@@ -273,20 +314,36 @@ export function renderMarkdown(summary, opts = {}) {
       `| this PR | ${summary.runs} | ${summary.failed} |`,
       "",
     );
-    if (control.kind === "strong")
+    if (control.kind === "strong") {
       L.push(
         control.strength === "tight"
           ? `The flake fires on the base at **${pct(control.baseRate)}** and not at all here. If this branch still flaked at that rate, ${plural(summary.runs, "clean run")} in a row would happen only about **${pct(control.pAllCleanAtBaseRate)}** of the time — so this is a real change in behaviour, bounded rather than proven.`
-          : `⚠️ **The control is too weak to conclude much.** The base only failed ${control.baseFailed}/${control.baseRuns} (**${pct(control.baseRate)}**), so even if this branch still flaked at exactly that rate, ${plural(summary.runs, "clean run")} in a row would happen about **${pct(control.pAllCleanAtBaseRate)}** of the time — luck explains this result almost as well as a fix does. Raise the repetition budget until the base fails often enough to make a clean run here meaningful.`,
+          : `⚠️ **The control is too weak to conclude much.** The base only failed ${control.baseFailed}/${control.baseRuns} (**${pct(control.baseRate)}**), so even if this branch still flaked at exactly that rate, ${plural(summary.runs, "clean run")} in a row would happen about **${pct(control.pAllCleanAtBaseRate)}** of the time — luck explains this result almost as well as a fix does. ${budgetAdvice(target, control.baseRate, "base's")}`,
       );
-    else if (control.kind === "inconclusive")
+      // A tight control needs no remedy; a loose one got the sizing clause above.
+      if (control.strength === "loose") sized = true;
+    } else if (control.kind === "inconclusive") {
       // The remedy differs by target: a full run is already under the label the fast
-      // nudge would name.
+      // nudge would name, so the budget and the mode are the knobs it has left.
+      const { key, cap } = budgetKnob(target);
+      // With no failures on the base there is no rate here to size a budget from, so
+      // borrow the nightly window's when it has one.
+      const sizedClause =
+        history?.rate > 0 ? ` ${budgetAdvice(target, history.rate, `nightly \`${historyRef}\``)}` : "";
+      sized = sizedClause !== "";
       L.push(
         target === "full"
-          ? `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". This is already the strongest target there is, so the budget is the only knob left: raise \`FULL_REPEAT_TARGETED\` / \`FULL_REPEAT_CONTENTION\` in the \`flake-focus-full\` job, or add \`flake-specs:\` so the test runs under cross-spec contention rather than alone.`
-          : `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". Raise the repetition budget, add \`flake-specs:\` so it runs under contention, or — if it was seen on the nightly \`e2e-full\` — use the \`e2e-full-flake-check\` label, since the fast stack cannot produce those conditions at all.`,
+          ? `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". This is already the strongest target there is, so the experiment itself is the knob: raise the repetitions with \`${key}: <n>\` in the PR description (cap ${cap}), or add \`flake-specs:\` so the test runs under cross-spec contention rather than alone.${sizedClause}`
+          : `**The experiment had no power.** The flake did not fire on the base either, so this run cannot distinguish "fixed" from "did not happen to fire". Raise the repetitions with \`${key}: <n>\` in the PR description (cap ${cap}), add \`flake-specs:\` so it runs under contention, or — if it was seen on the nightly \`e2e-full\` — use the \`e2e-full-flake-check\` label, since the fast stack cannot produce those conditions at all.${sizedClause}`,
       );
+      // `flake-specs:` silently buys the smaller contention budget, which is how a
+      // PR ends up with less power than the default it thought it was getting.
+      if (mode === "contention")
+        L.push(
+          "",
+          `Note: this ran in **contention** mode over \`${specs}\`, whose default budget is deliberately smaller than the targeted one (each repetition is every test in those files). To hammer the single test at the bigger budget while keeping the specs line, add \`flake-mode: targeted\`.`,
+        );
+    }
     else if (control.kind === "worse")
       L.push(
         `⚠️ It failed **more** here than on the base. At these sample sizes that is not proof of a regression, but this PR has not fixed the flake.`,
@@ -328,7 +385,7 @@ export function renderMarkdown(summary, opts = {}) {
     // control, not a fix.
     if (history.failed > 0 && (control.kind === "inconclusive" || control.kind === "none"))
       L.push(
-        `⚠️ **This flake is live on \`${historyRef}\` but the control did not reproduce it.** That makes the control unrepresentative of the conditions the flake needs, not the flake fixed. Treat the clean run above as *no reproduction under these conditions* and raise the budget or add \`flake-specs:\` until the control fires too.`,
+        `⚠️ **This flake is live on \`${historyRef}\` but the control did not reproduce it.** That makes the control unrepresentative of the conditions the flake needs, not the flake fixed. Treat the clean run above as *no reproduction under these conditions*, and change the experiment until the control fires too. ${sized ? "The budget that would take is sized above." : budgetAdvice(target, history.rate, `nightly \`${historyRef}\``)}`,
         "",
       );
     else if (history.failed === 0)

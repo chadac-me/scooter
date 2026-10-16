@@ -1,9 +1,13 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
+  budgetKnob,
   compareToBaseline,
   patternToRegExp,
   renderMarkdown,
+  repetitionsFor,
   summarize,
   summarizeHistory,
 } from "./flake-focus-report.mjs";
@@ -246,18 +250,38 @@ describe("renderMarkdown with a control run", () => {
     expect(body).not.toContain("Control");
   });
 
-  // A powerless full run is already under the label the fast nudge would name.
+  // A powerless full run is already under the label the fast nudge would name, so it
+  // is pointed at the knob it does still have — and at the key that sets it, since a
+  // budget nobody can raise without editing CI is not a remedy.
   it("points a powerless full run at the budget, not at its own label", () => {
     const body = md(Array(5).fill("passed"), Array(5).fill("passed"), { target: "full" });
     expect(body).toContain("no power");
-    expect(body).toContain("FULL_REPEAT_TARGETED");
+    expect(body).toContain("`flake-full-repeat: <n>`");
     expect(body).not.toContain("use the `e2e-full-flake-check` label");
   });
 
   it("still offers the full target to a powerless fast run", () => {
     const body = md(Array(5).fill("passed"), Array(5).fill("passed"), { target: "fast" });
     expect(body).toContain("use the `e2e-full-flake-check` label");
-    expect(body).not.toContain("FULL_REPEAT_TARGETED");
+    expect(body).toContain("`flake-repeat: <n>`");
+    // The fast job cannot raise the full job's budget, so it must not suggest it.
+    expect(body).not.toContain("flake-full-repeat");
+  });
+
+  // The trap behind this whole knob: naming `flake-specs:` buys the smaller
+  // contention budget, so a PR that wanted more power silently got less.
+  it("tells a powerless contention run that targeted mode has the bigger budget", () => {
+    const body = md(Array(3).fill("passed"), Array(3).fill("passed"), {
+      target: "full",
+      mode: "contention",
+      specs: "test/e2e/stop-run.spec.ts",
+    });
+    expect(body).toContain("`flake-mode: targeted`");
+  });
+
+  it("says nothing about `flake-mode:` when the run was already targeted", () => {
+    const body = md(Array(5).fill("passed"), Array(5).fill("passed"), { target: "full" });
+    expect(body).not.toContain("flake-mode");
   });
 });
 
@@ -286,6 +310,61 @@ describe("control strength", () => {
     const body = renderMarkdown(clean20, { baseline: baseWith(6), baselineRef: "main@abc" });
     expect(body).toContain("fires on the base, not here");
     expect(body).toContain("real change in behaviour");
+  });
+});
+
+// "Raise the budget" with no number is what leaves a PR guessing, so the report
+// sizes it: how many repetitions make a clean run mean something at a known rate.
+describe("sizing the repetition budget", () => {
+  const P = "THREE messages sent mid-run";
+  const clean = (n) => summarize(targeted(Array(n).fill("passed")), P);
+  const baseWith = (failures, total) =>
+    summarize(targeted([...Array(total - failures).fill("passed"), ...Array(failures).fill("failed")]), P);
+
+  it("needs ~14 repetitions at a 1-in-5 rate and ~59 at 1-in-20", () => {
+    expect(repetitionsFor(0.2)).toBe(14);
+    expect(repetitionsFor(0.05)).toBe(59);
+    // A rate of 0 gives no number at all — nothing observed, nothing to size from.
+    expect(repetitionsFor(0)).toBe(null);
+  });
+
+  it("names the number and the key on a weak control", () => {
+    const body = renderMarkdown(clean(5), { target: "full", baseline: baseWith(1, 5), baselineRef: "main@abc" });
+    expect(body).toContain("control is weak");
+    expect(body).toContain("`flake-full-repeat: 14`");
+  });
+
+  // The full target caps at 20 repetitions, so a rare flake must be argued from the
+  // failure's mechanism rather than chased with a budget that is not available.
+  it("admits when the required budget is past the cap instead of suggesting it", () => {
+    const body = renderMarkdown(clean(5), { target: "full", baseline: baseWith(1, 40), baselineRef: "main@abc" });
+    expect(body).toContain("past this target's cap of 20");
+    expect(body).not.toContain("flake-full-repeat: 1");
+  });
+
+  // The caps and keys this report quotes are enforced by the parser, in another
+  // language, in another directory — so assert they are the same ones.
+  it("quotes the keys and caps the PR-description parser actually enforces", () => {
+    const sh = readFileSync(new URL("../.github/scripts/flake-focus-pattern.sh", import.meta.url), "utf8");
+    for (const target of ["fast", "full"]) {
+      const { key, cap } = budgetKnob(target);
+      expect(sh).toContain(`repeat_key='${key}'`);
+      expect(sh).toContain(`repeat_cap=${cap}`);
+    }
+  });
+
+  // A clean control has no rate of its own, so a powerless run borrows the nightly's.
+  it("sizes a powerless run from the nightly rate when the control gives none", () => {
+    const sweep = (failures) =>
+      targeted([...Array(5 - failures).fill("passed"), ...Array(failures).fill("failed")]);
+    const body = renderMarkdown(clean(5), {
+      target: "full",
+      baseline: clean(5),
+      baselineRef: "main@abc",
+      history: summarizeHistory([sweep(1), sweep(1)], P),
+    });
+    expect(body).toContain("no power");
+    expect(body).toContain("`flake-full-repeat: 14`");
   });
 });
 
