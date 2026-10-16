@@ -7,7 +7,7 @@
  * The caller's identity is passed on as x-scooter-user.
  * Nothing on the forwarding path execs into the pod: liveness is read off the
  * connection. Why: PR #791. The pod address is cached briefly rather than listed
- * from the API server per request. Why: PR #799.
+ * from the API server per request. Why: PR #800.
  */
 
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
@@ -126,7 +126,7 @@ export const STATUS_SEGMENT = "__scooter_status";
 const USER_CACHE_TTL_MS = 60_000;
 const USER_CACHE_MAX = 1000;
 
-/** How long a resolved pod address is reused; also dropped on a status change or any upstream connect error. Why: PR #799. */
+/** How long a resolved pod address is reused; also dropped on a status change or any upstream connect error. Why: PR #800. */
 export const POD_TARGET_TTL_MS = 15_000;
 
 /** A proxied request whose time to the pod's first byte is at least this logs at info, below it at debug. */
