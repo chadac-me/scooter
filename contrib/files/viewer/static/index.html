@@ -264,12 +264,13 @@ mark.qmark.focus { background: color-mix(in srgb, var(--brand) 32%, transparent)
 }
 .ann .text { white-space: pre-wrap; }
 .ann.resolved { opacity: 0.6; }
-/* Sync state is never implied: a comment the broker has not acked says so, because
-   the agent cannot wake on a comment that never left the pod. */
+/* A comment that did not get out says so, because the agent cannot wake on a comment
+   that never left the pod. A comment that did get out says nothing: it is the
+   ordinary case, and a green tick beside the agent's own document would claim the
+   agent had read it. */
 .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
-.badge.pending { color: #b58900; border-color: #b58900; }
+.badge.pending, .badge.sending { color: #b58900; border-color: #b58900; }
 .badge.failed, .badge.stale { color: #dc322f; border-color: #dc322f; }
-.badge.acked { color: #859900; border-color: #859900; }
 .badge.disabled { color: var(--muted-foreground); }
 #cform { display: none; }
 #cform .cwhere { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; font-size: 12px; }
@@ -790,12 +791,19 @@ let syncPoll = null;
 let syncDelay = 0;
 let focused = null;
 
+// "acked" is deliberately absent: a stored comment draws no badge at all. What the
+// reader wants to know is whether it got out, not that the broker wrote a row.
 const SYNC_NOTE = {
   pending: "not yet sent to the broker — the agent has not been woken",
-  acked: "stored by the broker",
   failed: "could not be sent; the agent has not been woken",
   disabled: "this deployment stores no annotations, so nothing was sent",
 };
+
+/** The badge for a sync state, or nothing when there is nothing to say. */
+function syncBadge(state) {
+  if (!state || state === "acked") return null;
+  return badge(state, SYNC_NOTE[state] || "");
+}
 
 // The view keeps the source's hard wraps as newlines, so what a reader selects is
 // never byte-equal to what is on disk.
@@ -1297,7 +1305,8 @@ function card(thread, items) {
     // repeating the quote under it is noise.
     const top = document.createElement("div");
     top.className = "top";
-    top.appendChild(badge(reply.state, SYNC_NOTE[reply.state] || ""));
+    const replyState = syncBadge(reply.state);
+    if (replyState) top.appendChild(replyState);
     const spacer = document.createElement("span");
     spacer.className = "spacer";
     top.appendChild(spacer);
@@ -1324,7 +1333,8 @@ function headTop(a, replies) {
   // drifted from the line the reader wrote it against.
   if (a.anchor_state === "moved") top.appendChild(badge("moved", `written against line ${a.recorded_line}`));
   if (a.anchor_state === "stale") top.appendChild(badge("stale", "the quoted text is no longer in the file"));
-  top.appendChild(badge(a.state, SYNC_NOTE[a.state] || ""));
+  const state = syncBadge(a.state);
+  if (state) top.appendChild(state);
   if (replies.length) {
     const count = document.createElement("span");
     count.className = "crumb";

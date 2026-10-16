@@ -33,7 +33,13 @@ What it asserts, each one a bug that shipped:
   second anchor mark in the text
 - deleting a reply keeps the comment; deleting a thread takes its replies and leaves
   other threads alone, at the viewer and at the broker
-- a pending badge reaches `acked` with no user action
+- a pending badge clears itself with no user action, and a stored comment carries no
+  badge claiming it has been read
+- the quote highlight is painted rather than merely present, and a commented
+  paragraph still reads as the file does
+- the "+" offered beside a hovered block survives the pointer's reach for it
+- the cards sit in the document's margin, beside the text they are about, without
+  overlapping each other or rising above their own anchor
 
 CI home: this belongs in the Playwright suite under `test/e2e`, which already has the
 pinned browser and the sharding. It is kept out for now because that suite boots the

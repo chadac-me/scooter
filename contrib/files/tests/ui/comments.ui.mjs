@@ -318,12 +318,20 @@ try {
   check("deleting one thread leaves the other", left.length === 1 && left[0].id === lineRecord.id, JSON.stringify(left.map((a) => a.text)));
 
   // --- 6. the sync badge settles on its own ---------------------------------------
-  // No clicking, no reload: the page has to come back and look until the push acks.
-  const acked = await page
-    .waitForSelector("#clist .ann .badge.acked", { timeout: 15000 })
+  // No clicking, no reload: the page has to come back and look until the push lands,
+  // and then the badge goes. A stored comment is the ordinary case and says nothing
+  // -- there is no "acked", which on a card beside the agent's own document would
+  // read as the agent having seen it.
+  const settled = await page
+    .waitForFunction(() => {
+      const cards = [...document.querySelectorAll("#clist .ann")];
+      return cards.length > 0 && !cards.some((c) => c.querySelector(".badge.pending, .badge.sending"));
+    }, null, { timeout: 15000 })
     .then(() => true)
     .catch(() => false);
-  check("the pending badge flips to acked with no user action", acked);
+  check("the pending badge clears itself once the comment is out", settled);
+  const claims = await page.$$eval("#clist .ann .badge", (n) => n.map((b) => b.textContent));
+  check("a stored comment claims nothing about being read", !claims.includes("acked"), claims.join(", ") || "no badges");
 
   // Only when a stub broker is reachable: against a real broker the viewer's own view
   // of what synced is the assertable half.
