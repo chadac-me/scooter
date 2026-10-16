@@ -29,7 +29,7 @@ from pathlib import Path
 import annotations as ann
 import questions as q
 
-STATIC = Path(__file__).resolve().parent / "static"
+STATIC = Path(os.environ.get("SCOOTER_FILES_STATIC") or Path(__file__).resolve().parent / "static").resolve()
 
 # A file past this is served as metadata only: the viewer renders text, and a
 # multi-megabyte blob is a download, not something to read in a browser.
