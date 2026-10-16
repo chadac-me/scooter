@@ -29,7 +29,17 @@ from pathlib import Path
 import annotations as ann
 import questions as q
 
-STATIC = Path(os.environ.get("SCOOTER_FILES_STATIC") or Path(__file__).resolve().parent / "static").resolve()
+# The built frontend (../viewer-ui, `npm run build`), which Nix bakes into its own
+# store path and hands over as SCOOTER_FILES_STATIC; a checkout reads its dist/.
+DEFAULT_STATIC = Path(__file__).resolve().parent.parent / "viewer-ui" / "dist"
+
+# Served in place of the app when its build is missing, so a checkout that never
+# ran `npm run build` says so instead of 404ing at its own root.
+UNBUILT_PAGE = """<!doctype html><meta charset="utf-8"><title>Files</title>
+<script>window.__BASE__ = "{{BASE}}";</script>
+<p>The viewer's frontend is not built. Run <code>npm ci &amp;&amp; npm run build</code>
+in <code>contrib/files/viewer-ui</code>, or set SCOOTER_FILES_STATIC.</p>
+"""
 
 # A file past this is served as metadata only: the viewer renders text, and a
 # multi-megabyte blob is a download, not something to read in a browser.
@@ -69,9 +79,8 @@ class Config:
     root: Path
     base: str
     port: int
-    # The pinned browser assets (deps.nix), built separately from this tree.
-    # Absent is supported: the page falls back to its plain renderer.
-    vendor: Path | None = None
+    # The built frontend: index.html plus its hashed assets.
+    static: Path = DEFAULT_STATIC
     # Annotation state, on the workspace PVC so threads survive a hibernate; None
     # keeps the viewer a read-only file browser.
     state: Path | None = None
@@ -83,7 +92,7 @@ class Config:
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
         env = os.environ if env is None else env
-        vendor = env.get("SCOOTER_FILES_VENDOR", "")
+        static = env.get("SCOOTER_FILES_STATIC", "")
         root = Path(env.get("SCOOTER_FILES_ROOT", "/workspace")).resolve()
         state = env.get("SCOOTER_FILES_STATE", "")
         return cls(
@@ -92,8 +101,7 @@ class Config:
             # slash here would double up in all of them.
             base=env.get("SCOOTER_FILES_BASE", "").rstrip("/"),
             port=int(env.get("SCOOTER_FILES_PORT", "7801")),
-            # A checkout can drop assets in static/vendor/ for the same page.
-            vendor=Path(vendor).resolve() if vendor else STATIC / "vendor",
+            static=Path(static).resolve() if static else DEFAULT_STATIC,
             state=Path(state) if state else root / ".scooter/files/annotations.json",
             broker_url=env.get("BROKER_URL", ""),
             token_path=env.get("BROKER_TOKEN_PATH", "/var/run/secrets/broker/token"),
@@ -209,9 +217,6 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route in ("/", "."):
                 return self.serve_index()
-            # Before /static/: the vendor assets are their own store path.
-            if route.startswith("/static/vendor/"):
-                return self.serve_vendor(route[len("/static/vendor/"):])
             if route.startswith("/static/"):
                 return self.serve_static(route[len("/static/"):])
             if route == "/api/list":
@@ -230,8 +235,8 @@ class Handler(BaseHTTPRequestHandler):
                         "ok": True,
                         "root": str(self.cfg.root),
                         "base": self.cfg.base,
-                        # First thing to check when a doc renders as plain text.
-                        "vendor": self.vendor_dir is not None,
+                        # First thing to check when the page is a "not built" note.
+                        "frontend": self.built,
                     }
                 )
         except _Unavailable as exc:
@@ -423,28 +428,19 @@ class Handler(BaseHTTPRequestHandler):
         want = (urllib.parse.parse_qs(parsed.query).get("path") or [""])[0]
         return posixpath.normpath(route or "/"), want
 
+    @property
+    def built(self) -> bool:
+        return (self.cfg.static / "index.html").is_file()
+
     def serve_index(self) -> None:
-        html = (STATIC / "index.html").read_text()
+        html = (self.cfg.static / "index.html").read_text() if self.built else UNBUILT_PAGE
         # The page is served under the proxy prefix, so it cannot know its own base
         # at build time; inject it rather than guessing from location.pathname.
         html = html.replace("{{BASE}}", self.cfg.base)
         self.send_body(HTTPStatus.OK, html.encode(), "text/html; charset=utf-8")
 
     def serve_static(self, name: str) -> None:
-        self.send_asset(STATIC, name)
-
-    @property
-    def vendor_dir(self) -> Path | None:
-        """The vendor path, or None when the assets were never built."""
-        vendor = self.cfg.vendor
-        return vendor if vendor is not None and vendor.is_dir() else None
-
-    def serve_vendor(self, name: str) -> None:
-        vendor = self.vendor_dir
-        if vendor is None:
-            # 404, not 500: the page keys on it to render plain.
-            return self.fail(HTTPStatus.NOT_FOUND, "vendor assets are not built into this viewer")
-        self.send_asset(vendor, name)
+        self.send_asset(self.cfg.static, name)
 
     def send_asset(self, root: Path, name: str) -> None:
         target = (root / name).resolve()
@@ -455,8 +451,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("content-type", ctype or "application/octet-stream")
         self.send_header("content-length", str(len(body)))
-        # Immutable per image; re-fetching 280 kB per click is felt.
-        self.send_header("cache-control", "public, max-age=3600")
+        # Vite content-hashes every asset name, so a cached one never goes stale.
+        self.send_header("cache-control", "public, max-age=31536000, immutable")
         self.end_headers()
         self.wfile.write(body)
 

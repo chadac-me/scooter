@@ -1,9 +1,20 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { codeToHtml } from "shiki";
 import { MessageSquarePlus } from "lucide-react";
-import { api, type Question, type Thread } from "./api";
+import { api, BASE, type Question, type Thread } from "./api";
+import { hrefFor, isExternal, navigate, resolveRel, slug } from "./nav";
 import { findText, rehypeSourceLines, segments, sourceAnchor } from "./markdown";
 import { Composer, ThreadCard } from "./Thread";
 import { QuestionCard } from "./Questions";
@@ -18,14 +29,23 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
       defaultColor: false,
     })
       .catch(() =>
-        codeToHtml(code, { lang: "text", themes: { light: "solarized-light", dark: "solarized-dark" }, defaultColor: false }),
+        codeToHtml(code, {
+          lang: "text",
+          themes: { light: "solarized-light", dark: "solarized-dark" },
+          defaultColor: false,
+        }),
       )
       .then((h) => live && setHtml(h));
     return () => {
       live = false;
     };
   }, [lang, code]);
-  if (!html) return <pre className="shiki-fallback"><code>{code}</code></pre>;
+  if (!html)
+    return (
+      <pre className="shiki-fallback">
+        <code>{code}</code>
+      </pre>
+    );
   return <div className="not-prose shiki-block" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
@@ -35,7 +55,10 @@ const components: Components = {
     if (code?.type === "element" && code.tagName === "code") {
       const cls = (code.properties.className as string[] | undefined) ?? [];
       const lang = cls.find((c) => c.startsWith("language-"))?.slice(9) ?? "";
-      const text = code.children.map((c) => (c.type === "text" ? c.value : "")).join("").replace(/\n$/, "");
+      const text = code.children
+        .map((c) => (c.type === "text" ? c.value : ""))
+        .join("")
+        .replace(/\n$/, "");
       return (
         <div data-line={rest["data-line" as keyof typeof rest] as string}>
           <CodeBlock lang={lang} code={text} />
@@ -44,12 +67,50 @@ const components: Components = {
     }
     return <pre {...rest}>{children}</pre>;
   },
-  a: ({ node: _n, ...props }) => <a {...props} target={props.href?.startsWith("#") ? undefined : "_blank"} rel="noreferrer" />,
+  a: DocLink,
+  img: DocImage,
 };
+
+/** The open document's path, which relative links and images resolve against. */
+const DocPath = createContext("");
+
+/** A link in a document: in-page anchors scroll, workspace files open in the viewer. */
+function DocLink({ node: _n, href = "", ...props }: React.ComponentProps<"a"> & { node?: unknown }) {
+  const path = useContext(DocPath);
+  if (isExternal(href)) return <a {...props} href={href} target="_blank" rel="noopener noreferrer" />;
+  const [rel, frag = ""] = href.split("#");
+  // `#x` stays in this document; anything else is a file under the workspace.
+  const target = rel ? resolveRel(path, rel) : path;
+  return (
+    <a
+      {...props}
+      href={hrefFor(target, frag)}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        navigate(target, frag, { replace: target === path });
+      }}
+    />
+  );
+}
+
+/** Images in a document are workspace files, read through /api/raw. */
+function DocImage({ node: _n, src, ...props }: React.ComponentProps<"img"> & { node?: unknown }) {
+  const path = useContext(DocPath);
+  const url =
+    typeof src === "string" && src && !isExternal(src) && !src.startsWith("data:")
+      ? `${BASE}/api/raw?path=${encodeURIComponent(resolveRel(path, src))}`
+      : src;
+  return <img {...props} src={url} loading="lazy" />;
+}
 
 const Chunk = memo(function Chunk({ text, offset }: { text: string; offset: number }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeSourceLines, { offset }]]} components={components}>
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[[rehypeSourceLines, { offset }]]}
+      components={components}
+    >
       {text}
     </ReactMarkdown>
   );
@@ -74,12 +135,14 @@ function blockFor(root: HTMLElement, line: number): HTMLElement | null {
 
 export function MarkdownPane({
   path,
+  hash,
   body,
   threads,
   questions,
   onChange,
 }: {
   path: string;
+  hash: string;
   body: string;
   threads: Thread[];
   questions: Question[];
@@ -92,6 +155,23 @@ export function MarkdownPane({
   const ranges = useRef(new Map<string, Range>());
   const segs = useMemo(() => segments(body), [body]);
   const qByLine = useMemo(() => new Map(questions.map((q) => [q.line, q])), [questions]);
+
+  // Heading ids, set on the DOM across every chunk so two "Design" sections get
+  // design and design-2, then the address's #heading is scrolled to.
+  useLayoutEffect(() => {
+    const root = doc.current;
+    if (!root) return;
+    const seen = new Map<string, number>();
+    root.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6").forEach((h) => {
+      const base = slug(h.textContent ?? "");
+      const n = (seen.get(base) ?? 0) + 1;
+      seen.set(base, n);
+      h.id = n > 1 ? `${base}-${n}` : base;
+    });
+  }, [segs]);
+  useEffect(() => {
+    if (hash) document.getElementById(hash)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [hash, segs]);
 
   // Paint each thread's quote with the CSS Custom Highlight API, so React's DOM is untouched.
   useLayoutEffect(() => {
@@ -167,18 +247,23 @@ export function MarkdownPane({
     <div className="flex min-h-0 flex-1">
       <div className="min-w-0 flex-1 overflow-y-auto">
         <div className="relative mx-auto max-w-3xl px-10 py-10" onMouseUp={onMouseUp} onClick={onClick}>
-          <article ref={doc} className="prose prose-stone dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-pre:p-0">
-            {segs.map((s, i) => {
-              const q = s.kind === "question" ? qByLine.get(s.line) : undefined;
-              if (s.kind === "question" && q)
-                return (
-                  <div key={i} data-line={s.line} className="not-prose my-6">
-                    <QuestionCard path={path} question={q} onChange={onChange} />
-                  </div>
-                );
-              return <Chunk key={i} text={s.text} offset={s.offset} />;
-            })}
-          </article>
+          <DocPath.Provider value={path}>
+            <article
+              ref={doc}
+              className="prose prose-stone dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-pre:p-0"
+            >
+              {segs.map((s, i) => {
+                const q = s.kind === "question" ? qByLine.get(s.line) : undefined;
+                if (s.kind === "question" && q)
+                  return (
+                    <div key={i} data-line={s.line} className="not-prose my-6">
+                      <QuestionCard path={path} question={q} onChange={onChange} />
+                    </div>
+                  );
+                return <Chunk key={i} text={s.text} offset={s.offset} />;
+              })}
+            </article>
+          </DocPath.Provider>
           {pop && (
             <button
               className="btn-primary absolute z-10 -translate-x-1/2 shadow-lg"
@@ -197,16 +282,24 @@ export function MarkdownPane({
         </div>
       </div>
 
-      <aside className="flex w-[22rem] shrink-0 flex-col gap-3 overflow-y-auto border-l border-border bg-sidebar/50 p-4">
+      <aside
+        data-comments
+        className="flex w-[22rem] shrink-0 flex-col gap-3 overflow-y-auto border-l border-border bg-sidebar/50 p-4"
+      >
         <h2 className="flex items-center justify-between font-sans text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Comments
           <span className="font-normal normal-case tracking-normal">
-            {openThreads.length} open{threads.length > openThreads.length ? ` · ${threads.length - openThreads.length} resolved` : ""}
+            {openThreads.length} open
+            {threads.length > openThreads.length ? ` · ${threads.length - openThreads.length} resolved` : ""}
           </span>
         </h2>
         {draft && (
           <div className="rounded-lg border border-brand bg-card p-3 font-sans text-sm shadow-sm ring-2 ring-brand/30">
-            {draft.quote && <blockquote className="mb-2 line-clamp-3 text-xs italic text-muted-foreground">“{draft.quote}”</blockquote>}
+            {draft.quote && (
+              <blockquote className="mb-2 line-clamp-3 text-xs italic text-muted-foreground">
+                “{draft.quote}”
+              </blockquote>
+            )}
             <Composer
               autoFocus
               placeholder="Leave a comment for the agent…"

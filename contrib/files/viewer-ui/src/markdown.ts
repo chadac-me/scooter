@@ -19,8 +19,7 @@ export function rehypeSourceLines(opts: { offset: number }) {
 }
 
 export type Segment =
-  | { kind: "md"; text: string; offset: number }
-  | { kind: "question"; line: number; text: string; offset: number };
+  { kind: "md"; text: string; offset: number } | { kind: "question"; line: number; text: string; offset: number };
 
 const OPEN = /^\s*<!--\s*scooter:question\s+[^>]*?\s*-->\s*$/;
 const CLOSE = /^\s*<!--\s*\/scooter:question\s*-->\s*$/;

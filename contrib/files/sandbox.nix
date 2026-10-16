@@ -12,14 +12,12 @@
 let
   cfg = config.webServices.files;
 
-  # The viewer's own tree — server.py plus static/ — as one store path, so
-  # `STATIC = __file__/../static` resolves at runtime.
+  # The server's own tree (server.py and its sibling modules) as one store path.
   viewer = builtins.path { path = ./viewer; name = "scooter-files-viewer"; };
 
-  # The pinned browser assets (markdown-it, DOMPurify, highlight.js), kept as their
-  # own store path rather than copied into `viewer` so that editing server.py does
-  # not re-fetch them, and so the source tree stays free of vendored blobs.
-  vendor = pkgs.callPackage ./viewer/deps.nix { };
+  # The frontend (viewer-ui/), built by Vite with every library bundled, as its
+  # own store path so that editing server.py does not rebuild it.
+  frontend = pkgs.callPackage ./viewer-ui { };
 in
 {
   webServices.files = {
@@ -43,10 +41,9 @@ in
       export SCOOTER_FILES_BASE="/c/''${CONVERSATION_ID:-unknown}/files"
       export SCOOTER_FILES_PORT="${toString cfg.port}"
       export SCOOTER_FILES_ROOT="''${SCOOTER_FILES_ROOT:-/workspace}"
-      # Without this the page still renders, as plain text: every rich renderer is
-      # feature-detected, so a viewer built without the assets degrades rather than
-      # breaking. /api/health reports which of the two happened.
-      export SCOOTER_FILES_VENDOR="${vendor}"
+      # Without this the root is a "frontend not built" note; /api/health reports
+      # which of the two a viewer is serving.
+      export SCOOTER_FILES_STATIC="${frontend}"
       # A systemd unit inherits nothing from the pod, so the broker's address is read
       # from PID 1's environ the way carry-over.nix reads it.
       #

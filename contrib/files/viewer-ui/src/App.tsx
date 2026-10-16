@@ -6,8 +6,7 @@ import { Tree } from "./Tree";
 import { CodePane } from "./CodePane";
 import { MarkdownPane } from "./MarkdownPane";
 import { RetryAll } from "./Thread";
-
-const pathFromHash = () => decodeURIComponent(location.hash.replace(/^#\/?/, ""));
+import { current, navigate, onNavigate } from "./nav";
 
 function useDark() {
   const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -27,7 +26,7 @@ function useDark() {
 }
 
 export function App() {
-  const [path, setPath] = useState(pathFromHash);
+  const [{ path, hash }, setLoc] = useState(current);
   const [file, setFile] = useState<FileView | null>(null);
   const [error, setError] = useState("");
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -37,9 +36,10 @@ export function App() {
   const [dark, toggleDark] = useDark();
 
   useEffect(() => {
-    const on = () => setPath(pathFromHash());
-    window.addEventListener("hashchange", on);
-    return () => window.removeEventListener("hashchange", on);
+    // Rewrite an old-style `#/<file>` link to the canonical address once.
+    if (path && !new URLSearchParams(location.search).has("path")) navigate(path, hash, { replace: true });
+    return onNavigate(() => setLoc(current()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadNotes = useCallback(async (p: string) => {
@@ -91,8 +91,16 @@ export function App() {
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-2">
-          {unanswered > 0 && <span className="pill bg-brand/15 text-brand">{unanswered} question{unanswered > 1 ? "s" : ""}</span>}
-          {open > 0 && <span className="pill bg-warning/15 text-warning">{open} open comment{open > 1 ? "s" : ""}</span>}
+          {unanswered > 0 && (
+            <span className="pill bg-brand/15 text-brand">
+              {unanswered} question{unanswered > 1 ? "s" : ""}
+            </span>
+          )}
+          {open > 0 && (
+            <span className="pill bg-warning/15 text-warning">
+              {open} open comment{open > 1 ? "s" : ""}
+            </span>
+          )}
           <RetryAll failed={annotations.filter((a) => a.state === "failed")} onChange={refresh} />
           {md && (
             <div className="flex rounded-md border border-border p-0.5">
@@ -113,7 +121,7 @@ export function App() {
       <div className="flex min-h-0 flex-1">
         {tree && (
           <aside className="w-64 shrink-0 overflow-y-auto border-r border-border bg-sidebar p-2">
-            <Tree selected={path} onSelect={(p) => (location.hash = `/${p}`)} />
+            <Tree selected={path} onSelect={(p) => navigate(p)} />
           </aside>
         )}
         <main className="flex min-w-0 flex-1 flex-col">
@@ -127,7 +135,14 @@ export function App() {
             </div>
           )}
           {file && file.path === path && md && !source && (
-            <MarkdownPane path={path} body={file.body} threads={threads} questions={questions} onChange={refresh} />
+            <MarkdownPane
+              path={path}
+              hash={hash}
+              body={file.body}
+              threads={threads}
+              questions={questions}
+              onChange={refresh}
+            />
           )}
           {file && file.path === path && (file.renderer === "code" || (md && source)) && (
             <div className="min-h-0 flex-1 overflow-auto">

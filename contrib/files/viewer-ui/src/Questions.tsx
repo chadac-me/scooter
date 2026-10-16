@@ -5,7 +5,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, type Question } from "./api";
 
-export function QuestionCard({ path, question: q, onChange }: { path: string; question: Question; onChange: () => void }) {
+export function QuestionCard({
+  path,
+  question: q,
+  onChange,
+}: {
+  path: string;
+  question: Question;
+  onChange: () => void;
+}) {
   const last = q.answers.at(-1);
   const [editing, setEditing] = useState(!q.answered);
   const [picked, setPicked] = useState<string[]>([]);
@@ -15,7 +23,9 @@ export function QuestionCard({ path, question: q, onChange }: { path: string; qu
 
   const answer = q.kind === "text" ? text.trim() : picked.join(", ");
   const toggle = (label: string) =>
-    setPicked((p) => (q.kind === "single" ? [label] : p.includes(label) ? p.filter((x) => x !== label) : [...p, label]));
+    setPicked((p) =>
+      q.kind === "single" ? [label] : p.includes(label) ? p.filter((x) => x !== label) : [...p, label],
+    );
 
   const submit = async () => {
     setBusy(true);
@@ -33,6 +43,7 @@ export function QuestionCard({ path, question: q, onChange }: { path: string; qu
 
   return (
     <div
+      data-question={q.id}
       className={clsx(
         "overflow-hidden rounded-xl border bg-card font-sans shadow-sm",
         q.answered ? "border-border" : "border-brand/60",
@@ -98,7 +109,9 @@ export function QuestionCard({ path, question: q, onChange }: { path: string; qu
       ) : (
         last && (
           <div className="flex items-center gap-3 px-4 pb-4 pl-12 pt-2 text-sm">
-            <span className="rounded-md bg-secondary px-2.5 py-1 font-medium text-secondary-foreground">{last.text}</span>
+            <span className="rounded-md bg-secondary px-2.5 py-1 font-medium text-secondary-foreground">
+              {last.text}
+            </span>
             {last.state === "pending" && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
             <button className="btn-ghost ml-auto" onClick={() => setEditing(true)}>
               Change

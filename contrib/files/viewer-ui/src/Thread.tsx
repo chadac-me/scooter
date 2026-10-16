@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, CircleAlert, Loader2, MessageSquare, RotateCcw, Undo2 } from "lucide-react";
+import { Check, CircleAlert, Loader2, MessageSquare, RotateCcw, Trash2, Undo2 } from "lucide-react";
 import clsx from "clsx";
 import { api, type Annotation, type Thread } from "./api";
 
@@ -15,7 +15,10 @@ function ago(iso: string): string {
 function SyncBadge({ a, onChange }: { a: Annotation; onChange: () => void }) {
   if (a.state === "pending")
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground" title="Not yet delivered to the agent">
+      <span
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+        title="Not yet delivered to the agent"
+      >
         <Loader2 className="size-3 animate-spin" /> sending
       </span>
     );
@@ -92,6 +95,35 @@ export function Composer({
   );
 }
 
+/** Deleting the comment that opened a thread takes its replies with it (the server's rule). */
+function DeleteButton({ a, thread, onChange }: { a: Annotation; thread: Thread; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const opener = a.id === thread.id;
+  const replies = thread.comments.length - 1;
+  const label = opener && replies ? "Delete thread" : opener ? "Delete comment" : "Delete reply";
+  return (
+    <button
+      aria-label={label}
+      title={label}
+      disabled={busy}
+      className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-50"
+      onClick={async () => {
+        if (opener && replies && !confirm(`Delete this comment and its ${replies} repl${replies === 1 ? "y" : "ies"}?`))
+          return;
+        setBusy(true);
+        try {
+          await api.remove(a.id);
+        } finally {
+          setBusy(false);
+          onChange();
+        }
+      }}
+    >
+      {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+    </button>
+  );
+}
+
 export function ThreadCard({
   thread,
   path,
@@ -122,6 +154,7 @@ export function ThreadCard({
 
   return (
     <div
+      data-thread={thread.id}
       className={clsx(
         "rounded-lg border bg-card font-sans text-sm text-card-foreground shadow-sm transition-shadow",
         active ? "border-brand ring-2 ring-brand/30" : "border-border",
@@ -139,12 +172,13 @@ export function ThreadCard({
       )}
       <ul className="divide-y divide-border">
         {thread.comments.map((c) => (
-          <li key={c.id} className="px-3 py-2.5">
+          <li key={c.id} className="group px-3 py-2.5">
             <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
               <span className="font-medium text-foreground">You</span>
               <span>{ago(c.created_at)}</span>
-              <span className="ml-auto">
+              <span className="ml-auto flex items-center gap-2">
                 <SyncBadge a={c} onChange={onChange} />
+                <DeleteButton a={c} thread={thread} onChange={onChange} />
               </span>
             </div>
             <p className="whitespace-pre-wrap break-words leading-relaxed">{c.text}</p>
