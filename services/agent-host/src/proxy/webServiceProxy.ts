@@ -4,6 +4,8 @@
  * because only the agent-host can resolve <id> to a pod IP. It attaches to
  * agui/server.ts as an HTTP fallback before the 404 and as the `upgrade` listener.
  * Auth is whatever the ingress already applied; there is no extra per-conversation check.
+ * Nothing on the forwarding path execs into the pod: liveness is read off the
+ * connection. Why: PR #791.
  */
 
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
@@ -106,7 +108,7 @@ export interface WebServiceProxy {
 
 /** A proxy request resolved to its pod target, or an error; `notRunning` means the service exists but its unit is down, so it carries what the auto-start and loading page need. */
 type Resolution =
-  | { ok: true; conversationId: string; podIP: string; port: number; rest: string; stripBasePath: boolean; threadId: string; service: string }
+  | { ok: true; conversationId: string; podIP: string; port: number; rest: string; stripBasePath: boolean; threadId: string; service: string; basePath: string }
   | { ok: false; kind: "notRunning"; conversationId: string; service: string; basePath: string; threadId: string }
   | { ok: false; kind: "error"; status: 404 | 503; service: string; threadId: string };
 
@@ -187,10 +189,8 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     const desc = await registry.get(conv.id, service);
     if (!desc) return { ok: false, kind: "error", status: 404, service, threadId };
 
-    if (!(await registry.isRunning(conv.id, service))) {
-      return { ok: false, kind: "notRunning", conversationId: conv.id, service, basePath: desc.basePath, threadId };
-    }
-
+    // Deliberately no liveness check: a refused connection below is the answer, and
+    // asking first costs a pod exec (~0.7s). Why: PR #791.
     let target: PodTarget;
     try {
       target = await resolvePodTarget(conv.sandbox);
@@ -198,7 +198,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       // Pod suspended, not ready, or without an IP.
       return { ok: false, kind: "error", status: 503, service, threadId };
     }
-    return { ok: true, conversationId: conv.id, podIP: target.podIP, port: desc.port, rest, stripBasePath: desc.stripBasePath ?? false, threadId, service };
+    return { ok: true, conversationId: conv.id, podIP: target.podIP, port: desc.port, rest, stripBasePath: desc.stripBasePath ?? false, threadId, service, basePath: desc.basePath };
   }
 
   /** The readiness/log endpoint the loading page polls; returns true if it handled the request. */
@@ -219,6 +219,33 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     return true;
   }
 
+  /** The unit is down: a navigation gets an auto-start plus the loading page, while
+      an XHR/asset fetch gets a plain 502 since an HTML page would corrupt it. */
+  async function serveNotRunning(
+    req: IncomingMessage,
+    res: ServerResponse,
+    r: { conversationId: string; service: string; basePath: string },
+  ): Promise<void> {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    if (!wantsHtml(req.headers.accept)) {
+      res.writeHead(502, { "content-type": "text/plain" }).end(`${r.service} is not running`);
+      return;
+    }
+    // Best-effort start; the loading page polls readiness regardless.
+    await registry.start(r.conversationId, r.service).catch(() => {});
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
+      .end(renderLoadingPage(r.service, r.basePath));
+  }
+
+  /** Whether an upstream error means nothing is listening, as opposed to a connection
+      that broke mid-flight: only the former says anything about the unit. */
+  function nothingListening(err: NodeJS.ErrnoException): boolean {
+    return err.code === "ECONNREFUSED" || err.code === "EHOSTUNREACH" || err.code === "ENETUNREACH";
+  }
+
   async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -232,16 +259,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     }
     if (!r.ok) {
       if (r.kind === "notRunning") {
-        // The unit is down: a navigation gets an auto-start plus the loading page, while
-        // an XHR/asset fetch gets a plain 502 since an HTML page would corrupt it.
-        if (wantsHtml(req.headers.accept)) {
-          // Best-effort start; the loading page polls readiness regardless.
-          await registry.start(r.conversationId, r.service).catch(() => {});
-          const page = renderLoadingPage(r.service, r.basePath);
-          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(page);
-        } else {
-          res.writeHead(502, { "content-type": "text/plain" }).end(`${r.service} is not running`);
-        }
+        await serveNotRunning(req, res, r);
       } else if (r.status === 503) {
         res.writeHead(503, { "content-type": "text/plain" })
           .end(`${r.service} is asleep — resume the conversation and try again.`);
@@ -265,7 +283,13 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
         up.pipe(res);
       },
     );
-    upstream.on("error", () => {
+    upstream.on("error", (err: NodeJS.ErrnoException) => {
+      // Nothing listening means the unit is down; the stale descriptors go with it.
+      if (!res.headersSent && nothingListening(err)) {
+        registry.invalidate(r.conversationId);
+        void serveNotRunning(req, res, r);
+        return;
+      }
       if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
       res.end("upstream error");
     });
@@ -312,7 +336,11 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       socket.pipe(upstream);
     });
     const teardown = () => { socket.destroy(); upstream.destroy(); };
-    upstream.on("error", teardown);
+    upstream.on("error", (err: NodeJS.ErrnoException) => {
+      // As before the socket just fails; the navigation owns the auto-start.
+      if (nothingListening(err)) registry.invalidate(conversationId);
+      teardown();
+    });
     socket.on("error", teardown);
   }
 

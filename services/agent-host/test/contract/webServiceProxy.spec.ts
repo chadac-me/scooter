@@ -42,6 +42,17 @@ function fakeInPodService(): Promise<{ server: Server; port: number }> {
   });
 }
 
+/** A port with nothing behind it: the unit is down, as the forwarding path sees it. */
+function deadPort(): Promise<number> {
+  return new Promise((resolve) => {
+    const probe = createServer();
+    probe.listen(0, "127.0.0.1", () => {
+      const port = (probe.address() as AddressInfo).port;
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
 const MARIMO: WebServiceDescriptor = {
   name: "marimo",
   displayName: "marimo",
@@ -50,18 +61,25 @@ const MARIMO: WebServiceDescriptor = {
   unit: "webservice-marimo",
 };
 
-function fakeRegistry(port: number, opts: { running?: boolean } = {}): WebServiceRegistry {
+function fakeRegistry(
+  port: number,
+  opts: { running?: boolean } = {},
+): WebServiceRegistry & { execs: number; invalidated: string[] } {
   const running = opts.running ?? true;
   const desc = { ...MARIMO, port };
+  const state = { execs: 0, invalidated: [] as string[] };
   return {
+    get execs() { return state.execs; },
+    invalidated: state.invalidated,
     list: async () => [desc],
     get: async (_id, name) => (name === "marimo" ? desc : null),
-    isRunning: async () => running,
+    // Standing in for `systemctl is-active`, which is a pod exec.
+    isRunning: async () => { state.execs++; return running; },
     start: async () => {},
     stop: async () => {},
     logs: async () => "",
     ready: async () => true,
-    invalidate: () => {},
+    invalidate: (id: string) => { state.invalidated.push(id); },
   };
 }
 
@@ -69,13 +87,15 @@ function fakeRegistry(port: number, opts: { running?: boolean } = {}): WebServic
 function startingRegistry(
   port: number,
   opts: { runningAfter?: number; logs?: string } = {},
-): WebServiceRegistry & { starts: string[] } {
+): WebServiceRegistry & { starts: string[]; invalidated: string[] } {
   const desc = { ...MARIMO, port };
   const runningAfter = opts.runningAfter ?? 1;
   let calls = 0;
   const starts: string[] = [];
+  const invalidated: string[] = [];
   return {
     starts,
+    invalidated,
     list: async () => [desc],
     get: async (_id, name) => (name === "marimo" ? desc : null),
     isRunning: async () => ++calls > runningAfter,
@@ -83,7 +103,7 @@ function startingRegistry(
     stop: async () => {},
     logs: async () => opts.logs ?? "starting marimo…",
     ready: async () => true,
-    invalidate: () => {},
+    invalidate: (id: string) => { invalidated.push(id); },
   };
 }
 
@@ -203,7 +223,7 @@ describe("web-service proxy", () => {
   });
 
   it("declared-but-not-running HTML nav -> auto-starts + serves a loading page (200)", async () => {
-    const registry = startingRegistry(svc.port, { runningAfter: 99 });
+    const registry = startingRegistry(await deadPort(), { runningAfter: 99 });
     const proxy = makeProxy(registry);
     const { status, body } = await proxyGet(proxy, "/c/conv-1/marimo/", {
       accept: "text/html",
@@ -230,7 +250,7 @@ describe("web-service proxy", () => {
 
   it("a NON-HTML request to a dead service still gets a 502 (no HTML for an XHR/asset)", async () => {
     // An HTML loading page would corrupt an asset or XHR fetch.
-    const proxy = makeProxy(startingRegistry(svc.port, { runningAfter: 99 }));
+    const proxy = makeProxy(startingRegistry(await deadPort(), { runningAfter: 99 }));
     const { status } = await proxyGet(proxy, "/c/conv-1/marimo/assets/app.js", {
       accept: "*/*",
     });
@@ -242,6 +262,45 @@ describe("web-service proxy", () => {
     const proxy = makeProxy(registry);
     const { body } = await proxyGet(proxy, "/c/conv-1/marimo/__scooter_status");
     expect(JSON.parse(body).running).toBe(true);
+  });
+
+  it("forwards without asking the pod whether the unit is up (no exec on the hot path)", async () => {
+    // `systemctl is-active` is a pod exec -- an API-server round trip, a stream
+    // upgrade and a process spawn, measured at ~0.7s against a sandbox. It used to be
+    // paid before every forward, including every forward that then worked.
+    const registry = fakeRegistry(svc.port);
+    const proxy = makeProxy(registry);
+    for (let i = 0; i < 3; i++) {
+      const { status } = await proxyGet(proxy, `/c/conv-1/marimo/app?n=${i}`);
+      expect(status).toBe(200);
+    }
+    expect(registry.execs).toBe(0);
+  });
+
+  it("a refused connection is the liveness check: loading page, auto-start, cache dropped", async () => {
+    // The registry says the unit is up and the port says otherwise. The port wins,
+    // because it is the one that was asked at the moment of use.
+    const registry = fakeRegistry(await deadPort(), { running: true });
+    const proxy = makeProxy(registry);
+    const { status, body } = await proxyGet(proxy, "/c/conv-1/marimo/", { accept: "text/html" });
+    expect(status).toBe(200);
+    expect(body.toLowerCase()).toContain("starting");
+    expect(registry.invalidated).toContain("conv-1");
+  });
+
+  it("a refused connection on an XHR still gets a 502, not a loading page", async () => {
+    const registry = fakeRegistry(await deadPort(), { running: true });
+    const proxy = makeProxy(registry);
+    const { status, body } = await proxyGet(proxy, "/c/conv-1/marimo/api/x", { accept: "*/*" });
+    expect(status).toBe(502);
+    expect(body).not.toContain("<html");
+  });
+
+  it("the status endpoint still asks, since its answer is the product", async () => {
+    const registry = fakeRegistry(svc.port);
+    const proxy = makeProxy(registry);
+    await proxyGet(proxy, "/c/conv-1/marimo/__scooter_status");
+    expect(registry.execs).toBeGreaterThan(0);
   });
 
   // --- WebSocket upgrade ------------------------------------------------------
