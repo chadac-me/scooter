@@ -5,6 +5,7 @@
  * cached per conversation with a short TTL so a `scooter-rebuild` shows up without a
  * restart; start drops the entry and list({force}) re-reads on demand. This module
  * owns the exec coupling so the proxy stays unit-testable against a fake registry.
+ * Liveness is cached too, on a shorter TTL; only the loading page's poll asks for it.
  */
 
 import type { SandboxRef } from "../types.js";
@@ -64,14 +65,32 @@ export function parseManifest(json: string): WebServiceDescriptor[] {
 /** How long a successful manifest read stays authoritative, since nothing in the pod signals a `scooter-rebuild`. */
 export const MANIFEST_TTL_MS = 10_000;
 
+/** How long a liveness answer stays authoritative: short enough that a unit coming up
+    shows promptly, long enough that a 1s poll is not an exec per tick. Why: PR #791. */
+export const RUNNING_TTL_MS = 2_000;
+
 export function createWebServiceRegistry(
   deps: WebServiceRegistryDeps,
-  opts: { ttlMs?: number; now?: () => number } = {},
+  opts: { ttlMs?: number; runningTtlMs?: number; now?: () => number } = {},
 ): WebServiceRegistry {
   const ttlMs = opts.ttlMs ?? MANIFEST_TTL_MS;
   const now = opts.now ?? (() => Date.now());
   // conversationId -> descriptors plus when they were read.
   const cache = new Map<string, { descriptors: WebServiceDescriptor[]; at: number }>();
+  // `${conversationId}\u0000${service}` -> liveness plus when it was read.
+  const liveness = new Map<string, { value: boolean; at: number }>();
+  const runningTtlMs = opts.runningTtlMs ?? RUNNING_TTL_MS;
+  const livenessKey = (conversationId: string, name: string) => `${conversationId}\u0000${name}`;
+  /** Forget what we knew about a conversation's units, by service or wholesale. */
+  function forgetLiveness(conversationId: string, name?: string): void {
+    if (name !== undefined) {
+      liveness.delete(livenessKey(conversationId, name));
+      return;
+    }
+    for (const key of liveness.keys()) {
+      if (key.startsWith(`${conversationId}\u0000`)) liveness.delete(key);
+    }
+  }
 
   async function load(conversationId: string, force = false): Promise<WebServiceDescriptor[]> {
     const entry = cache.get(conversationId);
@@ -105,17 +124,24 @@ export function createWebServiceRegistry(
       return (await load(conversationId)).find((d) => d.name === name) ?? null;
     },
     async isRunning(conversationId, name) {
+      // One exec per TTL, not one per caller: the loading page polls this every second.
+      const key = livenessKey(conversationId, name);
+      const seen = liveness.get(key);
+      if (seen && now() - seen.at < runningTtlMs) return seen.value;
       const u = await unit(conversationId, name);
       const ref = deps.sandboxFor(conversationId);
       if (!u || !ref) return false;
+      let value = false;
       try {
         const exec = await deps.connect(ref);
         // `systemctl is-active` exits 0 and prints "active" when running.
         const r = await exec.execute({ command: "systemctl", args: ["is-active", u] });
-        return r.exitCode === 0 && r.stdout.trim() === "active";
+        value = r.exitCode === 0 && r.stdout.trim() === "active";
       } catch {
-        return false;
+        value = false;
       }
+      liveness.set(key, { value, at: now() });
+      return value;
     },
     async start(conversationId, name) {
       const u = await unit(conversationId, name);
@@ -129,8 +155,10 @@ export function createWebServiceRegistry(
       if (r.exitCode !== 0) {
         throw new Error(`scooter-service start ${name} failed (${r.exitCode}): ${r.stderr.trim()}`);
       }
-      // A start may reveal a freshly-enabled service, so drop the cache.
+      // A start may reveal a freshly-enabled service, and a cached "down" would outlive
+      // the unit it was told about, so both caches go.
       cache.delete(conversationId);
+      forgetLiveness(conversationId, name);
     },
     async stop(conversationId, name) {
       const u = await unit(conversationId, name);
@@ -142,6 +170,7 @@ export function createWebServiceRegistry(
       if (r.exitCode !== 0) {
         throw new Error(`scooter-service stop ${name} failed (${r.exitCode}): ${r.stderr.trim()}`);
       }
+      forgetLiveness(conversationId, name);
     },
     async logs(conversationId, name, lines = 50) {
       const u = await unit(conversationId, name);
@@ -173,6 +202,7 @@ export function createWebServiceRegistry(
     },
     invalidate(conversationId) {
       cache.delete(conversationId);
+      forgetLiveness(conversationId);
     },
   };
 }

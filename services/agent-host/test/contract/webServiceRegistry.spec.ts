@@ -1,8 +1,8 @@
 /**
  * WebServiceRegistry over a fake exec client: list/get read the in-pod discovery
- * manifest, isRunning maps `systemctl is-active`, start/stop go through
- * `scooter-service` (which persists the enabled set for boot restore) and drop the
- * cache, and logs() tails the unit journal.
+ * manifest, isRunning maps `systemctl is-active` behind a short TTL cache, start/stop
+ * go through `scooter-service` (which persists the enabled set for boot restore) and
+ * drop the caches, and logs() tails the unit journal.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -31,7 +31,7 @@ function fakeExec(over: Partial<ExecLike> = {}): ExecLike {
   };
 }
 
-function make(exec: ExecLike, opts?: { ttlMs?: number; now?: () => number }) {
+function make(exec: ExecLike, opts?: { ttlMs?: number; runningTtlMs?: number; now?: () => number }) {
   return createWebServiceRegistry(
     {
       sandboxFor: () => REF,
@@ -129,6 +129,45 @@ describe("WebServiceRegistry", () => {
 
     const inactive = make(fakeExec({ execute: vi.fn(async () => ({ stdout: "inactive", stderr: "", exitCode: 3 })) }));
     expect(await inactive.isRunning("conv-1", "marimo")).toBe(false);
+  });
+
+  it("serves a cached liveness within its TTL, since each answer is a pod exec", async () => {
+    // The loading page polls this every second while a unit starts.
+    let clock = 0;
+    const execute = vi.fn(async () => ({ stdout: "active", stderr: "", exitCode: 0 }));
+    const reg = make(fakeExec({ execute }), { runningTtlMs: 2_000, now: () => clock });
+    expect(await reg.isRunning("conv-1", "marimo")).toBe(true);
+    expect(await reg.isRunning("conv-1", "marimo")).toBe(true);
+    const execs = execute.mock.calls.filter((c) => c[0].command === "systemctl").length;
+    expect(execs).toBe(1);
+    // Past the TTL it asks again, so a unit that came up is seen promptly.
+    clock = 2_500;
+    expect(await reg.isRunning("conv-1", "marimo")).toBe(true);
+    expect(execute.mock.calls.filter((c) => c[0].command === "systemctl").length).toBe(2);
+  });
+
+  it("a start drops the cached liveness, so the unit it just started is re-read", async () => {
+    // Otherwise a "down" cached a moment before the start outlives the fact.
+    let clock = 0;
+    let active = false;
+    const execute = vi.fn(async (req: { command: string; args?: string[] }) => {
+      if (req.command === "scooter-service") { active = true; return { stdout: "", stderr: "", exitCode: 0 }; }
+      return active ? { stdout: "active", stderr: "", exitCode: 0 } : { stdout: "inactive", stderr: "", exitCode: 3 };
+    });
+    const reg = make(fakeExec({ execute }), { runningTtlMs: 60_000, now: () => clock });
+    expect(await reg.isRunning("conv-1", "marimo")).toBe(false);
+    await reg.start("conv-1", "marimo");
+    expect(await reg.isRunning("conv-1", "marimo")).toBe(true);
+  });
+
+  it("invalidate drops the cached liveness too (a refused connection calls it)", async () => {
+    let clock = 0;
+    const execute = vi.fn(async () => ({ stdout: "active", stderr: "", exitCode: 0 }));
+    const reg = make(fakeExec({ execute }), { runningTtlMs: 60_000, now: () => clock });
+    await reg.isRunning("conv-1", "marimo");
+    reg.invalidate("conv-1");
+    await reg.isRunning("conv-1", "marimo");
+    expect(execute.mock.calls.filter((c) => c[0].command === "systemctl").length).toBe(2);
   });
 
   it("start runs `scooter-service start <name>` (persists autostart) and invalidates the cache", async () => {
