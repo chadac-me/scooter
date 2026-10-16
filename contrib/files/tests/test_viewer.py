@@ -44,8 +44,20 @@ def workspace(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def cfg(workspace: Path) -> "server.Config":
-    return server.Config(root=workspace, base="/c/conv-test/files", port=0)
+def static(tmp_path_factory) -> Path:
+    """A built frontend as `npm run build` lays it out: index.html beside its assets."""
+    dist = tmp_path_factory.mktemp("dist")
+    (dist / "index.html").write_text(
+        '<script>window.__BASE__ = "{{BASE}}";</script>'
+        '<script type="module" src="{{BASE}}/static/index-abc123.js"></script>'
+    )
+    (dist / "index-abc123.js").write_text("/* app */\n")
+    return dist
+
+
+@pytest.fixture
+def cfg(workspace: Path, static: Path) -> "server.Config":
+    return server.Config(root=workspace, base="/c/conv-test/files", port=0, static=static)
 
 
 @contextlib.contextmanager
@@ -69,6 +81,7 @@ def running(cfg: "server.Config"):
         return status, json.loads(body)
 
     get.json = get_json
+    get.url = lambda path: f"http://127.0.0.1:{port}{cfg.base}{path}"
     try:
         yield get
     finally:
@@ -258,54 +271,39 @@ def test_raw_serves_svg_inert(client, workspace: Path) -> None:
     assert httpd_status == 200
 
 
-# --- vendored browser assets ------------------------------------------------------
+# --- the built frontend -----------------------------------------------------------
 
 
-@pytest.fixture
-def vendored(workspace: Path, tmp_path: Path):
-    """A viewer whose pinned assets were built (as the image ships them)."""
-    vendor = tmp_path / "vendor"
-    vendor.mkdir()
-    (vendor / "markdown-it.min.js").write_text("/* markdown-it */\n")
-    return server.Config(root=workspace, base="/c/conv-test/files", port=0, vendor=vendor)
+def test_assets_are_served_from_the_build_with_a_long_cache(client) -> None:
+    # Vite content-hashes the names, so an asset is immutable once served.
+    with urllib.request.urlopen(client.url("/static/index-abc123.js")) as resp:
+        assert resp.status == 200 and b"app" in resp.read()
+        assert "immutable" in resp.headers["cache-control"]
 
 
-def test_vendor_assets_are_served_from_their_own_store_path(vendored, client_for) -> None:
-    # They are built separately from this source tree, so they are NOT under static/.
-    with client_for(vendored) as get:
-        status, body = get("/static/vendor/markdown-it.min.js")
-        assert status == 200 and b"markdown-it" in body
+def test_an_asset_cannot_be_escaped(client) -> None:
+    status, _ = client("/static/../../etc/passwd")
+    assert status in (400, 404)
 
 
-def test_vendor_asset_cannot_be_escaped(vendored, client_for) -> None:
-    with client_for(vendored) as get:
-        status, _ = get("/static/vendor/../../etc/passwd")
-        assert status in (400, 404)
-
-
-def test_missing_vendor_dir_is_a_404_so_the_page_falls_back(client) -> None:
-    # The default fixture has no vendor dir — how `python server.py` runs out of a
-    # checkout. A 404 is what the page keys on to render plain text instead.
-    status, payload = client.json("/static/vendor/markdown-it.min.js")
-    assert status == 404 and "vendor" in payload["error"]
-
-
-def test_health_reports_whether_the_rich_renderers_are_available(
-    client, vendored, client_for
-) -> None:
-    # First thing to check when a document renders as plain text.
-    _, payload = client.json("/api/health")
-    assert payload["vendor"] is False
-    with client_for(vendored) as get:
-        _, payload = get.json("/api/health")
-        assert payload["vendor"] is True
-
-
-def test_the_page_requests_the_vendor_assets(client) -> None:
+def test_the_page_links_its_assets_under_the_base(client, cfg) -> None:
     _, body = client("/")
-    text = body.decode()
-    for asset in ("markdown-it.min.js", "purify.min.js", "highlight.min.js", "highlight-nix.min.js"):
-        assert f"/static/vendor/{asset}" in text
+    assert f'src="{cfg.base}/static/index-abc123.js"' in body.decode()
+
+
+def test_an_unbuilt_frontend_says_so_rather_than_404ing(workspace, tmp_path, client_for) -> None:
+    # How `python server.py` runs out of a checkout that never ran `npm run build`.
+    unbuilt = server.Config(root=workspace, base="/c/conv-test/files", port=0, static=tmp_path / "none")
+    with client_for(unbuilt) as get:
+        status, body = get("/")
+        assert status == 200 and b"not built" in body
+        _, health = get.json("/api/health")
+        assert health["frontend"] is False
+
+
+def test_health_reports_the_frontend_is_built(client) -> None:
+    _, payload = client.json("/api/health")
+    assert payload["frontend"] is True
 
 
 # --- config ---------------------------------------------------------------------

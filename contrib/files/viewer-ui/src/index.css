@@ -1,0 +1,239 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Tokens copied from ui/src/globals.css so the viewer matches the main UI. */
+@theme inline {
+  /* The three-column shell (sidebar | thread | right panel) needs real width to
+     not feel cramped; below this it switches to the mobile off-canvas-drawer
+     layout. Deliberately 1200px (above Tailwind's lg/1024 and xl-ish tablets like
+     the 834px iPad Pro) — those get the mobile layout. Drives the `desk:` variant
+     used across App/Sidebar/RightPanel; keep in sync with MOBILE_QUERY in mobileNav.ts. */
+  --breakpoint-desk: 1200px;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  /* Reskin additions (PR: paper reskin phase 1). --brand = the link/accent blue;
+     --status-active = the unread/running dot; --header = the raised chrome surface. */
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-status-active: var(--status-active);
+  --color-header: var(--header);
+  /* --chat = the conversation pane surface, kept a step lighter than the body
+     (--background) so the chat reads as the focal surface. */
+  --color-chat: var(--chat);
+}
+:root {
+  --radius: 0.625rem;
+  --background: #faf8f3; /* warm paper body */
+  --foreground: #1c1917; /* near-black ink (stone-900) */
+  --card: #fffefa; /* raised surfaces, a hair warm of white */
+  --card-foreground: #1c1917;
+  --popover: #fffefa;
+  --popover-foreground: #1c1917;
+  --primary: #1c1917; /* same near-black for buttons/emphasis */
+  --primary-foreground: #faf8f3;
+  --secondary: #f0ece1; /* warm fill */
+  --secondary-foreground: #1c1917;
+  --muted: #f0ece1;
+  --muted-foreground: #57534e; /* stone-600 — 7.4:1, AAA */
+  --accent: #e6e1d3; /* deeper warm fill for hover/active */
+  --accent-foreground: #1c1917;
+  --destructive: #b3261e;
+  --success: #4d6b00;
+  --warning: #8a6100;
+  --border: #d2ccbc; /* dividers only — see the note above */
+  --input: #948d80; /* control boundaries: 3.3:1 on --card */
+  --ring: #145d8f;
+  --brand: #145d8f; /* darkened blue: 6.8:1 as link text */
+  --brand-foreground: #fffefa;
+  --status-active: #145d8f;
+  --header: #f3f0e7;
+  --chat: #fdfcf8; /* the conversation pane, lightest surface */
+  --chart-1: #145d8f; /* blue   */
+  --chart-2: #1f6f68; /* teal   */
+  --chart-3: #4d6b00; /* green  */
+  --chart-4: #8a6100; /* yellow */
+  --chart-5: #a6390f; /* orange */
+  --sidebar: #f3f0e7;
+  --sidebar-foreground: #1c1917;
+  --sidebar-primary: #1c1917;
+  --sidebar-primary-foreground: #faf8f3;
+  --sidebar-accent: #e6e1d3;
+  --sidebar-accent-foreground: #1c1917;
+  --sidebar-border: #d2ccbc;
+  --sidebar-ring: #145d8f;
+}
+.dark {
+  --background: #002b36; /* base03 */
+  --foreground: #839496; /* base0 — body ink */
+  --card: #073642; /* base02 — raised */
+  --card-foreground: #93a1a1; /* base1 */
+  --popover: #073642;
+  --popover-foreground: #93a1a1;
+  --primary: #93a1a1; /* base1 — light ink for buttons/emphasis */
+  --primary-foreground: #002b36;
+  --secondary: #073642;
+  --secondary-foreground: #93a1a1;
+  --muted: #073642;
+  --muted-foreground: #657b83; /* base00 */
+  --accent: #0d4a58; /* a step lighter than base02 for hover/active */
+  --accent-foreground: #93a1a1;
+  --destructive: #dc322f;
+  --success: #859900;
+  --warning: #b58900;
+  --border: #0d4a58;
+  --input: #0d4a58;
+  --ring: #268bd2;
+  --brand: #268bd2;
+  --brand-foreground: #fdf6e3;
+  --status-active: #268bd2;
+  --header: #073642;
+  --chat: #002b36;
+  --chart-1: #268bd2;
+  --chart-2: #2aa198;
+  --chart-3: #859900;
+  --chart-4: #b58900;
+  --chart-5: #cb4b16;
+  --sidebar: #002b36;
+  --sidebar-foreground: #839496;
+  --sidebar-primary: #93a1a1;
+  --sidebar-primary-foreground: #002b36;
+  --sidebar-accent: #0d4a58;
+  --sidebar-accent-foreground: #93a1a1;
+  --sidebar-border: #0d4a58;
+  --sidebar-ring: #268bd2;
+}
+
+html,
+body {
+  height: 100%;
+}
+body {
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 font-sans text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-sans text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground;
+  }
+  .icon-btn {
+    @apply inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground;
+  }
+  .pill {
+    @apply rounded-full px-2 py-0.5 text-xs font-medium;
+  }
+  .seg {
+    @apply inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs text-muted-foreground;
+  }
+  .seg-on {
+    @apply bg-accent text-accent-foreground;
+  }
+}
+
+/* Comment highlights in rendered markdown (CSS Custom Highlight API). */
+::highlight(comment) {
+  background-color: color-mix(in srgb, var(--warning) 28%, transparent);
+}
+::highlight(comment-resolved) {
+  background-color: color-mix(in srgb, var(--muted-foreground) 14%, transparent);
+}
+::highlight(comment-active) {
+  background-color: color-mix(in srgb, var(--brand) 38%, transparent);
+}
+
+/* Shiki dual themes: light by default, dark under .dark. */
+.shiki-block pre {
+  margin: 0;
+  padding: 1rem 1.25rem;
+  border-radius: 0.6rem;
+  overflow-x: auto;
+  font-size: 0.85em;
+  line-height: 1.6;
+  border: 1px solid var(--border);
+}
+.shiki-block .shiki,
+.shiki-block .shiki span {
+  color: var(--shiki-light);
+  background-color: var(--shiki-light-bg);
+}
+.dark .shiki-block .shiki,
+.dark .shiki-block .shiki span {
+  color: var(--shiki-dark);
+  background-color: var(--shiki-dark-bg);
+}
+.shiki-block .shiki span {
+  background-color: transparent !important;
+}
+.shiki-fallback {
+  padding: 1rem 1.25rem !important;
+}
+
+.prose {
+  --tw-prose-links: var(--brand);
+}
+.dark .prose {
+  --tw-prose-invert-body: var(--foreground);
+  --tw-prose-invert-headings: var(--card-foreground);
+  --tw-prose-invert-links: var(--brand);
+  --tw-prose-invert-code: var(--card-foreground);
+  --tw-prose-invert-hr: var(--border);
+  --tw-prose-invert-th-borders: var(--border);
+  --tw-prose-invert-td-borders: var(--border);
+  --tw-prose-invert-quote-borders: var(--border);
+  --tw-prose-invert-bold: var(--card-foreground);
+}
+.prose :where(code):not(:where(pre code)) {
+  background: var(--muted);
+  padding: 0.1em 0.35em;
+  border-radius: 0.3em;
+  font-weight: 500;
+}
+.prose :where(code):not(:where(pre code))::before,
+.prose :where(code):not(:where(pre code))::after {
+  content: none;
+}
