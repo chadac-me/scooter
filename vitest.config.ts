@@ -45,6 +45,14 @@ export default defineConfig({
         },
       },
       {
+        // The in-sandbox Agent Host Protocol server VS Code bridges to: AG-UI -> AHP mapping.
+        test: {
+          name: "vscode-ahp",
+          include: ["contrib/code-server/ahp/test/**/*.spec.ts"],
+          environment: "node",
+        },
+      },
+      {
         // The BYOC controller, which holds the bring-your-own-Claude container sockets so any
         // agent-host replica can drive them.
         test: {

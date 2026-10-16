@@ -16,7 +16,11 @@
   # Multi-output (out + man); the shim must target `out` or it execs a directory.
   ttyd = { package = pkgs.ttyd; output = "out"; };
 
-  code-server = pkgs.code-server;
+  # The prebuilt release, not nixpkgs: the VS Code agent-host bridge needs VS Code >= 1.141.
+  code-server = pkgs.callPackage ../../contrib/code-server/code-server-bin { };
+
+  # The Agent Host Protocol server code-server bridges to (contrib/code-server/sandbox.nix).
+  scooter-vscode-ahp = pkgs.callPackage ../../contrib/code-server/ahp { };
 
   awscli2 = { package = pkgs.awscli2; bins = [ "aws" "aws_completer" ]; };
 }

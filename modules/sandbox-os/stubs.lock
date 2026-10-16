@@ -24,12 +24,12 @@
       },
       "code-server": {
         "attr": "code-server",
-        "drv": "/nix/store/1p0052cm66wqjm0pj9hkr1x1vdki2mza-code-server-4.134.0.drv",
+        "drv": "/nix/store/b1ahhw7fcvfdwrfb98ryp9f5v9a4yksp-code-server-4.141.0.drv",
         "output": "out",
         "bins": [
           "code-server"
         ],
-        "name": "code-server-4.134.0"
+        "name": "code-server-4.141.0"
       },
       "marimo": {
         "attr": "marimo",
@@ -39,6 +39,15 @@
           "marimo"
         ],
         "name": "marimo-0.25.1"
+      },
+      "scooter-vscode-ahp": {
+        "attr": "scooter-vscode-ahp",
+        "drv": "/nix/store/77il2jlxbirlkzindj306la3kkfyfhlx-scooter-vscode-ahp-0.0.0.drv",
+        "output": "out",
+        "bins": [
+          "scooter-vscode-ahp"
+        ],
+        "name": "scooter-vscode-ahp-0.0.0"
       },
       "tree": {
         "attr": "tree",
@@ -81,12 +90,12 @@
       },
       "code-server": {
         "attr": "code-server",
-        "drv": "/nix/store/q33qha0i4na8032jl8ngiqv3amb9m61m-code-server-4.134.0.drv",
+        "drv": "/nix/store/7wf1lg8m29ykyysgnh6safhfkzpq6an0-code-server-4.141.0.drv",
         "output": "out",
         "bins": [
           "code-server"
         ],
-        "name": "code-server-4.134.0"
+        "name": "code-server-4.141.0"
       },
       "marimo": {
         "attr": "marimo",
@@ -96,6 +105,15 @@
           "marimo"
         ],
         "name": "marimo-0.25.1"
+      },
+      "scooter-vscode-ahp": {
+        "attr": "scooter-vscode-ahp",
+        "drv": "/nix/store/wplaax48b0jf172cx3829ka53igh1b28-scooter-vscode-ahp-0.0.0.drv",
+        "output": "out",
+        "bins": [
+          "scooter-vscode-ahp"
+        ],
+        "name": "scooter-vscode-ahp-0.0.0"
       },
       "tree": {
         "attr": "tree",

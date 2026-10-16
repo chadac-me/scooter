@@ -443,6 +443,10 @@
             conversation-controller = conversationController;
             conversation-router = conversationRouter;
             byoc-controller = byocController;
+            # contrib/code-server's pieces (stubs in modules/sandbox-os/stubs.nix), built in CI
+            # because nix-stubs check only compares their .drv paths.
+            scooter-vscode-ahp = pkgs.callPackage ./contrib/code-server/ahp { };
+            code-server-bin = pkgs.callPackage ./contrib/code-server/code-server-bin { };
             warm-store-controller = warmStoreController;
             inherit agent; # the ACP agent (goose)
             inherit marimoMcp; # the isolated marimo MCP server

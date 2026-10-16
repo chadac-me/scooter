@@ -130,7 +130,8 @@ browser; you edit via marimo-pair; both see the same reactive notebook.
   interactively. The flagship; pairs with marimo-pair.
 - **a web terminal** (ttyd/wetty) — when the user wants to poke around the sandbox
   themselves.
-- **web VS Code** (code-server) — when the user wants to browse/edit the workspace
+- **web VS Code** (code-server; the `vscode` service, when contrib/code-server is
+  enabled) — when the user wants to browse/edit the workspace
   in a full editor.
 
 Don't spin one up unprompted for trivial tasks — offer it when seeing-it beats
