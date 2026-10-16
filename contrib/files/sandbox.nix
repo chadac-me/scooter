@@ -47,6 +47,16 @@ in
       # feature-detected, so a viewer built without the assets degrades rather than
       # breaking. /api/health reports which of the two happened.
       export SCOOTER_FILES_VENDOR="${vendor}"
+      # A systemd unit inherits nothing from the pod, so the broker's address is read
+      # from PID 1's environ the way carry-over.nix reads it.
+      #
+      # Empty is supported: the viewer then records comments locally and reports them
+      # as never committed.
+      if [ -z "''${BROKER_URL:-}" ]; then
+        BROKER_URL=$(${pkgs.coreutils}/bin/tr '\0' '\n' < /proc/1/environ \
+          | ${pkgs.gnused}/bin/sed -n 's/^BROKER_URL=//p' | ${pkgs.coreutils}/bin/head -1 || true)
+        export BROKER_URL
+      fi
       exec ${pkgs.python3}/bin/python3 ${viewer}/server.py
     ''}";
   };

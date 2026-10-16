@@ -24,6 +24,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# A sibling module, imported under a short name because `from __future__ import
+# annotations` already binds the bare one.
+import annotations as ann
+
 STATIC = Path(__file__).resolve().parent / "static"
 
 # A file past this is served as metadata only: the viewer renders text, and a
@@ -37,11 +41,22 @@ MAX_RAW_BYTES = 16 * 1024 * 1024
 # for the whole workspace. Why that is not wanted: PR #772.
 RAW_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".ico", ".bmp"}
 
+# A write body is a comment and its quote, never a file, so anything larger is a bug
+# or an attack whose read would cost the pod's memory.
+MAX_BODY_BYTES = 128 * 1024
+
+# Readable and never writable; a POST to one of these is refused as 405.
+READ_ONLY_ROUTES = ("/api/list", "/api/file", "/api/raw", "/api/health")
+
 # Directories that are never interesting to review and enormous to walk.
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", "result"}
 
 # Dotfiles are noise in a review view, with two exceptions worth reading.
 SHOW_DOTS = {".github", ".scooter"}
+
+
+class _Unavailable(Exception):
+    """This viewer was configured without the feature the request needs."""
 
 
 @dataclass(frozen=True)
@@ -56,19 +71,31 @@ class Config:
     # The pinned browser assets (deps.nix), built separately from this tree.
     # Absent is supported: the page falls back to its plain renderer.
     vendor: Path | None = None
+    # Annotation state, on the workspace PVC so threads survive a hibernate; None
+    # keeps the viewer a read-only file browser.
+    state: Path | None = None
+    # The broker's `files` provider and the pod's projected token for it, where an
+    # empty URL leaves annotations local and reported as never committed.
+    broker_url: str = ""
+    token_path: str = "/var/run/secrets/broker/token"
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
         env = os.environ if env is None else env
         vendor = env.get("SCOOTER_FILES_VENDOR", "")
+        root = Path(env.get("SCOOTER_FILES_ROOT", "/workspace")).resolve()
+        state = env.get("SCOOTER_FILES_STATE", "")
         return cls(
-            root=Path(env.get("SCOOTER_FILES_ROOT", "/workspace")).resolve(),
+            root=root,
             # Trailing slash stripped: every route is formed as base + "/…", so a
             # slash here would double up in all of them.
             base=env.get("SCOOTER_FILES_BASE", "").rstrip("/"),
             port=int(env.get("SCOOTER_FILES_PORT", "7801")),
             # A checkout can drop assets in static/vendor/ for the same page.
             vendor=Path(vendor).resolve() if vendor else STATIC / "vendor",
+            state=Path(state) if state else root / ".scooter/files/annotations.json",
+            broker_url=env.get("BROKER_URL", ""),
+            token_path=env.get("BROKER_TOKEN_PATH", "/var/run/secrets/broker/token"),
         )
 
 
@@ -172,19 +199,11 @@ class Handler(BaseHTTPRequestHandler):
     # --- routing ----------------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's casing
-        parsed = urllib.parse.urlsplit(self.path)
-        route = urllib.parse.unquote(parsed.path)
-
-        base = self.cfg.base
-        if base:
-            # Traffic that skips the prefix is not this service's: the proxy always
-            # sends the whole path, so a bare /api/list is someone else's request.
-            if not (route == base or route.startswith(base + "/")):
-                return self.fail(HTTPStatus.NOT_FOUND, "not under this service's base path")
-            route = route[len(base):]
-        route = posixpath.normpath(route or "/")
-
-        want = (urllib.parse.parse_qs(parsed.query).get("path") or [""])[0]
+        # Traffic that skips the prefix is not this service's: the proxy always sends
+        # the whole path, so a bare /api/list is someone else's request.
+        route, want = self.route_of(self.path)
+        if route is None:
+            return self.fail(HTTPStatus.NOT_FOUND, "not under this service's base path")
 
         try:
             if route in ("/", "."):
@@ -200,16 +219,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_file(want)
             if route == "/api/raw":
                 return self.serve_raw(want)
+            if route == "/api/annotations":
+                return self.serve_annotations(want)
             if route == "/api/health":
                 return self.send_json(
                     {
                         "ok": True,
                         "root": str(self.cfg.root),
-                        "base": base,
+                        "base": self.cfg.base,
                         # First thing to check when a doc renders as plain text.
                         "vendor": self.vendor_dir is not None,
                     }
                 )
+        except _Unavailable as exc:
+            return self.fail(HTTPStatus.NOT_IMPLEMENTED, str(exc))
         except ValueError as exc:
             return self.fail(HTTPStatus.BAD_REQUEST, str(exc))
         except FileNotFoundError:
@@ -218,6 +241,127 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail(HTTPStatus.FORBIDDEN, "permission denied")
 
         self.fail(HTTPStatus.NOT_FOUND, f"no route {route}")
+
+    # --- annotations ------------------------------------------------------------
+
+    @property
+    def store(self) -> ann.Annotations:
+        """The annotation store, or a 501 for a viewer configured without one."""
+        store = getattr(self.server, "store", None)
+        if store is None:
+            raise _Unavailable("this viewer stores no annotations")
+        return store
+
+    def live_content(self, want: str) -> str | None:
+        """The file's current text, which anchors are resolved against.
+
+        Read here rather than taken from the request: the browser's copy may be a
+        scroll behind an agent's edit, and an anchor validated against stale text is
+        exactly the unplaceable comment this check exists to refuse.
+        """
+        if not want:
+            return None
+        try:
+            target = resolve(self.cfg.root, want)
+            if not target.is_file() or target.stat().st_size > MAX_READ_BYTES:
+                return None
+            return target.read_bytes().decode("utf-8", errors="replace")
+        except (ValueError, OSError):
+            return None
+
+    def serve_annotations(self, want: str) -> None:
+        content = self.live_content(want)
+        self.send_json(
+            {
+                "annotations": self.store.list(path=want, content=content),
+                "counts": self.store.counts(
+                    contents={want: content} if content is not None else None
+                ),
+            }
+        )
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's casing
+        """The write half: adding a comment or an answer, resolving, retrying.
+
+        Everything a reader can do to annotation state is a POST under
+        /api/annotations; the file tree itself stays read-only.
+        """
+        route, want = self.route_of(self.path)
+        if route is None:
+            return self.fail(HTTPStatus.NOT_FOUND, "not under this service's base path")
+
+        try:
+            body = self.read_body()
+            if route == "/api/annotations":
+                return self.add_annotation(body)
+            if route.startswith("/api/annotations/threads/") and route.endswith("/resolve"):
+                thread = route[len("/api/annotations/threads/") : -len("/resolve")]
+                updated = self.store.resolve(thread, bool(body.get("resolved", True)))
+                return self.send_json({"thread": thread, "updated": updated})
+            if route.startswith("/api/annotations/") and route.endswith("/retry"):
+                annotation_id = route[len("/api/annotations/") : -len("/retry")]
+                record = self.store.retry(annotation_id)
+                return self.send_json({"annotation": record.view()})
+        except _Unavailable as exc:
+            return self.fail(HTTPStatus.NOT_IMPLEMENTED, str(exc))
+        except ann.AnchorError as exc:
+            # Not a 400: the request was well-formed and the file moved under it.
+            return self.fail(HTTPStatus.CONFLICT, str(exc))
+        except ann.AnnotationError as exc:
+            return self.fail(HTTPStatus.BAD_REQUEST, str(exc))
+        except ValueError as exc:
+            return self.fail(HTTPStatus.BAD_REQUEST, str(exc))
+
+        # The file routes exist and are readable, so a write to one is 405 rather
+        # than 404: the tree itself stays read-only.
+        if route in READ_ONLY_ROUTES or route.startswith("/static/") or route in ("/", "."):
+            return self.fail(HTTPStatus.METHOD_NOT_ALLOWED, f"{route} is read-only")
+        self.fail(HTTPStatus.NOT_FOUND, f"no route {route}")
+
+    def add_annotation(self, body: dict) -> None:
+        path = str(body.get("path") or "")
+        content = self.live_content(path)
+        if content is None:
+            raise ann.AnchorError("the annotated file is not readable")
+        asked = body.get("line")
+        record = self.store.add(
+            content=content,
+            path=path,
+            line=asked,
+            quote=str(body.get("quote") or ""),
+            text=str(body.get("text") or ""),
+            kind=str(body.get("kind") or "comment"),
+            thread=str(body.get("thread") or ""),
+            question_id=str(body.get("question_id") or ""),
+        )
+        # Where the anchor actually landed, since `add` places it against live content
+        # and the browser's line was only a hint.
+        state = "ok" if record.line == asked else "moved"
+        # 202, not 201: this viewer has recorded it, and the broker has not yet acked.
+        self.send_json({"annotation": record.view(anchor_state=state)}, HTTPStatus.ACCEPTED)
+
+    def read_body(self) -> dict:
+        length = int(self.headers.get("content-length") or 0)
+        if length > MAX_BODY_BYTES:
+            raise ValueError("body is too large")
+        if not length:
+            return {}
+        parsed = json.loads(self.rfile.read(length) or b"{}")
+        if not isinstance(parsed, dict):
+            raise ValueError("body must be a JSON object")
+        return parsed
+
+    def route_of(self, raw: str) -> tuple[str | None, str]:
+        """Split a request path into a base-relative route and its `path` query."""
+        parsed = urllib.parse.urlsplit(raw)
+        route = urllib.parse.unquote(parsed.path)
+        base = self.cfg.base
+        if base:
+            if not (route == base or route.startswith(base + "/")):
+                return None, ""
+            route = route[len(base) :]
+        want = (urllib.parse.parse_qs(parsed.query).get("path") or [""])[0]
+        return posixpath.normpath(route or "/"), want
 
     def serve_index(self) -> None:
         html = (STATIC / "index.html").read_text()
@@ -301,13 +445,26 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, store: ann.Annotations | None = None):
         self.cfg = cfg
+        self.store = store
         super().__init__(("0.0.0.0", cfg.port), Handler)
 
 
-def make_server(cfg: Config) -> Server:
-    return Server(cfg)
+def make_server(cfg: Config, store: ann.Annotations | None = None) -> Server:
+    """A viewer, with an annotation store when one is configured.
+
+    `store` is injected by the tests; otherwise it is built from the config, and its
+    outbox is started only once the socket is up so a slow broker cannot delay serving
+    the page.
+    """
+    if store is None and cfg.state is not None:
+        store = ann.Annotations(
+            state_path=cfg.state,
+            root=cfg.root,
+            transport=ann.BrokerTransport(cfg.broker_url, cfg.token_path),
+        )
+    return Server(cfg, store)
 
 
 def main() -> None:
@@ -315,6 +472,9 @@ def main() -> None:
     if not cfg.root.is_dir():
         raise SystemExit(f"files viewer: root {cfg.root} is not a directory")
     httpd = make_server(cfg)
+    if httpd.store is not None:
+        # After binding: a pull against a slow broker must not delay the first page.
+        httpd.store.start()
     print(
         f"files-viewer listening on 0.0.0.0:{httpd.server_address[1]} "
         f"root={cfg.root} base={cfg.base or '/'}",
