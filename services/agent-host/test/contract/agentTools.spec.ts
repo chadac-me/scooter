@@ -51,3 +51,60 @@ describe("agent-tools: web_fetch needs no credential and no broker", () => {
     expect(out.content[0].text).toContain("offline");
   });
 });
+
+describe("agent-tools: web_fetch follows redirects safely", () => {
+  /** A fetch serving `routes` by URL, recording each request. */
+  const serving = (routes: Record<string, () => Response>) => {
+    const asked: Array<{ url: string; redirect?: RequestRedirect }> = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      asked.push({ url, redirect: init?.redirect });
+      const route = routes[url];
+      if (!route) throw new Error(`unexpected fetch of ${url}`);
+      return route();
+    }) as unknown as typeof fetch;
+    return { fetchImpl, asked };
+  };
+  const to = (status: number, location: string) => () => new Response(null, { status, headers: { location } });
+
+  it("FOLLOWS a 301 then a relative 308 to the page, and says where it landed", async () => {
+    const { fetchImpl, asked } = serving({
+      "http://203.0.113.10/old": to(301, "http://203.0.113.10/moved"),
+      "http://203.0.113.10/moved": to(308, "/final"),
+      "http://203.0.113.10/final": () => new Response("<p>the page</p>"),
+    });
+    const res = await handleWebFetch({ fetchImpl }, { url: "http://203.0.113.10/old" });
+    expect(res.isError).toBeUndefined();
+    expect(res.content[0].text).toContain("the page");
+    expect(res.content[0].text).toContain("redirected to http://203.0.113.10/final");
+    // Never delegated to fetch's own redirect handling, which skips the guard.
+    expect(asked.every((a) => a.redirect === "manual")).toBe(true);
+  });
+
+  it("REFUSES a redirect to an internal address and never requests it", async () => {
+    const { fetchImpl, asked } = serving({
+      "http://203.0.113.10/": to(302, "http://169.254.169.254/latest/meta-data/"),
+    });
+    const res = await handleWebFetch({ fetchImpl }, { url: "http://203.0.113.10/" });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/refused.*169\.254\.169\.254/);
+    expect(asked.map((a) => a.url)).toEqual(["http://203.0.113.10/"]);
+  });
+
+  it("gives up on a redirect loop", async () => {
+    const { fetchImpl } = serving({
+      "http://203.0.113.10/a": to(302, "/b"),
+      "http://203.0.113.10/b": to(302, "/a"),
+    });
+    const res = await handleWebFetch({ fetchImpl }, { url: "http://203.0.113.10/a" });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain("more than 5 redirects");
+  });
+
+  it("names the underlying cause, not just \"fetch failed\"", async () => {
+    const fetchImpl = (async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: new Error("getaddrinfo ENOTFOUND nowhere") });
+    }) as unknown as typeof fetch;
+    const res = await handleWebFetch({ fetchImpl }, { url: "http://203.0.113.10/" });
+    expect(res.content[0].text).toContain("ENOTFOUND");
+  });
+});

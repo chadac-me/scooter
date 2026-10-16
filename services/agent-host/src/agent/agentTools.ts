@@ -32,6 +32,9 @@ export interface WebFetchDeps {
   fetchImpl?: typeof fetch;
 }
 
+/** Hops followed before giving up. */
+const MAX_REDIRECTS = 5;
+
 // --- Result helpers ---------
 
 const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
@@ -42,21 +45,35 @@ export async function handleWebFetch(
   deps: WebFetchDeps,
   args: { url: string },
 ): Promise<ToolResult> {
-  const guard = await ssrfCheck(args.url);
-  if (!guard.ok) return err(`web_fetch refused: ${guard.reason}`);
-
   const doFetch = deps.fetchImpl ?? fetch;
-  let res: Response;
-  try {
-    res = await doFetch(args.url, {
-      redirect: "error", // a redirect could bounce to an internal host
-      signal: AbortSignal.timeout(15_000),
-      headers: { "User-Agent": "scooter-agent/1.0" },
-    });
-  } catch (e) {
-    return err(`web_fetch failed: ${(e as Error).message}`);
+  let url = args.url;
+  let res!: Response;
+  // Redirects are followed by hand so every hop passes the SSRF guard.
+  for (let hop = 0; ; hop++) {
+    const guard = await ssrfCheck(url);
+    if (!guard.ok) {
+      return err(`web_fetch refused: ${guard.reason}${url === args.url ? "" : ` (redirected to ${url})`}`);
+    }
+    try {
+      res = await doFetch(url, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(15_000),
+        headers: { "User-Agent": "scooter-agent/1.0" },
+      });
+    } catch (e) {
+      const cause = (e as Error & { cause?: Error }).cause?.message;
+      return err(`web_fetch failed for ${url}: ${(e as Error).message}${cause ? ` (${cause})` : ""}`);
+    }
+    const location = res.headers.get("location");
+    if (res.status < 300 || res.status > 399 || !location) break;
+    if (hop >= MAX_REDIRECTS) return err(`web_fetch failed: more than ${MAX_REDIRECTS} redirects from ${args.url}`);
+    try {
+      url = new URL(location, url).toString();
+    } catch {
+      return err(`web_fetch failed: ${url} redirected to an invalid location`);
+    }
   }
-  if (!res.ok) return err(`web_fetch FAILED (HTTP ${res.status}) for ${args.url}.`);
+  if (!res.ok) return err(`web_fetch FAILED (HTTP ${res.status}) for ${url}.`);
   const MAX = 200_000; // cap the returned content
   const text = (await res.text()).slice(0, MAX);
   // Strip tags/scripts so the agent gets readable text.
@@ -66,7 +83,8 @@ export async function handleWebFetch(
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return ok(stripped || "(empty response)");
+  const from = url === args.url ? "" : `(redirected to ${url})\n\n`;
+  return ok(from + (stripped || "(empty response)"));
 }
 
 // --- SSRF guard (static block-list + DNS-resolve check) ----------------
