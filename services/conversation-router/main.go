@@ -68,6 +68,8 @@ func main() {
 	var dynClient dynamic.Interface
 	// Body-`owner` trust for in-cluster callers; nil outside a cluster, where a body owner is never honored.
 	var trusted TrustedCaller
+	// The apiserver credentials, for the self-access TokenReview; nil in dev mode.
+	var kubeCfg *rest.Config
 	if devModeEnabled() {
 		u, err := agentHostURLFromEnv()
 		if err != nil {
@@ -85,7 +87,8 @@ func main() {
 		log.Warn("ROUTER_DEV_MODE: kube-less single-host stack (no CRD watch, single upstream)",
 			slog.String("agent_host_url", u.String()))
 	} else {
-		dyn, kubeCfg, err := newDynamicClient()
+		dyn, kc, err := newDynamicClient()
+		kubeCfg = kc
 		if err != nil {
 			log.Error("k8s client init failed", errAttr(err))
 			os.Exit(1)
@@ -170,7 +173,22 @@ func main() {
 	go runConversationListener(ctx, store, links, hub)
 	go runLinkListener(ctx, store, links, hub)
 
-	srv := &http.Server{Addr: cfg.listenAddr, Handler: newRouter(ctx, cfg, resolver, creator, trusted, store, writeStore, links, hub)}
+	handler := newRouter(ctx, cfg, resolver, creator, trusted, store, writeStore, links, hub)
+	srv := &http.Server{Addr: cfg.listenAddr, Handler: handler}
+	if self := buildSelfServer(kubeCfg, cfg, store, handler, log); self != nil {
+		go func() {
+			<-ctx.Done()
+			sctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			defer c()
+			_ = self.Shutdown(sctx)
+		}()
+		go func() {
+			if err := self.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Error("self-access listener failed", errAttr(err))
+				os.Exit(1)
+			}
+		}()
+	}
 	go func() {
 		<-ctx.Done()
 		log.Info("shutdown signalled, draining")
@@ -389,6 +407,27 @@ func buildTrustedCaller(kubeCfg *rest.Config, log *slog.Logger) TrustedCaller {
 	}
 	log.Info("body-owner trust enabled", slog.Int("trusted_service_accounts", len(allowed)))
 	return newTrustedCaller(review, allowed)
+}
+
+// buildSelfServer returns the sandbox self-access listener (see selfaccess.go), or nil when SELF_LISTEN_ADDR is unset or it cannot verify tokens.
+func buildSelfServer(kubeCfg *rest.Config, cfg config, store *Store, handler http.Handler, log *slog.Logger) *http.Server {
+	addr := env("SELF_LISTEN_ADDR", "")
+	if addr == "" {
+		return nil
+	}
+	if kubeCfg == nil || store == nil {
+		log.Warn("SELF_LISTEN_ADDR set but TokenReview or the conversation store is unavailable: self-access disabled")
+		return nil
+	}
+	audience := env("SELF_TOKEN_AUDIENCE", "scooter-self")
+	review, err := newTokenReviewer(kubeCfg, audience)
+	if err != nil {
+		log.Warn("self-access TokenReview client init failed: self-access disabled", errAttr(err))
+		return nil
+	}
+	self := newSelfAccess(review, cfg.namespace, store.ConversationByID, identityConfigFromEnv(), atoi(env("SELF_MESSAGES_PER_MINUTE", "10")))
+	log.Info("self-access listener enabled", slog.String("listen_addr", addr), slog.String("audience", audience))
+	return &http.Server{Addr: addr, Handler: self.wrap(handler)}
 }
 
 // --- k8s client + unstructured helpers (used by cache.go) -------------------

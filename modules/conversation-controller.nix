@@ -226,6 +226,38 @@ in
       };
     };
 
+    # --- sandbox self-access ---------------------------------------------------
+    # A sandbox pod calling its own conversation's API (VS Code continuing the
+    # conversation) with its projected SA token, on a router port that never trusts
+    # identity headers. See services/conversation-router/selfaccess.go.
+    selfAccess = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Serve the sandbox self-access listener on the router and give each sandbox a
+          token for it (/var/run/secrets/<audience>/token) plus SCOOTER_SELF_URL. A pod
+          may only read events/history and post messages/cancel on conversations it
+          runs; it can never answer tool-permission prompts.
+        '';
+      };
+      audience = mkOption {
+        type = types.str;
+        default = "scooter-self";
+        description = "Audience of the projected token sandboxes present to the self-access listener.";
+      };
+      port = mkOption {
+        type = types.port;
+        default = 8081;
+        description = "Router container port for the self-access listener (fronted by the conversation-router-self Service on 8080).";
+      };
+      messagesPerMinute = mkOption {
+        type = types.int;
+        default = 10;
+        description = "Per-conversation cap on messages a sandbox may post (0 = unlimited), so the agent cannot drive itself in a loop.";
+      };
+    };
+
   };
   config = lib.mkMerge [
     ({
@@ -422,7 +454,8 @@ in
                 image = ccfg.routerImage;
                 imagePullPolicy = cfg.pullPolicy;
                 command = [ "conversation-router" ];
-                ports = [{ containerPort = 8080; name = "agui"; }];
+                ports = [{ containerPort = 8080; name = "agui"; }]
+                  ++ lib.optional ccfg.selfAccess.enable { containerPort = ccfg.selfAccess.port; name = "self"; };
                 env = [
                   { name = "NAMESPACE"; value = cfg.namespace; }
                   # The fallback Service for unassigned requests must select the
@@ -462,6 +495,11 @@ in
                     ); }
                   # The audience the callers' projected tokens are minted for.
                   { name = "WEBHOOKS_TOKEN_AUDIENCE"; value = "agent-host"; }
+                ]
+                ++ lib.optionals ccfg.selfAccess.enable [
+                  { name = "SELF_LISTEN_ADDR"; value = ":${toString ccfg.selfAccess.port}"; }
+                  { name = "SELF_TOKEN_AUDIENCE"; value = ccfg.selfAccess.audience; }
+                  { name = "SELF_MESSAGES_PER_MINUTE"; value = toString ccfg.selfAccess.messagesPerMinute; }
                 ];
                 readinessProbe.httpGet = { path = "/healthz"; port = "agui"; };
                 resources = lib.mkDefault {
@@ -473,6 +511,21 @@ in
           };
         };
       };
+    };
+  })
+  (lib.mkIf ccfg.selfAccess.enable {
+    # Separate from the `agent-host` front door so a NetworkPolicy can admit sandboxes here only.
+    kubernetes.resources.services.conversation-router-self = {
+      metadata = { name = "conversation-router-self"; namespace = cfg.namespace; };
+      spec = {
+        selector.app = "conversation-router";
+        ports = [{ port = 8080; targetPort = "self"; name = "self"; }];
+      };
+    };
+    scooter.deployTools.tokenAudiences = [ ccfg.selfAccess.audience ];
+    scooter.deployTools.env = {
+      SCOOTER_SELF_URL = "http://conversation-router-self.${cfg.namespace}.svc.cluster.local:8080";
+      SCOOTER_SELF_TOKEN_PATH = "/var/run/secrets/${ccfg.selfAccess.audience}/token";
     };
   })
   ];
