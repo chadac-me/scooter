@@ -203,7 +203,33 @@ try {
   check("rendered blocks carry their source line", !!target, JSON.stringify(target));
   await page.hover("#view .md p[data-line]");
   await page.waitForSelector("#linebtn", { state: "visible", timeout: 4000 });
-  await page.click("#linebtn");
+
+  // Reaching the "+" means crossing the margin between the text and the button, and a
+  // hand crosses it in small moves. page.click() teleports the pointer onto the
+  // element and so passes even when the button cannot be reached by hand: this walks
+  // the whole way in ~4px steps, which is how the offer was found to vanish at the
+  // paragraph's right edge and never come back.
+  const from = await page.evaluate(() => {
+    const b = document.querySelector("#view .md p[data-line]").getBoundingClientRect();
+    return { x: b.x + 120, y: b.y + b.height - 6 };
+  });
+  await page.mouse.move(from.x, from.y, { steps: 5 });
+  const to = await page.evaluate(() => {
+    const b = document.querySelector("#linebtn").getBoundingClientRect();
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  });
+  const steps = Math.max(2, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / 4));
+  let lost = 0;
+  for (let i = 1; i <= steps; i++) {
+    await page.mouse.move(from.x + ((to.x - from.x) * i) / steps, from.y + ((to.y - from.y) * i) / steps);
+    if (await page.$eval("#linebtn", (n) => getComputedStyle(n).display === "none")) lost++;
+  }
+  check("the + survives the reach for it", lost === 0, `hidden at ${lost}/${steps} points on the way`);
+
+  // Pressed where the pointer already is, rather than by selector: a button that is
+  // only clickable after a teleport is not clickable.
+  await page.mouse.down();
+  await page.mouse.up();
   await page.waitForSelector("#cform", { state: "visible" });
   const composer = await page.evaluate(() => ({
     where: document.getElementById("cwhere").textContent,
@@ -218,6 +244,17 @@ try {
   const emptyQuotes = await page.$$eval("#clist .ann blockquote", (nodes) => nodes.filter((n) => !n.textContent.trim()).length);
   check("a quoteless comment draws without an empty blockquote", emptyQuotes === 0, `${emptyQuotes} empty`);
 
+
+  // The rule under the column headers is one line across the window. Each header is a
+  // separate element that used to be sized by its own padding and content, so the
+  // three ended within a few pixels of each other -- close enough to look like a
+  // rendering fault rather than a layout one.
+  const heads = await page.evaluate(() =>
+    ["#tabs", ".filebar", "#cpane .chead"]
+      .map((sel) => { const n = document.querySelector(sel); return n ? { sel, bottom: +n.getBoundingClientRect().bottom.toFixed(2) } : null; })
+      .filter(Boolean));
+  const spread = Math.max(...heads.map((h) => h.bottom)) - Math.min(...heads.map((h) => h.bottom));
+  check("the column headers end on one line", heads.length === 3 && spread < 0.5, `${spread.toFixed(2)}px apart: ${JSON.stringify(heads)}`);
 
   // --- 5. deleting ----------------------------------------------------------------
   await page.click('#clist .ann .reply .top button:text-is("delete")');

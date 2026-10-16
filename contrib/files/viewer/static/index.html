@@ -8,6 +8,9 @@
 /* Warm Paper / Solarized Dark, the same tokens as the conversation UI. */
 :root {
   --radius: 0.625rem;
+  /* Every column header is this tall, border included, so their bottom rules line up
+     across the columns instead of each ending wherever its own content does. */
+  --head: 41px;
   --background: #faf8f3; --foreground: #1c1917;
   --card: #fffefa; --secondary: #f0ece1; --muted-foreground: #57534e;
   --accent: #e6e1d3; --border: #d2ccbc; --input: #948d80;
@@ -89,8 +92,8 @@ nav {
 section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
 .filebar {
   position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 9px;
-  padding: 7px 13px; background: var(--card); border-bottom: 1px solid var(--border);
-  font-size: 12px; flex: 0 0 auto;
+  padding: 0 13px; background: var(--card); border-bottom: 1px solid var(--border);
+  font-size: 12px; flex: 0 0 var(--head); height: var(--head);
 }
 .body { flex: 1; min-height: 0; }
 .note {
@@ -176,8 +179,8 @@ section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
   display: flex; flex-direction: column; min-width: 0; overflow: hidden;
 }
 #cpane .chead {
-  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
-  padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 12.5px;
+  display: flex; align-items: center; gap: 8px; flex: 0 0 var(--head); height: var(--head);
+  padding: 0 12px; border-bottom: 1px solid var(--border); font-size: 12.5px;
 }
 #cpane .cbody { flex: 1; overflow-y: auto; padding: 12px; }
 /* Empty space in this column is not dead space: clicking it comments on the line it
@@ -207,10 +210,10 @@ mark.qmark.focus { background: color-mix(in srgb, var(--brand) 32%, transparent)
   border-right: 1px solid var(--border); background: var(--sidebar);
   display: flex; flex-direction: column; min-width: 0; overflow: hidden;
 }
-#tabs { display: flex; flex: 0 0 auto; border-bottom: 1px solid var(--border); }
+#tabs { display: flex; flex: 0 0 var(--head); height: var(--head); border-bottom: 1px solid var(--border); }
 #tabs .tab {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
-  font: inherit; font-size: 12.5px; padding: 9px 4px; cursor: pointer;
+  font: inherit; font-size: 12.5px; padding: 0 4px; cursor: pointer;
   background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted-foreground);
 }
 #tabs .tab.on { color: var(--foreground); border-bottom-color: var(--brand); background: var(--card); }
@@ -932,32 +935,52 @@ el("view").addEventListener("click", (event) => {
 // between it and the comments column.
 const linebtn = el("linebtn");
 let hoverLine = 0;
-el("view").addEventListener("mousemove", (event) => {
-  const block = event.target.closest?.(".md [data-line]");
-  if (!block) {
-    linebtn.style.display = "none";
-    return;
-  }
+// The region the pointer may move through without losing the offer. The button sits
+// in the margin 8px clear of the text, so reaching it means crossing ground that is
+// not the paragraph -- and hiding on "not over a block" pulled the button out from
+// under a pointer that was on its way to press it. The offer survives anywhere in the
+// band that spans the block and the button.
+let keep = null;
+
+function offerLine(block) {
   const box = block.getBoundingClientRect();
   hoverLine = Number(block.dataset.line);
   linebtn.style.display = "block";
   linebtn.style.top = `${box.top + window.scrollY}px`;
   linebtn.style.left = `${Math.min(box.right + 8, window.innerWidth - 40) + window.scrollX}px`;
-});
-// Hidden when the pointer leaves the text *and* the button — not on leaving the text
-// alone, which is a pointer on its way to press it. Positioned from measured geometry,
-// so scrolling hides it rather than leaving a "+" beside a paragraph that has moved.
+  const btn = linebtn.getBoundingClientRect();
+  keep = {
+    left: Math.min(box.left, btn.left) - 4,
+    right: Math.max(box.right, btn.right) + 8,
+    top: Math.min(box.top, btn.top) - 6,
+    bottom: Math.max(box.bottom, btn.bottom) + 6,
+  };
+}
+
+function hideOffer() {
+  linebtn.style.display = "none";
+  keep = null;
+}
+
+// One handler on the document rather than one on the text and one outside it: the
+// two used to disagree, and the one bound to the text won the moment the pointer
+// entered the margin.
 document.addEventListener("mousemove", (event) => {
-  if (event.target.closest("#view, #linebtn")) return;
-  linebtn.style.display = "none";
+  const block = event.target.closest?.(".md [data-line]");
+  if (block) {
+    offerLine(block);
+    return;
+  }
+  if (event.target.closest?.("#linebtn")) return;
+  if (keep && event.clientX >= keep.left && event.clientX <= keep.right
+      && event.clientY >= keep.top && event.clientY <= keep.bottom) return;
+  hideOffer();
 });
-document.querySelector("section")?.addEventListener(
-  "scroll",
-  () => { linebtn.style.display = "none"; },
-  { passive: true },
-);
+// Positioned from measured geometry, so scrolling hides it rather than leaving a "+"
+// beside a paragraph that has moved.
+document.querySelector("section")?.addEventListener("scroll", hideOffer, { passive: true });
 linebtn.addEventListener("click", () => {
-  linebtn.style.display = "none";
+  hideOffer();
   commentOnLine(hoverLine);
 });
 
