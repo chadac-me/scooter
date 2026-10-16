@@ -126,11 +126,36 @@ line the check fails loudly rather than passing on zero tests.
 ```
 flake-test: THREE messages sent mid-run       # playwright -g pattern (required)
 flake-specs: test/e2e/queue-durability.spec.ts test/e2e/ui-state-consistency.spec.ts
+flake-repeat: 40                              # repetitions on the FAST job (cap 100)
+flake-full-repeat: 14                         # repetitions on the FULL job (cap 20)
+flake-mode: targeted                          # force the path: targeted | contention
 ```
 
 `flake-specs:` is optional — give it when the flake only reproduces under
 cross-spec contention, and CI runs those files together instead of the lone `-g`
 match.
+
+The last three lines **tune the experiment**, and exist because a default budget
+that never makes the flake fire produces the `⚠️ no power` verdict below, which
+proves nothing. They live in the PR description so raising the budget on your own
+flake needs no CI change, and so the PR records what was actually run:
+
+- **`flake-repeat:` / `flake-full-repeat:`** override the repetitions per test.
+  Defaults are 20 (fast targeted), 5 (fast contention), 5 (full targeted) and 3
+  (full contention) — the full target pays a real sandbox pod and a cold boot per
+  repetition, which is why its cap is far lower. The keys are deliberately
+  per-target: one number must not silently apply to both. The control run uses the
+  same budget, or the two rates would not be comparable, so a raise costs double.
+- **`flake-mode:`** forces the path instead of inferring it from `flake-specs:`.
+  This is worth knowing about: naming specs selects the contention path, whose
+  default budget is *smaller*, so a PR reaching for more realism silently gets
+  less power. `flake-mode: targeted` keeps the specs line on the record while
+  hammering the single `-g` match at the bigger budget; `flake-mode: contention`
+  requires specs.
+
+A malformed tuning line (non-numeric, zero, over the cap, an unknown mode) fails
+the job at its first step, before the expensive bring-up, rather than being
+clamped — the budget the comment quotes is then always the budget that ran.
 
 Both focused jobs report into **one shared PR comment**, a section each (fast /
 full), updated in place on every re-run — so a PR carrying both labels shows the
@@ -160,6 +185,14 @@ comment distinguishes:
   add `flake-specs:`, or move to the full target. (On the full target there is
   nowhere further to move: the repeat budget is the only knob left.)
 
+When a verdict turns on power, the comment **sizes the budget for you**: from the
+base's — or, failing that, the nightly window's — observed rate it names the
+repetitions at which a clean run would mean something (p ≤ 5%) and the exact line
+to paste, e.g. `flake-full-repeat: 14`. If that number is past the target's cap it
+says so instead of suggesting it: a 1-in-40 flake cannot be cornered by
+repetitions on a shared fleet, and the fix has to be argued from the failure's
+mechanism (trace, logs) rather than from a count.
+
 The control costs roughly a second run of the job, so it is skipped when the PR's
 own run already reproduced the flake (the answer is in already).
 
@@ -186,6 +219,11 @@ with the PR skips the push — for a test-only fix, all of them.
 | `e2e-full-flake-check` | flake focus full (k3d, targeted ×5) | **full** — a real k3d cluster |
 | `e2e-full` | e2e full (k3d) | the whole full suite, once (the nightly sweeps it ×5) |
 
+The job names quote the *default* budgets (×20, ×5). A `flake-repeat:` line
+changes what runs, not the name: the names are how `.github/ci-gates.yml` matches
+its gates, so the comment — not the title — says how many repetitions a verdict
+rests on.
+
 Both full-target jobs run on the **self-hosted fleet**, the same runners as the
 nightly. A control on different hardware is being asked to reproduce a
 contention flake in conditions it was never seen in.
@@ -206,7 +244,7 @@ renders exactly one of these, and only the first means done:
 | Comment heading | Means | Done? |
 |---|---|---|
 | `✅ … fixed: it fires on the base, not here` | Fires on the base often enough that a clean run here is unlikely by luck (≤5%) | **YES** |
-| `✅ … clean here, but the control is weak (n/m on the base)` | Base barely fired; luck explains it nearly as well as a fix | No — raise the budget |
+| `✅ … clean here, but the control is weak (n/m on the base)` | Base barely fired; luck explains it nearly as well as a fix | No — raise the budget (`flake-repeat:` / `flake-full-repeat:`) |
 | `⚠️ … clean, but the control did not reproduce either` | Fired on neither. The experiment had **no power** | No — proves nothing |
 | `✅ … no reproduction in n repetitions` | No control ran at all | No — unfalsifiable alone |
 | `❌ … the flake STILL reproduces` | Fails here | No |
