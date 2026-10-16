@@ -701,6 +701,7 @@ jobs:
             /tmp/pf.log
             /tmp/cluster-sampler.log
             /tmp/rollout-hook.log
+            /tmp/platform-logs/
           retention-days: 7
       # always(): a sandbox can crash, be retried by the kubelet, and the spec still
       # pass, so the census runs on green too; it exits 0 and only annotates.
@@ -1218,27 +1219,30 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: .github/scripts/flake-focus-pattern.sh
 
-      # Contention path: run the `flake-specs:` files together, each test 5×, so
-      # cross-spec load recreates the flake.
-      - name: e2e ×5 (contention — flake-specs)
-        if: steps.pat.outputs.specs != ''
+      # Contention path: run the `flake-specs:` files together, each test N×, so
+      # cross-spec load recreates the flake. N is the budget the script resolved —
+      # the mode's default unless the PR body raised it with `flake-repeat:`.
+      - name: e2e ×N (contention — flake-specs)
+        if: steps.pat.outputs.mode == 'contention'
         env:
           CI: "1"
-          FLAKE_SPECS: ${{ steps.pat.outputs.specs }}
+          FLAKE_SPECS: ${{ steps.pat.outputs.specs_run }}
+          FLAKE_REPEAT: ${{ steps.pat.outputs.repeat }}
         # `json` alongside `list`: the exit status cannot say whether the targeted
         # test passed, failed or ever ran, so the report below answers that.
-        run: nix develop --command bash -c 'npm install && npm run test:e2e -- --repeat-each=5 --reporter=list,json $FLAKE_SPECS'
+        run: nix develop --command bash -c 'npm install && npm run test:e2e -- --repeat-each="$FLAKE_REPEAT" --reporter=list,json $FLAKE_SPECS'
 
-      # Targeted path: no `flake-specs:`, so hammer just the matching test 20×.
-      - name: e2e ×20 (targeted)
-        if: steps.pat.outputs.specs == ''
+      # Targeted path: hammer just the matching test N×.
+      - name: e2e ×N (targeted)
+        if: steps.pat.outputs.mode == 'targeted'
         env:
           CI: "1"
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
+          FLAKE_REPEAT: ${{ steps.pat.outputs.repeat }}
         # --trace on overrides playwright.config's `trace: on-first-retry`, which
         # never fires under retries=0, so every repetition gets a full trace.zip
         # under test-results/.
-        run: nix develop --command bash -c 'npm install && npm run test:e2e -- -g "$FLAKE_PATTERN" --repeat-each=20 --trace on --reporter=list,json'
+        run: nix develop --command bash -c 'npm install && npm run test:e2e -- -g "$FLAKE_PATTERN" --repeat-each="$FLAKE_REPEAT" --trace on --reporter=list,json'
 
       # Resolves `flake-test:` against the report, since a green job under
       # `flake-specs:` can pass having never executed the flaky test; plain `node`
@@ -1250,12 +1254,12 @@ jobs:
           # Via env, never inline `${{ }}`: these come from the PR description, so
           # interpolating them into `run:` would let a PR body execute shell.
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
-          FLAKE_SPECS: ${{ steps.pat.outputs.specs }}
+          FLAKE_SPECS: ${{ steps.pat.outputs.specs_run }}
+          FLAKE_MODE: ${{ steps.pat.outputs.mode }}
         run: |
           set -euo pipefail
-          mode=targeted; [ -n "$FLAKE_SPECS" ] && mode=contention
           node scripts/flake-focus-report.mjs "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
-            --pattern "$FLAKE_PATTERN" --target fast --mode "$mode" > /dev/null
+            --pattern "$FLAKE_PATTERN" --target fast --mode "$FLAKE_MODE" > /dev/null
 
       # The control runs the same test with the same budget on the PR's base commit
       # (only when the PR's own run came back clean) because "0 failures in 20 runs"
@@ -1270,7 +1274,8 @@ jobs:
         env:
           CI: "1"
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
-          FLAKE_SPECS: ${{ steps.pat.outputs.specs }}
+          FLAKE_SPECS: ${{ steps.pat.outputs.specs_run }}
+          FLAKE_REPEAT: ${{ steps.pat.outputs.repeat }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/flake-baseline.json
           # A different Postgres port: `pg_ctl` daemonizes, so the first run's database
@@ -1283,11 +1288,12 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
           git worktree add --detach ../baseline "$BASE_SHA"
           cd ../baseline
-          # Same commands and repetition counts, or the two rates are incomparable.
+          # Same commands and repetition counts, or the two rates are incomparable —
+          # including a budget the PR raised, which is the whole point of raising it.
           if [ -n "$FLAKE_SPECS" ]; then
-            nix develop --command bash -c 'npm install && npm run test:e2e -- --repeat-each=5 --reporter=list,json $FLAKE_SPECS' || true
+            nix develop --command bash -c 'npm install && npm run test:e2e -- --repeat-each="$FLAKE_REPEAT" --reporter=list,json $FLAKE_SPECS' || true
           else
-            nix develop --command bash -c 'npm install && npm run test:e2e -- -g "$FLAKE_PATTERN" --repeat-each=20 --reporter=list,json' || true
+            nix develop --command bash -c 'npm install && npm run test:e2e -- -g "$FLAKE_PATTERN" --repeat-each="$FLAKE_REPEAT" --reporter=list,json' || true
           fi
 
       - name: flake verdict comment
@@ -1299,21 +1305,21 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
-          FLAKE_SPECS: ${{ steps.pat.outputs.specs }}
+          FLAKE_SPECS: ${{ steps.pat.outputs.specs_run }}
+          FLAKE_MODE: ${{ steps.pat.outputs.mode }}
           HAS_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-full-flake-check') }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          mode=targeted; [ -n "$FLAKE_SPECS" ] && mode=contention
           # Only nag about the full target when this PR isn't already running it.
           suggest=(--suggest-full); [ "$HAS_FULL_LABEL" = "true" ] && suggest=()
           # Absent when the control was skipped; the comment then has no control section.
           base=()
           [ -f flake-baseline.json ] && base=(--baseline flake-baseline.json --baseline-ref "$BASE_REF@${BASE_SHA:0:7}")
           node scripts/flake-focus-report.mjs "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
-            --pattern "$FLAKE_PATTERN" --target fast --mode "$mode" \
+            --pattern "$FLAKE_PATTERN" --target fast --mode "$FLAKE_MODE" \
             --specs "$FLAKE_SPECS" --run-url "$RUN_URL" \
             "${suggest[@]}" "${base[@]}" > flake-comment.md
           cat flake-comment.md >> "$GITHUB_STEP_SUMMARY"
@@ -1368,10 +1374,6 @@ jobs:
     env:
       # The JSON report the verdict is computed from.
       PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/flake-report.json
-      # Each repetition costs a real sandbox pod and a cold boot; the k3d setup is
-      # paid once either way.
-      FULL_REPEAT_TARGETED: "5"
-      FULL_REPEAT_CONTENTION: "3"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -1398,32 +1400,36 @@ jobs:
       # Contention path: run the full-allowlisted `flake-specs:` files together so
       # competing for sandbox provisioning recreates the flake.
       - name: e2e full ×N (contention — flake-specs)
-        if: steps.pat.outputs.specs_full != ''
+        if: steps.pat.outputs.mode == 'contention'
         env:
           E2E_TARGET: full
           E2E_CLUSTER_URL: http://127.0.0.1:8899
           E2E_ROLLOUT_HOOK: http://127.0.0.1:8898
           CI: "1"
-          FLAKE_SPECS: ${{ steps.pat.outputs.specs_full }}
+          FLAKE_SPECS: ${{ steps.pat.outputs.specs_run }}
+          # The budget the pattern script resolved: this target's default unless the
+          # PR body raised it with `flake-full-repeat:`.
+          FLAKE_REPEAT: ${{ steps.pat.outputs.repeat }}
         run: |
           set -euo pipefail
           . .github/scripts/e2e-full-serve.sh
-          nix develop --command bash -c 'npm install && just e2e-full-run --repeat-each="$FULL_REPEAT_CONTENTION" --reporter=list,json $FLAKE_SPECS'
+          nix develop --command bash -c 'npm install && just e2e-full-run --repeat-each="$FLAKE_REPEAT" --reporter=list,json $FLAKE_SPECS'
 
       # Targeted path: --trace on overrides `trace: on-first-retry`, which never
       # fires under retries=0.
       - name: e2e full ×N (targeted)
-        if: steps.pat.outputs.specs_full == ''
+        if: steps.pat.outputs.mode == 'targeted'
         env:
           E2E_TARGET: full
           E2E_CLUSTER_URL: http://127.0.0.1:8899
           E2E_ROLLOUT_HOOK: http://127.0.0.1:8898
           CI: "1"
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
+          FLAKE_REPEAT: ${{ steps.pat.outputs.repeat }}
         run: |
           set -euo pipefail
           . .github/scripts/e2e-full-serve.sh
-          nix develop --command bash -c 'npm install && just e2e-full-run -g "$FLAKE_PATTERN" --repeat-each="$FULL_REPEAT_TARGETED" --trace on --reporter=list,json'
+          nix develop --command bash -c 'npm install && just e2e-full-run -g "$FLAKE_PATTERN" --repeat-each="$FLAKE_REPEAT" --trace on --reporter=list,json'
 
       # Before the control, which replaces this cluster with the base's; always(),
       # since a sandbox can crash, be retried by the kubelet, and the spec still pass.
@@ -1443,12 +1449,12 @@ jobs:
           # Via env, never inline `${{ }}`: these come from the PR description,
           # so interpolating them into `run:` would let a PR body execute shell.
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
-          FLAKE_SPECS: ${{ steps.pat.outputs.specs_full }}
+          FLAKE_SPECS: ${{ steps.pat.outputs.specs_run }}
+          FLAKE_MODE: ${{ steps.pat.outputs.mode }}
         run: |
           set -euo pipefail
-          mode=targeted; [ -n "$FLAKE_SPECS" ] && mode=contention
           nix develop --command node scripts/flake-focus-report.mjs "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
-            --pattern "$FLAKE_PATTERN" --target full --mode "$mode" > /dev/null
+            --pattern "$FLAKE_PATTERN" --target full --mode "$FLAKE_MODE" > /dev/null
 
       # The control runs the same test with the same budget on the base's own
       # platform (only when the PR's run came back clean) because "0 failures in 5
@@ -1466,7 +1472,10 @@ jobs:
           E2E_ROLLOUT_HOOK: http://127.0.0.1:8898
           CI: "1"
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
-          FLAKE_SPECS: ${{ steps.pat.outputs.specs_full }}
+          FLAKE_SPECS: ${{ steps.pat.outputs.specs_run }}
+          # Same budget as the run above, raised or not: two different budgets make
+          # the two rates incomparable.
+          FLAKE_REPEAT: ${{ steps.pat.outputs.repeat }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # Absolute and under the PR's workspace so it outlives the baseline worktree.
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/flake-baseline.json
@@ -1486,9 +1495,9 @@ jobs:
           # Same project and repetition counts as the run above; open-coded
           # `npx playwright` because `just` here resolves the base's justfile.
           if [ -n "$FLAKE_SPECS" ]; then
-            nix develop --command bash -c 'npm install && npx playwright test --project=full --repeat-each="$FULL_REPEAT_CONTENTION" --reporter=list,json $FLAKE_SPECS' || true
+            nix develop --command bash -c 'npm install && npx playwright test --project=full --repeat-each="$FLAKE_REPEAT" --reporter=list,json $FLAKE_SPECS' || true
           else
-            nix develop --command bash -c 'npm install && npx playwright test --project=full -g "$FLAKE_PATTERN" --repeat-each="$FULL_REPEAT_TARGETED" --reporter=list,json' || true
+            nix develop --command bash -c 'npm install && npx playwright test --project=full -g "$FLAKE_PATTERN" --repeat-each="$FLAKE_REPEAT" --reporter=list,json' || true
           fi
 
       # Prior evidence: the nightly `e2e-full-report` artifacts say whether this spec
@@ -1516,13 +1525,14 @@ jobs:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           # Env, not inline `${{ }}`: these come from the PR description.
           FLAKE_PATTERN: ${{ steps.pat.outputs.pattern }}
-          FLAKE_SPECS: ${{ steps.pat.outputs.specs_full }}
+          FLAKE_SPECS: ${{ steps.pat.outputs.specs_run }}
+          FLAKE_MODE: ${{ steps.pat.outputs.mode }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          mode=targeted; [ -n "$FLAKE_SPECS" ] && mode=contention
           # Absent when the control was skipped; the comment then has no control section.
           base=()
           [ -f flake-baseline.json ] && base=(--baseline flake-baseline.json --baseline-ref "$BASE_REF@${BASE_SHA:0:7}")
@@ -1534,10 +1544,15 @@ jobs:
             hist+=(--history "$f")
             hist+=(--history-label "$(cat "$(dirname "$f")/label" 2>/dev/null || true)")
           done < <(find history -name report.json 2>/dev/null | sort)
-          nix develop --command node scripts/flake-focus-report.mjs "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
-            --pattern "$FLAKE_PATTERN" --target full --mode "$mode" \
-            --specs "$FLAKE_SPECS" --run-url "$RUN_URL" --history-ref "$BASE_REF" \
-            "${base[@]}" "${hist[@]}" > flake-comment.md
+          # The redirect sits inside the devshell: the shellHook's banner goes to
+          # the outer stdout and would otherwise land at the top of the comment.
+          # The history window is always the default branch's nightly, whatever
+          # this PR is based on.
+          nix develop --command bash -c 'node scripts/flake-focus-report.mjs "$@" > flake-comment.md' _ \
+            "$PLAYWRIGHT_JSON_OUTPUT_NAME" \
+            --pattern "$FLAKE_PATTERN" --target full --mode "$FLAKE_MODE" \
+            --specs "$FLAKE_SPECS" --run-url "$RUN_URL" --history-ref "$DEFAULT_BRANCH" \
+            "${base[@]}" "${hist[@]}"
           cat flake-comment.md >> "$GITHUB_STEP_SUMMARY"
           # One section of the shared CI comment; advisory per .github/ci-gates.yml,
           # but the gate blocks while it is pending.
@@ -1569,6 +1584,7 @@ jobs:
             /tmp/pf.log
             /tmp/cluster-sampler.log
             /tmp/rollout-hook.log
+            /tmp/platform-logs/
           retention-days: 14
           if-no-files-found: ignore
 

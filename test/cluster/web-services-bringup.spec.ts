@@ -20,6 +20,7 @@ import { createK8sProvisioner } from "../../services/agent-host/src/session/k8sP
 import { resolvePodTarget } from "../../services/agent-host/src/exec/k8sExec.js";
 import { connectSandbox } from "../../services/agent-host/src/exec/sandboxExec.js";
 import { createWake, createWebServiceProxy } from "../../services/agent-host/src/proxy/webServiceProxy.js";
+import { ANONYMOUS_USER } from "../../services/agent-host/src/auth/identity.js";
 import { createWebServiceRegistry } from "../../services/agent-host/src/proxy/webServiceRegistry.js";
 import { createSessionManager, type SandboxProvisioner, type SessionManager } from "../../services/agent-host/src/session/manager.js";
 import { createFileConversationStore } from "../../services/agent-host/src/session/fileStore.js";
@@ -88,6 +89,7 @@ maybe("web-service bring-up from the browser (real pod)", () => {
       resolvePodTarget: (r) => resolvePodTarget(r),
       registry,
       publicHost: "test.local",
+      resolveUser: () => ({ id: ANONYMOUS_USER, anonymous: true }),
       wake: createWake({ sessions, provisioner, registry }),
     });
     server = createServer((req, res) => {

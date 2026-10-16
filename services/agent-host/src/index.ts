@@ -1341,6 +1341,7 @@ export async function main(
         resolvePodTarget: (ref) => resolvePodTarget(ref),
         registry: webServices,
         wake: createWake({ sessions, provisioner, registry: webServices }),
+        resolveUser,
         publicHost: (() => {
           try {
             return process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).host : "";
