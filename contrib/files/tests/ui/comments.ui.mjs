@@ -265,6 +265,29 @@ try {
   const emptyQuotes = await page.$$eval("#clist .ann blockquote", (nodes) => nodes.filter((n) => !n.textContent.trim()).length);
   check("a quoteless comment draws without an empty blockquote", emptyQuotes === 0, `${emptyQuotes} empty`);
 
+  // A line comment quotes nothing, so it has no highlight -- and until the tick it
+  // left no trace in the document at all: the card was in the margin and the
+  // paragraph it was about looked untouched.
+  const tick = await page.evaluate((line) => {
+    const block = document.querySelector(`#view .md [data-line="${line}"]`);
+    const t = block?.querySelector(".cmark");
+    if (!t) return null;
+    const b = block.getBoundingClientRect(), r = t.getBoundingClientRect();
+    return { label: t.title, left: Math.round(r.left - b.left), inText: t.textContent.length, threads: (block.dataset.threads || "").split(" ").length };
+  }, target.line);
+  check("a line comment leaves a tick in the margin", !!tick && tick.left < 0, JSON.stringify(tick));
+  check("the tick adds no text to the document", tick && tick.inText === 0, `${tick?.inText} characters`);
+
+  // The tick is the way back to the comment: pressing it lights the thread in the
+  // document and its card in the margin together.
+  await page.click(`#view .md [data-line="${target.line}"] .cmark`);
+  await page.waitForTimeout(250);
+  const lit = await page.evaluate(() => ({
+    tick: !!document.querySelector("#view .cmark.focus"),
+    card: !!document.querySelector("#clist .ann.focus"),
+  }));
+  check("pressing the tick lights the comment and its card", lit.tick && lit.card, JSON.stringify(lit));
+
 
   // The rule under the column headers is one line across the window. Each header is a
   // separate element that used to be sized by its own padding and content, so the

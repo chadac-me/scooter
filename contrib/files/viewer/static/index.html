@@ -209,6 +209,19 @@ section { overflow: auto; min-width: 0; display: flex; flex-direction: column; }
 .codewrap .gutter .ln { cursor: pointer; }
 .codewrap .gutter .ln:hover { color: var(--brand); opacity: 1; text-decoration: underline; }
 
+/* A comment on a line quotes nothing, so until now it left no trace in the document
+   at all: the card existed in the margin and the paragraph it was about looked
+   untouched. A tick in the left margin marks any block that carries a comment, which
+   is also what a comment whose quote has gone stale falls back to. */
+.md .commented { position: relative; }
+.md .cmark {
+  position: absolute; left: -17px; top: 3px; bottom: 3px; width: 3px; padding: 0;
+  border: 0; border-radius: 2px; cursor: pointer;
+  background: color-mix(in srgb, var(--warning) 45%, transparent);
+}
+.md .cmark:hover, .md .cmark.focus { background: var(--warning); }
+/* A code file is read by line number, so the number itself carries the mark. */
+.codewrap .gutter .ln.commented { color: var(--warning); opacity: 1; font-weight: 650; }
 mark.qmark {
   background: color-mix(in srgb, var(--warning) 28%, transparent);
   color: inherit; border-radius: 3px; padding: 0 1px; cursor: pointer;
@@ -1501,9 +1514,54 @@ function markAnchors() {
     const before = lines.slice(0, Math.max(0, a.line - 1)).join("\n");
     markQuote(view, a.quote, countOf(before, a.quote), a.thread);
   }
+  markCommentedBlocks();
   // The marks are what the cards are placed against, so the notes are re-placed once
   // the highlights exist rather than against the bare blocks.
   layoutNotes();
+}
+
+/** A tick beside every block that carries a comment, quoted or not. */
+function markCommentedBlocks() {
+  const view = el("view");
+  for (const old of view.querySelectorAll(".cmark")) old.remove();
+  for (const block of view.querySelectorAll(".commented")) {
+    block.classList.remove("commented");
+    delete block.dataset.threads;
+  }
+
+  // Threads per block, in the order the file has them: a block can carry several, and
+  // a reply is not a second comment on it.
+  const byBlock = new Map();
+  for (const a of annotations) {
+    if (a.kind === "answer" || a.resolved) continue;
+    const block = blockForLine(a.line);
+    if (!block) continue;
+    const threads = byBlock.get(block) || [];
+    if (!threads.includes(a.thread)) threads.push(a.thread);
+    byBlock.set(block, threads);
+  }
+
+  for (const [block, threads] of byBlock) {
+    block.classList.add("commented");
+    block.dataset.threads = threads.join(" ");
+    // In a code file the line number is the mark; a button inside the gutter would
+    // break the column the numbers are read in.
+    if (block.classList.contains("ln")) continue;
+    const tick = document.createElement("button");
+    tick.type = "button";
+    tick.className = "cmark";
+    tick.dataset.thread = threads[0];
+    // No text: this sits inside the rendered document, and what the paragraph reads
+    // as has to stay what the file says.
+    const label = threads.length === 1 ? "1 comment on this line" : `${threads.length} comments on this line`;
+    tick.title = label;
+    tick.setAttribute("aria-label", label);
+    tick.addEventListener("click", (event) => {
+      event.stopPropagation();
+      focus(threads[0], { scroll: false });
+    });
+    block.appendChild(tick);
+  }
 }
 
 function markQuote(root, quote, nth, thread) {
@@ -1606,9 +1664,17 @@ function focus(thread, { scroll }) {
   for (const node of document.querySelectorAll("mark.qmark, #clist .ann")) {
     node.classList.toggle("focus", node.dataset.thread === thread);
   }
+  // A block can carry several threads, so the tick lights for any of them.
+  for (const tick of document.querySelectorAll("#view .cmark")) {
+    const threads = (tick.parentElement?.dataset.threads || "").split(" ");
+    tick.classList.toggle("focus", threads.includes(thread));
+  }
   if (!scroll) return;
-  const mark = el("view").querySelector(`mark.qmark[data-thread="${CSS.escape(thread)}"]`);
-  if (mark) mark.scrollIntoView({ block: "center", behavior: "smooth" });
+  // A line comment has no highlight to scroll to, and its block is where it is about.
+  const card = document.querySelector(`#clist .ann[data-thread="${CSS.escape(thread)}"]`);
+  const target = el("view").querySelector(`mark.qmark[data-thread="${CSS.escape(thread)}"]`)
+    || blockForLine(card?.dataset.line);
+  if (target) target.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 // Expand ancestors first, so a deep link opens showing where the file lives.
