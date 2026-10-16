@@ -153,6 +153,8 @@
     # with the PVC retained as it requires, so the render check exercises it.
     eventBackfill.enable = true;
     conversationController.historyMirror.retainForMigration = true;
+    # Sandbox self-access (VS Code continuing its own conversation), so the render check covers it.
+    conversationController.selfAccess.enable = true;
 
     # OpenTelemetry metrics with per-model prices per million tokens.
     observability.otel = {

@@ -527,6 +527,21 @@ let
         else [ ("aws-off: sandbox-manifest-overlay still carries contrib.yaml — the sandbox seam is"
                 + " wired unconditionally, so every sandbox mounts a ConfigMap that is not rendered") ]);
 
+  # Sandbox self-access: the router serves the listener, a Service fronts it, and every sandbox
+  # gets the token audience and the URL to reach it.
+  routerPorts =
+    let ctrs = builtins.attrValues (res.deployments.conversation-router.spec.template.spec.containers or { });
+    in builtins.concatMap (c: c.ports or [ ]) ctrs;
+  hostEnvVal = name: let m = builtins.filter (e: e.name == name) hostEnv; in if m == [ ] then "" else (builtins.head m).value;
+  selfAccessProblems =
+    (if hasName routerEnv "SELF_LISTEN_ADDR" then [ ] else [ "router.env.SELF_LISTEN_ADDR (selfAccess.enable not wired into the router)" ])
+    ++ (if hasName routerPorts "self" then [ ] else [ "router port `self` missing — the Service below has nothing to target" ])
+    ++ (if (res.services or { }) ? conversation-router-self then [ ] else [ "services.conversation-router-self missing" ])
+    ++ (if builtins.elem "scooter-self" (builtins.filter builtins.isString (builtins.split "," (hostEnvVal "SCOOTER_TOKEN_AUDIENCES"))) then [ ]
+        else [ "host.env.SCOOTER_TOKEN_AUDIENCES lacks scooter-self — sandboxes get no token for the listener" ])
+    ++ (if (builtins.fromJSON (if hostEnvVal "SCOOTER_ENV" == "" then "{}" else hostEnvVal "SCOOTER_ENV")) ? SCOOTER_SELF_URL then [ ]
+        else [ "host.env.SCOOTER_ENV lacks SCOOTER_SELF_URL — the sandbox cannot find the listener" ]);
+
   # A contrib's approval declaration reaches the agent-host, and with aws off it does not.
   approvalsJson =
     let m = builtins.filter (e: e.name == "APPROVAL_CONTRIBS_JSON") hostEnv;
@@ -664,7 +679,7 @@ let
       (containersOf w))
     allWorkloads;
 
-  allProblems = disabledContribProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems;
+  allProblems = disabledContribProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"
