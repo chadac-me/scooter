@@ -357,6 +357,27 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail(HTTPStatus.METHOD_NOT_ALLOWED, f"{route} is read-only")
         self.fail(HTTPStatus.NOT_FOUND, f"no route {route}")
 
+    def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's casing
+        """Removing an annotation: the reader's way out of a comment they regret.
+
+        Resolving says a discussion is finished and keeps it; this says it should not
+        be in the record at all, so it is a different verb rather than another flag.
+        """
+        route, _ = self.route_of(self.path)
+        if route is None:
+            return self.fail(HTTPStatus.NOT_FOUND, "not under this service's base path")
+        if not route.startswith("/api/annotations/") or route.count("/") != 3:
+            return self.fail(HTTPStatus.NOT_FOUND, f"no route {route}")
+
+        annotation_id = route[len("/api/annotations/") :]
+        try:
+            removed = self.store.delete(annotation_id)
+        except _Unavailable as exc:
+            return self.fail(HTTPStatus.NOT_IMPLEMENTED, str(exc))
+        except ann.AnnotationError as exc:
+            return self.fail(HTTPStatus.NOT_FOUND, str(exc))
+        self.send_json({"deleted": removed})
+
     def add_annotation(self, body: dict) -> None:
         path = str(body.get("path") or "")
         content = self.live_content(path)

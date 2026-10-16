@@ -55,7 +55,15 @@ header {
   border: 1px solid var(--border); color: var(--muted-foreground);
 }
 .chip.warn { border-color: var(--warning); color: var(--warning); }
-main { flex: 1; display: grid; grid-template-columns: 300px 1fr 340px; min-height: 0; }
+main { flex: 1; display: grid; grid-template-columns: 300px 360px 1fr; min-height: 0; }
+/* The rail sits between the tree and the document, not out past its right edge: a
+   reader writing comments works down the left side and across, and the document is
+   the thing that should keep the remaining width. Ordered rather than placed in
+   explicit columns, so dropping the rail at a narrow width leaves the other two
+   where they are. */
+nav { order: 1; }
+#rail { order: 2; }
+main > section { order: 3; }
 /* The gutter goes first and the tree second, because the Comments tab is the only
    view that cannot be reached another way. */
 @media (max-width: 1250px) { #gutter { display: none; } }
@@ -186,7 +194,7 @@ mark.anchor {
 mark.anchor.focus { background: color-mix(in srgb, var(--brand) 32%, transparent); }
 
 #rail {
-  border-left: 1px solid var(--border); background: var(--sidebar);
+  border-right: 1px solid var(--border); background: var(--sidebar);
   display: flex; flex-direction: column; min-width: 0; overflow: hidden;
 }
 #tabs { display: flex; flex: 0 0 auto; border-bottom: 1px solid var(--border); }
@@ -248,6 +256,19 @@ mark.anchor.focus { background: color-mix(in srgb, var(--brand) 32%, transparent
   color: var(--foreground); font: inherit; resize: vertical;
 }
 #cform .row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+/* A reply is inside its thread's card, indented under the comment it answers. */
+.ann .reply { margin: 8px 0 0 10px; padding-top: 7px; border-top: 1px solid var(--border); }
+.ann .reply .top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.replybox { margin-top: 9px; }
+.replybox textarea {
+  width: 100%; box-sizing: border-box; min-height: 40px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--card);
+  color: var(--foreground); font: inherit; resize: vertical;
+}
+.replybox .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 0; cursor: default; }
+/* The card drawn the instant a comment is submitted, before the store has it. */
+.ann.sending { opacity: 0.7; }
+.badge.sending { color: var(--muted-foreground); }
 </style>
 </head>
 <body>
@@ -297,7 +318,7 @@ mark.anchor.focus { background: color-mix(in srgb, var(--brand) 32%, transparent
         <blockquote class="mono" id="cquote"></blockquote>
         <textarea id="ctext" placeholder="Leave a comment for the agent…"></textarea>
         <div class="row">
-          <button class="btn" type="submit">comment</button>
+          <button class="btn" type="submit" id="csubmit">comment</button>
           <button class="btn" type="button" id="ccancel">cancel</button>
         </div>
       </form>
@@ -339,6 +360,14 @@ const post = (route, body) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body || {}),
   }).then(async (r) => {
+    const parsed = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(parsed.error || r.statusText);
+    return parsed;
+  });
+
+// Deleting is the one destructive thing the page can do; same error shape as post().
+const del = (route) =>
+  fetch(`${BASE}/api/${route}`, { method: "DELETE" }).then(async (r) => {
     const parsed = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(parsed.error || r.statusText);
     return parsed;
@@ -696,8 +725,10 @@ let questions = [];
 // The selection a comment is being written against, held because opening the form
 // collapses the selection it came from.
 let pendingAnchor = null;
-// The one follow-up poll for an in-flight push, cleared on every draw.
+// The follow-up poll for an in-flight push, cleared on every draw, and how long the
+// next one waits.
 let syncPoll = null;
+let syncDelay = 0;
 let focused = null;
 
 const SYNC_NOTE = {
@@ -818,20 +849,67 @@ el("ccancel").addEventListener("click", () => {
   pendingAnchor = null;
 });
 
+// One submission at a time. The handler used to leave the composer untouched until
+// a POST and a full rail reload had both come back, which under the proxy is a
+// second or more of a button that looks like it did nothing — so it got pressed
+// again, and every press left another copy of the same comment.
+let submitting = false;
+
 el("cform").addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = el("ctext").value;
-  if (!text.trim() || !pendingAnchor || !selected) return;
+  if (submitting || !text.trim() || !pendingAnchor || !selected) return;
+  const anchor = pendingAnchor;
+  const path = selected;
+
+  submitting = true;
+  el("csubmit").disabled = true;
+  // Closed and drawn now, not when the round trip returns: the reader gets their
+  // comment on screen immediately, marked as still being recorded.
+  el("cform").style.display = "none";
+  el("ctext").value = "";
+  el("cerror").textContent = "";
+  pendingAnchor = null;
+  drawSending(anchor, text);
+
   try {
-    await post("annotations", { path: selected, text, ...pendingAnchor });
-    el("cform").style.display = "none";
-    el("ctext").value = "";
-    pendingAnchor = null;
-    await loadRail(selected);
+    await post("annotations", { path, text, ...anchor });
+    await loadRail(path);
   } catch (err) {
+    // Hand the reader their words back in the box they typed them in, rather than
+    // dropping the comment on the floor with an error beside it.
+    clearSending();
+    pendingAnchor = anchor;
+    el("cquote").textContent = anchor.quote;
+    el("ctext").value = text;
+    el("cform").style.display = "block";
     showError(err.message);
+  } finally {
+    submitting = false;
+    el("csubmit").disabled = false;
   }
 });
+
+/** The comment as it looks between pressing the button and the store having it. */
+function drawSending(anchor, text) {
+  clearSending();
+  const node = document.createElement("div");
+  node.className = "ann sending";
+  node.id = "csending";
+  const top = document.createElement("div");
+  top.className = "top";
+  const where = document.createElement("span");
+  where.className = "crumb mono";
+  where.textContent = `line ${anchor.line}`;
+  top.append(where, badge("sending", "being recorded"));
+  node.append(top, quoteOf(anchor.quote), textOf(text));
+  const list = el("clist");
+  // The empty-state note is not something to prepend a comment above.
+  if (list.firstElementChild?.classList.contains("note")) list.replaceChildren();
+  list.prepend(node);
+}
+
+const clearSending = () => el("csending")?.remove();
 
 // --- tabs -----------------------------------------------------------------------
 
@@ -992,22 +1070,67 @@ function drawComments(counts) {
   }
   const pending = counts.pending || 0;
   el("csync").textContent = pending ? `${pending} not yet synced` : "";
-  // The outbox acks on its own thread, so one follow-up per draw — and only while
-  // something is in flight — keeps the page off a stale "pending".
+  // The outbox acks on its own thread, so the rail has to come back and look. One
+  // follow-up at a fixed 1.5s was not enough: a push that needed its backoff left
+  // the badge reading "pending" until something else happened to redraw the page.
+  // Only a push still trying is worth waiting on — a failed one has a retry button
+  // and would otherwise poll for the life of the page.
+  const inFlight = annotations.filter((a) => a.state === "pending").length;
   clearTimeout(syncPoll);
-  if (pending) syncPoll = setTimeout(() => loadRail(selected), 1500);
+  if (inFlight) {
+    syncDelay = Math.min(syncDelay ? syncDelay * 2 : 700, 5000);
+    syncPoll = setTimeout(() => loadRail(selected), syncDelay);
+  } else {
+    syncDelay = 0;
+  }
 
+  // Grouped by thread: a reply belongs under the comment it answers, not beside it
+  // as a second thread. The server's order (line, then creation) puts the comment
+  // that opened a thread first, which is the one carrying the anchor.
+  const threads = new Map();
   for (const a of annotations) {
     if (a.kind === "answer") continue;
-    list.appendChild(card(a));
+    const found = threads.get(a.thread);
+    if (found) found.push(a);
+    else threads.set(a.thread, [a]);
   }
+  for (const [thread, items] of threads) list.appendChild(card(thread, items));
 }
 
-function card(a) {
+/** One thread: the comment that opened it, its replies, and a box for another. */
+function card(thread, items) {
+  const [head, ...replies] = items;
   const node = document.createElement("div");
-  node.className = `ann${a.resolved ? " resolved" : ""}`;
-  node.dataset.thread = a.thread;
+  node.className = `ann${head.resolved ? " resolved" : ""}`;
+  node.dataset.thread = thread;
 
+  node.append(headTop(head, replies), quoteOf(head.quote), textOf(head.text));
+  if (head.error) node.appendChild(why(head.error));
+
+  for (const reply of replies) {
+    const row = document.createElement("div");
+    row.className = "reply";
+    // No quote and no line: a reply is anchored to the same text as its parent, so
+    // repeating the quote under it is noise.
+    const top = document.createElement("div");
+    top.className = "top";
+    top.appendChild(badge(reply.state, SYNC_NOTE[reply.state] || ""));
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    top.appendChild(spacer);
+    if (reply.state === "failed") top.appendChild(action("retry", () => retry(reply.id)));
+    top.appendChild(action("delete", () => remove(reply, 0)));
+    row.append(top, textOf(reply.text));
+    if (reply.error) row.appendChild(why(reply.error));
+    node.appendChild(row);
+  }
+
+  if (!head.resolved) node.appendChild(replyBox(head, thread));
+  node.addEventListener("click", () => focus(thread, { scroll: true }));
+  return node;
+}
+
+function headTop(a, replies) {
   const top = document.createElement("div");
   top.className = "top";
   const where = document.createElement("span");
@@ -1019,32 +1142,95 @@ function card(a) {
   if (a.anchor_state === "moved") top.appendChild(badge("moved", `written against line ${a.recorded_line}`));
   if (a.anchor_state === "stale") top.appendChild(badge("stale", "the quoted text is no longer in the file"));
   top.appendChild(badge(a.state, SYNC_NOTE[a.state] || ""));
+  if (replies.length) {
+    const count = document.createElement("span");
+    count.className = "crumb";
+    count.textContent = replies.length === 1 ? "1 reply" : `${replies.length} replies`;
+    top.appendChild(count);
+  }
 
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   top.appendChild(spacer);
 
   if (a.state === "failed") top.appendChild(action("retry", () => retry(a.id)));
+  // Delete and resolve are different acts: resolving says the discussion is finished
+  // and keeps it, deleting says it should never have been written.
+  top.appendChild(action("delete", () => remove(a, replies.length)));
   if (!a.resolved) top.appendChild(action("resolve", () => resolveThread(a.thread, true)));
   else top.appendChild(action("reopen", () => resolveThread(a.thread, false)));
+  return top;
+}
 
+function quoteOf(text) {
   const quote = document.createElement("blockquote");
   quote.className = "mono";
-  quote.textContent = a.quote;
+  quote.textContent = text;
+  return quote;
+}
 
+function textOf(body) {
   const text = document.createElement("div");
   text.className = "text";
-  text.textContent = a.text;
+  text.textContent = body;
+  return text;
+}
 
-  node.append(top, quote, text);
-  if (a.error) {
-    const why = document.createElement("div");
-    why.className = "crumb";
-    why.textContent = a.error;
-    node.appendChild(why);
-  }
-  node.addEventListener("click", () => focus(a.thread, { scroll: true }));
+function why(message) {
+  const node = document.createElement("div");
+  node.className = "crumb";
+  node.textContent = message;
   return node;
+}
+
+/** The box that adds another comment to an existing thread. */
+function replyBox(head, thread) {
+  const form = document.createElement("form");
+  form.className = "replybox";
+  const text = document.createElement("textarea");
+  text.placeholder = "Reply…";
+  const row = document.createElement("div");
+  row.className = "row";
+  const send = document.createElement("button");
+  send.className = "btn";
+  send.type = "submit";
+  send.textContent = "reply";
+  const error = document.createElement("span");
+  error.className = "crumb";
+  row.append(send, error);
+  form.append(text, row);
+
+  // Typing in the box is not a click on the card: the card's handler scrolls the
+  // document to the anchor, which would move the text out from under the reader.
+  form.addEventListener("click", (event) => event.stopPropagation());
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = text.value;
+    if (send.disabled || !body.trim() || !selected) return;
+    // Locked and labelled before the round trip, for the same reason the composer is.
+    send.disabled = true;
+    send.textContent = "sending…";
+    error.textContent = "";
+    try {
+      // The parent's anchor, so the reply hangs off the same text; recorded_line is
+      // where the comment was written, which is what the store re-resolves against.
+      await post("annotations", {
+        path: selected,
+        line: head.recorded_line || head.line,
+        quote: head.quote,
+        text: body,
+        thread,
+      });
+      // The redraw replaces this form, so the box needs no clearing of its own.
+      await loadRail(selected);
+    } catch (err) {
+      error.textContent = err.message;
+      send.disabled = false;
+      send.textContent = "reply";
+    }
+  });
+  return form;
 }
 
 function badge(kind, title) {
@@ -1076,6 +1262,19 @@ async function retry(id) {
   await loadRail(selected);
 }
 
+async function remove(a, replies) {
+  const also = replies ? ` and its ${replies === 1 ? "reply" : `${replies} replies`}` : "";
+  // Deleting is not undoable here and the broker is told to forget it too, so it
+  // asks first — and says what else goes with it.
+  if (!window.confirm(`Delete this comment${also}? This cannot be undone.`)) return;
+  try {
+    await del(`annotations/${encodeURIComponent(a.id)}`);
+  } catch (err) {
+    showError(err.message);
+  }
+  await loadRail(selected);
+}
+
 async function resolveThread(thread, resolved) {
   try {
     await post(`annotations/threads/${encodeURIComponent(thread)}/resolve`, { resolved });
@@ -1097,8 +1296,13 @@ function markAnchors() {
   if (!current || typeof current.body !== "string") return;
 
   const lines = current.body.split("\n");
+  const marked = new Set();
   for (const a of annotations) {
     if (a.resolved || a.anchor_state === "stale" || !a.quote) continue;
+    // One mark per thread: a reply carries its parent's quote, and marking it twice
+    // would skip the text already wrapped and highlight the wrong occurrence.
+    if (marked.has(a.thread)) continue;
+    marked.add(a.thread);
     // Which occurrence of the quote this anchor is: the same count the write path
     // used, so a repeated line marks the one the comment was left on.
     const before = lines.slice(0, Math.max(0, a.line - 1)).join("\n");

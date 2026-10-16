@@ -212,13 +212,16 @@ class BrokerTransport:
     def resolve(self, thread: str, resolved: bool) -> None:
         self._call("POST", f"/threads/{thread}/resolve", {"resolved": resolved})
 
+    def delete(self, annotation_id: str) -> None:
+        self._call("DELETE", f"/{annotation_id}", None)
+
     def pull(self) -> list[dict]:
         return self._call("GET", "", None).get("annotations", [])
 
 
 @dataclass
 class _Op:
-    """Queued work: a record to push, or a thread to resolve."""
+    """Queued work: a record to push, a thread to resolve, or a record to forget."""
 
     kind: str
     key: str
@@ -337,6 +340,36 @@ class Annotations:
             self.queue.append(_Op(kind="resolve", key=thread, resolved=resolved))
             self._save()
         return len(touched)
+
+    def delete(self, annotation_id: str) -> list[str]:
+        """Forget an annotation here, and queue the same for the broker.
+
+        Deleting the comment that opened a thread takes its replies with it: a reply
+        whose parent is gone reads as a remark about nothing. The delete is queued
+        even for a record the broker never acked, because a push may be in flight;
+        the broker treats forgetting what it does not have as already done.
+        """
+        with self._lock:
+            record = self.records.get(annotation_id)
+            if record is None:
+                raise AnnotationError("no such annotation")
+            doomed = (
+                [r for r in self.records.values() if r.thread == record.thread]
+                if record.id == record.thread
+                else [record]
+            )
+            removed = []
+            for victim in doomed:
+                self.records.pop(victim.id, None)
+                # A queued push for a record that no longer exists must not be
+                # retried into existence after the delete.
+                self.queue = [
+                    op for op in self.queue if not (op.kind == "put" and op.key == victim.id)
+                ]
+                self.queue.append(_Op(kind="delete", key=victim.id))
+                removed.append(victim.id)
+            self._save()
+        return removed
 
     def retry(self, annotation_id: str) -> Record:
         """Re-queue an abandoned or refused push, at the reader's request."""
@@ -470,6 +503,8 @@ class Annotations:
         try:
             if op.kind == "resolve":
                 self.transport.resolve(op.key, op.resolved)
+            elif op.kind == "delete":
+                self.transport.delete(op.key)
             else:
                 record = self.records.get(op.key)
                 if record is None or record.state == "acked":
