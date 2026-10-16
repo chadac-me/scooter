@@ -25,6 +25,8 @@ var selfRoutes = []struct {
 	re     *regexp.Regexp
 }{
 	{http.MethodGet, regexp.MustCompile(`^/conversations/([^/]+)/events$`)},
+	// The replay+live stream; /events alone replays and never carries live events to a viewer.
+	{http.MethodGet, regexp.MustCompile(`^/conversations/([^/]+)/events\.integrity$`)},
 	{http.MethodGet, regexp.MustCompile(`^/conversations/([^/]+)/history$`)},
 	{http.MethodPost, regexp.MustCompile(`^/conversations/([^/]+)/messages$`)},
 	{http.MethodPost, regexp.MustCompile(`^/conversations/([^/]+)/cancel$`)},
