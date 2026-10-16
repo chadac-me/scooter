@@ -7,10 +7,11 @@
 import { AddressInfo } from "node:net";
 import { createServer, request, type Server } from "node:http";
 import { connect, type Socket } from "node:net";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createWebServiceProxy,
+  POD_TARGET_TTL_MS,
   parseProxyPath,
   type PodTarget,
   type WebServiceDescriptor,
@@ -427,6 +428,97 @@ describe("web-service proxy", () => {
     const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { user: ANON });
     const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app");
     expect(ident).toMatchObject({ handoff: null, handoffEmail: null });
+  });
+
+  // --- pod address cache --------------------------------------------------------
+
+  /** A proxy whose resolver counts lookups and answers from `ips` in turn (the last one repeats). */
+  function countingProxy(
+    registry: WebServiceRegistry,
+    conv: { status?: string } = {},
+    ips: string[] = ["127.0.0.1"],
+    gate?: Promise<void>,
+  ): { proxy: WebServiceProxy; lookups: () => number } {
+    let n = 0;
+    const proxy = createWebServiceProxy({
+      sessions: { get: () => ({ id: "conv-1", threadId: "conv-1", ...conv }), touchById: () => {} } as never,
+      resolvePodTarget: (async () => {
+        const ip = ips[Math.min(n, ips.length - 1)];
+        n++;
+        if (gate) await gate;
+        return { name: "conv-1-pod", podIP: ip };
+      }) as never,
+      registry,
+      publicHost: "scooter.example.com",
+      resolveUser: () => ANON,
+    });
+    return { proxy, lookups: () => n };
+  }
+
+  it("looks the pod up once, not per request", async () => {
+    const { proxy, lookups } = countingProxy(fakeRegistry(svc.port));
+    for (let i = 0; i < 4; i++) {
+      expect((await proxyGet(proxy, `/c/conv-1/marimo/a?n=${i}`)).status).toBe(200);
+    }
+    expect(lookups()).toBe(1);
+  });
+
+  it("concurrent requests share one in-flight lookup (a page load fans out)", async () => {
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const { proxy, lookups } = countingProxy(fakeRegistry(svc.port), {}, ["127.0.0.1"], gate);
+    const all = Promise.all([1, 2, 3, 4].map((i) => proxyGet(proxy, `/c/conv-1/marimo/a?n=${i}`)));
+    setTimeout(open, 20);
+    expect((await all).map((r) => r.status)).toEqual([200, 200, 200, 200]);
+    expect(lookups()).toBe(1);
+  });
+
+  it("looks again once the cached address expires", async () => {
+    const { proxy, lookups } = countingProxy(fakeRegistry(svc.port));
+    const realNow = Date.now;
+    let offset = 0;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    try {
+      await proxyGet(proxy, "/c/conv-1/marimo/a");
+      offset = POD_TARGET_TTL_MS + 1;
+      await proxyGet(proxy, "/c/conv-1/marimo/a");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lookups()).toBe(2);
+  });
+
+  it("looks again when the conversation's status changes (suspend/resume moves the pod)", async () => {
+    const conv = { status: "running" };
+    const { proxy, lookups } = countingProxy(fakeRegistry(svc.port), conv);
+    await proxyGet(proxy, "/c/conv-1/marimo/a");
+    conv.status = "suspended";
+    await proxyGet(proxy, "/c/conv-1/marimo/a");
+    expect(lookups()).toBe(2);
+  });
+
+  it("a stale cached address is dropped on the first failed connect, and the next request finds the pod", async () => {
+    // 127.0.0.2 is loopback but nothing listens there for this port: the old pod IP.
+    const { proxy, lookups } = countingProxy(fakeRegistry(svc.port), {}, ["127.0.0.2", "127.0.0.1"]);
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/a", { accept: "*/*" })).status).toBe(502);
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/a")).status).toBe(200);
+    expect(lookups()).toBe(2);
+  });
+
+  it("a failed lookup is not cached", async () => {
+    let n = 0;
+    const proxy = createWebServiceProxy({
+      sessions: { get: () => ({ id: "conv-1", threadId: "conv-1" }), touchById: () => {} } as never,
+      resolvePodTarget: (async () => {
+        if (n++ === 0) throw new Error("no ready pod");
+        return { name: "conv-1-pod", podIP: "127.0.0.1" };
+      }) as never,
+      registry: fakeRegistry(svc.port),
+      publicHost: "scooter.example.com",
+      resolveUser: () => ANON,
+    });
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/a")).status).toBe(503);
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/a")).status).toBe(200);
   });
 });
 
