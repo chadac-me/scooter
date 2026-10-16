@@ -310,6 +310,7 @@ export function createFileConversationStore(root: string): ConversationStore {
           createdAt: meta.createdAt ?? lastActivityAt,
           lastActivityAt,
           model: meta.model,
+          modelSetBy: meta.modelSetBy,
           owner: meta.owner,
           parentId: meta.parentId,
           userTitled: meta.userTitled,

@@ -147,6 +147,26 @@ describe("IntegrityAgent", () => {
     agent.dispose();
   });
 
+  it("reports the model a send carried once the POST is accepted, and not on a failure", async () => {
+    const sent: string[] = [];
+    const ok = vi.fn(async () => new Response(new ReadableStream(), { status: 200 })) as unknown as typeof fetch;
+    const agent = createIntegrityAgent({
+      baseUrl: "http://host", conversationId: "c1", model: "opus", fetchImpl: ok, onModelSent: (m) => sent.push(m),
+    });
+    await agent.send("hi");
+    expect(sent).toEqual(["opus"]);
+    agent.dispose();
+
+    const failed: string[] = [];
+    const bad = vi.fn(async () => new Response("no", { status: 503 })) as unknown as typeof fetch;
+    const agent2 = createIntegrityAgent({
+      baseUrl: "http://host", conversationId: "c1", model: "opus", fetchImpl: bad, onModelSent: (m) => failed.push(m),
+    });
+    await agent2.send("hi");
+    expect(failed, "a refused send must keep the pick pending").toEqual([]);
+    agent2.dispose();
+  });
+
   it("send() cancels the POST /agui response body (frees the HTTP/2 flow-control window)", async () => {
     // An unread POST /agui body would fill the HTTP/2 flow-control window and stall the integrity stream.
     const cancel = vi.fn(async () => {});

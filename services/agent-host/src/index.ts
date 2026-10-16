@@ -928,6 +928,7 @@ export async function main(
       ? {
           catalog: config.modelCatalog,
           currentModel: (id: string) => sessions.get(id)?.model,
+          modelSetBy: (id: string) => sessions.get(id)?.modelSetBy,
           switchModel: (id: string, model: string) => sessions.switchModelNow(id, model),
         }
       : undefined;

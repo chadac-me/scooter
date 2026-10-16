@@ -47,6 +47,8 @@ CREATE TABLE "conversations" (
   "created_at"       bigint NOT NULL,
   "last_activity_at" bigint NOT NULL,
   "model"            text NULL,
+  -- Who chose `model`; the agent keeps a user's pick.
+  "model_set_by"     text NULL CHECK ("model_set_by" IN ('user', 'agent')),
   "owner"            text NULL,
   "parent_id"        text NULL,
   "user_titled"      boolean NULL,

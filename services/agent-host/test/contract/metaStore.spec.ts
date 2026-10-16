@@ -35,7 +35,7 @@ function fakeDb(): {
   // Column order matches lib/sql/agent_host/schema.sql because drizzle's bare .select() maps positionally.
   const ORDER = [
     "id", "thread_id", "title", "created_at", "last_activity_at",
-    "model", "owner", "parent_id", "user_titled", "starred", "pending_queue",
+    "model", "model_set_by", "owner", "parent_id", "user_titled", "starred", "pending_queue",
   ] as const;
 
   const client = {
@@ -45,8 +45,8 @@ function fakeDb(): {
       const head = text.trim().toUpperCase();
 
       if (head.startsWith("INSERT")) {
-        const [id, threadId, title, createdAt, lastActivityAt, model, owner, parentId, userTitled, starred, pendingQueue] =
-          values as [string, string, string, number, number, string | null, string | null, string | null, boolean | null, boolean | null, unknown];
+        const [id, threadId, title, createdAt, lastActivityAt, model, modelSetBy, owner, parentId, userTitled, starred, pendingQueue] =
+          values as [string, string, string, number, number, string | null, string | null, string | null, string | null, boolean | null, boolean | null, unknown];
         if (rows.has(id) && !/DO UPDATE/i.test(text)) return { rows: [], rowCount: 0 };
         rows.set(id, {
           id,
@@ -56,6 +56,7 @@ function fakeDb(): {
           created_at: String(createdAt),
           last_activity_at: String(lastActivityAt),
           model,
+          model_set_by: modelSetBy,
           owner,
           parent_id: parentId,
           user_titled: userTitled,
@@ -67,8 +68,8 @@ function fakeDb(): {
 
       if (head.startsWith("UPDATE")) {
         // Every column, then the target id as the last param.
-        const [id, threadId, title, createdAt, lastActivityAt, model, owner, parentId, userTitled, starred, pendingQueue, target] =
-          values as [string, string, string, number, number, string | null, string | null, string | null, boolean | null, boolean | null, unknown, string];
+        const [id, threadId, title, createdAt, lastActivityAt, model, modelSetBy, owner, parentId, userTitled, starred, pendingQueue, target] =
+          values as [string, string, string, number, number, string | null, string | null, string | null, string | null, boolean | null, boolean | null, unknown, string];
         if (!rows.has(target)) return { rows: [], rowCount: 0 }; // no row => nothing written
         rows.set(target, {
           id,
@@ -77,6 +78,7 @@ function fakeDb(): {
           created_at: String(createdAt),
           last_activity_at: String(lastActivityAt),
           model,
+          model_set_by: modelSetBy,
           owner,
           parent_id: parentId,
           user_titled: userTitled,
@@ -110,6 +112,7 @@ function fakeDb(): {
       created_at: "0",
       last_activity_at: "0",
       model: null,
+      model_set_by: null,
       owner: null,
       parent_id: null,
       user_titled: null,
@@ -168,6 +171,7 @@ describe("conversation metadata in Postgres", () => {
     created("conv-1");
     const full = meta({
       model: "claude-opus-4",
+      modelSetBy: "agent",
       owner: "user@example.com",
       parentId: "conv-parent" as SessionId,
       userTitled: true,

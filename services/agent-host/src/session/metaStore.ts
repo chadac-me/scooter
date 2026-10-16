@@ -46,6 +46,7 @@ type MetaRow = {
   createdAt: string | number;
   lastActivityAt: string | number;
   model: string | null;
+  modelSetBy: string | null;
   owner: string | null;
   parentId: string | null;
   userTitled: boolean | null;
@@ -66,6 +67,7 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
     createdAt: Number(row.createdAt),
     lastActivityAt: Number(row.lastActivityAt),
     ...(row.model == null ? {} : { model: row.model }),
+    ...(row.modelSetBy === "user" || row.modelSetBy === "agent" ? { modelSetBy: row.modelSetBy } : {}),
     ...(row.owner == null ? {} : { owner: row.owner }),
     ...(row.parentId == null ? {} : { parentId: row.parentId as SessionId }),
     ...(row.userTitled == null ? {} : { userTitled: row.userTitled }),
@@ -88,6 +90,7 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
       createdAt: meta.createdAt,
       lastActivityAt: meta.lastActivityAt,
       model: meta.model ?? null,
+      modelSetBy: meta.modelSetBy ?? null,
       owner: meta.owner ?? null,
       parentId: meta.parentId ?? null,
       userTitled: meta.userTitled ?? null,

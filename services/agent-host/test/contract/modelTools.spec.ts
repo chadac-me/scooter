@@ -50,6 +50,25 @@ describe("list_models", () => {
     expect(text).not.toMatch(/sonnet.*current/);
   });
 
+  it("tells the agent to KEEP a model the user picked", () => {
+    const { deps } = wiring({ currentModel: () => "opus", modelSetBy: () => "user" });
+    const text = handleListModels(deps, "c1").content[0].text;
+    expect(text).toMatch(/opus.*current, picked by the user/);
+    expect(text).toContain("keep it unless they ask you to switch");
+  });
+
+  it("marks a model the agent chose, without the keep instruction", () => {
+    const { deps } = wiring({ currentModel: () => "opus", modelSetBy: () => "agent" });
+    const text = handleListModels(deps, "c1").content[0].text;
+    expect(text).toMatch(/opus.*current, chosen by you/);
+    expect(text).not.toContain("picked by the user");
+  });
+
+  it("leaves an inherited default unmarked", () => {
+    const text = handleListModels(wiring().deps, "c1").content[0].text;
+    expect(text).not.toMatch(/picked by the user|chosen by you/);
+  });
+
   it("says so when no models are configured", () => {
     const empty = catalogFromEnv({} as NodeJS.ProcessEnv);
     const text = handleListModels(wiring({ catalog: empty }).deps, "c1").content[0].text;
