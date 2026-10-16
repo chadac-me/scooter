@@ -23,6 +23,8 @@ pkgs.testers.runNixOSTest {
       "d /workspace 0755 root root -"
       "d /workspace/docs 0755 root root -"
       "f /workspace/docs/design.md 0644 root root - # hello"
+      # tmpfiles' argument is one line, so the fixture is written by its own unit.
+      "f /workspace/docs/questions.md 0644 root root -"
       "d /workspace/node_modules 0755 root root -"
     ];
   };
@@ -31,6 +33,24 @@ pkgs.testers.runNixOSTest {
     import json
 
     machine.wait_for_unit("default.target")
+
+    # A document with one live question and one shown inside a fence.
+    machine.succeed(
+        "cat > /workspace/docs/questions.md <<'EOF'\n"
+        "# Asking\n"
+        "\n"
+        "```\n"
+        "<!-- scooter:question id=example kind=text -->\n"
+        "Shown, never asked.\n"
+        "<!-- /scooter:question -->\n"
+        "```\n"
+        "\n"
+        "<!-- scooter:question id=real kind=single -->\n"
+        "Which one is live?\n"
+        "- [ ] this one\n"
+        "<!-- /scooter:question -->\n"
+        "EOF"
+    )
 
     # 1. The contrib's module reaches the discovery manifest the agent-host reads.
     data = json.loads(machine.succeed("cat /run/scooter/web-services.json"))
@@ -114,6 +134,14 @@ pkgs.testers.runNixOSTest {
     assert [a["text"] for a in listed["annotations"]] == ["why?"], listed
     # "hello" is line 1 of the fixture, so the anchor resolved against the file.
     assert listed["annotations"][0]["anchor_state"] == "ok", listed
+
+    # 8b. Question fields come out of the document itself, and an example inside a
+    # code fence is syntax being shown rather than a field being asked.
+    asked = json.loads(machine.succeed(
+        f"curl -fsS 'http://localhost:7801{base}/api/questions?path=docs/questions.md'"
+    ))
+    assert [f["id"] for f in asked["questions"]] == ["real"], asked
+    assert asked["counts"]["open"] == 1, asked
 
     # 9. `scooter-service start` recorded the intent on the PVC, so a pod recreate
     # brings the viewer back without the user asking twice.

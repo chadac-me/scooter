@@ -397,15 +397,16 @@ import server  # noqa: E402
 
 
 @contextlib.contextmanager
-def viewer(tmp_path: Path, *, with_store: bool = True):
+def viewer(tmp_path: Path, *, with_store: bool = True, doc: str = DOC, name: str = "doc.md"):
     """A live viewer over a one-file workspace; yields (call, store)."""
     root = tmp_path / "ws"
     root.mkdir()
-    (root / "doc.md").write_text(DOC)
+    (root / name).write_text(doc)
     cfg = server.Config(root=root, base="/c/conv-test/files", port=0, state=None)
     store = (
         ann.Annotations(
             state_path=tmp_path / "annotations.json",
+            root=root,
             transport=FakeTransport(),
             clock=FakeClock(),
         )

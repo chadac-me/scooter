@@ -27,6 +27,7 @@ from pathlib import Path
 # A sibling module, imported under a short name because `from __future__ import
 # annotations` already binds the bare one.
 import annotations as ann
+import questions as q
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -46,7 +47,7 @@ RAW_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".ico
 MAX_BODY_BYTES = 128 * 1024
 
 # Readable and never writable; a POST to one of these is refused as 405.
-READ_ONLY_ROUTES = ("/api/list", "/api/file", "/api/raw", "/api/health")
+READ_ONLY_ROUTES = ("/api/list", "/api/file", "/api/raw", "/api/health", "/api/questions")
 
 # Directories that are never interesting to review and enormous to walk.
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", "result"}
@@ -221,6 +222,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_raw(want)
             if route == "/api/annotations":
                 return self.serve_annotations(want)
+            if route == "/api/questions":
+                return self.serve_questions(want)
             if route == "/api/health":
                 return self.send_json(
                     {
@@ -269,14 +272,50 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             return None
 
+    def annotations(self, want: str, content: str | None) -> list[dict]:
+        return self.store.list(path=want, content=content)
+
+    def counts(self, want: str, content: str | None) -> dict:
+        return self.store.counts(
+            path=want, contents={want: content} if content is not None else None
+        )
+
     def serve_annotations(self, want: str) -> None:
         content = self.live_content(want)
         self.send_json(
             {
-                "annotations": self.store.list(path=want, content=content),
-                "counts": self.store.counts(
-                    contents={want: content} if content is not None else None
-                ),
+                "annotations": self.annotations(want, content),
+                "counts": self.counts(want, content),
+            }
+        )
+
+    def serve_questions(self, want: str) -> None:
+        """The document's question fields, each with the answers it already has.
+
+        Questions live in the file and answers live in the store, so they are joined
+        here rather than in either: a field the author deleted stops being asked, and
+        its answer stays on record.
+        """
+        content = self.live_content(want)
+        fields = q.parse_if_markdown(content, want) if content is not None else []
+        answers: dict[str, list[dict]] = {}
+        for view in self.annotations(want, content):
+            if view["kind"] == "answer" and view["question_id"]:
+                answers.setdefault(view["question_id"], []).append(view)
+
+        out = [field | {"answers": answers.get(field["id"], [])} for field in fields]
+        for field in out:
+            field["answered"] = bool(field["answers"])
+        self.send_json(
+            {
+                "questions": out,
+                # Open questions and unresolved comments are counted apart because they
+                # ask different things of a reader: one blocks the agent, one does not.
+                "counts": self.counts(want, content)
+                | {
+                    "questions": len(out),
+                    "open": sum(1 for field in out if not field["answered"]),
+                },
             }
         )
 

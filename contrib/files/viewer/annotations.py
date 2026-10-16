@@ -374,10 +374,15 @@ class Annotations:
         out.sort(key=lambda r: (r["line"], r["created_at"]))
         return out
 
-    def counts(self, *, contents: dict[str, str] | None = None) -> dict[str, int]:
-        """What the rail badges: open discussion, un-acked syncs, lost anchors."""
+    def counts(self, *, path: str = "", contents: dict[str, str] | None = None) -> dict[str, int]:
+        """What the rail badges: open discussion, un-acked syncs, lost anchors.
+
+        Scoped to a path when one is given, because the rail's number and the list
+        under it have to be the same set — a tab reading 3 over a list of 1 is worse
+        than no number at all.
+        """
         with self._lock:
-            records = list(self.records.values())
+            records = [r for r in self.records.values() if not path or r.path == path]
         threads = {r.thread for r in records if r.kind == "comment" and not r.resolved}
         stale = 0
         for record in records:
