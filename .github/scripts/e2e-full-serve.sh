@@ -23,12 +23,25 @@ PF_PID=$!
   done >/tmp/cluster-sampler.log 2>&1 ) &
 SAMPLER_PID=$!
 
+# Platform log follower: every agent-host / router / controller pod's log with
+# timestamps, for the whole run. The failure dump only has each surviving pod's
+# tail, which misses the failing window on a long run and loses pods a rollout
+# spec replaced; stern follows pods as they come and go. One file per call, so
+# the base's control run (which sources its own copy of this script) does not
+# overwrite the PR's.
+mkdir -p /tmp/platform-logs
+PLATFORM_LOG=/tmp/platform-logs/$(date -u +%H%M%S)-platform.log
+nix shell nixpkgs#stern -c stern -n agent-sandbox \
+  --selector 'app in (agent-host,conversation-router,conversation-controller)' \
+  --timestamps --color never >"$PLATFORM_LOG" 2>&1 &
+LOGS_PID=$!
+
 # The rollout/move hook lets the browser specs delete the owner pod or restart the
 # deployment, with kubectl running here rather than in the browser.
 nix shell nixpkgs#kubectl -c python3 test/e2e/support/rolloutHook.py 8898 >/tmp/rollout-hook.log 2>&1 &
 HOOK_PID=$!
 
-trap 'kill "$PF_PID" "$SAMPLER_PID" "$HOOK_PID" 2>/dev/null || true' EXIT
+trap 'kill "$PF_PID" "$SAMPLER_PID" "$LOGS_PID" "$HOOK_PID" 2>/dev/null || true' EXIT
 
 # Wait on a real GET, not the port bind — the forward accepts before nginx serves.
 for _ in $(seq 1 60); do

@@ -689,6 +689,7 @@ jobs:
             /tmp/pf.log
             /tmp/cluster-sampler.log
             /tmp/rollout-hook.log
+            /tmp/platform-logs/
           retention-days: 7
       # always(): a sandbox can crash, be retried by the kubelet, and the spec still
       # pass, so the census runs on green too; it exits 0 and only annotates.
@@ -1571,6 +1572,7 @@ jobs:
             /tmp/pf.log
             /tmp/cluster-sampler.log
             /tmp/rollout-hook.log
+            /tmp/platform-logs/
           retention-days: 14
           if-no-files-found: ignore
 
