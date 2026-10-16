@@ -5,7 +5,7 @@
  */
 
 import { test, expect } from "./fixtures.js";
-import { fastOnly } from "./target.js";
+import { fastOnly, isFull } from "./target.js";
 
 const sidebar = {
   list: '[data-testid="session-list"]',
@@ -52,16 +52,23 @@ test.describe("session selector & titles", () => {
     await expect(chat.assistantMessages().filter({ hasText: /<title>/i })).toHaveCount(0);
   });
 
-  // TODO(rename-e2e): re-enable once this runs on a non-CPU-starved runner; the rename-open
-  // click intermittently misses Playwright's action window on the 2-core hosted runner, and
-  // ui/src/Sidebar.rename.test.ts guards the blur rule until then.
-  test.skip("the user can rename a conversation, and the agent can't override it", async ({ chat, page }) => {
+  // Full target only: the rename-open click misses Playwright's action window on the 2-core
+  // hosted runner that e2e fast uses, which is why this was quarantined (#742). The
+  // self-hosted fleet e2e full runs on is the non-starved runner that TODO was waiting for;
+  // e2e fast cannot move there, since it runs on fork PRs and `runs-on` is not a security
+  // boundary. ui/src/Sidebar.rename.test.ts still guards the blur rule on every PR.
+  test("the user can rename a conversation, and the agent can't override it", async ({ chat, page }) => {
+    test.skip(!isFull, "starves on the 2-core hosted runner e2e fast uses — see #742");
     await chat.open();
     await chat.send("help me refactor the parser");
     await chat.waitForReply(/dummy agent/i);
-    // Only one conversation here, so .first() is unambiguous; a hasText filter would stop
-    // matching once the rename swaps the title span for an input.
-    const row = page.locator(sidebar.item).first();
+    // Keyed by conversation id, not .first(): the full target's fleet is shared, and a
+    // hasText filter would stop matching once the rename swaps the title span for an input.
+    const titled = page.locator(sidebar.item).filter({ hasText: /refactor the parser/i });
+    await expect(titled).toHaveCount(1, { timeout: 30_000 });
+    const convId = await titled.getAttribute("data-conversation-id");
+    expect(convId).toBeTruthy();
+    const row = page.locator(`${sidebar.item}[data-conversation-id="${convId}"]`);
     const title = row.locator(sidebar.title);
     await expect(title).toHaveText(/refactor the parser/i, { timeout: 30_000 });
 
@@ -76,7 +83,7 @@ test.describe("session selector & titles", () => {
     // The agent titling again on a follow-up turn must not override the user's name.
     await chat.send("now do the other thing");
     await chat.waitForReply(/dummy agent/i);
-    // Give the merge poll a chance to (wrongly) clobber it, then assert it held.
+    // Give the stream's upsert a chance to (wrongly) clobber it, then assert it held.
     await expect(title).toHaveText(/my pinned project/i, { timeout: 30_000 });
     await expect(title).not.toHaveText(/refactor/i);
   });
