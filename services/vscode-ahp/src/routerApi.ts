@@ -19,16 +19,48 @@ export function routerApi(baseUrl: string, conversationId: string, tokenPath?: s
     sendMessage: (text) => post("/messages", { text }),
     cancel: () => post("/cancel"),
     async stream(onEvent, signal) {
-      const res = await fetch(`${base}/events`, { headers: { ...headers(), accept: "text/event-stream" }, signal });
-      if (!res.ok || !res.body) throw new Error(`events: ${res.status}`);
-      for await (const data of sseData(res.body as unknown as AsyncIterable<Uint8Array>)) {
-        try {
-          onEvent(JSON.parse(data) as AguiEvent);
-        } catch {
-          // A malformed frame is skipped rather than ending the stream.
-        }
+      // /events only replays; live events reach a persistent viewer through /events.integrity.
+      // Subscribe first so nothing appended while /history is read is missed, then link the
+      // two by checksum: history ends at checksum H, live frames continue from H.
+      const res = await fetch(`${base}/events.integrity`, { headers: { ...headers(), accept: "text/event-stream" }, signal });
+      if (!res.ok || !res.body) throw new Error(`events.integrity: ${res.status}`);
+      const frames = sseData(res.body as unknown as AsyncIterable<Uint8Array>)[Symbol.asyncIterator]();
+      const first = frames.next(); // start reading so the subscription is live before /history
+      const hist = await fetch(`${base}/history`, { headers: headers(), signal });
+      if (!hist.ok) throw new Error(`history: ${hist.status}`);
+      const { events, checksum } = (await hist.json()) as { events: AguiEvent[]; checksum: string };
+      for (const e of events) onEvent(e);
+      const link = linker(checksum);
+      for (let n = await first; !n.done; n = await frames.next()) {
+        let frame: IntegrityFrame;
+        try { frame = JSON.parse(n.value) as IntegrityFrame; } catch { continue; }
+        const ev = link(frame);
+        if (ev) onEvent(ev);
       }
     },
+  };
+}
+
+export interface IntegrityFrame { kind: string; event?: AguiEvent; checksum?: string; prevChecksum?: string }
+
+/**
+ * Picks the live events that follow a history ending at checksum `head`. The integrity
+ * stream first replays (a snapshot plus unchecksummed frames, and checksummed ones already
+ * in /history); those never link to `head` and are dropped. Once a frame links, every later
+ * one must too: a gap throws so the caller reconnects and re-reads history.
+ */
+export function linker(head: string): (f: IntegrityFrame) => AguiEvent | undefined {
+  let running = head;
+  let linked = false;
+  return (f) => {
+    if (f.kind !== "event" || !f.event || !f.checksum) return undefined;
+    if (f.prevChecksum === running) {
+      linked = true;
+      running = f.checksum;
+      return f.event;
+    }
+    if (linked) throw new Error("events.integrity: checksum gap");
+    return undefined; // already covered by /history
   };
 }
 
