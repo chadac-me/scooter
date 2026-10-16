@@ -76,6 +76,9 @@ Key rules for the `command`:
 - `--no-token` / disable the service's own auth: the platform proxy already gates
   access; an in-pod token would just block the user (and marimo-pair, below).
 
+**Who can open the link.** Any signed-in user, not just the owner, so links can be
+shared. Don't serve anything private. The caller's id arrives as `x-scooter-user`.
+
 ## Starting a service and giving the user the link
 
 Prefer **`scooter-service start <name>`** (not raw `systemctl start`). It starts the

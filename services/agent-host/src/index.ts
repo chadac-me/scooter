@@ -1340,6 +1340,7 @@ export async function main(
         sessions,
         resolvePodTarget: (ref) => resolvePodTarget(ref),
         registry: webServices,
+        resolveUser,
         publicHost: (() => {
           try {
             return process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).host : "";

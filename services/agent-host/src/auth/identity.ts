@@ -118,6 +118,41 @@ export function resolverFromEnv(): IdentityResolver {
   });
 }
 
+// --- handoff into a sandbox (web-service proxy) ------------------------------
+
+/** Set by the proxy so an in-pod service knows who is calling. */
+export const HANDOFF_USER_HEADER = "x-scooter-user";
+/** The caller's email, when the ingress supplied one. */
+export const HANDOFF_EMAIL_HEADER = "x-scooter-user-email";
+
+/** Inbound headers dropped before forwarding: ingress identity (incl. a live OIDC token) and forged handoffs. */
+export function inboundIdentityHeaders(): string[] {
+  const cfg = identityConfigFromEnv();
+  return [
+    cfg.userHeader,
+    cfg.emailHeader,
+    (process.env.AUTH_ALB_IDENTITY_HEADER || "x-amzn-oidc-identity").toLowerCase(),
+    (process.env.AUTH_ALB_DATA_HEADER || "x-amzn-oidc-data").toLowerCase(),
+    "x-amzn-oidc-accesstoken",
+    HANDOFF_USER_HEADER,
+    HANDOFF_EMAIL_HEADER,
+  ];
+}
+
+/** `headers` with inbound identity stripped and `user` stamped on; anonymous stamps nothing. */
+export function withHandoffIdentity<T extends Record<string, unknown>>(
+  headers: T,
+  user: UserContext | undefined,
+): T {
+  const out = { ...headers } as Record<string, unknown>;
+  for (const name of inboundIdentityHeaders()) delete out[name];
+  if (user && !user.anonymous && user.id) {
+    out[HANDOFF_USER_HEADER] = user.id;
+    if (user.email) out[HANDOFF_EMAIL_HEADER] = user.email;
+  }
+  return out as T;
+}
+
 // --- synchronous header parse -----------------------------------------------------------
 export type IdentityConfig = HeaderIdentityConfig;
 
