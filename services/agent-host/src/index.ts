@@ -1340,6 +1340,16 @@ export async function main(
         sessions,
         resolvePodTarget: (ref) => resolvePodTarget(ref),
         registry: webServices,
+        // What the UI's "Start sandbox" does (revive), unless the entry is already running and
+        // only its pod is gone, where resuming the Sandbox suffices and a revive would rebuild a
+        // live bridge.
+        wake: async (id) => {
+          const conv = sessions.get(id as SessionId);
+          if (!conv) return;
+          if (conv.status === "running") await provisioner.resume(conv.sandbox, conv.threadId);
+          else await sessions.revive(id as SessionId);
+          webServices.invalidate(id);
+        },
         publicHost: (() => {
           try {
             return process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).host : "";

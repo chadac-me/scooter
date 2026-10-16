@@ -303,6 +303,77 @@ describe("web-service proxy", () => {
     expect(registry.execs).toBeGreaterThan(0);
   });
 
+  it("the loading page polls the path the browser used, not the manifest's unexpanded basePath", async () => {
+    // web-services.nix renders basePath as the literal "/c/${CONVERSATION_ID}/<name>".
+    const registry = startingRegistry(await deadPort(), { runningAfter: 99 });
+    const raw = { ...registry, get: async (id: string, name: string) => {
+      const d = await registry.get(id, name);
+      return d && { ...d, basePath: "/c/${CONVERSATION_ID}/marimo" };
+    } } as WebServiceRegistry;
+    const { body } = await proxyGet(makeProxy(raw), "/c/conv-1/marimo/?path=a.md", { accept: "text/html" });
+    expect(body).toContain('"/c/conv-1/marimo/__scooter_status"');
+    expect(body).not.toContain("CONVERSATION_ID");
+  });
+
+  it("a navigation to an asleep sandbox wakes it and serves the loading page", async () => {
+    const woken: string[] = [];
+    const proxy = createWebServiceProxy({
+      sessions: { get: () => ({ id: "conv-1", threadId: "conv-1" }), touchById: () => {} } as never,
+      resolvePodTarget: (async () => ({ name: "p", podIP: "127.0.0.1" })) as never,
+      // The pod is down: the manifest cannot be read and the exec channel is not live.
+      registry: { ...fakeRegistry(svc.port), get: async () => null, ready: async () => false },
+      publicHost: "scooter.example.com",
+      wake: async (id) => { woken.push(id); },
+    });
+    const { status, body } = await proxyGet(proxy, "/c/conv-1/marimo/", { accept: "text/html" });
+    expect(status).toBe(200);
+    expect(body).toContain("__scooter_status");
+    expect(woken).toEqual(["conv-1"]);
+    // An XHR to the same asleep service still gets the 503.
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/api/x", { accept: "*/*" })).status).toBe(503);
+  });
+
+  it("the status poll wakes a down sandbox, then starts the unit once the pod is ready", async () => {
+    let podReady = false;
+    const woken: string[] = [];
+    const registry = startingRegistry(svc.port, { runningAfter: 99 });
+    const proxy = createWebServiceProxy({
+      sessions: { get: () => ({ id: "conv-1", threadId: "conv-1" }), touchById: () => {} } as never,
+      resolvePodTarget: (async () => ({ name: "p", podIP: "127.0.0.1" })) as never,
+      registry: { ...registry, ready: async () => podReady },
+      publicHost: "scooter.example.com",
+      wake: async (id) => { woken.push(id); },
+    });
+    const first = JSON.parse((await proxyGet(proxy, "/c/conv-1/marimo/__scooter_status")).body);
+    expect(first).toMatchObject({ running: false, phase: "sandbox" });
+    expect(woken).toEqual(["conv-1"]);
+    expect(registry.starts).toEqual([]);
+
+    podReady = true;
+    const second = JSON.parse((await proxyGet(proxy, "/c/conv-1/marimo/__scooter_status")).body);
+    expect(second).toMatchObject({ running: false, phase: "service" });
+    expect(registry.starts).toEqual(["marimo"]);
+    // Throttled: the next poll inside the window does not re-issue the start.
+    await proxyGet(proxy, "/c/conv-1/marimo/__scooter_status");
+    expect(registry.starts).toEqual(["marimo"]);
+  });
+
+  it("a full conversation id this pod has not loaded is hydrated, not 404'd", async () => {
+    let loaded = false;
+    const proxy = createWebServiceProxy({
+      sessions: {
+        get: () => (loaded ? { id: "conv-1", threadId: "conv-1" } : undefined),
+        getByShortId: async () => undefined,
+        ensureReadable: async () => { loaded = true; return true; },
+        touchById: () => {},
+      } as never,
+      resolvePodTarget: (async () => ({ name: "p", podIP: "127.0.0.1" })) as never,
+      registry: fakeRegistry(svc.port),
+      publicHost: "scooter.example.com",
+    });
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/app")).status).toBe(200);
+  });
+
   // --- WebSocket upgrade ------------------------------------------------------
 
   it("handleUpgrade splices an upgrade and echoes bytes both ways", async () => {

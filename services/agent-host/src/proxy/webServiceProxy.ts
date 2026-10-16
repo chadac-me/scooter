@@ -77,6 +77,8 @@ export interface WebServiceProxyDeps {
   registry: WebServiceRegistry;
   /** The external host from PUBLIC_URL, for absolute-URL correctness. */
   publicHost: string;
+  /** Bring a down sandbox back up (what the UI's "Start sandbox" does); absent, a navigation to an asleep pod gets a plain 503. */
+  wake?: (conversationId: string) => Promise<void>;
 }
 
 /** Parsed shape of a proxy path: /c/<id>/<service>/<rest...> */
@@ -106,11 +108,11 @@ export interface WebServiceProxy {
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>;
 }
 
-/** A proxy request resolved to its pod target, or an error; `notRunning` means the service exists but its unit is down, so it carries what the auto-start and loading page need. */
+/** A proxy request resolved to its pod target, or why not: `asleep` means the pod is down, so it carries what the wake and loading page need. */
 type Resolution =
   | { ok: true; conversationId: string; podIP: string; port: number; rest: string; stripBasePath: boolean; threadId: string; service: string; basePath: string }
-  | { ok: false; kind: "notRunning"; conversationId: string; service: string; basePath: string; threadId: string }
-  | { ok: false; kind: "error"; status: 404 | 503; service: string; threadId: string };
+  | { ok: false; kind: "asleep"; conversationId: string; service: string; basePath: string; threadId: string }
+  | { ok: false; kind: "error"; status: 404; service: string; threadId: string };
 
 /** The reserved sub-path (under /c/<id>/<service>/) the loading page polls for readiness and the unit's journal. */
 export const STATUS_SEGMENT = "__scooter_status";
@@ -121,6 +123,11 @@ const htmlEscape = (s: string) =>
 /** Whether this request is a top-level browser navigation (wants HTML) rather than an XHR/asset fetch. */
 export function wantsHtml(accept: string | undefined): boolean {
   return (accept ?? "").includes("text/html");
+}
+
+/** The `/c/<id>/<service>` prefix exactly as the browser addressed it. Not the manifest's basePath, which carries an unexpanded `${CONVERSATION_ID}`. */
+export function requestBasePath(p: ParsedProxyPath): string {
+  return `/c/${encodeURIComponent(p.conversationId)}/${encodeURIComponent(p.service)}`;
 }
 
 /** The self-refreshing loading page shown while a just-started service comes up: it polls `<basePath>/__scooter_status`, shows the unit's journal, and reloads into the app once running. */
@@ -139,7 +146,7 @@ export function renderLoadingPage(service: string, basePath: string): string {
  .muted{color:#64748b;font-size:.85rem}
 </style></head><body>
 <div class="row"><div class="spin"></div><h2 style="margin:0">Starting ${safe}…</h2></div>
-<p class="muted">The service is coming up — this page will load it automatically. Recent log:</p>
+<p class="muted">The sandbox and service are coming up — this page will load it automatically. Recent log:</p>
 <pre id="log">(waiting for output…)</pre>
 <p class="muted">Unit: <code>webservice-${safe}</code></p>
 <script>
@@ -150,6 +157,7 @@ export function renderLoadingPage(service: string, basePath: string): string {
      const r = await fetch(STATUS, { cache: "no-store", headers: { accept: "application/json" } });
      const j = await r.json();
      if (j.logs && j.logs.trim()) logEl.textContent = j.logs;
+     else if (j.phase === "sandbox") logEl.textContent = "(starting the sandbox…)";
      if (j.running) { location.reload(); return; }
    } catch (e) { /* transient; keep polling */ }
    setTimeout(tick, 1200);
@@ -160,7 +168,23 @@ export function renderLoadingPage(service: string, basePath: string): string {
 }
 
 export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProxy {
-  const { sessions, resolvePodTarget, registry } = deps;
+  const { sessions, resolvePodTarget, registry, wake } = deps;
+
+  // Wake/start kicks from navigations and the loading page's 1.2s poll, at most one per key per
+  // window: revive and `systemctl start` are not free, and a wake already in flight covers later polls.
+  const KICK_THROTTLE_MS = 15_000;
+  const lastKick = new Map<string, number>();
+  const kick = (key: string, fn: () => Promise<void>) => {
+    const now = Date.now();
+    if (now - (lastKick.get(key) ?? 0) < KICK_THROTTLE_MS) return;
+    lastKick.set(key, now);
+    void fn().catch(() => {}); // best-effort; the poll re-kicks after the window
+  };
+  const wakeSandbox = (conversationId: string) => {
+    if (wake) kick(`wake:${conversationId}`, () => wake(conversationId));
+  };
+  const startService = (conversationId: string, service: string) =>
+    kick(`start:${conversationId}/${service}`, () => registry.start(conversationId, service));
 
   const matches = (pathname: string): boolean => parseProxyPath(pathname) !== null;
 
@@ -176,46 +200,76 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     sessions.touchById(conversationId as never);
   };
 
+  // The URL id may be the full threadId or the short hash; a full id this pod has not loaded is
+  // hydrated (read-only) so a deep link to a cold conversation does not 404.
+  async function lookup(urlId: string) {
+    const known = sessions.get(urlId) ?? (await sessions.getByShortId(urlId));
+    if (known) return known;
+    if (!(await sessions.ensureReadable(urlId as never).catch(() => false))) return undefined;
+    return sessions.get(urlId);
+  }
+
   async function resolve(pathname: string): Promise<Resolution | null> {
     const parsed = parseProxyPath(pathname);
     if (!parsed) return null;
     const { conversationId, service, rest } = parsed;
 
-    // The URL id may be the full threadId or the short hash.
-    const conv = sessions.get(conversationId) ?? (await sessions.getByShortId(conversationId));
+    const conv = await lookup(conversationId);
     const threadId = conv?.threadId ?? conversationId;
     if (!conv) return { ok: false, kind: "error", status: 404, service, threadId };
+    const basePath = requestBasePath(parsed);
+    await sessions.refreshSandbox?.(conv.id);
 
     const desc = await registry.get(conv.id, service);
-    if (!desc) return { ok: false, kind: "error", status: 404, service, threadId };
+    if (!desc) {
+      // An unreadable manifest usually means the pod is down, not that the service is undeclared.
+      if (!(await registry.ready(conv.id).catch(() => false))) {
+        return { ok: false, kind: "asleep", conversationId: conv.id, service, basePath, threadId };
+      }
+      return { ok: false, kind: "error", status: 404, service, threadId };
+    }
 
     // Deliberately no liveness check: a refused connection below is the answer, and
     // asking first costs a pod exec (~0.7s). Why: PR #791.
     let target: PodTarget;
     try {
-      target = await resolvePodTarget(conv.sandbox);
+      target = await resolvePodTarget(sessions.get(conv.id)?.sandbox ?? conv.sandbox);
     } catch {
       // Pod suspended, not ready, or without an IP.
-      return { ok: false, kind: "error", status: 503, service, threadId };
+      return { ok: false, kind: "asleep", conversationId: conv.id, service, basePath, threadId };
     }
-    return { ok: true, conversationId: conv.id, podIP: target.podIP, port: desc.port, rest, stripBasePath: desc.stripBasePath ?? false, threadId, service, basePath: desc.basePath };
+    return { ok: true, conversationId: conv.id, podIP: target.podIP, port: desc.port, rest, stripBasePath: desc.stripBasePath ?? false, threadId, service, basePath };
   }
 
   /** The readiness/log endpoint the loading page polls; returns true if it handled the request. */
   async function handleStatus(pathname: string, res: ServerResponse): Promise<boolean> {
     const parsed = parseProxyPath(pathname);
     if (!parsed || parsed.rest !== `/${STATUS_SEGMENT}`) return false;
-    const conv = sessions.get(parsed.conversationId) ?? (await sessions.getByShortId(parsed.conversationId));
+    const conv = await lookup(parsed.conversationId);
     if (!conv) {
       res.writeHead(404).end();
+      return true;
+    }
+    const reply = (body: { running: boolean; logs: string; phase: "sandbox" | "service" }) =>
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" })
+        .end(JSON.stringify(body));
+    await sessions.refreshSandbox?.(conv.id);
+
+    // The poll drives the whole bring-up: wake the sandbox until its pod is ready, then start the
+    // unit, so a page opened on a cold conversation lands in the app without anyone clicking Start.
+    if (!(await registry.ready(conv.id).catch(() => false))) {
+      wakeSandbox(conv.id);
+      reply({ running: false, logs: "", phase: "sandbox" });
       return true;
     }
     const [running, logs] = await Promise.all([
       registry.isRunning(conv.id, parsed.service).catch(() => false),
       registry.logs(conv.id, parsed.service).catch(() => ""),
     ]);
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" })
-      .end(JSON.stringify({ running, logs }));
+    if (!running && (await registry.get(conv.id, parsed.service).catch(() => null))) {
+      startService(conv.id, parsed.service);
+    }
+    reply({ running, logs, phase: "service" });
     return true;
   }
 
@@ -258,11 +312,17 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       return;
     }
     if (!r.ok) {
-      if (r.kind === "notRunning") {
-        await serveNotRunning(req, res, r);
-      } else if (r.status === 503) {
-        res.writeHead(503, { "content-type": "text/plain" })
-          .end(`${r.service} is asleep — resume the conversation and try again.`);
+      if (r.kind === "asleep") {
+        // A navigation wakes the sandbox and waits on the loading page, whose poll starts the unit
+        // once the pod is ready; an XHR/asset fetch just gets the 503.
+        if (wake && wantsHtml(req.headers.accept)) {
+          wakeSandbox(r.conversationId);
+          const page = renderLoadingPage(r.service, r.basePath);
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(page);
+        } else {
+          res.writeHead(503, { "content-type": "text/plain" })
+            .end(`${r.service} is asleep — resume the conversation and try again.`);
+        }
       } else {
         res.writeHead(404).end();
       }
@@ -302,8 +362,8 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     if (!r || !r.ok) {
       // A WebSocket to a dead/unreachable service just fails; the navigation that owns
       // the page handles the auto-start.
-      const status = !r ? 404 : r.kind === "notRunning" ? 502 : r.status;
-      const text = status === 503 ? "service asleep" : status === 502 ? "service not running" : "not found";
+      const status = !r ? 404 : r.kind === "asleep" ? 503 : r.status;
+      const text = status === 503 ? "service asleep" : "not found";
       socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`);
       socket.destroy();
       return;

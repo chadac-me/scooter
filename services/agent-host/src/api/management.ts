@@ -771,6 +771,13 @@ export function createManagementApi(deps: ManagementDeps): Router {
     const conv = sessions.get(id) ?? (await sessions.getByShortId(id));
     return conv?.id ?? null;
   };
+  // resolveConvId plus a refresh of a hydrated entry's Sandbox ref, for the routes that exec into
+  // the pod: a stale placeholder ref reads as "no services" and "suspended" on a running sandbox.
+  const resolveLiveConvId = async (id: string): Promise<string | null> => {
+    const convId = await resolveConvId(id);
+    if (convId) await sessions.refreshSandbox?.(convId as SessionId);
+    return convId;
+  };
 
   // The webhooks `conversation_map` row for a conversation, the fallback target source for
   // a provider reply tool whose link has neither a usable `ref` nor a parseable URL; served
@@ -838,7 +845,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
   // Actual pod readiness: `status` can be "running" while the pod is still
   // ContainerCreating, and exec succeeds only once the pod is Ready.
   r.get("/conversations/:id/ready", async (ctx) => {
-    const id = await resolveConvId(ctx.params.id);
+    const id = await resolveLiveConvId(ctx.params.id);
     const conv = id ? sessions.get(id) : undefined;
     // Only a running-status conversation can be ready.
     if (!id || !conv || conv.status !== "running" || !deps.webServices) {
@@ -849,7 +856,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   r.get("/conversations/:id/web-services", async (ctx) => {
-    const id = await resolveConvId(ctx.params.id);
+    const id = await resolveLiveConvId(ctx.params.id);
     if (!id || !deps.webServices) return { json: { services: [] } };
     // ?refresh=1 re-reads the in-pod manifest, since nothing in the pod signals a `scooter-rebuild`.
     const force = ctx.query.get("refresh") === "1";
@@ -915,7 +922,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   r.post("/conversations/:id/web-services/:name/start", async (ctx) => {
-    const id = await resolveConvId(ctx.params.id);
+    const id = await resolveLiveConvId(ctx.params.id);
     if (!id) return { status: 404, json: { error: "unknown conversation" } };
     if (!deps.webServices) return { status: 501, json: { error: "web services unavailable" } };
     const svc = await deps.webServices.get(id, ctx.params.name);
@@ -929,7 +936,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   r.post("/conversations/:id/web-services/:name/stop", async (ctx) => {
-    const id = await resolveConvId(ctx.params.id);
+    const id = await resolveLiveConvId(ctx.params.id);
     if (!id) return { status: 404, json: { error: "unknown conversation" } };
     if (!deps.webServices) return { status: 501, json: { error: "web services unavailable" } };
     const svc = await deps.webServices.get(id, ctx.params.name);
