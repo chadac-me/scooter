@@ -1,6 +1,6 @@
 """The annotations transport: the viewer's sync endpoint, mounted under /files/*.
 
-    PUT    /files/annotations/{id}                 store one (idempotent; wakes the agent on first write)
+    PUT    /files/annotations/{id}                 store one (idempotent)
     GET    /files/annotations                      this conversation's annotations (?path=&thread=&resolved=)
     GET    /files/annotations/{id}                 one annotation
     POST   /files/annotations/threads/{t}/resolve  resolve or reopen a whole thread
@@ -20,13 +20,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from scooter_broker_lib.types import AuthDependency, Identity, Provider, Transport
 
-from .notify import notify_host
 from .store import KINDS, Anchor, Annotation, AnnotationStore
 
 logger = logging.getLogger(__name__)
@@ -100,31 +98,15 @@ def _parse(body: dict, *, annotation_id: str, conversation_id: str) -> Annotatio
 
 @dataclass
 class Annotations(Transport):
-    """Routes over an AnnotationStore; the provider injects the store and the wake."""
+    """Routes over an AnnotationStore, which the provider injects."""
 
     name: str = "annotations"
     # Injected by the provider via set_store, so a test can drive the real routes
-    # against SQLite and a stub wake with no agent-host anywhere.
+    # against SQLite.
     store: AnnotationStore | None = field(default=None)
-    agent_host_url: str = ""
-    notify_attempts: int = 3
-    notify_backoff: float = 0.5
-    notify: Callable[..., Any] | None = field(default=None)
 
-    def set_store(
-        self,
-        store: AnnotationStore,
-        *,
-        agent_host_url: str = "",
-        notify_attempts: int = 3,
-        notify_backoff: float = 0.5,
-        notify: Callable[..., Any] | None = None,
-    ) -> None:
+    def set_store(self, store: AnnotationStore) -> None:
         self.store = store
-        self.agent_host_url = agent_host_url
-        self.notify_attempts = notify_attempts
-        self.notify_backoff = notify_backoff
-        self.notify = notify
 
     def routes(self, provider: Provider, authed: AuthDependency) -> APIRouter:
         router = APIRouter(prefix="/annotations", tags=["annotations"])
@@ -133,15 +115,6 @@ class Annotations(Transport):
             if self.store is None:
                 raise HTTPException(status_code=503, detail="annotations not configured")
             return self.store
-
-        async def _wake(annotation: Annotation) -> bool:
-            wake = self.notify or notify_host
-            return await wake(
-                annotation,
-                agent_host_url=self.agent_host_url,
-                attempts=self.notify_attempts,
-                backoff=self.notify_backoff,
-            )
 
         @router.put("/{annotation_id}")
         async def put_annotation(
@@ -157,14 +130,11 @@ class Annotations(Transport):
             except PermissionError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-            # Only a first write wakes the agent. A retried push is the same remark
-            # arriving twice, and waking on it would cost a turn per lost ack.
-            woke = await _wake(stored) if created else False
-
-            # `created` and `woke` are the sync state the viewer renders: an annotation
-            # the broker never acked shows as pending, and one stored-but-not-woken is
-            # real but silent, which is worth showing differently.
-            return {"annotation": stored.payload(), "created": created, "woke": woke}
+            # Storing is all the broker does. The viewer announces a remark to its
+            # conversation itself, through the router's sandbox self-access listener,
+            # once this ack arrives; the broker identifies a sandbox only by its short
+            # id, which is not the conversation's.
+            return {"annotation": stored.payload(), "created": created}
 
         @router.get("")
         async def list_annotations(

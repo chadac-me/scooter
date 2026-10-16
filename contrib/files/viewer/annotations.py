@@ -11,6 +11,13 @@ the broker means the reader believes they commented and the agent never wakes. S
 sync state of every record is explicit and visible, and nothing is reported as
 committed before the broker says so.
 
+Once the broker has a remark, this side tells the agent about it through the
+conversation router's sandbox self-access listener (SCOOTER_SELF_URL). That is a
+second outbox step rather than part of the push: the remark is durable either way, and
+a notify that fails only delays the agent's turn. Notifies that come due together go
+out as one message, so a burst of comments costs the agent one turn and stays under
+the listener's per-conversation rate limit.
+
 Stdlib only: the viewer ships as a store path and runs on the sandbox's python with
 no site-packages.
 """
@@ -42,6 +49,10 @@ NEAR_LINES = 50
 # First retry delay; each further attempt doubles it.
 BACKOFF_SECONDS = 2.0
 
+# How long a fresh notify waits for company, so a reader leaving several comments in a
+# row wakes the agent once with all of them.
+NOTIFY_DELAY_SECONDS = 3.0
+
 # Attempts before a push is abandoned and the card offers a manual retry, because a
 # broker down for longer than this needs a human rather than more retries.
 MAX_ATTEMPTS = 5
@@ -59,11 +70,14 @@ class AnchorError(AnnotationError):
 
 
 class TransportError(Exception):
-    """A push failed; `status` carries the broker's code when there was one."""
+    """A push failed; `status` carries the upstream's code when there was one."""
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, status: int | None = None, retry_after: float | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 def _now_iso() -> str:
@@ -135,6 +149,11 @@ class Record:
     attempts: int = 0
     error: str = ""
     next_attempt: float = 0.0
+    # Whether the agent is owed a notify for this remark: pending until one is sent,
+    # then sent, or failed once the retries are spent. Empty for a record nobody owes
+    # a notify, such as one pulled from the broker, so a restart never re-announces
+    # old threads.
+    notify: str = ""
 
     @property
     def anchor(self) -> Anchor:
@@ -219,6 +238,81 @@ class BrokerTransport:
         return self._call("GET", "", None).get("annotations", [])
 
 
+class SelfTransport:
+    """POST /conversations/{id}/messages on the router's sandbox self-access listener.
+
+    The router admits the pod's `scooter-self` projected token only for conversations
+    this pod runs, so the id here is the full conversation id the pod was started
+    with. Like the broker token, it is re-read per attempt because it rotates in place.
+    """
+
+    def __init__(
+        self, base_url: str, token_path: str, conversation_id: str, *, timeout: float = 10.0
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.token_path = token_path
+        self.conversation_id = conversation_id
+        self.timeout = timeout
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.token_path and self.conversation_id)
+
+    def send(self, text: str) -> None:
+        try:
+            token = Path(self.token_path).read_text().strip()
+        except OSError as exc:
+            raise TransportError(f"no self-access token: {exc}") from exc
+        request = urllib.request.Request(
+            f"{self.base_url}/conversations/{self.conversation_id}/messages",
+            data=json.dumps({"text": text}).encode(),
+            method="POST",
+            headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read()[:400].decode(errors="replace")
+            try:
+                retry_after = float(exc.headers.get("retry-after") or "")
+            except ValueError:
+                retry_after = None
+            raise TransportError(
+                f"self-access {exc.code}: {detail}", status=exc.code, retry_after=retry_after
+            ) from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise TransportError(str(exc)) from exc
+
+
+def notify_message(records: list[Record], root: Path) -> str:
+    """What the agent reads when it wakes: every remark, where it is, and what it says.
+
+    It names the file, the line and the quoted text, because the agent wakes into a
+    fresh turn with no memory of the document it wrote: "someone commented" would
+    make it re-read the whole file to find out where.
+    """
+    blocks = []
+    for record in records:
+        what = "answered a question in" if record.kind == "answer" else "commented on"
+        where = f"{root / record.path}:{record.line}"
+        lines = [f"A reviewer {what} {where}."]
+        if record.quote:
+            lines.append(f"Anchored to: {record.quote!r}")
+        if record.question_id:
+            lines.append(f"Question: {record.question_id}")
+        if record.thread != record.id:
+            lines.append(f"In reply to thread {record.thread}.")
+        lines.append(f"\n{record.text}")
+        blocks.append("\n".join(lines))
+    paths = sorted({r.path for r in records})
+    tail = "Open the files viewer to see the thread in context (" + ", ".join(
+        f"?path={p}" for p in paths
+    ) + ")."
+    head = f"{len(records)} new review remarks:\n\n" if len(records) > 1 else ""
+    return head + "\n\n---\n\n".join(blocks) + "\n\n" + tail
+
+
 @dataclass
 class _Op:
     """Queued work: a record to push, a thread to resolve, or a record to forget."""
@@ -239,6 +333,9 @@ class Annotations:
     # Held workspace-relative as the browser asks for them, pushed absolute as a
     # waking agent can act on them; the root converts between the two.
     root: Path = Path("/workspace")
+    # The SelfTransport that tells the agent; None, or one not configured, leaves
+    # remarks stored but unannounced.
+    notifier: object | None = None
     clock: object = time.monotonic
     records: dict[str, Record] = field(default_factory=dict)
     queue: list[_Op] = field(default_factory=list)
@@ -264,6 +361,9 @@ class Annotations:
             # A record the broker never acked is still owed, so a restart re-queues it.
             if record.state in ("pending", "failed"):
                 self.queue.append(_Op(kind="put", key=record.id))
+            # Stored but the agent not yet told: the notify is still owed.
+            elif record.state == "acked" and record.notify == "pending":
+                self.queue.append(_Op(kind="notify", key=record.id))
 
     def _save(self) -> None:
         # Atomic replace: a half-written state file would lose every thread, and this
@@ -322,6 +422,8 @@ class Annotations:
         # A remark with no thread of its own starts one, which is the first comment
         # on a line; the broker applies the same rule to its own default.
         record.thread = thread or record.id
+        if self._can_notify:
+            record.notify = "pending"
         with self._lock:
             self.records[record.id] = record
             self.queue.append(_Op(kind="put", key=record.id))
@@ -377,10 +479,16 @@ class Annotations:
             record = self.records.get(annotation_id)
             if record is None:
                 raise AnnotationError("no such annotation")
-            record.state = "pending"
-            record.attempts = 0
-            record.next_attempt = 0.0
-            self.queue.append(_Op(kind="put", key=record.id))
+            if record.state == "acked":
+                # Stored already: the only thing left to retry is telling the agent.
+                if record.notify == "failed":
+                    record.notify = "pending"
+                    self.queue.append(_Op(kind="notify", key=record.id))
+            else:
+                record.state = "pending"
+                record.attempts = 0
+                record.next_attempt = 0.0
+                self.queue.append(_Op(kind="put", key=record.id))
             self._save()
         return record
 
@@ -491,12 +599,43 @@ class Annotations:
             due = [op for op in self.queue if op.next_attempt <= now]
         done = 0
         for op in due:
-            if self._attempt(op, now):
+            if op.kind != "notify" and self._attempt(op, now):
                 done += 1
+        done += self._notify([op for op in due if op.kind == "notify"], now)
         if done:
             with self._lock:
                 self._save()
         return done
+
+    @property
+    def _can_notify(self) -> bool:
+        return self.notifier is not None and getattr(self.notifier, "configured", True)
+
+    def _notify(self, ops: list[_Op], now: float) -> int:
+        """Tell the agent about every due remark in one message; returns ops completed."""
+        with self._lock:
+            live = []
+            for op in ops:
+                record = self.records.get(op.key)
+                # Deleted, or already told: nothing is owed any more.
+                if record is None or record.notify != "pending" or not self._can_notify:
+                    self._drop(op)
+                else:
+                    live.append((op, record))
+        if not live:
+            return 0
+        records = sorted((r for _, r in live), key=lambda r: (r.path, r.line, r.created_at))
+        try:
+            self.notifier.send(notify_message(records, self.root))
+        except TransportError as exc:
+            for op, _ in live:
+                self._failed(op, exc, now)
+            return 0
+        with self._lock:
+            for op, record in live:
+                record.notify = "sent"
+                self._drop(op)
+        return len(live)
 
     def _attempt(self, op: _Op, now: float) -> bool:
         """One push; on failure the op stays queued with its backoff extended."""
@@ -520,10 +659,19 @@ class Annotations:
             if op.kind == "put" and record is not None:
                 record.state = "acked"
                 record.error = ""
+                # Stored, so now the agent is owed a notify. The short delay lets the
+                # next few remarks join it.
+                if record.notify == "pending":
+                    self.queue.append(
+                        _Op(kind="notify", key=record.id, next_attempt=now + NOTIFY_DELAY_SECONDS)
+                    )
             self._drop(op)
         return True
 
     def _failed(self, op: _Op, exc: TransportError, now: float) -> None:
+        if op.kind == "notify":
+            self._notify_failed(op, exc, now)
+            return
         with self._lock:
             op.attempts += 1
             op.next_attempt = now + BACKOFF_SECONDS * (2 ** (op.attempts - 1))
@@ -543,6 +691,30 @@ class Annotations:
             self._save()
         logger.warning("annotation push failed (attempt %d): %s", op.attempts, exc)
 
+    def _notify_failed(self, op: _Op, exc: TransportError, now: float) -> None:
+        """Back a notify off; the remark itself is stored whatever happens here."""
+        with self._lock:
+            record = self.records.get(op.key)
+            if exc.status == 429:
+                # The listener's rate limit says when to come back, and waiting it out
+                # is not a failure of the notify, so it does not spend an attempt.
+                op.next_attempt = now + (exc.retry_after or 60.0)
+                self._save()
+                logger.info("annotation notify rate-limited; retrying in %.0fs", op.next_attempt - now)
+                return
+            op.attempts += 1
+            op.next_attempt = now + BACKOFF_SECONDS * (2 ** (op.attempts - 1))
+            # 403 and 404 are the router refusing this pod or this route, which a retry
+            # cannot change; the card's retry is there for after the cause is fixed.
+            if exc.status in (403, 404) or op.attempts >= MAX_ATTEMPTS:
+                self._drop(op)
+                if record is not None:
+                    record.notify = "failed"
+            self._save()
+        logger.warning(
+            "annotation notify failed (attempt %d; the remark is stored): %s", op.attempts, exc
+        )
+
     def _drop(self, op: _Op) -> None:
         with self._lock:
             if op in self.queue:
@@ -555,6 +727,11 @@ class Annotations:
         if not getattr(self.transport, "configured", True):
             logger.warning("no broker URL: annotations stay local and the agent will not wake")
             return
+        if not self._can_notify:
+            logger.warning(
+                "no SCOOTER_SELF_URL, scooter-self token or CONVERSATION_ID: annotations are "
+                "stored but the agent will not be notified of them"
+            )
         self.pull()
 
         def loop() -> None:
