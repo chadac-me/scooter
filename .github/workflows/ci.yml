@@ -530,23 +530,32 @@ jobs:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # Weights from the last green full run (best-effort), mirroring e2e fast.
-      - name: fetch prior e2e-full report (for weights)
+      # A window of recent runs regardless of conclusion, not the last GREEN one: the full
+      # suite goes green rarely enough that `--status success` selects nothing and the plan
+      # silently falls back to the committed table. Weighting from a red run is safe because
+      # shard-tests takes a per-test MAX and floors it with that table.
+      - name: fetch recent e2e-full reports (for weights)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           mkdir -p prior
-          run_id=$(gh run list --workflow "${{ github.workflow }}" --branch "${{ github.event.repository.default_branch }}" \
-            --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
-          if [ -n "${run_id:-}" ]; then
-            gh run download "$run_id" --name e2e-full-report --dir prior 2>/dev/null \
-              && echo "downloaded prior e2e-full report from run $run_id" \
-              || echo "no e2e-full-report artifact on run $run_id — using committed weights"
-          else
-            echo "no prior successful run — using committed weights"
-          fi
+          # Walk back from newest: the artifact expires (90d) and a run that died before
+          # `merge reports` has none, so "most recent" is not "has one".
+          runs=$(gh run list --workflow "${{ github.workflow }}" --branch "$DEFAULT_BRANCH" \
+            --limit 20 --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
+          found=0
+          for id in $runs; do
+            [ "$found" -ge 5 ] && break
+            [ "$id" = "${{ github.run_id }}" ] && continue
+            if gh run download "$id" --name e2e-full-report --dir "prior/$id" 2>/dev/null; then
+              found=$((found + 1))
+              echo "weights: took e2e-full-report from run $id"
+            fi
+          done
+          [ "$found" -gt 0 ] || echo "no recent e2e-full report — using committed weights"
 
       - id: plan
         name: plan shards
@@ -557,8 +566,6 @@ jobs:
           E2E_FULL_REPEAT: ${{ steps.budget.outputs.repeat }}
         run: |
           set -euo pipefail
-          report=""
-          [ -f prior/report.json ] && report="prior/report.json"
           # Per-test sharding: shard-tests.mjs exits non-zero unless the union of every
           # shard's selection equals the inventory exactly once.
           # The JSON goes to a file because `nix develop` prints a banner to stdout
@@ -566,7 +573,7 @@ jobs:
           # Listing the cluster project imports agent-host sources, and those resolve
           # @scooter/schema through its built dist/, which a fresh checkout does not have.
           nix develop --command bash -c \
-            "npm install --silent && npm -w @scooter/schema run build --silent && PRIOR_REPORT='$report' SHARDS='$E2E_FULL_SHARDS' REPEAT='$E2E_FULL_REPEAT' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
+            "npm install --silent && npm -w @scooter/schema run build --silent && PRIOR_REPORT_DIR=prior SHARDS='$E2E_FULL_SHARDS' REPEAT='$E2E_FULL_REPEAT' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
           matrix=$(cat /tmp/matrix.json)
           # Fail now on a banner or stray log line rather than downstream.
           echo "$matrix" | jq -e 'has("include")' >/dev/null \
