@@ -217,6 +217,36 @@ describe("editing lock (rename in progress freezes the sidebar — the CI rename
 });
 
 describe("per-conversation model (model-switch scoping)", () => {
+  it("THE AGENT'S SWITCH STANDS: a synced model never overrides a newer server model", () => {
+    sessionStore.mergeFromServer([{ id: "a", model: "claude-sonnet-5" }]);
+    // The agent escalates; the server reports it.
+    sessionStore.mergeFromServer([{ id: "a", model: "claude-fable-5-1" }]);
+    const a = sessionStore.get().sessions.find((s) => s.id === "a")!;
+    expect(a.model).toBe("claude-fable-5-1");
+    expect(a.pendingModel, "nothing for the next prompt to send").toBeUndefined();
+  });
+
+  it("an UNSENT pick is shown and kept until a prompt carries it", () => {
+    sessionStore.mergeFromServer([{ id: "a", model: "claude-sonnet-5" }]);
+    sessionStore.setModel("a", "claude-opus-5-5");
+    sessionStore.mergeFromServer([{ id: "a", model: "claude-sonnet-5" }]);
+    let a = sessionStore.get().sessions.find((s) => s.id === "a")!;
+    expect(a.model).toBe("claude-opus-5-5");
+    expect(a.pendingModel).toBe("claude-opus-5-5");
+
+    sessionStore.modelSent("a", "claude-opus-5-5");
+    a = sessionStore.get().sessions.find((s) => s.id === "a")!;
+    expect(a.pendingModel).toBeUndefined();
+  });
+
+  it("a stale send acknowledgement does not clear a newer pick", () => {
+    sessionStore.mergeFromServer([{ id: "a" }]);
+    sessionStore.setModel("a", "claude-opus-5-5");
+    sessionStore.setModel("a", "claude-sonnet-5");
+    sessionStore.modelSent("a", "claude-opus-5-5");
+    expect(sessionStore.get().sessions.find((s) => s.id === "a")!.pendingModel).toBe("claude-sonnet-5");
+  });
+
   it("setModel changes ONLY the target conversation, never the others", () => {
     sessionStore.mergeFromServer([{ id: "a" }, { id: "b" }, { id: "c" }]);
     sessionStore.setModel("a", "claude-sonnet-4-6");

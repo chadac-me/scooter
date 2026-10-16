@@ -198,7 +198,8 @@ function ConversationRuntime({
 }: Readonly<{ conversationKey: string; children: ReactNode }>) {
   const { sessions } = useSessions();
   const session = sessions.find((s) => s.id === conversationKey);
-  const model = session?.model;
+  // Only an unsent pick rides the prompt, so the agent's own switches stand.
+  const model = session?.pendingModel;
   // The server's id, or AWAITING_ID until the server creates it; the mount stays keyed on the stable key, so nothing is torn down when the id arrives.
   const conversationId: MaybeConversationId = session?.serverId ?? AWAITING_ID;
   // The Conversation object owns whether a server id exists yet, so nothing here branches on id presence.
@@ -216,6 +217,7 @@ function ConversationRuntime({
         baseUrl: BASE_URL,
         conversationId,
         model,
+        onModelSent: (m) => sessionStore.modelSent(conversationKey, m),
         idleReconnectMs: IDLE_RECONNECT_MS,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps

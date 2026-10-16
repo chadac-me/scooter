@@ -15,12 +15,15 @@ export interface ModelToolsWiring {
   catalog: ModelCatalog;
   /** This conversation's current model; undefined means the default. */
   currentModel(conversationId: string): string | undefined;
+  /** Who chose the current model; undefined means nobody (the default). */
+  modelSetBy?(conversationId: string): "user" | "agent" | undefined;
   /** Switch this conversation's model now and continue on it, resolving to false when already on that model. */
   switchModel(conversationId: string, model: string): Promise<boolean>;
 }
 
-function modelLine(id: string, hint: string, current: boolean, isDefault: boolean): string {
-  const tags = [current ? "current" : null, isDefault ? "default" : null].filter(Boolean).join(", ");
+function modelLine(id: string, hint: string, current: boolean, isDefault: boolean, setBy?: string): string {
+  const picked = current && setBy ? (setBy === "user" ? "picked by the user" : "chosen by you") : null;
+  const tags = [current ? "current" : null, picked, isDefault ? "default" : null].filter(Boolean).join(", ");
   const suffix = tags ? `  [${tags}]` : "";
   const h = hint ? ` — ${hint}` : "";
   return `- ${id}${suffix}${h}`;
@@ -33,9 +36,15 @@ export function handleListModels(deps: ModelToolsWiring, conversationId: string)
     return { content: [{ type: "text", text: "No models are configured for selection." }] };
   }
   const current = deps.currentModel(conversationId) ?? catalog.defaultId;
+  const setBy = deps.modelSetBy?.(conversationId);
   const lines = catalog.models.map((m) =>
-    modelLine(m.id, m.hint, m.id === current, m.default),
+    modelLine(m.id, m.hint, m.id === current, m.default, setBy),
   );
+  // A user's explicit pick outranks the agent's own judgment.
+  const keep =
+    setBy === "user"
+      ? "\nThe user picked your current model: keep it unless they ask you to switch."
+      : "";
   return {
     content: [
       {
@@ -43,7 +52,8 @@ export function handleListModels(deps: ModelToolsWiring, conversationId: string)
         text:
           "Available models (switch with switch_model). Pick the fast/cheap model for simple work; " +
           "escalate to a more powerful one for complex planning, research, or hard debugging:\n" +
-          lines.join("\n"),
+          lines.join("\n") +
+          keep,
       },
     ],
   };

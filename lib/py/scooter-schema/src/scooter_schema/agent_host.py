@@ -4,7 +4,7 @@
 from typing import Optional
 import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, PrimaryKeyConstraint, Text, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Index, PrimaryKeyConstraint, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -59,6 +59,7 @@ class ConversationJobs(Base):
 class Conversations(Base):
     __tablename__ = 'conversations'
     __table_args__ = (
+        CheckConstraint("model_set_by = ANY (ARRAY['user'::text, 'agent'::text])", name='conversations_model_set_by_check'),
         PrimaryKeyConstraint('id', name='conversations_pkey'),
         Index('conversations_by_activity', 'last_activity_at'),
         Index('conversations_by_owner', 'owner'),
@@ -72,6 +73,7 @@ class Conversations(Base):
     last_activity_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     host_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text('0'))
     model: Mapped[Optional[str]] = mapped_column(Text)
+    model_set_by: Mapped[Optional[str]] = mapped_column(Text)
     owner: Mapped[Optional[str]] = mapped_column(Text)
     parent_id: Mapped[Optional[str]] = mapped_column(Text)
     user_titled: Mapped[Optional[bool]] = mapped_column(Boolean)

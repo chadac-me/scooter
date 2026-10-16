@@ -19,8 +19,10 @@ export interface Session {
   createdAt: number;
   /** Last user activity timestamp (ms epoch), used for sidebar sorting. */
   lastActivityAt: number;
-  /** Per-conversation model sent on the next prompt via the X-Agent-Model header (undefined = host default). */
+  /** The model shown: an unsent pick, else the server's (undefined = host default). */
   model?: string;
+  /** A picker choice not yet sent; the only model X-Agent-Model carries. */
+  pendingModel?: string;
   /** Distinct linked-resource providers for the sidebar icons, server-sourced. */
   sources?: string[];
   /** Compact linked-resource summary, server-sourced, driving the label mode, keyword search and provider filter. */
@@ -107,6 +109,7 @@ const sameSession = (a: Session, b: Session): boolean => {
     a.createdAt !== b.createdAt ||
     a.lastActivityAt !== b.lastActivityAt ||
     a.model !== b.model ||
+    a.pendingModel !== b.pendingModel ||
     a.owner !== b.owner ||
     a.status !== b.status ||
     a.parentId !== b.parentId
@@ -351,8 +354,9 @@ export const sessionStore = {
         starred: c.starred ?? existing?.starred,
         createdAt: c.createdAt ?? existing?.createdAt ?? Date.now(),
         lastActivityAt: c.lastActivityAt ?? existing?.lastActivityAt ?? Date.now(),
-        // A locally chosen model not yet persisted server-side wins.
-        model: existing?.model ?? c.model,
+        // Only an unsent pick outranks the server, which also records the agent's switches.
+        model: existing?.pendingModel ?? c.model,
+        pendingModel: existing?.pendingModel,
         sources: authoritative ? (c.sources ?? existing?.sources) : existing?.sources,
         links: authoritative ? (c.links ?? existing?.links) : existing?.links,
         owner: c.owner ?? existing?.owner,
@@ -487,7 +491,17 @@ export const sessionStore = {
     if (!s || s.model === model) return;
     setState({
       ...state,
-      sessions: state.sessions.map((x) => (x.id === id ? { ...x, model } : x)),
+      sessions: state.sessions.map((x) => (x.id === id ? { ...x, model, pendingModel: model } : x)),
+    });
+  },
+
+  /** A prompt carrying `model` was accepted, so the pick is no longer pending. */
+  modelSent(id: string, model: string) {
+    const s = state.sessions.find((x) => x.id === id);
+    if (!s || s.pendingModel !== model) return;
+    setState({
+      ...state,
+      sessions: state.sessions.map((x) => (x.id === id ? { ...x, pendingModel: undefined } : x)),
     });
   },
 

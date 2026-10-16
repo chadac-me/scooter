@@ -64,6 +64,9 @@ export interface SandboxProvisioner {
   reconcile?(): Promise<Array<{ ref: SandboxRef; running: boolean }>>;
 }
 
+/** Who chose a conversation's model. */
+export type ModelSetBy = "user" | "agent";
+
 /** Durable, restart-surviving metadata for one conversation. */
 export interface ConversationMeta {
   id: SessionId;
@@ -73,6 +76,7 @@ export interface ConversationMeta {
   lastActivityAt: number;
   /** Per-conversation model override (undefined = host default). */
   model?: string;
+  modelSetBy?: ModelSetBy;
   /** Creating user (ingress identity); undefined = unowned/public. */
   owner?: string;
   /** The spawning conversation when this is a subagent, which shares its parent's sandbox pod. */
@@ -193,6 +197,7 @@ export interface Conversation {
   readonly lastActivityAt: number;
   /** Model this conversation runs on (undefined = the host default). */
   readonly model?: string;
+  readonly modelSetBy?: ModelSetBy;
   /** The user who created it (the ingress identity); undefined = unowned/public, and a view filter
    *  rather than an access boundary. */
   readonly owner?: string;
@@ -329,6 +334,7 @@ interface Entry {
   createdAt: number;
   lastActivityAt: number;
   model?: string;
+  modelSetBy?: ModelSetBy;
   /** The explicitly picked provider, persisted so a resume keeps the swap. */
   pickedProvider?: string;
   owner?: string;
@@ -382,6 +388,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     createdAt: e.createdAt,
     lastActivityAt: e.lastActivityAt,
     model: e.model,
+    modelSetBy: e.modelSetBy,
     owner: e.owner,
     parentId: e.parentId,
     userTitled: e.userTitled,
@@ -411,6 +418,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       createdAt: m.createdAt,
       lastActivityAt: m.lastActivityAt,
       model: m.model,
+      modelSetBy: m.modelSetBy,
       owner: m.owner,
       parentId: m.parentId,
       userTitled: m.userTitled,
@@ -510,6 +518,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           createdAt: e.createdAt,
           lastActivityAt: e.lastActivityAt,
           model: e.model,
+          modelSetBy: e.modelSetBy,
           owner: e.owner,
           parentId: e.parentId,
           userTitled: e.userTitled,
@@ -551,11 +560,19 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   /** Switch a conversation's model: update entry.model, tear down the live bridge fire-and-forget
    *  so the next prompt's revive relaunches goose with the new GOOSE_MODEL, and persist the
    *  change; a no-op when `model` is undefined or already current. */
-  const applyModelSwitch = async (e: Entry, model?: string, provider?: string): Promise<void> => {
+  const applyModelSwitch = async (
+    e: Entry,
+    model?: string,
+    provider?: string,
+    setBy: ModelSetBy = "user",
+  ): Promise<void> => {
     // A provider-only switch must rebuild too: `model` has not moved.
     const providerMoved = provider !== undefined && provider !== e.pickedProvider;
     if ((model === undefined || model === e.model) && !providerMoved) return;
-    if (model !== undefined) e.model = model;
+    if (model !== undefined && model !== e.model) {
+      e.model = model;
+      e.modelSetBy = setBy;
+    }
     if (provider !== undefined) e.pickedProvider = provider;
     if (e.bridge) {
       const old = e.bridge;
@@ -576,6 +593,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         id, threadId, sandbox: { name: `conv-${shortId(threadId)}`, namespace: "" },
         bridge: undefined, status: "running",
         title: PLACEHOLDER_TITLE, createdAt: nowMs(), lastActivityAt: nowMs(), model, owner,
+        ...(model ? { modelSetBy: "user" as const } : {}),
       };
       entries.set(id, entry);
       await saveMeta(entry);
@@ -922,7 +940,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       // model on the now-idle bridge, then nudge only after the rebuild so the new goose is fully
       // up first.
       await entry.bridge?.cancel().catch(() => {});
-      await applyModelSwitch(entry, model);
+      await applyModelSwitch(entry, model, undefined, "agent");
       // source "resume" persists as a UI-hidden SYSTEM_MESSAGE.
       await this.prompt(id, MODEL_SWITCH_NUDGE, undefined, undefined, undefined, undefined, undefined, "resume");
       return true;

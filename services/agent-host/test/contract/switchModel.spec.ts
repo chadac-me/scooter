@@ -113,6 +113,26 @@ describe("switchModelNow (immediate mid-turn model switch)", () => {
     expect(built.at(-1)!.model).toBe("sonnet");
   });
 
+  it("records WHO chose the model: the user's pick, then the agent's switch, then the user's again", async () => {
+    const { factory } = trackingFactory();
+    const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore(), bridgeFactory: factory });
+    const unset = await sessions.start("thread-0");
+    expect(sessions.get(unset.id)?.modelSetBy).toBeUndefined();
+
+    const conv = await sessions.start("thread-1", "opus");
+    expect(sessions.get(conv.id)?.modelSetBy).toBe("user");
+
+    await sessions.switchModelNow(conv.id, "sonnet");
+    expect(sessions.get(conv.id)?.modelSetBy).toBe("agent");
+
+    // A prompt that carries the model it already has changes nothing.
+    await sessions.prompt(conv.id, "same", "sonnet");
+    expect(sessions.get(conv.id)?.modelSetBy).toBe("agent");
+
+    await sessions.prompt(conv.id, "back to opus", "opus");
+    expect(sessions.get(conv.id)?.modelSetBy).toBe("user");
+  });
+
   it("throws on an unknown conversation", async () => {
     const { factory } = trackingFactory();
     const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore(), bridgeFactory: factory });

@@ -20,6 +20,8 @@ export interface IntegrityAgentConfig extends AgentHostConfig {
   conversationId: MaybeConversationId;
   /** Per-conversation model, sent as the X-Agent-Model header on POST /agui. */
   model?: string;
+  /** Called once a POST carrying `model` was accepted. */
+  onModelSent?: (model: string) => void;
   /** Injectable fetch (tests). */
   fetchImpl?: typeof fetch;
   /** Idle-watchdog threshold in ms: a run that looks running while the stream stays silent this long forces a reconnect (default 25s, 0 disables). */
@@ -851,6 +853,7 @@ export class IntegrityAgent extends AbstractAgent {
       ...(this.cfg.token ? { Authorization: `Bearer ${this.cfg.token}` } : {}),
       ...(this.cfg.model ? { "X-Agent-Model": this.cfg.model } : {}),
     };
+    const sentModel = this.cfg.model;
     const res = await this.doFetch(`${this.base}/agui`, {
       method: "POST",
       headers,
@@ -859,6 +862,7 @@ export class IntegrityAgent extends AbstractAgent {
       /* a failed POST surfaces on the integrity stream as a missing RUN_STARTED */
       return null;
     });
+    if (sentModel && res?.ok) this.cfg.onModelSent?.(sentModel);
     // POST /agui streams the whole run as SSE, and an unread body would fill the HTTP/2 flow-control window and stall every other stream on the connection.
     res?.body?.cancel().catch(() => {});
   }
