@@ -1578,7 +1578,9 @@ in
         metadata = { name = "agent-host"; namespace = cfg.namespace; };
         spec = {
           selector.app = "conversation-router";  # the front door always fronts the router
-          ports = [{ port = 8080; targetPort = "agui"; name = "agui"; }];
+          ports = [{ port = 8080; targetPort = "agui"; name = "agui"; }]
+            # The router's sandbox-host listener, for the wildcard Ingress only.
+            ++ lib.optional (cfg.ingress.sandboxDomain != "") { port = 8081; targetPort = "sandbox"; name = "sandbox"; };
         };
       };
       # ClusterIP Service selecting the agent-host pods directly: the router's fallback
@@ -1746,8 +1748,9 @@ in
       };
     })
     # The per-conversation service origins: `*.<sandboxDomain>` straight to the
-    # conversation-router (the `agent-host` Service), which resolves the label to the
-    # conversation and serves only its web services there.
+    # conversation-router's sandbox listener (port `sandbox` on the `agent-host`
+    # Service). That listener serves a conversation's web services and nothing else,
+    # so no other router endpoint is reachable through the wildcard host.
     (lib.mkIf (cfg.ingress.enable && cfg.ingress.sandboxDomain != "") {
       ingresses.sandbox-services = {
         metadata = {
@@ -1762,7 +1765,7 @@ in
             http.paths = [{
               path = "/";
               pathType = "Prefix";
-              backend.service = { name = "agent-host"; port.number = 8080; };
+              backend.service = { name = "agent-host"; port.name = "sandbox"; };
             }];
           }];
           tls = lib.optionals cfg.ingress.tls [

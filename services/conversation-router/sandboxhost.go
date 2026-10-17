@@ -5,9 +5,11 @@
 // serves, and marks it with SandboxHostHeader so the proxy forwards /<service>/...
 // (not /c/<id>/...) to the pod.
 //
-// A sandbox host serves web services and nothing else: the API, the UI and every
-// other route stay on the main host, so a page on one conversation's origin cannot
-// reach them same-origin.
+// Sandbox hosts are served by their own listener (newSandboxRouter, on
+// SANDBOX_LISTEN_ADDR), which is all the public wildcard Ingress reaches. It serves a
+// conversation's web services and nothing else: an unknown host, a bad label or a
+// path with no service is a 404, and no router endpoint is behind it. The main
+// listener in turn refuses every sandbox-domain host.
 package main
 
 import (
@@ -15,6 +17,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -126,4 +129,51 @@ func rewriteSandboxRequest(w http.ResponseWriter, r *http.Request, label string,
 	r.RequestURI = ""
 	r.Header.Set(SandboxHostHeader, label)
 	return true
+}
+
+// IsSandboxDomainHost reports whether host is any name under domain (a sandbox host or
+// not), which the main listener refuses.
+func IsSandboxDomainHost(host, domain string) bool {
+	if domain == "" {
+		return false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return strings.HasSuffix(host, "."+strings.ToLower(strings.TrimSuffix(domain, ".")))
+}
+
+// newSandboxRouter is the sandbox listener's whole handler: a valid sandbox host is
+// rewritten onto its conversation's /c/<id>/<service>/... and proxied to the owning
+// agent-host; anything else is a 404.
+func newSandboxRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, store *Store) http.Handler {
+	fallback := cfg.fallback
+	// A typed-nil *Store in an interface is not nil.
+	var labels labelResolver
+	if store != nil {
+		labels = store
+	}
+	return newSandboxHandler(shutdownCtx, cfg, resolver, labels, fallback)
+}
+
+func newSandboxHandler(shutdownCtx context.Context, cfg config, resolver ownerResolver, labels labelResolver, fallback *url.URL) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Del(SandboxHostHeader)
+		label, ok := SandboxLabel(r.Host, cfg.sandboxDomain)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if !rewriteSandboxRequest(w, r, label, labels) {
+			return
+		}
+		convID, target, err := resolveTargetFor(cfg, resolver, r, fallback)
+		if errors.Is(err, ErrNoPods) {
+			w.Header().Set("Retry-After", "2")
+			http.Error(w, "no agent-host pod is ready", http.StatusServiceUnavailable)
+			return
+		}
+		serveVia(shutdownCtx, w, r, target, fallback, target.Host != fallback.Host, convID)
+	})
 }

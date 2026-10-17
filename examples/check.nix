@@ -670,10 +670,17 @@ let
     else
       let rule = builtins.head sbIngress.spec.rules; in
       (if rule.host != "*.sandbox.example.com" then [ "sandbox-services Ingress host is ${rule.host}, not *.sandbox.example.com" ] else [ ])
-      ++ (if (builtins.head rule.http.paths).backend.service.name != "agent-host" then
-          [ "sandbox-services Ingress must go to the agent-host Service (the router), which serves only web services on sandbox hosts" ] else [ ])
+      ++ (let b = (builtins.head rule.http.paths).backend.service; in
+          if b.name != "agent-host" || (b.port.name or "") != "sandbox" then
+          [ "sandbox-services Ingress must go to the router's sandbox listener (agent-host Service, port `sandbox`); any other port exposes the router's API on the wildcard host" ] else [ ])
+      ++ (if !(builtins.any (p: p.name == "sandbox" && p.targetPort == "sandbox") (sandboxRes.services.agent-host.spec.ports or [ ])) then
+          [ "the agent-host Service has no `sandbox` port for the wildcard Ingress" ] else [ ])
+      ++ (if builtins.any (p: p.name == "sandbox") (res.services.agent-host.spec.ports or [ ]) then
+          [ "the agent-host Service exposes a `sandbox` port with no ingress.sandboxDomain" ] else [ ])
       ++ (if (builtins.head (sbIngress.spec.tls or [ { } ])).secretName or "" != "sandbox-wildcard-tls" then
           [ "sandbox-services Ingress does not use sandboxTlsSecretName" ] else [ ]))
+    ++ (if envIn "conversation-router" "SANDBOX_LISTEN_ADDR" != ":8081" then
+    [ "the conversation-router does not get SANDBOX_LISTEN_ADDR, so its sandbox listener is not the port the Service targets" ] else [ ])
     ++ (if envIn "conversation-router" "SANDBOX_DOMAIN" != "sandbox.example.com" then
     [ "the conversation-router does not get SANDBOX_DOMAIN, so it never routes sandbox hosts" ] else [ ])
     ++ (if envIn "agent-host" "SANDBOX_DOMAIN" != "sandbox.example.com" then

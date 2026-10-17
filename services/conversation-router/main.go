@@ -44,15 +44,18 @@ type config struct {
 	fallback *url.URL
 	// Parent domain of the per-conversation service hosts (<label>.<domain>); empty disables them.
 	sandboxDomain string
+	// The sandbox listener's address, the only one serving sandbox hosts (see sandboxhost.go).
+	sandboxListenAddr string
 }
 
 func configFromEnv() config {
 	return config{
-		namespace:        env("NAMESPACE", "agent-sandbox"),
-		upstreamPort:     atoi(env("UPSTREAM_PORT", "8080")),
-		listenAddr:       env("LISTEN_ADDR", ":8080"),
-		clusterIPService: env("AGENT_HOST_SERVICE", "agent-host"),
-		sandboxDomain:    env("SANDBOX_DOMAIN", ""),
+		namespace:         env("NAMESPACE", "agent-sandbox"),
+		upstreamPort:      atoi(env("UPSTREAM_PORT", "8080")),
+		listenAddr:        env("LISTEN_ADDR", ":8080"),
+		clusterIPService:  env("AGENT_HOST_SERVICE", "agent-host"),
+		sandboxDomain:     env("SANDBOX_DOMAIN", ""),
+		sandboxListenAddr: env("SANDBOX_LISTEN_ADDR", ":8081"),
 	}
 }
 
@@ -192,6 +195,23 @@ func main() {
 			}
 		}()
 	}
+	if cfg.sandboxDomain != "" {
+		// The public wildcard Ingress points here, and this port serves sandbox hosts only.
+		sb := &http.Server{Addr: cfg.sandboxListenAddr, Handler: newSandboxRouter(ctx, cfg, resolver, store)}
+		go func() {
+			<-ctx.Done()
+			sctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+			defer c()
+			_ = sb.Shutdown(sctx)
+		}()
+		go func() {
+			log.Info("sandbox listener", slog.String("listen_addr", cfg.sandboxListenAddr), slog.String("sandbox_domain", cfg.sandboxDomain))
+			if err := sb.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Error("sandbox listener failed", errAttr(err))
+				os.Exit(1)
+			}
+		}()
+	}
 	go func() {
 		<-ctx.Done()
 		log.Info("shutdown signalled, draining")
@@ -218,26 +238,13 @@ func newRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, 
 	if store != nil {
 		parents = store
 	}
-	// A typed-nil *Store in an interface is not nil.
-	var labels labelResolver
-	if store != nil {
-		labels = store
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only the router may mark a request as host-routed.
+		// Only the router's sandbox listener may mark a request as host-routed.
 		r.Header.Del(SandboxHostHeader)
-		// A sandbox host serves its conversation's web services and nothing else.
-		if label, ok := SandboxLabel(r.Host, cfg.sandboxDomain); ok {
-			if !rewriteSandboxRequest(w, r, label, labels) {
-				return
-			}
-			convID, target, err := resolveTargetFor(cfg, resolver, r, fallback)
-			if errors.Is(err, ErrNoPods) {
-				w.Header().Set("Retry-After", "2")
-				http.Error(w, "no agent-host pod is ready", http.StatusServiceUnavailable)
-				return
-			}
-			serveVia(shutdownCtx, w, r, target, fallback, target.Host != fallback.Host, convID)
+		// Sandbox hosts are served only by the sandbox listener (newSandboxRouter); one that
+		// reaches this listener is misrouted and gets nothing, least of all the API.
+		if IsSandboxDomainHost(r.Host, cfg.sandboxDomain) {
+			http.NotFound(w, r)
 			return
 		}
 		// Create, the conversation list and its events stream are served here rather than proxied: no single agent-host pod knows every conversation, and a capacity-bound pod cannot create one (see create.go, list.go, events.go).

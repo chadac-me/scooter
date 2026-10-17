@@ -89,8 +89,9 @@ func TestRewriteSandboxRequest(t *testing.T) {
 	}
 }
 
-// The API is never reachable through a sandbox host, and a client cannot forge the header.
-func TestRouterSandboxHostServesOnlyServices(t *testing.T) {
+// The main listener refuses every sandbox-domain host, so the API is never reachable
+// through one, and a client cannot forge the routing header.
+func TestMainListenerRefusesSandboxHosts(t *testing.T) {
 	var seen *http.Request
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = r
@@ -100,23 +101,63 @@ func TestRouterSandboxHostServesOnlyServices(t *testing.T) {
 	cfg := config{sandboxDomain: "scooter.example.com", fallback: mustURL(t, upstream.URL)}
 	h := newRouter(context.Background(), cfg, nil, nil, nil, nil, nil, nil, nil)
 
-	// No store: the sandbox host is refused rather than falling through to the API.
-	r := httptest.NewRequest("GET", "http://5a515e73.scooter.example.com/conversations", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusServiceUnavailable || seen != nil {
-		t.Fatalf("sandbox host reached the API: code=%d proxied=%v", w.Code, seen != nil)
+	for _, host := range []string{"5a515e73.scooter.example.com", "foo.scooter.example.com", "a.b.scooter.example.com"} {
+		r := httptest.NewRequest("GET", "http://"+host+"/conversations", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound || seen != nil {
+			t.Fatalf("%s reached the main listener: code=%d proxied=%v", host, w.Code, seen != nil)
+		}
 	}
 
 	// The main host proxies as before, with a forged header removed.
-	r = httptest.NewRequest("GET", "http://scooter.example.com/c/abc/marimo/", nil)
+	r := httptest.NewRequest("GET", "http://scooter.example.com/c/abc/marimo/", nil)
 	r.Header.Set(SandboxHostHeader, "5a515e73")
-	w = httptest.NewRecorder()
+	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if seen == nil {
 		t.Fatalf("main host not proxied: %d", w.Code)
 	}
 	if v := seen.Header.Get(SandboxHostHeader); v != "" {
 		t.Errorf("forged %s reached the upstream: %q", SandboxHostHeader, v)
+	}
+}
+
+// The sandbox listener serves a valid sandbox host's services and 404s everything else,
+// including every router endpoint and any other host.
+func TestSandboxListenerServesOnlyServices(t *testing.T) {
+	const id = "5a515e73-860b-49ba-bc3f-6ff8d5fda5ff"
+	var seen *http.Request
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer upstream.Close()
+	cfg := config{sandboxDomain: "scooter.example.com", fallback: mustURL(t, upstream.URL)}
+	h := newSandboxHandler(context.Background(), cfg, nil, fakeLabels{"5a515e73": {id}}, cfg.fallback)
+
+	for _, c := range []struct{ host, path string }{
+		{"scooter.example.com", "/conversations"},        // the main host
+		{"scooter.example.com", "/c/" + id + "/marimo/"}, // even a service path
+		{"foo.scooter.example.com", "/conversations"},    // not a label
+		{"evil.example.com", "/healthz"},                 // another domain
+		{"5a515e73.scooter.example.com", "/"},            // no service segment
+	} {
+		seen = nil
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "http://"+c.host+c.path, nil))
+		if w.Code != http.StatusNotFound || seen != nil {
+			t.Errorf("%s%s: code=%d proxied=%v, want a 404 and nothing proxied", c.host, c.path, w.Code, seen != nil)
+		}
+	}
+
+	seen = nil
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "http://5a515e73.scooter.example.com/marimo/x", nil))
+	if seen == nil {
+		t.Fatalf("a sandbox host's service was not proxied: %d", w.Code)
+	}
+	if seen.URL.Path != "/c/"+id+"/marimo/x" || seen.Header.Get(SandboxHostHeader) != "5a515e73" {
+		t.Errorf("proxied %q with header %q", seen.URL.Path, seen.Header.Get(SandboxHostHeader))
 	}
 }
