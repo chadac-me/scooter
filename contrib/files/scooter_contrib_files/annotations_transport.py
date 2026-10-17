@@ -25,7 +25,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from scooter_broker_lib.types import AuthDependency, Identity, Provider, Transport
 
-from .store import KINDS, Anchor, Annotation, AnnotationStore
+from .store import AGENT_AUTHOR, KINDS, Anchor, Annotation, AnnotationStore
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,10 @@ def _parse(body: dict, *, annotation_id: str, conversation_id: str) -> Annotatio
     if len(quote.encode()) > _MAX_QUOTE_BYTES:
         raise HTTPException(status_code=400, detail="anchor.quote is too long")
 
+    by = body.get("by") or "reviewer"
+    if by not in ("reviewer", "agent"):
+        raise HTTPException(status_code=400, detail="by must be reviewer or agent")
+
     question_id = body.get("question_id") or ""
     if kind == "answer" and not question_id:
         # An answer with nothing to answer cannot be rendered against its question.
@@ -89,7 +93,7 @@ def _parse(body: dict, *, annotation_id: str, conversation_id: str) -> Annotatio
         # A remark with no thread of its own starts one, which is the common case:
         # the first comment on a line.
         thread=body.get("thread") or annotation_id,
-        author=conversation_id,
+        author=AGENT_AUTHOR if by == "agent" else conversation_id,
         question_id=question_id,
         resolved=bool(body.get("resolved", False)),
         created_at=body.get("created_at") or "",

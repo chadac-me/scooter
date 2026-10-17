@@ -174,7 +174,7 @@ export function ThreadCard({
         {thread.comments.map((c) => (
           <li key={c.id} className="group px-3 py-2.5">
             <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-              <span className="font-medium text-foreground">You</span>
+              <span className="font-medium text-foreground">{c.by === "agent" ? "Scooter" : "You"}</span>
               <span>{ago(c.created_at)}</span>
               <span className="ml-auto flex items-center gap-2">
                 <SyncBadge a={c} onChange={onChange} />

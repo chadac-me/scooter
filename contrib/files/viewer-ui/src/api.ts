@@ -32,6 +32,7 @@ export type Annotation = {
   text: string;
   thread: string;
   question_id: string;
+  by: "reviewer" | "agent";
   resolved: boolean;
   created_at: string;
   state: "pending" | "acked" | "failed" | "disabled";
