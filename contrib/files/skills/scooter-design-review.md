@@ -96,13 +96,30 @@ Then:
 - **Write the decision into the doc.** The file is the source of truth. Once a
   question is answered, replace its block with the decision and its reason.
   The answer stays on record.
-- **Act on comments** by editing the doc, then tell the user in chat what
-  changed and send the link again.
+- **Act on comments** by editing the doc.
+- **Reply in the thread** so the answer sits beside the line it is about (see
+  below). Use chat for a summary of what changed, with the link again.
 - **Resolve threads you've addressed**, so the doc's open count stays honest:
   `curl -s -X POST "$V/api/annotations/threads/<thread>/resolve" -d '{"resolved": true}'`
-- **Don't post comments yourself** through `/api/annotations`. A remark you add
-  is announced back to you as a reviewer's, which costs a turn and confuses the
-  thread. Reply in chat instead.
+- **Always send `"by": "agent"`** on anything you post. Without it your reply
+  shows as the user's and is announced back to you, costing a turn.
+
+### Replying in a thread
+
+Post to the viewer with the thread id and the opener's `line` and `quote` from
+`/api/annotations`. The reply shows as "Scooter" and does not wake you:
+
+```bash
+curl -s -X POST "$V/api/annotations" -H 'content-type: application/json' -d "$(jq -n \
+  --arg path docs/design/retry.md --argjson line 12 --arg quote "the quoted text" \
+  --arg thread "<thread>" --arg text "Agreed, switched to exponential backoff." \
+  '{path: $path, line: $line, quote: $quote, thread: $thread, text: $text, by: "agent"}')"
+```
+
+Keep replies short, saying what you changed or why you didn't. A `409` means
+the quoted text is no longer in the file, usually because you just edited it.
+Retry with the line and quote as they read now. Resolve the thread after
+replying if your reply settles it.
 
 Start implementing once the open questions are answered and the user agrees.
 If the user wants to skip the doc ("just do it"), do that instead.

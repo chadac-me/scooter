@@ -26,6 +26,8 @@ from scooter_broker_lib.store import StoreConfig, open_sessions
 # a document. Both are the same record because they are the same thing to the agent:
 # something a human said about a place in a file.
 KINDS = {"comment", "answer"}
+# Stored in `author` for a remark the agent wrote; a reviewer's holds the conversation.
+AGENT_AUTHOR = "agent"
 
 
 class _Base(DeclarativeBase):
@@ -88,6 +90,10 @@ class Annotation:
     created_at: str = ""
     updated_at: str = ""
 
+    @property
+    def by(self) -> str:
+        return "agent" if self.author == AGENT_AUTHOR else "reviewer"
+
     def payload(self) -> dict:
         return {
             "id": self.id,
@@ -99,7 +105,8 @@ class Annotation:
             "thread": self.thread,
             # Attribution is conversation-level in draft 1: nothing in the proxy or
             # broker chain knows which human clicked.
-            "author": {"conversation": self.author or self.conversation_id},
+            "author": {"conversation": self.conversation_id, "by": self.by},
+            "by": self.by,
             "text": self.text,
             "resolved": self.resolved,
             "created_at": self.created_at,

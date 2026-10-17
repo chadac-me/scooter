@@ -541,6 +541,35 @@ def test_a_remark_deleted_before_its_notify_is_not_announced(told):
     assert store.notifier.sent == []
 
 
+def test_an_agent_reply_is_stored_but_never_announced(told):
+    store, clock = told
+    opener = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="why?")
+    reply = store.add(
+        content=DOC, path="doc.md", line=2, quote="bravo", text="because", thread=opener.id, by="agent"
+    )
+    store.flush()
+    _past_the_delay(clock)
+    store.flush()
+    assert store.get(reply.id).state == "acked"
+    assert [p["by"] for p in store.transport.puts] == ["reviewer", "agent"]
+    (message,) = store.notifier.sent
+    assert "why?" in message and "because" not in message
+
+
+def test_an_unknown_author_is_refused(store):
+    with pytest.raises(ann.AnnotationError):
+        store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x", by="someone")
+
+
+def test_a_pulled_agent_reply_keeps_its_author(store):
+    store.transport.remote = [
+        {"id": "r1", "path": "/workspace/doc.md", "anchor": {"line": 2}, "text": "hi",
+         "author": {"conversation": "c", "by": "agent"}},
+    ]
+    store.pull()
+    assert store.get("r1").by == "agent"
+
+
 def test_an_owed_notify_survives_a_restart_and_a_pulled_thread_is_never_announced(
     tmp_path: Path,
 ):

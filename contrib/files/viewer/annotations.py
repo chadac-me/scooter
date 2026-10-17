@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 # The same two kinds the broker stores: review discussion, and an answer to a
 # `scooter:question` block.
 KINDS = {"comment", "answer"}
+# Who wrote a remark; the agent's own replies are never announced back to it.
+AUTHORS = {"reviewer", "agent"}
 
 # A quote is searched for this many lines either side of its recorded line before the
 # whole file is scanned, so a moved anchor prefers a near occurrence to a far one.
@@ -134,6 +136,7 @@ class Record:
     text: str
     thread: str
     question_id: str = ""
+    by: str = "reviewer"
     resolved: bool = False
     created_at: str = ""
     updated_at: str = ""
@@ -160,6 +163,7 @@ class Record:
             "text": self.text,
             "thread": self.thread,
             "question_id": self.question_id,
+            "by": self.by,
             "resolved": self.resolved,
             "created_at": self.created_at,
         }
@@ -367,10 +371,13 @@ class Annotations:
         kind: str = "comment",
         thread: str = "",
         question_id: str = "",
+        by: str = "reviewer",
     ) -> Record:
         """Record an annotation against live content, and queue it for the broker."""
         if kind not in KINDS:
             raise AnnotationError(f"kind must be one of {sorted(KINDS)}")
+        if by not in AUTHORS:
+            raise AnnotationError(f"by must be one of {sorted(AUTHORS)}")
         if not text.strip():
             raise AnnotationError("text is required")
         if len(text.encode()) > MAX_TEXT_BYTES:
@@ -396,13 +403,14 @@ class Annotations:
             text=text,
             thread="",
             question_id=question_id,
+            by=by,
             created_at=now,
             updated_at=now,
         )
         # A remark with no thread of its own starts one, which is the first comment
         # on a line; the broker applies the same rule to its own default.
         record.thread = thread or record.id
-        if self._can_notify:
+        if self._can_notify and by != "agent":
             record.notify = "pending"
         with self._lock:
             self.records[record.id] = record
@@ -561,6 +569,7 @@ class Annotations:
                     text=row.get("text") or "",
                     thread=row.get("thread") or row["id"],
                     question_id=row.get("question_id") or "",
+                    by=_by(row),
                     resolved=bool(row.get("resolved")),
                     created_at=row.get("created_at") or "",
                     updated_at=row.get("updated_at") or "",
@@ -725,3 +734,9 @@ class Annotations:
         self._stop.set()
         if self._worker is not None:
             self._worker.join(timeout=2)
+
+
+def _by(row: dict) -> str:
+    """Who wrote a pulled row; anything unrecognised reads as a reviewer."""
+    by = row.get("by") or (row.get("author") or {}).get("by") or "reviewer"
+    return by if by in AUTHORS else "reviewer"

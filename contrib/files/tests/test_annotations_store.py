@@ -173,7 +173,7 @@ async def test_put_stores_the_annotation(store):
     assert body["created"] is True
     # The broker only stores; the viewer wakes the agent.
     assert "woke" not in body
-    assert body["annotation"]["author"] == {"conversation": "conv-alice"}
+    assert body["annotation"]["author"] == {"conversation": "conv-alice", "by": "reviewer"}
     # A remark with no thread of its own starts one.
     assert body["annotation"]["thread"] == "a1"
     assert await store.get("a1") is not None
@@ -258,3 +258,18 @@ def test_an_unconfigured_transport_serves_503_rather_than_crashing():
     )
     app.dependency_overrides[authenticate] = lambda: _identity("conv-alice")
     assert TestClient(app).get("/files/annotations").status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_an_agent_reply_round_trips_its_author(store):
+    client = _client(store)
+    r = client.put("/files/annotations/a2", json=_payload() | {"by": "agent"})
+    assert r.status_code == 200, r.text
+    assert r.json()["annotation"]["by"] == "agent"
+    (row,) = client.get("/files/annotations").json()["annotations"]
+    assert row["author"] == {"conversation": "conv-alice", "by": "agent"}
+
+
+def test_an_unknown_author_is_a_400(store):
+    r = _client(store).put("/files/annotations/a3", json=_payload() | {"by": "root"})
+    assert r.status_code == 400
