@@ -184,7 +184,7 @@ export function withHandoffIdentity<T extends Record<string, unknown>>(
 ): T {
   const out = { ...headers } as Record<string, unknown>;
   for (const name of inboundIdentityHeaders()) delete out[name];
-  // The ingress session cookie is the user's whole login; whatever receives it can replay it. Why: PR #TBD.
+  // The ingress session cookie is the user's whole login; whatever receives it can replay it. Why: PR #826.
   const cookie = stripSessionCookies(typeof out.cookie === "string" ? out.cookie : undefined);
   if (cookie === undefined) delete out.cookie;
   else out.cookie = cookie;
