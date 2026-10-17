@@ -793,6 +793,33 @@ describe("bridge run queue + cancel", () => {
     expect(snaps.at(-1)!.items).toEqual([]);
   });
 
+  it("tags a queued platform-injected prompt with its source in the QUEUE_UPDATED snapshot", async () => {
+    const agent = createFakeAcpAgent();
+    agent.setScript([{ finish: { stopReason: "end_turn" } }]);
+    agent.gate();
+    const bridge = mkBridge(agent);
+    const events = collect(bridge);
+
+    await bridge.start();
+    void bridge.prompt({ threadId: "t1", text: "first (running)" });
+    await tick();
+    void bridge.prompt({ threadId: "t1", text: "webhook event", source: "github" });
+    void bridge.prompt({ threadId: "t1", text: "user msg" });
+    await tick();
+
+    const snap = (events.filter((e) => e.type === "QUEUE_UPDATED") as Array<{
+      items: Array<{ text: string; source?: string }>;
+    }>).at(-1)!;
+    // The UI renders a sourced item as a collapsed system line; a user item carries no source.
+    expect(snap.items.find((i) => i.text === "webhook event")?.source).toBe("github");
+    expect(snap.items.find((i) => i.text === "user msg")).not.toHaveProperty("source");
+
+    agent.releaseGate();
+    await tick();
+    await tick();
+    await tick();
+  });
+
   it("shouldYieldToQueue() is true when a PRIORITY_INTERRUPT item is queued, false for a normal/empty queue", async () => {
     const agent = createFakeAcpAgent();
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);
