@@ -23,7 +23,7 @@ in
     # `command` is types.str, so the derivation is interpolated to its store path for the re-converge eval.
     command = lib.mkDefault "${pkgs.writeShellScript "terminal-web-service" ''
       set -euo pipefail
-      base="/c/''${CONVERSATION_ID:-unknown}/terminal"
+      base="''${SCOOTER_SERVICE_PREFIX-/c/''${CONVERSATION_ID:-unknown}}/terminal"
       # libwebsockets dlopen()s its evlib_uv plugin at runtime, so its lib dir must be on the search path.
       export LD_LIBRARY_PATH="${pkgs.libwebsockets}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
       # Writable because the proxy gates access; `tmux new -A` reattaches the session across reconnects.

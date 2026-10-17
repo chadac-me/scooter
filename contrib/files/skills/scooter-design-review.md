@@ -70,9 +70,10 @@ How should the outbox treat a rolling deploy?
 ## 3. Send the link
 
 ```bash
-scooter-service start files
-ORIGIN=$(echo "$CONVERSATION_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
-echo "$ORIGIN/c/$CONVERSATION_ID/files/?path=docs/design/retry.md"
+FILES=$(scooter-service start files | sed -n 's/^url: //p')
+# A path (/c/<id>/files/) means the main host: prefix the origin of $CONVERSATION_URL.
+case "$FILES" in /*) FILES="$(echo "$CONVERSATION_URL" | sed -E 's#^(https?://[^/]+).*#\1#')$FILES" ;; esac
+echo "${FILES}?path=docs/design/retry.md"
 ```
 
 `path` is relative to `/workspace`. Add a heading anchor (`#open-questions`) to
@@ -86,7 +87,8 @@ The message names each remark's file, line, quoted text and comment, and for an
 answer the question `id`. To see a whole doc's state:
 
 ```bash
-V="http://127.0.0.1:7801/c/$CONVERSATION_ID/files"
+# In-pod: /files on its own origin, /c/<id>/files on the main host.
+V="http://127.0.0.1:7801$([ -n "${SCOOTER_SERVICES_ORIGIN:-}" ] || echo "/c/$CONVERSATION_ID")/files"
 curl -s "$V/api/annotations?path=docs/design/retry.md" | jq '.annotations[] | {id, line, kind, thread, resolved, question_id, text}'
 curl -s "$V/api/questions?path=docs/design/retry.md"   | jq '.questions[] | {id, answered, answers: [.answers[].text]}'
 ```

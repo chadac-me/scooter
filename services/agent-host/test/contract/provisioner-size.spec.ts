@@ -140,6 +140,21 @@ describe("k8sProvisioner size — the CR is the store", () => {
     expect(creates.some((c) => c.body?.metadata?.name === "sandbox-abc")).toBe(true);
   });
 
+  it("gives the sandbox its own services origin only when sandbox origins are configured", async () => {
+    const envOf = async (extra: Obj, thread: string) => {
+      const { kc, creates } = fakeKc({ cr: null });
+      await provisioner(kc, extra).setSize("abc", { size: "small" }, thread);
+      const sandbox = creates.find((c) => c.plural === "sandboxes")!;
+      return Object.fromEntries(sandbox.body.spec.podTemplate.spec.containers[0].env.map((e: Obj) => [e.name, e.value]));
+    };
+    const origins = { sandboxOrigins: { domain: "scooter.example.com", scheme: "https" } };
+    const id = "5a515e73-860b-49ba-bc3f-6ff8d5fda5ff";
+    expect((await envOf(origins, id)).SCOOTER_SERVICES_ORIGIN).toBe("https://5a515e73.scooter.example.com");
+    expect((await envOf({}, id)).SCOOTER_SERVICES_ORIGIN).toBeUndefined();
+    // An id that can't be a host label keeps the main-host path.
+    expect((await envOf(origins, "thread-abc")).SCOOTER_SERVICES_ORIGIN).toBeUndefined();
+  });
+
   it("exposes the deployment's preset catalog and default", () => {
     const { kc } = fakeKc({});
     const { sizes, default: def } = provisioner(kc).getSizes();

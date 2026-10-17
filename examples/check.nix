@@ -647,6 +647,37 @@ let
   };
   tlsRes = tlsPlatform.config.kubernetes.resources;
   # Every container of every workload kind.
+  # Per-conversation service origins: with ingress.sandboxDomain set, a wildcard Ingress
+  # goes straight to the router, and the router and agent-host both learn the domain.
+  sandboxRes = (evalPlatform {
+    module = { lib, ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.ingress.sandboxDomain = "sandbox.example.com";
+      scooter.ingress.sandboxTlsSecretName = "sandbox-wildcard-tls";
+    };
+  }).config.kubernetes.resources;
+  envIn = dep: name:
+    let env = builtins.concatMap (c: c.env or [ ])
+          (builtins.attrValues (sandboxRes.deployments.${dep}.spec.template.spec.containers or { }));
+        m = builtins.filter (e: e.name == name) env;
+    in if m == [ ] then null else (builtins.head m).value;
+  sbIngress = sandboxRes.ingresses.sandbox-services or null;
+  sandboxOriginProblems =
+    (if (res.ingresses or { }) ? sandbox-services then
+    [ "the sandbox-services Ingress renders with no ingress.sandboxDomain" ] else [ ])
+    ++ (if sbIngress == null then
+    [ "ingress.sandboxDomain set but no sandbox-services Ingress rendered" ]
+    else
+      let rule = builtins.head sbIngress.spec.rules; in
+      (if rule.host != "*.sandbox.example.com" then [ "sandbox-services Ingress host is ${rule.host}, not *.sandbox.example.com" ] else [ ])
+      ++ (if (builtins.head rule.http.paths).backend.service.name != "agent-host" then
+          [ "sandbox-services Ingress must go to the agent-host Service (the router), which serves only web services on sandbox hosts" ] else [ ])
+      ++ (if (builtins.head (sbIngress.spec.tls or [ { } ])).secretName or "" != "sandbox-wildcard-tls" then
+          [ "sandbox-services Ingress does not use sandboxTlsSecretName" ] else [ ]))
+    ++ (if envIn "conversation-router" "SANDBOX_DOMAIN" != "sandbox.example.com" then
+    [ "the conversation-router does not get SANDBOX_DOMAIN, so it never routes sandbox hosts" ] else [ ])
+    ++ (if envIn "agent-host" "SANDBOX_DOMAIN" != "sandbox.example.com" then
+    [ "the agent-host does not get SANDBOX_DOMAIN, so sandboxes never learn their origin" ] else [ ]);
   allWorkloads = builtins.concatMap
     (kind: builtins.attrValues (tlsRes.${kind} or { }))
     [ "deployments" "statefulSets" "jobs" "cronJobs" ];
@@ -679,7 +710,7 @@ let
       (containersOf w))
     allWorkloads;
 
-  allProblems = disabledContribProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems;
+  allProblems = disabledContribProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

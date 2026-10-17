@@ -13,7 +13,7 @@ import type { BaseEvent } from "@ag-ui/core";
 import type { AguiEvent, ApproverIdentity } from "../bridge.js";
 import type { SessionId, ThreadId } from "../types.js";
 import type { Router } from "../http/router.js";
-import type { WebServiceProxy } from "../proxy/webServiceProxy.js";
+import { sandboxLabelOf, type WebServiceProxy } from "../proxy/webServiceProxy.js";
 import { logger, withConversation } from "../log.js";
 
 const log = logger("agui");
@@ -257,6 +257,14 @@ export function createAguiServer(): AguiServer {
     const url = new URL(req.url ?? "/", "http://localhost");
     const parts = url.pathname.split("/").filter(Boolean);
 
+    // A request routed from a sandbox host reaches web services and nothing else, even if the
+    // router let something else through.
+    if (sandboxLabelOf(req) !== undefined) {
+      if (mountedProxy && mountedProxy.matches(url.pathname)) await mountedProxy.handleHttp(req, res);
+      else res.writeHead(404).end();
+      return;
+    }
+
     // Management API (mounted router) is tried first.
     if (mountedRouter && (await mountedRouter.handle(req, res))) return;
 
@@ -481,7 +489,7 @@ export function createAguiServer(): AguiServer {
         server.on("upgrade", (req, socket, head) => {
           const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
           const registered = upgradeHandlers.get(pathname);
-          if (registered) {
+          if (registered && sandboxLabelOf(req) === undefined) {
             registered(req, socket, head);
           } else if (mountedProxy && mountedProxy.matches(pathname)) {
             mountedProxy.handleUpgrade(req, socket, head).catch(() => socket.destroy());

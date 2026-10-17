@@ -42,6 +42,8 @@ type config struct {
 	clusterIPService string
 	// The ClusterIP Service in cluster, or AGENT_HOST_URL in dev mode.
 	fallback *url.URL
+	// Parent domain of the per-conversation service hosts (<label>.<domain>); empty disables them.
+	sandboxDomain string
 }
 
 func configFromEnv() config {
@@ -50,6 +52,7 @@ func configFromEnv() config {
 		upstreamPort:     atoi(env("UPSTREAM_PORT", "8080")),
 		listenAddr:       env("LISTEN_ADDR", ":8080"),
 		clusterIPService: env("AGENT_HOST_SERVICE", "agent-host"),
+		sandboxDomain:    env("SANDBOX_DOMAIN", ""),
 	}
 }
 
@@ -215,7 +218,28 @@ func newRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, 
 	if store != nil {
 		parents = store
 	}
+	// A typed-nil *Store in an interface is not nil.
+	var labels labelResolver
+	if store != nil {
+		labels = store
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the router may mark a request as host-routed.
+		r.Header.Del(SandboxHostHeader)
+		// A sandbox host serves its conversation's web services and nothing else.
+		if label, ok := SandboxLabel(r.Host, cfg.sandboxDomain); ok {
+			if !rewriteSandboxRequest(w, r, label, labels) {
+				return
+			}
+			convID, target, err := resolveTargetFor(cfg, resolver, r, fallback)
+			if errors.Is(err, ErrNoPods) {
+				w.Header().Set("Retry-After", "2")
+				http.Error(w, "no agent-host pod is ready", http.StatusServiceUnavailable)
+				return
+			}
+			serveVia(shutdownCtx, w, r, target, fallback, target.Host != fallback.Host, convID)
+			return
+		}
 		// Create, the conversation list and its events stream are served here rather than proxied: no single agent-host pod knows every conversation, and a capacity-bound pod cannot create one (see create.go, list.go, events.go).
 		if IsConversationCreate(r.Method, r.URL.Path) {
 			serveConversationCreate(w, r, creator, ownerFrom(r), trusted)

@@ -247,6 +247,77 @@ describe("web-service proxy", () => {
     expect(echoPath).toBe("/app?x=1");
   });
 
+  // --- sandbox hosts (<label>.<sandbox domain>/<service>/) --------------------
+
+  describe("sandbox hosts", () => {
+    const ID = "5a515e73-860b-49ba-bc3f-6ff8d5fda5ff";
+    const HOST = { "x-scooter-sandbox-host": "5a515e73" };
+
+    function sandboxProxy(registry: WebServiceRegistry, sandboxDomain: string | undefined = "scooter.example.com") {
+      return createWebServiceProxy({
+        sessions: { get: () => ({ id: ID, threadId: ID }), touchById: () => {} } as never,
+        resolvePodTarget: (async () => ({ name: "pod", podIP: "127.0.0.1" })) as never,
+        registry,
+        publicHost: "scooter.example.com",
+        resolveUser: () => ANON,
+        sandboxDomain,
+      });
+    }
+
+    it("forwards the browser-visible /<service>/... path, not the router's /c/<id> prefix", async () => {
+      const { status, echoPath } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app%2Fx?x=1`, { headers: HOST });
+      expect(status).toBe(200);
+      expect(echoPath).toBe("/marimo/app%2Fx?x=1");
+    });
+
+    it("does not pass the routing header on to the pod", async () => {
+      const seen: Record<string, unknown>[] = [];
+      const pod = createServer((req, res) => { seen.push(req.headers); res.end("ok"); });
+      await new Promise<void>((r) => pod.listen(0, "127.0.0.1", () => r()));
+      try {
+        await proxyGet(sandboxProxy(fakeRegistry((pod.address() as AddressInfo).port)), `/c/${ID}/marimo/`, { headers: HOST });
+        expect(seen[0]?.["x-scooter-sandbox-host"]).toBeUndefined();
+      } finally {
+        pod.close();
+      }
+    });
+
+    it("stripBasePath still forwards only the remainder", async () => {
+      const desc = { ...MARIMO, port: svc.port, stripBasePath: true };
+      const registry = { ...fakeRegistry(svc.port), get: async (_id: string, n: string) => (n === "marimo" ? desc : null) } as WebServiceRegistry;
+      const { echoPath } = await proxyGet(sandboxProxy(registry), `/c/${ID}/marimo/app?x=1`, { headers: HOST });
+      expect(echoPath).toBe("/app?x=1");
+    });
+
+    it("the loading page polls the short base path", async () => {
+      const { body } = await proxyGet(sandboxProxy(startingRegistry(await deadPort())), `/c/${ID}/marimo/`, { headers: HOST, accept: "text/html" });
+      expect(body).toContain("/marimo/__scooter_status");
+      expect(body).not.toContain(`/c/${ID}`);
+    });
+
+    it("with sandbox hosts on, the main host serves no services", async () => {
+      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`);
+      expect(status).toBe(404);
+      const status2 = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/__scooter_status`);
+      expect(status2.status).toBe(404);
+    });
+
+    it("with sandbox hosts off, a host-routed request is refused", async () => {
+      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port), ""), `/c/${ID}/marimo/app`, { headers: HOST });
+      expect(status).toBe(404);
+    });
+
+    it("a label that is not the conversation's prefix is refused", async () => {
+      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`, { headers: { "x-scooter-sandbox-host": "deadbeef" } });
+      expect(status).toBe(404);
+    });
+
+    it("WebSockets forward the short path", async () => {
+      const { statusLine } = await proxyUpgrade(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/ws`, "ping", { headers: HOST });
+      expect(statusLine).toContain("101");
+    });
+  });
+
   it("unknown service -> 404", async () => {
     const proxy = makeProxy({
       ...fakeRegistry(svc.port),

@@ -1,5 +1,8 @@
 # webServices.<name>: declarative in-pod web services the platform
-# reverse-proxies at https://<host>/c/<id>/<name>/.
+# reverse-proxies at https://<label>.<sandbox domain>/<name>/ (the conversation's own
+# origin, SCOOTER_SERVICES_ORIGIN), or at https://<host>/c/<id>/<name>/ when the
+# deployment has no sandbox domain. SCOOTER_SERVICE_PREFIX ("" or "/c/<id>") is the
+# path prefix a service serves under; each unit gets it in its conv.env.
 #
 # Each entry produces both the systemd unit `webservice-<name>` and an entry in
 # the discovery manifest /run/scooter/web-services.json the agent-host reads to
@@ -87,7 +90,14 @@ let
 
       have_manifest() { [ -s "$MANIFEST" ] || { echo "scooter-service: no web services declared (manifest $MANIFEST missing)" >&2; exit 1; }; }
       unit_of() { jq -r --arg n "$1" '.services[] | select(.name==$n) | .unit' "$MANIFEST"; }
-      base_of() { jq -r --arg n "$1" '.services[] | select(.name==$n) | .basePath' "$MANIFEST"; }
+      # Where the user opens a service: its conversation's own origin when the deployment
+      # has one, else the main-host path. The pod env may only be on PID 1.
+      podenv() { v=$(printenv "$1" 2>/dev/null || true); [ -n "$v" ] || v=$(tr '\0' '\n' < /proc/1/environ 2>/dev/null | sed -n "s/^$1=//p" | head -1 || true); printf '%s' "$v"; }
+      url_of() {
+        origin=$(podenv SCOOTER_SERVICES_ORIGIN)
+        if [ -n "$origin" ]; then printf '%s/%s/' "$origin" "$1"
+        else printf '/c/%s/%s/' "$(podenv CONVERSATION_ID)" "$1"; fi
+      }
       resolve() {
         have_manifest
         u=$(unit_of "$1")
@@ -103,17 +113,17 @@ let
           # Emit the table once so an early-closing reader cannot SIGPIPE a
           # mid-loop printf.
           out=$(printf '%-16s %-9s %s\n' NAME STATE URL)
-          while IFS=$'\t' read -r n u b; do
+          while IFS=$'\t' read -r n u; do
             [ -n "$n" ] || continue
-            out="$out"$'\n'"$(printf '%-16s %-9s %s' "$n" "$(state "$u")" "$b")"
-          done <<< "$(jq -r '.services[] | "\(.name)\t\(.unit)\t\(.basePath)"' "$MANIFEST")"
+            out="$out"$'\n'"$(printf '%-16s %-9s %s' "$n" "$(state "$u")" "$(url_of "$n")")"
+          done <<< "$(jq -r '.services[] | "\(.name)\t\(.unit)"' "$MANIFEST")"
           # Tolerate a reader closing the pipe early.
           printf '%s\n' "$out" || true
           ;;
         status)
           [ -n "$name" ] || { usage; exit 2; }
           u=$(resolve "$name")
-          echo "$name: $(state "$u")  unit=$u  url=$(base_of "$name")" || true  # tolerate an early-closing reader
+          echo "$name: $(state "$u")  unit=$u  url=$(url_of "$name")" || true  # tolerate an early-closing reader
           ;;
         start|stop|restart)
           [ -n "$name" ] || { usage; exit 2; }
@@ -125,7 +135,7 @@ let
             stop)          state_disable "$name" || true ;;
           esac
           echo "$name: $(state "$u")  ($cmd applied)"
-          [ "$cmd" != "stop" ] && echo "url: $(base_of "$name")" || true
+          [ "$cmd" != "stop" ] && echo "url: $(url_of "$name")" || true
           ;;
         restore)
           # Starts every autostart service that still exists in this manifest,
@@ -187,12 +197,13 @@ let
 
       basePath = lib.mkOption {
         type = lib.types.str;
-        default = "/c/\${CONVERSATION_ID}/${name}";
+        default = "\${SCOOTER_SERVICE_PREFIX}/${name}";
         description = ''
-          The external sub-path this service is served under. The conversation id
-          comes from the CONVERSATION_ID env var the provisioner injects at pod
-          creation (alongside CONVERSATION_URL) — the unit's ExecStart expands it
-          at start time, so no proxy-side templating is needed. The service must be
+          The external sub-path this service is served under: `/<name>` on the
+          conversation's own origin, `/c/<id>/<name>` on the main host.
+          SCOOTER_SERVICE_PREFIX comes from the unit's conv.env, derived from the
+          env the provisioner injects at pod creation, and the unit's ExecStart
+          expands it at start time, so no proxy-side templating is needed. The service must be
           configured to emit links/assets under this prefix (e.g. marimo
           `--base-url ${"$"}{basePath}`).
         '';
@@ -317,11 +328,16 @@ in
           set -eu
           out="''${RUNTIME_DIRECTORY%%:*}/conv.env"
           : > "$out"
-          for k in CONVERSATION_ID CONVERSATION_URL; do
+          origin=""; id=""
+          for k in CONVERSATION_ID CONVERSATION_URL SCOOTER_SERVICES_ORIGIN; do
             v=$(tr '\0' '\n' < /proc/1/environ | sed -n "s/^$k=//p" | head -1 || true)
             # An absent var is normal and must not trip `set -e`.
             if [ -n "$v" ]; then printf '%s=%s\n' "$k" "$v" >> "$out"; fi
+            case "$k" in CONVERSATION_ID) id="$v" ;; SCOOTER_SERVICES_ORIGIN) origin="$v" ;; esac
           done
+          # On its own origin a service serves at /<name>; otherwise under /c/<id>/<name>.
+          if [ -n "$origin" ]; then prefix=""; else prefix="/c/''${id:-unknown}"; fi
+          printf 'SCOOTER_SERVICE_PREFIX=%s\n' "$prefix" >> "$out"
         '';
         base = {
           description = "web service: ${s.displayName}";

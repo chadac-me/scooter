@@ -463,6 +463,8 @@ in
                   { name = "AGENT_HOST_SERVICE"; value = "agent-host-pods"; }
                   { name = "UPSTREAM_PORT"; value = "8080"; }
                   { name = "LISTEN_ADDR"; value = ":8080"; }
+                  # Requests to <label>.<sandboxDomain> are a conversation's web services.
+                  { name = "SANDBOX_DOMAIN"; value = cfg.ingress.sandboxDomain; }
                   # Read-only handle on the agent_host database via the router's own role.
                   { name = "AGENT_HOST_DB_HOST"; value = cfg.postgres.host; }
                   { name = "AGENT_HOST_DB_PORT"; value = toString cfg.postgres.port; }
