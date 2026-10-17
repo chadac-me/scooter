@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Code2, Eye, Moon, PanelLeft, Sun } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Code2, Eye, Moon, PanelLeft, RefreshCw, Sun } from "lucide-react";
 import clsx from "clsx";
 import { api, threadsOf, type Annotation, type FileView, type Question } from "./api";
 import { Tree } from "./Tree";
@@ -25,6 +25,20 @@ function useDark() {
   return [dark, toggle] as const;
 }
 
+const POLL_MS = 3000;
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+function useLive() {
+  const [live, setLive] = useState(() => localStorage.getItem("files-live") !== "off");
+  const toggle = () =>
+    setLive((l) => {
+      localStorage.setItem("files-live", l ? "off" : "on");
+      return !l;
+    });
+  return [live, toggle] as const;
+}
+
 export function App() {
   const [{ path, hash }, setLoc] = useState(current);
   const [file, setFile] = useState<FileView | null>(null);
@@ -42,36 +56,67 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadNotes = useCallback(async (p: string) => {
-    const [a, q] = await Promise.all([api.annotations(p).catch(() => []), api.questions(p).catch(() => [])]);
-    setAnnotations(a);
-    setQuestions(q);
+  // The open file's etag, so a poll asks only whether it changed.
+  const etag = useRef("");
+  const shown = useRef(path);
+  shown.current = path;
+
+  /** Body, comments and questions together, so question lines always index the body shown. */
+  const load = useCallback(async (p: string, fresh = false) => {
+    const [f, a, q] = await Promise.all([
+      fresh || !etag.current ? api.file(p) : api.fileIfChanged(p, etag.current),
+      api.annotations(p).catch(() => [] as Annotation[]),
+      api.questions(p).catch(() => ({ questions: [] as Question[], etag: "" })),
+    ]);
+    // The file moved between the two reads; fetch it again rather than misplace questions.
+    let next = f;
+    const have = next?.etag ?? etag.current;
+    if (q.etag && have && q.etag !== have) next = await api.file(p);
+    if (shown.current !== p) return;
+    if (next) {
+      etag.current = next.etag ?? "";
+      setFile(next);
+    }
+    setAnnotations((old) => (same(old, a) ? old : a));
+    setQuestions((old) => (same(old, q.questions) ? old : q.questions));
   }, []);
 
   useEffect(() => {
     if (!path) return;
     setError("");
-    api
-      .file(path)
-      .then((f) => {
-        setFile(f);
-        return loadNotes(path);
-      })
-      .catch((e) => {
-        setFile(null);
-        setError(String(e.message ?? e));
-      });
-  }, [path, loadNotes]);
+    etag.current = "";
+    load(path, true).catch((e) => {
+      setFile(null);
+      setError(String(e.message ?? e));
+    });
+  }, [path, load]);
 
-  // Pending comments flip to delivered once the broker acks; poll only while any are pending.
+  // Pending comments flip to delivered once the broker acks; poll fast while any are pending.
   useEffect(() => {
     if (!path || !annotations.some((a) => a.state === "pending")) return;
-    const t = setTimeout(() => loadNotes(path), 1500);
+    const t = setTimeout(() => load(path).catch(() => {}), 1500);
     return () => clearTimeout(t);
-  }, [annotations, path, loadNotes]);
+  }, [annotations, path, load]);
+
+  // Auto-refresh: pick up the agent's edits and replies while the tab is visible.
+  const [live, toggleLive] = useLive();
+  useEffect(() => {
+    if (!path || !live) return;
+    const tick = () => {
+      if (document.visibilityState === "visible") load(path).catch(() => {});
+    };
+    const t = setInterval(tick, POLL_MS);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [path, live, load]);
 
   const threads = useMemo(() => threadsOf(annotations), [annotations]);
-  const refresh = () => loadNotes(path);
+  const refresh = () => {
+    load(path).catch(() => {});
+  };
   const md = file?.renderer === "markdown";
   const open = threads.filter((t) => !t.resolved).length;
   const unanswered = questions.filter((q) => !q.answered).length;
@@ -112,6 +157,14 @@ export function App() {
               </button>
             </div>
           )}
+          <button
+            className={clsx("icon-btn", live && "text-brand")}
+            onClick={toggleLive}
+            title={live ? "Auto-refresh on: click to pause" : "Auto-refresh paused: click to resume"}
+            aria-pressed={live}
+          >
+            <RefreshCw className="size-4" />
+          </button>
           <button className="icon-btn" onClick={toggleDark} title="Toggle theme">
             {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
           </button>

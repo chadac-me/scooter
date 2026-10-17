@@ -70,7 +70,8 @@ viewer, and each remark wakes you. See the `scooter-design-review` skill.
 ## It is read-only, and it is not your own file access
 
 The viewer has no write path. If the user asks for a change while looking at it,
-**you** make the edit with your normal tools and tell them to reload.
+**you** make the edit with your normal tools. The open page picks it up within
+a few seconds, so there is no need to ask them to reload.
 
 Nor is it a way for *you* to read files — you have the filesystem directly. Open
 the viewer only to show the **user** something. Reading a file into your own

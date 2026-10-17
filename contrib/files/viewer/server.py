@@ -161,6 +161,10 @@ def listing(root: Path, path: Path) -> dict:
     return {"path": rel_of(root, path), "entries": entries}
 
 
+def etag_of(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
 def read_file(root: Path, path: Path) -> dict:
     """One file as text, or metadata explaining why it is not being rendered."""
     size = path.stat().st_size
@@ -177,7 +181,7 @@ def read_file(root: Path, path: Path) -> dict:
     return out | {
         "body": body,
         "lines": body.count("\n") + 1,
-        "etag": hashlib.sha256(raw).hexdigest()[:16],
+        "etag": etag_of(body),
         # Which of the page's renderers gets the body; markdown is parsed in the
         # browser, where the sanitizer that must see the result lives.
         "renderer": "markdown" if path.suffix in {".md", ".markdown"} else "code",
@@ -321,6 +325,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(
             {
                 "questions": out,
+                # Lines are only valid against this text; the page refetches on mismatch.
+                "etag": etag_of(content) if content is not None else "",
                 # Open questions and unresolved comments are counted apart because they
                 # ask different things of a reader: one blocks the agent, one does not.
                 "counts": self.counts(want, content)
@@ -478,7 +484,17 @@ class Handler(BaseHTTPRequestHandler):
             raise FileNotFoundError(want)
         if not target.is_file():
             return self.fail(HTTPStatus.BAD_REQUEST, "not a file")
-        self.send_json(read_file(self.cfg.root, target))
+        view = read_file(self.cfg.root, target)
+        # The page polls with its etag; an unchanged file costs no body.
+        etag = view.get("etag")
+        if etag and self.headers.get("if-none-match", "").strip('"') == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("etag", f'"{etag}"')
+            self.send_header("cache-control", "no-store")
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        self.send_json(view)
 
     def serve_raw(self, want: str) -> None:
         """Bytes for an <img> in a rendered document, confined to image types."""

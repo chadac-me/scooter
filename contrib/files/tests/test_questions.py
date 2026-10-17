@@ -271,6 +271,7 @@ def test_questions_are_served_with_their_answers_and_their_own_counts(tmp_path: 
 def test_a_file_with_no_fields_asks_nothing(tmp_path: Path):
     with viewer(tmp_path) as (call, _store):
         _, body = call("GET", "/api/questions?path=doc.md")
+        assert body.pop("etag")
         assert body == {"questions": [], "counts": {"comments": 0, "pending": 0, "stale": 0, "questions": 0, "open": 0}}
 
 
@@ -287,3 +288,11 @@ def test_the_tab_count_and_the_list_under_it_are_the_same_set(tmp_path: Path):
 
         _, body = call("GET", "/api/annotations?path=design.md")
         assert body["counts"]["comments"] == len(body["annotations"]) == 1
+
+
+def test_questions_carry_the_etag_of_the_text_their_lines_index(tmp_path: Path):
+    # The page compares it with the file's to catch a body older than the questions.
+    with viewer(tmp_path, doc=DOC_WITH_FIELDS, name="design.md") as (call, _store):
+        _, file = call("GET", "/api/file?path=design.md")
+        _, asked = call("GET", "/api/questions?path=design.md")
+        assert asked["etag"] == file["etag"]
