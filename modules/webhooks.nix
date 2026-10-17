@@ -47,6 +47,11 @@ in
       default = false;
       description = "Enable the Slack events handler (/webhooks/slack).";
     };
+    jiraEnabled = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Enable the Jira webhook handler (/webhooks/jira). Needs JIRA_WEBHOOK_SECRET in the provider Secret.";
+    };
 
     # --- Trigger convention -------------------------------------------------
     mentionPattern = mkOption {
@@ -62,7 +67,7 @@ in
     labelTrigger = mkOption {
       type = types.str;
       default = "scooter";
-      description = "Issue/PR label name that triggers a conversation (GitHub/GitLab).";
+      description = "Issue/PR label name that triggers a conversation (GitHub/GitLab/Jira).";
     };
     ignoreUsernames = mkOption {
       type = types.listOf types.str;
@@ -240,6 +245,7 @@ in
                   { name = "GITHUB_ENABLED"; value = lib.boolToString wcfg.githubEnabled; }
                   { name = "GITLAB_ENABLED"; value = lib.boolToString wcfg.gitlabEnabled; }
                   { name = "SLACK_ENABLED"; value = lib.boolToString wcfg.slackEnabled; }
+                  { name = "JIRA_ENABLED"; value = lib.boolToString wcfg.jiraEnabled; }
                   { name = "MENTION_PATTERN"; value = wcfg.mentionPattern; }
                   { name = "LABEL_TRIGGER"; value = wcfg.labelTrigger; }
                   { name = "IGNORE_USERNAMES"; value = lib.concatStringsSep "," wcfg.ignoreUsernames; }
