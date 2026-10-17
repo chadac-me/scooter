@@ -146,10 +146,9 @@ let
   approvalContribsJson =
     if cfg.approvals == { } then null else builtins.toJSON cfg.approvals;
   # Skill DIRECTORIES ship SKILL.md to the agent as `<name>.md`, with a note naming
-  # the sandbox copy (modules/sandbox-os/contrib-skills.nix) after the frontmatter,
+  # the sandbox copy (modules/skills/sandbox.nix) after the frontmatter,
   # since a skill resolves its scripts/ against "the directory it was loaded from"
   # and the agent-host's copy is not the one the agent's shell can run.
-  contribSkillDirs = import ../contrib/skill-dirs.nix { inherit lib; contribs = config.contribs; };
   withSandboxNote = name: text:
     let
       lines = lib.splitString "\n" text;
@@ -164,22 +163,27 @@ let
     else lib.concatStringsSep "\n"
       (lib.take (close + 1) lines ++ [ "" note ] ++ lib.drop (close + 1) lines);
   dirSkills = lib.mapAttrs'
-    (name: d: lib.nameValuePair "${name}.md" (withSandboxNote name (builtins.readFile "${d.src}/SKILL.md")))
-    contribSkillDirs;
+    (name: src: lib.nameValuePair "${name}.md" (withSandboxNote name (builtins.readFile "${src}/SKILL.md")))
+    config.resolvedSkillDirs;
+  # The directories an enabled contrib added are its own skills, gated like its files;
+  # the ones the deployment declared always ship.
+  contribDirNames = map (n: "${n}.md") (lib.concatMap (c: lib.attrNames c.skillDirs)
+    (lib.attrValues (lib.filterAttrs (_: c: c.enable) config.contribs)));
+  deploymentDirSkills = removeAttrs dirSkills contribDirNames;
 
   fileSkills = lib.mapAttrs (_: file: builtins.readFile file)
     (lib.concatMapAttrs (_: skills: skills) contribSkills);
-  builtins' = lib.optionalAttrs cfg.agent.builtinSkills (
+  builtins' =
     let clash = lib.intersectLists (lib.attrNames fileSkills) (lib.attrNames dirSkills); in
-    if clash != [ ] then throw "contrib skills: ${lib.concatStringsSep ", " clash} is both a skill file and a skill directory."
-    else fileSkills // dirSkills);
+    if clash != [ ] then throw "skills: ${lib.concatStringsSep ", " clash} is both a contrib skill file and a skill directory."
+    else lib.optionalAttrs cfg.agent.builtinSkills (fileSkills // dirSkills) // deploymentDirSkills;
   allSkills = builtins' // cfg.agent.skills;
 in
 {
   # ./testing.nix is absent on purpose (test-only overrides are opted into by a test
   # manifest), and the contribs arrive via `contribModules`, each declaring its own
   # `contribs.<name>` options and manifests with contrib/spec.nix as their schema.
-  imports = [ kubenix.modules.k8s ./images.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./legacy-state-migration.nix ./event-backfill.nix ]
+  imports = [ kubenix.modules.k8s ./images.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./legacy-state-migration.nix ./event-backfill.nix ./skills ]
     ++ contribModules;
 
   # Declared only so a definition on the old root reaches `legacyRoot`'s message; no

@@ -50,9 +50,9 @@ let
     programs.scooterModule.extraReconvergeModuleFiles =
       contribSandbox.treeRelative ++ extraModuleFiles
       # The skill directories, as reconverge-inputs.nix baked them into the tree.
-      ++ lib.optional (contribSandbox.skillDirs != { }) "contrib-skills/module.nix";
+      ++ lib.optional (contribSandbox.skillDirs != { }) "skill-dirs/module.nix";
 
-    scooter.skillDirs = lib.mapAttrs (_: d: d.src) contribSandbox.skillDirs;
+    scooter.skillDirs = contribSandbox.skillDirs;
 
     # The uv-nix uv for web-services/marimo.nix (null in nixosTests).
     _module.args.uvNix = uvNix;

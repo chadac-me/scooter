@@ -10,7 +10,7 @@ let
   # A module system of its own, so the NixOS-side `imports` gets plain paths rather than config values it cannot read that early.
   eval = lib.evalModules {
     specialArgs = { inherit lib; };
-    modules = [ ./all-modules.nix ] ++ extraModules;
+    modules = [ ./all-modules.nix ../modules/skills ] ++ extraModules;
   };
 
   # A disabled contrib is absent from the image with no `mkIf` in any contrib's module.
@@ -21,8 +21,8 @@ in
 {
   modules = lib.mapAttrsToList (_: c: c.sandbox.module) enabled;
 
-  # The enabled contribs' skill directories: name -> { contrib; src; }.
-  skillDirs = import ./skill-dirs.nix { inherit lib; contribs = eval.config.contribs; };
+  # Skill directories (modules/skills), the enabled contribs' included: name -> store path.
+  skillDirs = eval.config.resolvedSkillDirs;
 
   # Built from base names rather than `toString`, which would drag the whole repo into the image closure, and checked against this tree so a path that resolves nowhere throws at image build.
   treeRelative = lib.mapAttrsToList

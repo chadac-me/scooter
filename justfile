@@ -497,7 +497,7 @@ check-shell-syntax:
 check-contrib-coverage:
     @scripts/check-contrib-coverage.sh
 
-# Pin contrib skill-directory sources in contrib/skills.lock (`--update` re-pins to HEAD).
+# Pin skill-directory sources in modules/skills/skills.lock (`--update` re-pins to HEAD).
 lock-skills *args:
     @scripts/lock-skills.sh {{args}}
 

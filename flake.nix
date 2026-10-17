@@ -344,7 +344,7 @@
               listFile = sandboxWithEcho.nixos.config.environment.etc."scooter/reconverge-modules.json".source;
 
               # echo enabled as a contrib (not just its module file), so its skill
-              # DIRECTORY goes through contrib/skill-dirs.nix like a shipped one would.
+              # DIRECTORY goes through modules/skills like a shipped one would.
               withEchoSkills = import ./pkgs/sandbox-os/image.nix {
                 deploymentModules = deploymentModules ++ [{ contribs.echo.enable = lib.mkForce true; }];
                 inherit lib n2c uvNix;
@@ -366,7 +366,7 @@
               == (derive [ ]).treeRelative;
             assert shipped.nixos.config.systemd.services ? "scooter-aws-config";
             assert skillCfg.environment.etc ? "scooter/skills/echo-skill";
-            assert builtins.elem "contrib-skills/module.nix"
+            assert builtins.elem "skill-dirs/module.nix"
               skillCfg.programs.scooterModule.extraReconvergeModuleFiles;
             assert lib.any (p: (p.pname or p.name or "") == "scooter-aws")
               shipped.nixos.config.environment.systemPackages;
@@ -390,9 +390,9 @@
               # module the in-pod re-converge reads instead of re-resolving it.
               test -x ${skillSrc}/scripts/hello.sh
               case "${skillSrc}" in */*-skill-echo-skill) ;; *) echo "FAIL: ${skillSrc} is not named skill-echo-skill" >&2; exit 1 ;; esac
-              diff -r ${skillSrc} ${skillTree}/contrib-skills/echo-skill
+              diff -r ${skillSrc} ${skillTree}/skill-dirs/echo-skill
               grep -F 'builtins.path { path = ./echo-skill; name = "skill-echo-skill"; }' \
-                ${skillTree}/contrib-skills/module.nix
+                ${skillTree}/skill-dirs/module.nix
               touch $out
             '';
 

@@ -42,17 +42,17 @@ let
     # The binary as a bare store path, already in the image closure so the in-pod eval resolves it offline.
     printf '%s' ${lib.escapeShellArg "${nixStubs.package}"} > $out/nix-stubs-bin
   '' + lib.optionalString (skillDirs != { }) ''
-    mkdir -p $out/contrib-skills
+    mkdir -p $out/skill-dirs
     ${lib.concatStrings (lib.mapAttrsToList (name: src: ''
-      cp -r ${src} $out/contrib-skills/${name}
+      cp -r ${src} $out/skill-dirs/${name}
     '') skillDirs)}
-    chmod -R u+w $out/contrib-skills
-    cp ${skillModule} $out/contrib-skills/module.nix
+    chmod -R u+w $out/skill-dirs
+    cp ${skillModule} $out/skill-dirs/module.nix
   '');
 
   # Same content and same name as at image build, so the store paths match and a
   # self-modify does not churn /etc.
-  skillModule = pkgs.writeText "contrib-skills-module.nix" ''
+  skillModule = pkgs.writeText "skill-dirs-module.nix" ''
     {
       scooter.skillDirs = {
     ${lib.concatStrings (lib.mapAttrsToList (name: _: ''

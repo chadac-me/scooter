@@ -1,29 +1,32 @@
 #!/usr/bin/env bash
-# Pin every contrib skill directory's `source` in contrib/skills.lock.
+# Pin every skill directory's `source` (modules/skills) in modules/skills/skills.lock.
 #
 #   scripts/lock-skills.sh            add missing pins, keep existing ones
 #   scripts/lock-skills.sh --update   re-pin every source to its default branch's HEAD
 #   scripts/lock-skills.sh --check    fail if the lock is missing, stale or has extras (CI)
 #
-# Every DECLARED source is pinned, enabled or not, so enabling a contrib never
-# needs a lock change. The lock holds the commit and narHash; contrib.nix names only
-# the repo, so the lib-only evals stay pure and the in-pod re-converge never fetches.
+# Declared means this repo's `skillDirs` (with the deployment config it ships) plus
+# every contrib's, enabled or not, so enabling a contrib never needs a lock change.
+# The lock holds the commit and narHash; declarations name only the repo, so the
+# lib-only evals stay pure and the in-pod re-converge never fetches.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mode="${1:-}"
-lock=contrib/skills.lock
+lock=modules/skills/skills.lock
 
 # shellcheck disable=SC2016 # the ${…} below is Nix, not shell
 declared=$(nix eval --impure --json --expr '
   let
     flake = builtins.getFlake (toString ./.);
     lib = flake.inputs.nixpkgs.lib;
-    ev = lib.evalModules { specialArgs = { inherit lib; }; modules = [ ./contrib/all-modules.nix ]; };
-  in lib.concatMapAttrs (contrib: c:
-       lib.concatMapAttrs (name: s:
-         lib.optionalAttrs (s.source != null) { "${contrib}/${name}" = { inherit (s) source dir; }; })
-       c.skillDirs)
-     ev.config.contribs')
+    ev = lib.evalModules {
+      specialArgs = { inherit lib; };
+      modules = [ ./contrib/all-modules.nix ./modules/skills ./.github/deployment/config.nix ];
+    };
+    sources = lib.filterAttrs (_: s: s.source != null);
+    pick = lib.mapAttrs (_: s: { inherit (s) source dir; });
+  in pick (sources (lib.concatMapAttrs (_: c: c.skillDirs) ev.config.contribs
+                    // ev.config.skillDirs))')
 
 current=$(cat "$lock" 2>/dev/null || echo '{}')
 
@@ -31,13 +34,13 @@ if [ "$mode" = "--check" ]; then
   problems=$(jq -rn --argjson d "$declared" --argjson l "$current" '
     ($d | to_entries[] | select(($l[.key] // null) == null) | "\(.key): not pinned"),
     ($d | to_entries[] | select(($l[.key] // null) != null and ($l[.key].source != .value.source or $l[.key].dir != .value.dir)) | "\(.key): pinned to \($l[.key].source) dir \"\($l[.key].dir)\", declared \(.value.source) dir \"\(.value.dir)\""),
-    ($l | keys[] | select(($d[.] // null) == null) | "\(.): pinned but no contrib declares it")')
+    ($l | keys[] | select(($d[.] // null) == null) | "\(.): pinned but nothing declares it")')
   if [ -n "$problems" ]; then
-    echo "contrib/skills.lock is out of date (run \`just lock-skills\`):" >&2
+    echo "modules/skills/skills.lock is out of date (run \`just lock-skills\`):" >&2
     echo "$problems" >&2
     exit 1
   fi
-  echo "contrib/skills.lock pins every declared skill source"
+  echo "modules/skills/skills.lock pins every declared skill source"
   exit 0
 fi
 

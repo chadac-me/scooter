@@ -419,12 +419,23 @@ let
     else if !(nixpkgsLib.hasInfix "/etc/scooter/skills/echo-skill" echoDirSkill) then
     [ "echo-skill.md lacks the note naming /etc/scooter/skills/echo-skill — the agent would resolve scripts/ against the agent-host's copy" ]
     else [ ])
-    # A `source` with no pin in contrib/skills.lock must fail the render, not fetch an unpinned HEAD.
+    # A `source` with no pin in modules/skills/skills.lock must fail the render, not fetch an unpinned HEAD.
     ++ (if renders {
           contribs.echo.enable = nixpkgsLib.mkForce true;
           contribs.echo.skillDirs.unpinned.source = "github:example/unpinned";
         }
-        then [ "a skill directory whose source is not in contrib/skills.lock rendered — it must fail and point at `just lock-skills`" ]
+        then [ "a skill directory whose source is not in modules/skills/skills.lock rendered — it must fail and point at `just lock-skills`" ]
+        else [ ])
+    # Skill directories are a platform feature: a deployment declares one with no
+    # contrib, and it ships even with the contribs' own skills turned off.
+    ++ (let d = skillDataWith {
+              skillDirs.core-skill.path = ../contrib/echo/skills/echo-skill;
+              scooter.agent.builtinSkills = false;
+            }; in
+        if !(d ? "core-skill.md") then
+        [ "a deployment-level skillDirs entry did not reach the agent-skills ConfigMap — skill directories only work through a contrib" ]
+        else if !(nixpkgsLib.hasInfix "/etc/scooter/skills/core-skill" d."core-skill.md") then
+        [ "core-skill.md lacks the note naming /etc/scooter/skills/core-skill" ]
         else [ ]);
   disabledContribProblems =
     (if disabled != [ ] then [ ] else
