@@ -6,7 +6,7 @@ let
   flake = builtins.getFlake (toString ../.);
   system = builtins.currentSystem;
   # The vended entry point: it loads platform.nix and the image modules.
-  evalPlatform = flake.legacyPackages.${system}.evalPlatform;
+  evalPlatform = { module }: flake.lib.evalPlatform { inherit system module; };
 
   platform = evalPlatform {
     module = ./kubenix-config.nix;

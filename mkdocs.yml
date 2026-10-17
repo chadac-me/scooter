@@ -46,7 +46,26 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Getting started: getting-started.md
+  - Tutorial:
+      - Getting started: getting-started.md
+      - Deploying Scooter:
+          - Overview: tutorial/deploying/index.md
+          - Using the published images: tutorial/deploying/published-images.md
+          - Custom images: tutorial/deploying/custom-images.md
+      - Customizing skills: tutorial/skills.md
+      - Setting up contribs: tutorial/contribs.md
+      - Configuring webhooks: tutorial/webhooks.md
+      - Writing a contrib:
+          - Overview: tutorial/writing-a-contrib/index.md
+          - The declaration: tutorial/writing-a-contrib/declaration.md
+          - The deployment half: tutorial/writing-a-contrib/deployment.md
+          - The broker provider: tutorial/writing-a-contrib/broker.md
+          - Agent tools: tutorial/writing-a-contrib/tools.md
+          - Skills: tutorial/writing-a-contrib/skills.md
+          - The webhook handler: tutorial/writing-a-contrib/webhooks.md
+          - The sandbox module: tutorial/writing-a-contrib/sandbox.md
+          - UI metadata: tutorial/writing-a-contrib/ui.md
+          - Testing and shipping: tutorial/writing-a-contrib/testing.md
   - Features:
       - Overview: features/index.md
       - Conversations & sandboxes: features/conversations.md

@@ -1,0 +1,268 @@
+# Setting up contribs
+
+Scooter's integrations are packaged as **contribs**: GitHub, GitLab, Slack, AWS, web
+search and others. Each one adds some mix of broker routes, agent tools, skills, webhook
+handlers and sandbox packages. This chapter turns on the common ones.
+
+## How credentials work
+
+Most contribs give the agent access to an external API. The credential never enters
+the sandbox. It lives in a Kubernetes Secret that only the **broker** reads. When the
+agent calls the API, the broker adds the credential to the outbound request:
+
+```text
+agent, in its sandbox
+  │  agent-broker github/repos/acme/app
+  ▼
+broker
+  │  adds the GitHub token
+  ▼
+api.github.com
+```
+
+So for each contrib you:
+
+1. create a Secret in Scooter's namespace,
+2. point the contrib at it by name and key, and
+3. set `enable = true`.
+
+Every contrib is **off until you enable it**. Enabling one also ships its skill, so the
+agent learns how to use it (see [Customizing skills](skills.md)). Configuring a contrib
+without enabling it is an error, not a silent no-op.
+
+All of this needs the broker:
+
+```nix
+scooter.broker.enable = true;
+```
+
+The examples below use the `scooter` namespace from [Getting started](../getting-started.md).
+
+## GitHub
+
+The GitHub contrib gives the agent `git clone`/`push` over HTTPS and the GitHub API,
+as a **GitHub App**. Commits and comments show up as the App, and you choose
+exactly which repos it can reach.
+
+1. Create a GitHub App (Settings → Developer settings → GitHub Apps → New). Grant it
+   the repository permissions the agent needs: typically *Contents*, *Pull requests*
+   and *Issues* (read and write), plus *Metadata* (read). Leave the webhook off for
+   now; [Configuring webhooks](webhooks.md) covers it.
+2. Generate a private key and install the App on your org or repos. Note the **App ID**
+   (on the App's page) and the **installation ID** (the number at the end of the
+   installation's settings URL).
+3. Store the key:
+
+    ```bash
+    kubectl -n scooter create secret generic github-app-key \
+      --from-file=private-key=./my-app.private-key.pem
+    ```
+
+4. Configure the contrib:
+
+    ```nix
+    contribs.github = {
+      enable = true;
+      appId = "123456";
+      installationId = "7890123";
+      privateKeySecret = { name = "github-app-key"; key = "private-key"; };
+    };
+    ```
+
+## GitLab
+
+GitLab uses a token: a personal, group or project access token with the `api` scope.
+The contrib currently targets `gitlab.com`.
+
+```bash
+kubectl -n scooter create secret generic gitlab-token \
+  --from-literal=GITLAB_TOKEN=glpat-...
+```
+
+```nix
+contribs.gitlab = {
+  enable = true;
+  tokenSecret.name = "gitlab-token";   # key defaults to GITLAB_TOKEN
+};
+```
+
+To start conversations *from* GitLab comments and labels, also set up the
+[GitLab webhook](webhooks.md#gitlab).
+
+## Slack
+
+Slack lets the agent post and read messages as a Slack app. Create an app at
+<https://api.slack.com/apps>, add the bot scopes it needs (at least `chat:write`; the
+[Slack webhook](webhooks.md#slack) section lists the rest), install it, and copy the
+**Bot User OAuth Token** (`xoxb-…`).
+
+```bash
+kubectl -n scooter create secret generic slack-bot-token \
+  --from-literal=SLACK_BOT_TOKEN=xoxb-...
+```
+
+```nix
+contribs.slack = {
+  enable = true;
+  botTokenSecret.name = "slack-bot-token";
+};
+```
+
+To start conversations *from* Slack mentions, also set up the
+[Slack webhook](webhooks.md#slack).
+
+## Web search
+
+Three search contribs are available, and they can all run at once. Each adds its own
+tool (`brave_web_search`, `kagi_web_search`, `duckduckgo_web_search`) and the agent picks
+between them.
+
+```nix
+contribs = {
+  duckduckgo.enable = true;                  # no key needed
+
+  brave = {
+    enable = true;
+    apiKeySecret.name = "brave-search-key";  # key defaults to BRAVE_SEARCH_API_KEY
+  };
+
+  kagi = {
+    enable = true;
+    apiKeySecret.name = "kagi-search-key";   # key defaults to KAGI_API_KEY
+  };
+};
+```
+
+## Files and the VS Code editor
+
+These two need no credentials. They add tools inside the sandbox.
+
+```nix
+contribs = {
+  # A read-only file viewer in the browser. Reviewers can comment on lines, and
+  # each comment wakes the agent.
+  files.enable = true;
+
+  # code-server (VS Code in the browser) inside the sandbox.
+  code-server.enable = true;
+};
+```
+
+For `files` comments to wake the agent, the conversation router's self-access
+listener must be on:
+
+```nix
+scooter.conversationController.selfAccess.enable = true;
+```
+
+Without it, comments are stored but the agent isn't told about them.
+
+## Observability: Grafana and Datadog
+
+```nix
+contribs = {
+  # Proxies /grafana/* to your stack, with a service-account token added.
+  grafana = {
+    enable = true;
+    url = "https://myorg.grafana.net";
+    tokenSecret.name = "grafana-token";      # key defaults to GRAFANA_TOKEN
+  };
+
+  datadog = {
+    enable = true;
+    site = "datadoghq.eu";                   # default: datadoghq.com
+    apiKeySecret.name = "datadog-keys";      # key: DATADOG_API_KEY
+    appKeySecret.name = "datadog-keys";      # key: DATADOG_APP_KEY
+  };
+};
+```
+
+Grafana only mounts when both `url` and the token are set. Give the Grafana service
+account the Viewer role unless you want the agent editing dashboards.
+
+## AWS
+
+The AWS contrib doesn't hand out standing credentials. The agent asks for scoped,
+time-limited access to a named account, a human approves it in the conversation, and
+the broker vends short-lived STS credentials into the sandbox.
+
+It needs more setup than the others: an IRSA role for the broker, and in every account a
+base role that the broker may assume.
+
+```nix
+contribs.aws = {
+  enable = true;
+  region = "us-east-1";
+  # The broker's IRSA role, which each account's base role trusts.
+  serviceAccountRoleArn = "arn:aws:iam::111111111111:role/scooter-broker";
+  brokerPrincipalArn = "arn:aws:iam::111111111111:role/scooter-broker";
+
+  accounts.sandbox = {
+    account_id = "222222222222";
+    broker_role_arn = "arn:aws:iam::222222222222:role/agent-token-broker-base";
+    enabled = true;
+    # The agent reads this to pick the right account, so always set it.
+    description = "Sandbox account for read-only exploration (S3, CloudWatch logs).";
+    # Grant purely read-only requests without a human.
+    auto_approve_read_only = true;
+  };
+};
+```
+
+The [`accounts` option](../reference/options/index.md) documents every per-account
+field, including `allowed_policy` (the ceiling on what can ever be granted) and
+`auto_allowed_policy` (what's granted without approval).
+
+## Jira and Airtable
+
+```nix
+contribs = {
+  airtable = {
+    enable = true;
+    tokenSecret.name = "airtable-token";     # key defaults to AIRTABLE_TOKEN
+  };
+
+  jira = {
+    enable = true;
+    siteUrl = "https://acme.atlassian.net";  # for human-facing /browse links
+  };
+};
+```
+
+<!-- TODO: the Jira broker reads ATLASSIAN_CLIENT_ID / ATLASSIAN_CLIENT_SECRET /
+     ATLASSIAN_CLOUD_ID, but contribs.jira declares no options for them, so today they
+     have to be passed through scooter.broker.extraEnv. Add secret options to the
+     contrib, then document them here. -->
+
+Jira authenticates with an Atlassian OAuth client, which the contrib doesn't have
+options for yet. Until it does, pass the client through the broker's environment:
+
+```nix
+scooter.broker.extraEnv = map (name: {
+  inherit name;
+  valueFrom.secretKeyRef = { name = "atlassian-oauth"; key = name; };
+}) [ "ATLASSIAN_CLIENT_ID" "ATLASSIAN_CLIENT_SECRET" "ATLASSIAN_CLOUD_ID" ];
+```
+
+To start conversations from Jira comments, see the [Jira webhook](webhooks.md#jira).
+
+## Deploy and check
+
+```bash
+nix build && kubectl apply -f result
+kubectl -n scooter rollout status deploy/agent-broker
+```
+
+Then start a conversation and try it: "list the open PRs on acme/app", or "search the web
+for the kubenix docs". If a call fails, the agent sees the real HTTP status from the
+broker. A `404` on a provider route means that contrib isn't enabled or its credential
+didn't resolve, so check the broker's logs:
+
+```bash
+kubectl -n scooter logs deploy/agent-broker | grep -i <contrib>
+```
+
+[`examples/kubenix-config.nix`](https://github.com/chadac/scooter/blob/main/examples/kubenix-config.nix)
+configures every shipped contrib, and CI renders it, so it is a reliable reference.
+
+Next: [Configuring webhooks](webhooks.md).
