@@ -13,6 +13,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { codeToHtml } from "shiki";
 import { MessageSquarePlus } from "lucide-react";
+import clsx from "clsx";
 import { api, BASE, type Question, type Thread } from "./api";
 import { hrefFor, isExternal, navigate, resolveRel, slug } from "./nav";
 import { findText, rehypeSourceLines, segments, sourceAnchor } from "./markdown";
@@ -117,6 +118,62 @@ const Chunk = memo(function Chunk({ text, offset }: { text: string; offset: numb
 });
 
 type Draft = { line: number; quote: string };
+type Heading = { id: string; text: string; level: number };
+
+// The doc's 48rem column plus a 14rem contents column.
+const TOC_MIN_WIDTH = 1000;
+
+/** The document's h1–h3, linking each section and marking the one in view. */
+function Contents({ toc, active, path, inRail }: { toc: Heading[]; active: string; path: string; inRail?: boolean }) {
+  const top = Math.min(...toc.map((h) => h.level));
+  const list = (
+    <ul className="flex flex-col gap-0.5 border-l border-border">
+      {toc.map((h) => (
+        <li key={h.id}>
+          <a
+            href={hrefFor(path, h.id)}
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+              e.preventDefault();
+              navigate(path, h.id, { replace: true });
+              document.getElementById(h.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+            style={{ paddingLeft: `${0.75 + (h.level - top) * 0.75}rem` }}
+            className={clsx(
+              "-ml-px block truncate border-l py-0.5 pr-2 transition-colors",
+              h.id === active
+                ? "border-brand font-medium text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+            title={h.text}
+          >
+            {h.text}
+          </a>
+        </li>
+      ))}
+    </ul>
+  );
+  const label = "text-xs font-semibold uppercase tracking-wide text-muted-foreground";
+  // Narrow: a collapsible block atop the comment rail, rather than squeezing the doc.
+  if (inRail)
+    return (
+      <details open className="font-sans text-sm" aria-label="Contents">
+        <summary className={clsx(label, "mb-2 cursor-pointer select-none")}>Contents</summary>
+        <nav aria-label="Contents" className="max-h-64 overflow-y-auto">
+          {list}
+        </nav>
+      </details>
+    );
+  return (
+    <nav
+      aria-label="Contents"
+      className="sticky top-0 max-h-full w-56 shrink-0 self-start overflow-y-auto py-10 pl-6 font-sans text-sm"
+    >
+      <p className={clsx(label, "mb-2")}>Contents</p>
+      {list}
+    </nav>
+  );
+}
 type Pop = { top: number; left: number; anchor: Draft };
 
 /** The element tagged with `line`, or the nearest tagged block before it. */
@@ -154,7 +211,9 @@ export function MarkdownPane({
   const [active, setActive] = useState<string | null>(null);
   const ranges = useRef(new Map<string, Range>());
   const segs = useMemo(() => segments(body), [body]);
-  const qByLine = useMemo(() => new Map(questions.map((q) => [q.line, q])), [questions]);
+  // By id, not line: an agent's edit above a block moves its line but not its id.
+  const qById = useMemo(() => new Map(questions.map((q) => [q.id, q])), [questions]);
+  const [toc, setToc] = useState<Heading[]>([]);
 
   // Heading ids, set on the DOM across every chunk so two "Design" sections get
   // design and design-2, then the address's #heading is scrolled to.
@@ -168,10 +227,23 @@ export function MarkdownPane({
       seen.set(base, n);
       h.id = n > 1 ? `${base}-${n}` : base;
     });
+    const found = [...root.querySelectorAll<HTMLElement>("h1, h2, h3")].map((h) => ({
+      id: h.id,
+      text: h.textContent ?? "",
+      level: Number(h.tagName[1]),
+    }));
+    setToc((old) => (JSON.stringify(old) === JSON.stringify(found) ? old : found));
   }, [segs]);
+  // Once per address, so an auto-refresh of the body never yanks the reader back.
+  const scrolledTo = useRef("");
   useEffect(() => {
-    if (hash) document.getElementById(hash)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [hash, segs]);
+    const key = `${path}#${hash}`;
+    if (!hash || scrolledTo.current === key) return;
+    const el = document.getElementById(hash);
+    if (!el) return;
+    scrolledTo.current = key;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [path, hash, segs]);
 
   // Paint each thread's quote with the CSS Custom Highlight API, so React's DOM is untouched.
   useLayoutEffect(() => {
@@ -243,20 +315,51 @@ export function MarkdownPane({
 
   const openThreads = threads.filter((t) => !t.resolved);
 
+  // Contents sit beside the doc only when there is room; the tree and rail both take width.
+  const scroller = useRef<HTMLDivElement>(null);
+  const [wide, setWide] = useState(false);
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setWide(el.clientWidth >= TOC_MIN_WIDTH));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // The section being read: the last heading scrolled past the top.
+  const [current, setCurrent] = useState("");
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || toc.length < 2) return;
+    const onScroll = () => {
+      const top = el.getBoundingClientRect().top + 24;
+      let at = toc[0].id;
+      for (const h of toc) {
+        const node = document.getElementById(h.id);
+        if (node && node.getBoundingClientRect().top <= top) at = h.id;
+      }
+      setCurrent(at);
+    };
+    onScroll();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [toc]);
+
   return (
     <div className="flex min-h-0 flex-1">
-      <div className="min-w-0 flex-1 overflow-y-auto">
-        <div className="relative mx-auto max-w-3xl px-10 py-10" onMouseUp={onMouseUp} onClick={onClick}>
+      <div ref={scroller} className="flex min-w-0 flex-1 overflow-y-auto">
+        {wide && toc.length > 1 && <Contents toc={toc} active={current} path={path} />}
+        <div className="relative mx-auto min-w-0 max-w-3xl flex-1 px-10 py-10" onMouseUp={onMouseUp} onClick={onClick}>
           <DocPath.Provider value={path}>
             <article
               ref={doc}
               className="prose prose-stone dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-pre:p-0"
             >
               {segs.map((s, i) => {
-                const q = s.kind === "question" ? qByLine.get(s.line) : undefined;
+                const q = s.kind === "question" ? qById.get(s.id) : undefined;
                 if (s.kind === "question" && q)
                   return (
-                    <div key={i} data-line={s.line} className="not-prose my-6">
+                    <div key={`q:${s.id}`} data-line={s.line} className="not-prose my-6">
                       <QuestionCard path={path} question={q} onChange={onChange} />
                     </div>
                   );
@@ -286,6 +389,7 @@ export function MarkdownPane({
         data-comments
         className="flex w-[22rem] shrink-0 flex-col gap-3 overflow-y-auto border-l border-border bg-sidebar/50 p-4"
       >
+        {!wide && toc.length > 1 && <Contents toc={toc} active={current} path={path} inRail />}
         <h2 className="flex items-center justify-between font-sans text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Comments
           <span className="font-normal normal-case tracking-normal">

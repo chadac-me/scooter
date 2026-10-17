@@ -74,10 +74,19 @@ async function call<T>(method: string, route: string, body?: unknown, query?: Re
 export const api = {
   list: (path: string) => call<Listing>("GET", "list", undefined, { path }),
   file: (path: string) => call<FileView>("GET", "file", undefined, { path }),
+  /** The file, or null when it still matches `etag`. */
+  fileIfChanged: async (path: string, etag: string): Promise<FileView | null> => {
+    const r = await fetch(`${BASE}/api/file?${new URLSearchParams({ path })}`, {
+      headers: { "if-none-match": `"${etag}"` },
+    });
+    if (r.status === 304) return null;
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new ApiError(data.error ?? `${r.status} ${r.statusText}`, r.status);
+    return data as FileView;
+  },
   annotations: (path: string) =>
     call<{ annotations: Annotation[] }>("GET", "annotations", undefined, { path }).then((r) => r.annotations),
-  questions: (path: string) =>
-    call<{ questions: Question[] }>("GET", "questions", undefined, { path }).then((r) => r.questions),
+  questions: (path: string) => call<{ questions: Question[]; etag: string }>("GET", "questions", undefined, { path }),
   add: (body: {
     path: string;
     line: number;

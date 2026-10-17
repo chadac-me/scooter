@@ -19,11 +19,15 @@ export function rehypeSourceLines(opts: { offset: number }) {
 }
 
 export type Segment =
-  { kind: "md"; text: string; offset: number } | { kind: "question"; line: number; text: string; offset: number };
+  | { kind: "md"; text: string; offset: number }
+  | { kind: "question"; id: string; line: number; text: string; offset: number };
 
-const OPEN = /^\s*<!--\s*scooter:question\s+[^>]*?\s*-->\s*$/;
+// These mirror viewer/questions.py; a block either side reads differently renders raw.
+const OPEN = /^\s*<!--\s*scooter:question\s+([^>]*?)\s*-->\s*$/;
 const CLOSE = /^\s*<!--\s*\/scooter:question\s*-->\s*$/;
 const FENCE = /^\s*(```+|~~~+)/;
+const INDENTED = /^(?: {4}|\t)/;
+const ID = /(?:^|\s)id\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/;
 
 /** The document cut at question blocks, each piece remembering where it started. */
 export function segments(body: string): Segment[] {
@@ -33,12 +37,19 @@ export function segments(body: string): Segment[] {
   let fence = "";
   for (let i = 0; i < lines.length; i++) {
     const f = lines[i].match(FENCE);
-    if (f) fence = fence ? (f[1].startsWith(fence) ? "" : fence) : f[1];
-    if (fence || !OPEN.test(lines[i])) continue;
+    if (f && (!fence || f[1][0] === fence[0])) {
+      fence = fence ? "" : f[1];
+      continue;
+    }
+    if (fence || INDENTED.test(lines[i])) continue;
+    const open = lines[i].match(OPEN);
+    if (!open) continue;
     const end = lines.findIndex((l, j) => j > i && CLOSE.test(l));
     if (end === -1) continue;
+    const m = open[1].match(ID);
+    const id = (m?.[1] ?? m?.[2] ?? m?.[3] ?? "").trim();
     if (i > start) out.push({ kind: "md", text: lines.slice(start, i).join("\n"), offset: start });
-    out.push({ kind: "question", line: i + 1, text: lines.slice(i + 1, end).join("\n"), offset: i + 1 });
+    out.push({ kind: "question", id, line: i + 1, text: lines.slice(i + 1, end).join("\n"), offset: i + 1 });
     start = end + 1;
     i = end;
   }

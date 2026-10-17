@@ -255,6 +255,62 @@ try {
   const asked = (await api("questions?path=docs/review.md")).questions;
   check("answering a question records it", asked[0]?.answered === true, JSON.stringify(asked[0]));
 
+  // --- an agent edits the doc while the reader answers ----------------------------
+
+  // The bug: lines shifted under a stale body, so every block fell back to raw text.
+  const TWO = (pre) => `${pre}# Two questions
+
+## First
+
+<!-- scooter:question id=one kind=single -->
+First?
+- [ ] yes
+- [ ] no
+<!-- /scooter:question -->
+
+## Second
+
+<!-- scooter:question id=two kind=single -->
+Second?
+- [ ] left
+- [ ] right
+<!-- /scooter:question -->
+`;
+  writeFileSync(join(ws, "docs/two.md"), TWO(""));
+  await page.goto(`${url}/?path=docs/two.md`);
+  await page.locator('[data-question="two"]').waitFor();
+  // The agent writes a decision in above both blocks, moving their lines.
+  writeFileSync(join(ws, "docs/two.md"), TWO("Decided: ship it.\n\nMore context.\n\n"));
+  const two = page.locator('[data-question="two"]');
+  await two.getByText("right", { exact: true }).click();
+  await two.getByRole("button", { name: "Answer" }).click();
+  await page.waitForTimeout(800);
+  check(
+    "questions still render after the doc moves under them",
+    (await page.locator("[data-question]").count()) === 2,
+    `${await page.locator("[data-question]").count()} cards`,
+  );
+  check(
+    "auto-refresh shows the agent's edit",
+    await until(() => page.getByText("Decided: ship it.").isVisible(), 8000),
+  );
+  check("the answer survives the refresh", await until(() => two.getByText("Change", { exact: true }).isVisible(), 3000));
+
+  // --- contents ------------------------------------------------------------------
+
+  const toc = page.locator('nav[aria-label="Contents"]');
+  check("a table of contents lists the headings", (await toc.getByRole("link").allTextContents()).join("|") === "Two questions|First|Second",
+    (await toc.getByRole("link").allTextContents()).join("|"));
+  await toc.getByRole("link", { name: "Second" }).click();
+  check("a contents link addresses its section", new URL(page.url()).hash === "#second", page.url());
+  check("narrow, the contents sit in the comment rail", (await page.locator('[data-comments] nav[aria-label="Contents"]').count()) === 1);
+  await page.setViewportSize({ width: 1920, height: 900 });
+  check(
+    "wide, the contents get their own column",
+    await until(async () => (await page.locator('[data-comments] nav[aria-label="Contents"]').count()) === 0 && (await toc.count()) === 1, 3000),
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   // --- links: the address format the scooter-files skill hands out ---------------
 
   await page.goto(`${url}/?path=docs/review.md#later-section`);

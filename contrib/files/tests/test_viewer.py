@@ -202,6 +202,19 @@ def test_source_file_uses_the_code_renderer(client) -> None:
     assert payload["lines"] == 2
 
 
+def test_an_unchanged_file_is_a_304_and_a_changed_one_is_served(client, workspace: Path) -> None:
+    _, first = client.json("/api/file?path=README.md")
+    ask = lambda: urllib.request.urlopen(
+        urllib.request.Request(client.url("/api/file?path=README.md"), headers={"if-none-match": f'"{first["etag"]}"'})
+    )
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        ask()
+    assert caught.value.code == 304
+    (workspace / "README.md").write_text("# edited\n")
+    with ask() as resp:
+        assert json.loads(resp.read())["body"] == "# edited\n"
+
+
 @pytest.mark.parametrize("name", ["README.md", "NOTES.markdown"])
 def test_markdown_gets_its_own_renderer(client, workspace: Path, name: str) -> None:
     # Markdown is parsed in the browser, where the sanitizer is; the server's whole
