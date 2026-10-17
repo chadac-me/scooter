@@ -326,6 +326,9 @@ class Annotations:
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _worker: threading.Thread | None = None
     _stop: threading.Event = field(default_factory=threading.Event)
+    # Bumped on every write, so an open page's event stream knows to refetch.
+    generation: int = 0
+    _changed: threading.Condition = field(default_factory=threading.Condition)
 
     def __post_init__(self) -> None:
         self.state_path = Path(self.state_path)
@@ -357,6 +360,15 @@ class Annotations:
         payload = {"version": 1, "records": [asdict(r) for r in self.records.values()]}
         tmp.write_text(json.dumps(payload, indent=1))
         os.replace(tmp, self.state_path)
+        with self._changed:
+            self.generation += 1
+            self._changed.notify_all()
+
+    def wait_change(self, since: int, timeout: float) -> int:
+        """The generation once it passes `since`, or the current one after `timeout`."""
+        with self._changed:
+            self._changed.wait_for(lambda: self.generation != since, timeout)
+            return self.generation
 
     # --- writes -----------------------------------------------------------------
 

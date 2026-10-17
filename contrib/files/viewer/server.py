@@ -18,6 +18,7 @@ import json
 import mimetypes
 import os
 import posixpath
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -57,7 +58,12 @@ RAW_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".ico
 MAX_BODY_BYTES = 128 * 1024
 
 # Readable and never writable; a POST to one of these is refused as 405.
-READ_ONLY_ROUTES = ("/api/list", "/api/file", "/api/raw", "/api/health", "/api/questions")
+READ_ONLY_ROUTES = ("/api/list", "/api/file", "/api/raw", "/api/health", "/api/questions", "/api/events")
+
+# The event stream checks the open file this often (stdlib has no inotify; a stat is
+# cheap and local), and sends a comment line this often so a proxy never idles it out.
+EVENTS_STAT_S = 1.0
+EVENTS_HEARTBEAT_S = 15.0
 
 # Directories that are never interesting to review and enormous to walk.
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", "result"}
@@ -240,6 +246,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_annotations(want)
             if route == "/api/questions":
                 return self.serve_questions(want)
+            if route == "/api/events":
+                return self.serve_events(want)
             if route == "/api/health":
                 return self.send_json(
                     {
@@ -478,6 +486,61 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail(HTTPStatus.BAD_REQUEST, "not a directory")
         self.send_json(listing(self.cfg.root, target))
 
+    def serve_events(self, want: str) -> None:
+        """Server-sent events for one open file: `file` when it changes on disk, `notes`
+        when the annotation store takes any write. Each names what to refetch; the page
+        then asks the ordinary routes, so the stream carries no data of its own."""
+        target = resolve(self.cfg.root, want)
+
+        def stamp() -> tuple[int, int] | None:
+            try:
+                st = target.stat()
+                return (st.st_size, st.st_mtime_ns)
+            except OSError:
+                return None
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-store")
+        # Nginx-style proxies buffer otherwise; the router already flushes at once.
+        self.send_header("x-accel-buffering", "no")
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+        # A viewer without a store still streams file changes.
+        store = getattr(self.server, "store", None)
+        closing = self.server.closing
+        seen = stamp()
+        gen = store.generation if store is not None else 0
+        quiet = 0.0
+        try:
+            # The browser reconnects after this long, and the page refetches on reconnect.
+            self.wfile.write(b"retry: 2000\n\n")
+            self.wfile.flush()
+            while not closing.is_set():
+                if store is not None:
+                    now = store.wait_change(gen, EVENTS_STAT_S)
+                else:
+                    closing.wait(EVENTS_STAT_S)
+                    now = 0
+                out = b""
+                if now != gen:
+                    gen = now
+                    out += b"event: notes\ndata: {}\n\n"
+                cur = stamp()
+                if cur != seen:
+                    seen = cur
+                    out += b"event: file\ndata: {}\n\n"
+                quiet = 0.0 if out else quiet + EVENTS_STAT_S
+                if quiet >= EVENTS_HEARTBEAT_S:
+                    out, quiet = b": keepalive\n\n", 0.0
+                if out:
+                    self.wfile.write(out)
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            pass  # The tab closed or navigated away.
+
     def serve_file(self, want: str) -> None:
         target = resolve(self.cfg.root, want)
         if not target.exists():
@@ -485,7 +548,7 @@ class Handler(BaseHTTPRequestHandler):
         if not target.is_file():
             return self.fail(HTTPStatus.BAD_REQUEST, "not a file")
         view = read_file(self.cfg.root, target)
-        # The page polls with its etag; an unchanged file costs no body.
+        # The page refetches with its etag; an unchanged file costs no body.
         etag = view.get("etag")
         if etag and self.headers.get("if-none-match", "").strip('"') == etag:
             self.send_response(HTTPStatus.NOT_MODIFIED)
@@ -528,7 +591,14 @@ class Server(ThreadingHTTPServer):
     def __init__(self, cfg: Config, store: ann.Annotations | None = None):
         self.cfg = cfg
         self.store = store
+        # Set on shutdown, so open event streams end instead of holding their threads.
+        self.closing = threading.Event()
         super().__init__(("0.0.0.0", cfg.port), Handler)
+
+
+    def shutdown(self) -> None:
+        self.closing.set()
+        super().shutdown()
 
 
 def make_server(cfg: Config, store: ann.Annotations | None = None) -> Server:

@@ -662,6 +662,7 @@ def test_the_self_transport_posts_to_its_own_conversation_with_its_token(tmp_pat
 
 import contextlib  # noqa: E402
 import threading  # noqa: E402
+import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
@@ -703,6 +704,8 @@ def viewer(tmp_path: Path, *, with_store: bool = True, doc: str = DOC, name: str
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read() or b"{}")
 
+    call.url = f"http://127.0.0.1:{port}{cfg.base}"
+    call.root = root
     try:
         yield call, store
     finally:
@@ -820,3 +823,74 @@ def test_a_write_to_a_read_route_is_refused_as_read_only(tmp_path: Path):
         assert call("POST", "/api/file?path=doc.md", {})[0] == 405
         assert call("POST", "/api/list", {})[0] == 405
         assert call("POST", "/api/nope", {})[0] == 404
+
+
+# --- the event stream ----------------------------------------------------------------
+
+
+class _Events:
+    """An open /api/events stream; next() is the next named event, or None on timeout."""
+
+    def __init__(self, call, path: str = "doc.md") -> None:
+        self.response = urllib.request.urlopen(f"{call.url}/api/events?path={path}", timeout=5)
+
+    def next(self) -> str | None:
+        try:
+            while line := self.response.readline():
+                if line.startswith(b"event: "):
+                    return line[len(b"event: "):].strip().decode()
+        except TimeoutError:
+            return None
+        return None
+
+    def close(self) -> None:
+        self.response.close()
+
+
+def test_events_is_a_stream_and_a_write_to_the_store_is_a_notes_event(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        events = _Events(call)
+        try:
+            assert events.response.headers["content-type"] == "text/event-stream"
+            # The retry hint comes first, so the browser's reconnect delay is ours.
+            assert events.response.readline() == b"retry: 2000\n"
+            call("POST", "/api/annotations", {"path": "doc.md", "line": 2, "quote": "bravo", "text": "hm"})
+            assert events.next() == "notes"
+        finally:
+            events.close()
+
+
+def test_an_edit_on_disk_is_a_file_event(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        events = _Events(call)
+        try:
+            (call.root / "doc.md").write_text(DOC + "echo\n")
+            assert events.next() == "file"
+        finally:
+            events.close()
+
+
+def test_a_viewer_without_a_store_still_streams_file_changes(tmp_path: Path):
+    with viewer(tmp_path, with_store=False) as (call, _store):
+        events = _Events(call)
+        try:
+            (call.root / "doc.md").unlink()
+            assert events.next() == "file"
+        finally:
+            events.close()
+
+
+def test_shutdown_ends_an_open_stream(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        events = _Events(call)
+    # The server closed the stream (EOF in about a second) rather than leaving its
+    # thread waiting for the 5s read timeout.
+    started = time.monotonic()
+    assert events.next() is None
+    assert time.monotonic() - started < 3
+    events.close()
+
+
+def test_events_refuses_a_path_outside_the_root(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        assert call("GET", "/api/events?path=../outside")[0] in (400, 403, 404)

@@ -74,6 +74,8 @@ async function call<T>(method: string, route: string, body?: unknown, query?: Re
 export const api = {
   list: (path: string) => call<Listing>("GET", "list", undefined, { path }),
   file: (path: string) => call<FileView>("GET", "file", undefined, { path }),
+  /** The server's change feed for one file: `file` and `notes` events, each naming what to refetch. */
+  events: (path: string) => new EventSource(`${BASE}/api/events?${new URLSearchParams({ path })}`),
   /** The file, or null when it still matches `etag`. */
   fileIfChanged: async (path: string, etag: string): Promise<FileView | null> => {
     const r = await fetch(`${BASE}/api/file?${new URLSearchParams({ path })}`, {
