@@ -265,6 +265,9 @@ export function createAguiServer(): AguiServer {
       return;
     }
 
+    // The router's cluster-internal web-service routes (direct proxying of sandbox hosts).
+    if (mountedProxy && (await mountedProxy.handleInternal(req, res))) return;
+
     // Management API (mounted router) is tried first.
     if (mountedRouter && (await mountedRouter.handle(req, res))) return;
 
