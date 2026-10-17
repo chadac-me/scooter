@@ -104,8 +104,11 @@ kubectl -n scooter rollout status deploy/agent-host
 ```
 
 Open `https://scooter.example.com` and start a conversation. To upgrade, run
-`nix flake update scooter` and apply again. Only images CI has published are
-deployable, so if you track a branch, wait for its images to publish first.
+`nix flake update scooter` and apply again.
+
+This is fine for trying Scooter out. For a deployment a team relies on, see
+[Deploying Scooter](tutorial/deploying/index.md): deploying from GitHub Actions, checking
+images exist before you apply, weekly updates, and running your own images.
 
 ## Common options
 
@@ -222,14 +225,17 @@ scooter = {
 
 ### Storage on single-node clusters
 
-The agent-host shares two volumes across replicas, and they need `ReadWriteMany`.
-Provisioners like k3s's `local-path` only support `ReadWriteOnce`, so on those clusters
-use host paths instead:
+The agent-host stores uploaded files on a volume shared by all its replicas, so it needs
+`ReadWriteMany`. Provisioners like k3s's `local-path` only support `ReadWriteOnce`, so on
+those clusters use a host path instead:
 
 ```nix
 scooter.conversationController = {
-  historyMirror.hostPath = "/var/lib/scooter/agent-host-history";
   assets.hostPath = "/var/lib/scooter/agent-host-assets";
+
+  # Conversation history lives in Postgres. This turns off a leftover volume that
+  # nothing uses, which would otherwise sit Pending without RWX (#825).
+  historyMirror.enable = false;
 };
 ```
 
@@ -239,13 +245,15 @@ This only works while every agent-host pod runs on the same node.
 
 The rest of the tutorial builds on this deployment:
 
-1. [Customizing skills](tutorial/skills.md): include Scooter's platform skills and teach
+1. [Deploying Scooter](tutorial/deploying/index.md): deploy from CI, keep it updated, and
+   run custom images.
+2. [Customizing skills](tutorial/skills.md): include Scooter's platform skills and teach
    the agent about your repos.
-2. [Setting up contribs](tutorial/contribs.md): GitHub, GitLab, Slack, search, AWS and
+3. [Setting up contribs](tutorial/contribs.md): GitHub, GitLab, Slack, search, AWS and
    more.
-3. [Configuring webhooks](tutorial/webhooks.md): start conversations from comments,
+4. [Configuring webhooks](tutorial/webhooks.md): start conversations from comments,
    labels and mentions.
-4. [Writing a contrib](tutorial/writing-a-contrib/index.md): add an integration of your
+5. [Writing a contrib](tutorial/writing-a-contrib/index.md): add an integration of your
    own.
 
 Also useful:

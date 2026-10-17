@@ -11,7 +11,13 @@ the sandbox. It lives in a Kubernetes Secret that only the **broker** reads. Whe
 agent calls the API, the broker adds the credential to the outbound request:
 
 ```text
-agent ──▶ agent-broker github/repos/acme/app ──▶ broker (adds token) ──▶ api.github.com
+agent, in its sandbox
+  │  agent-broker github/repos/acme/app
+  ▼
+broker
+  │  adds the GitHub token
+  ▼
+api.github.com
 ```
 
 So for each contrib you:
@@ -79,6 +85,9 @@ contribs.gitlab = {
   tokenSecret.name = "gitlab-token";   # key defaults to GITLAB_TOKEN
 };
 ```
+
+To start conversations *from* GitLab comments and labels, also set up the
+[GitLab webhook](webhooks.md#gitlab).
 
 ## Slack
 
@@ -234,6 +243,8 @@ scooter.broker.extraEnv = map (name: {
   valueFrom.secretKeyRef = { name = "atlassian-oauth"; key = name; };
 }) [ "ATLASSIAN_CLIENT_ID" "ATLASSIAN_CLIENT_SECRET" "ATLASSIAN_CLOUD_ID" ];
 ```
+
+To start conversations from Jira comments, see the [Jira webhook](webhooks.md#jira).
 
 ## Deploy and check
 
