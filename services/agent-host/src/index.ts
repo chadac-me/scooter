@@ -539,6 +539,8 @@ export async function main(
             await metaStore.saveMeta(meta);
             await fileStore.saveMeta?.(meta);
           },
+          touchActivity: (id: SessionId, at: number) => metaStore.touchActivity(id, at),
+          readLastActivity: (id: SessionId) => metaStore.readLastActivity(id),
           listConversations: () => metaStore.listConversations(),
           removeConversation: async (id: SessionId) => {
             await metaStore.removeConversation(id);

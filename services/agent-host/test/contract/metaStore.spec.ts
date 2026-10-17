@@ -66,6 +66,15 @@ function fakeDb(): {
         return { rows: [], rowCount: 1 };
       }
 
+      if (head.startsWith("UPDATE") && values.length === 2) {
+        // touchActivity: SET last_activity_at = GREATEST(last_activity_at, $1) WHERE id = $2.
+        const [at, target] = values as [number, string];
+        const row = rows.get(target);
+        if (!row) return { rows: [], rowCount: 0 };
+        row.last_activity_at = String(Math.max(Number(row.last_activity_at), Number(at)));
+        return { rows: [], rowCount: 1 };
+      }
+
       if (head.startsWith("UPDATE")) {
         // Every column, then the target id as the last param.
         const [id, threadId, title, createdAt, lastActivityAt, model, modelSetBy, owner, parentId, userTitled, starred, pendingQueue, target] =
@@ -76,7 +85,10 @@ function fakeDb(): {
           thread_id: threadId,
           title,
           created_at: String(createdAt),
-          last_activity_at: String(lastActivityAt),
+          // saveMeta only moves lastActivityAt forward (GREATEST), never back.
+          last_activity_at: /GREATEST/i.test(text)
+            ? String(Math.max(Number(rows.get(target)!.last_activity_at), Number(lastActivityAt)))
+            : String(lastActivityAt),
           model,
           model_set_by: modelSetBy,
           owner,
@@ -86,6 +98,12 @@ function fakeDb(): {
           pending_queue: pendingQueue,
         });
         return { rows: [], rowCount: 1 };
+      }
+
+      if (head.startsWith("SELECT") && /WHERE/i.test(text)) {
+        // readLastActivity: SELECT last_activity_at WHERE id = $1 LIMIT $2.
+        const row = rows.get(values[0] as string);
+        return { rows: row ? [[row.last_activity_at]] : [], rowCount: row ? 1 : 0 };
       }
 
       if (head.startsWith("SELECT")) {
@@ -352,5 +370,23 @@ describe("failure behaviour", () => {
   it("saveMeta degrades quietly — a metadata write must not fail the turn", async () => {
     const store = createPgMetaStore({ db: brokenDb() });
     await expect(store.saveMeta(meta())).resolves.toBeUndefined();
+  });
+
+  it("lastActivityAt only moves forward, from any replica", async () => {
+    const { db, created } = fakeDb();
+    const store = createPgMetaStore({ db });
+    created("conv-1");
+
+    await store.saveMeta(meta({ lastActivityAt: 5_000 }));
+    // A replica proxying a web service records newer activity...
+    await store.touchActivity("conv-1" as SessionId, 9_000);
+    expect(await store.readLastActivity("conv-1" as SessionId)).toBe(9_000);
+    // ...which neither an older touch nor a stale replica's full save can erase.
+    await store.touchActivity("conv-1" as SessionId, 7_000);
+    await store.saveMeta(meta({ lastActivityAt: 6_000, title: "renamed" }));
+    expect(await store.readLastActivity("conv-1" as SessionId)).toBe(9_000);
+    const [row] = await store.listConversations();
+    expect(row.title).toBe("renamed");
+    expect(await store.readLastActivity("missing" as SessionId)).toBeUndefined();
   });
 });
