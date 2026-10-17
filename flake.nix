@@ -361,7 +361,7 @@
             assert sandboxWithEcho.nixos.config.environment.etc ? "scooter/contrib-echo";
             assert echoOnly == [ "contrib/echo/sandbox.nix" ];
             assert shipped.nixos.config.programs.scooterModule.extraReconvergeModuleFiles
-              == (derive [ ]).treeRelative ++ [ "contrib-skills/module.nix" ];
+              == (derive [ ]).treeRelative ++ [ "skill-dirs/module.nix" ];
             # marimo ships as a contrib: its service, and marimo-pair's directory for the agent's shell.
             assert builtins.elem "contrib/marimo/sandbox.nix" (derive [ ]).treeRelative;
             assert shipped.nixos.config.webServices.marimo.enable;
@@ -383,8 +383,8 @@
                 test -f "$p" || { echo "FAIL: $p is in the list but is not a file" >&2; exit 1; }
               done
               # marimo-pair's scripts are baked into the tree the in-pod re-converge reads.
-              shippedTree=$(dirname "$(dirname "$(${pkgs.jq}/bin/jq -r 'map(select(endswith("/contrib-skills/module.nix")))[0]' ${shippedListFile})")")
-              test -f "$shippedTree/contrib-skills/marimo-pair/scripts/execute-code.sh"
+              shippedTree=$(dirname "$(dirname "$(${pkgs.jq}/bin/jq -r 'map(select(endswith("/skill-dirs/module.nix")))[0]' ${shippedListFile})")")
+              test -f "$shippedTree/skill-dirs/marimo-pair/scripts/execute-code.sh"
               # Both halves are in the baked list.
               ${pkgs.jq}/bin/jq -e 'map(endswith("/contrib/aws/sandbox.nix")) | any' ${listFile} >/dev/null
               ${pkgs.jq}/bin/jq -e 'map(endswith("/contrib/echo/sandbox.nix")) | any' ${listFile} >/dev/null
