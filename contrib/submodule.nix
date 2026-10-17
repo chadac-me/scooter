@@ -75,12 +75,51 @@ let
     };
   };
 
+  # One contrib settings page. `entry` is a string, not a path, so reading the
+  # registry never copies a .tsx into the store.
+  settingsTabModule = {
+    options = {
+      id = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "${name}-accounts";
+        description = ''
+          The URL segment, `/settings/<id>`. Defaults to the contrib name, which is
+          the right id for a contrib's only tab. A second tab must set one, and every
+          id must be the contrib name or start with `${name}-`, so two contribs can
+          never claim the same URL. Checked by contrib/settings-tabs.nix.
+        '';
+      };
+      label = mkOption {
+        type = types.str;
+        example = "Personalization";
+        description = "The tab's name in the settings sidebar.";
+      };
+      order = mkOption {
+        type = types.int;
+        default = 100;
+        description = "Sort key in the sidebar. Built-in tabs take 10, 20, … 50; ties sort by id.";
+      };
+      entry = mkOption {
+        type = types.str;
+        example = "ui/SettingsTab.tsx";
+        description = ''
+          The tab's module, relative to this contrib's directory and inside its `ui/`.
+          Its default export is a React component with no props. It may import only
+          @/components/*, @/lib/*, @/src/contrib/sdk and ui/package.json deps (an
+          ESLint rule enforces this). A string so the UI build resolves it; a path
+          would pull the .tsx into every eval that reads the registry.
+        '';
+      };
+    };
+  };
+
   uiModule = { config, ... }: {
     options = {
       enable = mkOption {
         type = types.bool;
         description = ''
-          Contribute UI metadata. Defaults to true once `source` or `tools` is
+          Contribute UI metadata. Defaults to true once `source`, `tools` or `settingsTabs` is
           set, so a declared row cannot silently render nothing; set it false to
           build the contrib with its UI half dropped.
         '';
@@ -107,9 +146,25 @@ let
           NAME (the identity the UI normalizes an incoming call down to).
         '';
       };
+
+      settingsTabs = mkOption {
+        type = types.listOf (types.submodule settingsTabModule);
+        default = [ ];
+        example = literalExpression ''
+          [{ label = "Personalization"; entry = "ui/SettingsTab.tsx"; }]
+        '';
+        description = ''
+          Pages this contrib adds under /settings. Compiled into the main UI bundle
+          as lazy chunks; the runtime manifest decides which appear, so a disabled
+          contrib's tab is in the bundle but never fetched (see contrib/README.md).
+          A list, not keyed by name: `contribs.<name>` already names the contrib,
+          and a tab's id defaults to it.
+        '';
+      };
     };
 
-    config.enable = lib.mkDefault (config.source != null || config.tools != { });
+    config.enable = lib.mkDefault
+      (config.source != null || config.tools != { } || config.settingsTabs != [ ]);
   };
 
   serviceModule = svc: { ... }: {

@@ -8,7 +8,7 @@
  * section shows a "not configured" note when its backing service is not deployed.
  */
 
-import { useCallback, useEffect, useState, type FC } from "react";
+import { useCallback, useEffect, useMemo, useState, type FC } from "react";
 
 import { agentHostConfig } from "./config.js";
 import { loadDevices, deregisterDevice, formatLastSeen, type ByocDevice } from "./byocDevices.js";
@@ -33,7 +33,9 @@ import {
   type RegistryModule,
 } from "./client.js";
 import { useSessions, currentConversation } from "./sessions.js";
-import { viewStore, useSettingsTab, SETTINGS_TABS, type SettingsTab } from "./view.js";
+import { viewStore, useSettingsTab, settingsTabList, resolveTab, isBuiltinTab, type BuiltinTab } from "./view.js";
+import { contribSettingsTabs } from "./contribManifest.js";
+import { ContribTabBody } from "./contribTabs.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -1002,7 +1004,7 @@ function AdminAreaSection() {
   );
 }
 
-const TAB_BODIES: Record<SettingsTab, FC> = {
+const TAB_BODIES: Record<BuiltinTab, FC> = {
   tasks: ScheduledTasksSection,
   skills: SkillsSection,
   claude: ClaudeAgentSection,
@@ -1018,12 +1020,19 @@ const TAB_BODIES: Record<SettingsTab, FC> = {
  * collapsed by default at every width, and selecting a tab does not auto-close it.
  */
 export function SettingsPage() {
-  const tab = useSettingsTab();
-  const Body = TAB_BODIES[tab];
+  // The manifest is loaded before first paint (main.tsx), so contrib tabs are known here
+  // and a deep link to one survives a refresh. An id that is neither built-in nor in the
+  // manifest lands on the default tab.
+  const contribTabs = contribSettingsTabs();
+  const tabs = useMemo(() => settingsTabList(contribTabs), [contribTabs]);
+  const tab = resolveTab(useSettingsTab(), tabs);
+  // A built-in always wins, matching settingsTabList.
+  const contribTab = isBuiltinTab(tab) ? undefined : contribTabs[tab];
+  const Body = isBuiltinTab(tab) ? TAB_BODIES[tab] : undefined;
   const [menuOpen, setMenuOpen] = useState(false);
-  const activeLabel = SETTINGS_TABS.find((t) => t.id === tab)?.label ?? "Settings";
+  const activeLabel = tabs.find((t) => t.id === tab)?.label ?? "Settings";
 
-  const tabButtons = SETTINGS_TABS.map((t) => {
+  const tabButtons = tabs.map((t) => {
     const active = t.id === tab;
     return (
       <Button
@@ -1094,7 +1103,7 @@ export function SettingsPage() {
           data-testid={`settings-panel-${tab}`}
           className="min-h-0 flex-1 overflow-y-auto pr-1"
         >
-          <Body />
+          {contribTab ? <ContribTabBody key={tab} tab={contribTab} /> : Body && <Body />}
         </div>
       </div>
     </div>

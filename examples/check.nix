@@ -761,7 +761,41 @@ let
       (containersOf w))
     allWorkloads;
 
-  allProblems = disabledContribProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  # Contrib settings tabs, resolved by the same function the UI manifest uses, over
+  # the platform eval's contribs with fixture overrides. Echo declares a tab and is
+  # disabled; each bad declaration must throw, since a tab the UI cannot route is
+  # otherwise a silently broken page.
+  resolveSettingsTabs = import ../contrib/settings-tabs.nix { lib = nixpkgsLib; };
+  tabsWith = extra:
+    let
+      e = evalPlatform {
+        module = { ... }: {
+          imports = [ ./kubenix-config.nix ];
+          config = extra;
+        };
+      };
+    in resolveSettingsTabs (nixpkgsLib.filterAttrs (_: c: c.enable) e.config.contribs);
+  tabsThrow = extra: !(builtins.tryEval (builtins.deepSeq (tabsWith extra) true)).success;
+  echoOn = tabs: {
+    contribs.echo.enable = nixpkgsLib.mkForce true;
+    contribs.echo.ui.settingsTabs = nixpkgsLib.mkForce tabs;
+  };
+  echoTab = { label = "Echo"; entry = "ui/SettingsTab.tsx"; };
+  settingsTabProblems =
+    (if (tabsWith { }) ? echo
+     then [ "the echo settings tab is in the manifest while echo is disabled — tabs are not gated on the contrib's `enable`" ] else [ ])
+    ++ (if ((tabsWith { contribs.echo.enable = nixpkgsLib.mkForce true; }).echo.entry or null) == "echo/ui/SettingsTab.tsx" then [ ]
+        else [ "enabling echo did not put its settings tab in the manifest as id `echo` with entry echo/ui/SettingsTab.tsx" ])
+    ++ (if tabsThrow (echoOn [ (echoTab // { id = "other"; }) ]) then [ ]
+        else [ "a settings tab id outside `<contrib>[-…]` rendered — tab URLs are no longer scoped by contrib" ])
+    ++ (if tabsThrow (echoOn [ echoTab echoTab ]) then [ ]
+        else [ "two settings tabs with the same id rendered — one silently replaces the other in the manifest" ])
+    ++ (if tabsThrow (echoOn [ (echoTab // { entry = "ui/Missing.tsx"; }) ]) then [ ]
+        else [ "a settings tab whose entry does not exist rendered — the UI would show an error card instead of failing the eval" ])
+    ++ (if tabsThrow (echoOn [ (echoTab // { id = "echo_Bad"; }) ]) then [ ]
+        else [ "a settings tab id that is not a URL slug rendered" ]);
+
+  allProblems = disabledContribProblems ++ settingsTabProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

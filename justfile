@@ -432,7 +432,10 @@ typecheck:
     # The generated Drizzle schema (catches broken/drifted generation at the type level).
     npm -w @scooter/schema run typecheck
 
+# The contrib settings-tab import boundary (ui/eslint.config.js); the rest of the UI
+# is not linted yet.
 lint: typecheck
+    npm -w ui run lint:contrib
 
 # Guard against a stale stubs.lock: re-evaluate stubs.nix and fail if any recorded .drv
 # differs. An in-repo stub (contrib/code-server/ahp) changes its .drv with every source edit, and a

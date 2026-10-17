@@ -18,6 +18,7 @@ import {
   contribToolCards,
   contribToolTitles,
   contribLinkProviders,
+  contribSettingsTabs,
 } from "./contribManifest.js";
 import { sourceLabel, SourceBadge } from "./sourceIcon.js";
 import { matchToolCall } from "./toolCallView.js";
@@ -221,5 +222,37 @@ describe("the app no longer hardcodes a contrib's row", () => {
     await loadContribManifest();
     expect(render("datadog")).not.toContain("<svg");
     expect(sourceLabel("datadog")).toBe("datadog");
+  });
+});
+
+describe("settings tabs", () => {
+  const TAB = { contrib: "echo", label: "Echo", order: 60, entry: "echo/ui/SettingsTab.tsx" };
+
+  it("keeps a well-formed row, keyed by its id", async () => {
+    serve({ settingsTabs: { echo: TAB, "echo-more": { ...TAB, label: "More" } } });
+    await loadContribManifest();
+    expect(contribSettingsTabs()).toEqual({ echo: TAB, "echo-more": { ...TAB, label: "More" } });
+  });
+
+  it("drops a malformed row without costing its neighbours", async () => {
+    serve({
+      settingsTabs: {
+        echo: TAB,
+        "no-label": { ...TAB, label: "" },
+        "no-order": { ...TAB, order: "60" },
+        "Bad_Id": TAB,
+        // An entry outside the declaring contrib's ui/ could load another contrib's module.
+        "foreign-entry": { ...TAB, entry: "aws/ui/SettingsTab.tsx" },
+        "not-an-object": "echo",
+      },
+    });
+    await loadContribManifest();
+    expect(Object.keys(contribSettingsTabs())).toEqual(["echo"]);
+  });
+
+  it("is empty when the manifest has no settingsTabs key", async () => {
+    serve({});
+    await loadContribManifest();
+    expect(contribSettingsTabs()).toEqual({});
   });
 });

@@ -33,6 +33,7 @@ contrib/<name>/
     __init__.py             # neutral; imports NEITHER broker nor webhooks
     broker_provider.py      # imports broker.*  (only loaded in the broker image)
     webhooks_handler.py     # imports webhooks.* (only loaded in the webhooks image)
+  ui/                       # optional: settings tabs, ui/*.tsx (see "Contributing UI")
   tests/
 ```
 
@@ -526,11 +527,45 @@ ui = {
 };
 ```
 
-`enable` defaults to true as soon as `source` or `tools` is set, so a declared
-row cannot silently render nothing.
+`enable` defaults to true as soon as `source`, `tools` or `settingsTabs` is set,
+so a declared row cannot silently render nothing.
 
-**This is METADATA only.** A contrib shipping real React (a `RightPanel` tab, a
-custom renderer) is a second tier that lands with the first feature needing one.
+#### Settings tabs (`ui.settingsTabs`)
+
+A contrib can add a page under `/settings`, written in React:
+
+```nix
+ui.settingsTabs = [{
+  label = "Personalization";
+  order = 50;                    # built-ins take 10, 20, … 50; ties sort by id
+  entry = "ui/SettingsTab.tsx";  # relative to this contrib's directory
+}];
+```
+
+- **Id and URL.** A tab's id defaults to the contrib name, so the usual single tab
+  lives at `/settings/<name>`. A second tab sets `id`, and every id must be the
+  contrib name or start with `<name>-`, which keeps contribs from colliding.
+  `contrib/settings-tabs.nix` throws at eval on a bad or duplicate id, a clash with a
+  built-in tab, or an `entry` that does not exist.
+- **Where the code lives.** Every tab file is `contrib/<name>/ui/*.tsx`, directly in
+  `ui/` (sibling files there are fine to import). `just check-contrib-coverage` fails
+  on a `.tsx` anywhere else in a contrib, because the build, the type-check and the
+  lint only see that glob.
+- **The module.** Its default export is a React component with no props. It may
+  import only `@/src/contrib/sdk`, `@/components/*`, `@/lib/*` and the packages in
+  `ui/package.json`; `just lint` (ESLint, `ui/eslint.config.js`) rejects anything
+  else. If a tab needs something from the app, add it to `ui/src/contrib/sdk.ts`.
+  Need a new npm package? Add it to `ui/package.json`, the single lockfile.
+- **How it ships.** Tabs are compiled into the main UI bundle as lazy chunks
+  (`ui/src/contribTabs.tsx`), and the runtime manifest's `settingsTabs` section
+  decides which appear. A disabled contrib's chunk is in the bundle but never
+  fetched. A tab that fails to load or throws shows an error card in that tab only.
+
+`contrib/echo/ui/SettingsTab.tsx` is the minimal example. To see a tab under
+`npm run dev`, enable its contrib and copy the manifest as shown below.
+
+Other React a contrib might ship (a `RightPanel` tab, a custom message renderer) is
+not supported yet; it lands with the first feature that needs it.
 
 **Why it is served at runtime rather than compiled in.** The UI image is built
 once and deployed to clusters whose contrib set differs, so baking the manifest

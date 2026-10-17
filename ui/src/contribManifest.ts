@@ -1,5 +1,5 @@
 /**
- * The deployment's contrib UI metadata (brand rows, tool cards, filter chips),
+ * The deployment's contrib UI metadata (brand rows, tool cards, filter chips, settings tabs),
  * fetched at runtime from `/contrib/manifest.json`, which the UI's nginx serves from
  * the contrib set that deployment enabled. Loading never throws: a 404, a network
  * error, a timeout or a malformed body all mean "no contribs", and the app renders
@@ -11,6 +11,7 @@ import type {
   ContribApproval,
   ContribIcon,
   ContribManifest,
+  ContribSettingsTab,
   ContribSource,
   ContribToolCard,
 } from "./contribTypes.js";
@@ -28,6 +29,7 @@ const EMPTY: ContribManifest = {
   toolTitles: {},
   linkProviders: [],
   approvals: {},
+  settingsTabs: {},
 };
 
 let manifest: ContribManifest = EMPTY;
@@ -64,11 +66,22 @@ function asApproval(v: unknown): ContribApproval | undefined {
   return { gatedOption: r.gatedOption, blockedTitle: r.blockedTitle, blockedHint: r.blockedHint };
 }
 
+/** A settings tab row. The id (its key) must be a URL slug and the entry must sit in
+ *  its own contrib's ui/, so a bad row cannot route to another contrib's module. */
+const TAB_ID = /^[a-z][a-z0-9-]*$/;
+function asSettingsTab(id: string, v: unknown): ContribSettingsTab | undefined {
+  const r = asRecord(v);
+  if (!TAB_ID.test(id) || !isStr(r.contrib) || !isStr(r.label) || !isStr(r.entry)) return undefined;
+  if (typeof r.order !== "number" || !Number.isFinite(r.order)) return undefined;
+  if (!r.entry.startsWith(`${r.contrib}/ui/`)) return undefined;
+  return { contrib: r.contrib, label: r.label, order: r.order, entry: r.entry };
+}
+
 /** Keep the rows that validate, drop the ones that don't. */
-function rows<T>(v: unknown, as: (x: unknown) => T | undefined): Record<string, T> {
+function rows<T>(v: unknown, as: (x: unknown, key: string) => T | undefined): Record<string, T> {
   const out: Record<string, T> = {};
   for (const [key, raw] of Object.entries(asRecord(v))) {
-    const row = as(raw);
+    const row = as(raw, key);
     if (row) out[key] = row;
   }
   return out;
@@ -83,6 +96,7 @@ function parse(doc: unknown): ContribManifest {
     toolCards: rows(d.toolCards, asToolCard),
     toolTitles: rows(d.toolTitles, (v) => (isStr(v) ? v : undefined)),
     approvals: rows(d.approvals, asApproval),
+    settingsTabs: rows(d.settingsTabs, (v, id) => asSettingsTab(id, v)),
     // A link provider whose source row failed validation would be a chip with no
     // icon, so it is dropped too.
     linkProviders: (Array.isArray(d.linkProviders) ? d.linkProviders : []).filter(
@@ -132,4 +146,9 @@ export function contribLinkProviders(): readonly string[] {
 /** Approval gating per contrib name (InterruptPanel.tsx); absent means no gating. */
 export function contribApprovals(): Record<string, ContribApproval> {
   return manifest.approvals;
+}
+
+/** Contrib settings tabs, keyed by tab id (SettingsPage.tsx). */
+export function contribSettingsTabs(): Record<string, ContribSettingsTab> {
+  return manifest.settingsTabs;
 }

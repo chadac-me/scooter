@@ -43,8 +43,25 @@ for f in contrib/*/*.nix; do
   esac
 done
 
+# Settings-tab code is linted, type-checked and chunked only as contrib/<name>/ui/*.tsx,
+# so a .tsx anywhere else in a contrib is a tab file none of that sees. Exempt: a
+# standalone app with its own package.json (files/viewer-ui), and the lint fixture.
+while IFS= read -r f; do
+  case "$f" in
+    contrib/*/ui/lint-fixture/*) continue ;;
+  esac
+  [[ "$f" =~ ^contrib/[^/]+/ui/[^/]+\.tsx$ ]] && continue
+  d=$(dirname "$f") standalone=0
+  while [ "$d" != contrib ] && [ "$d" != . ]; do
+    [ -f "$d/package.json" ] && { standalone=1; break; }
+    d=$(dirname "$d")
+  done
+  [ "$standalone" -eq 1 ] \
+    || note "$f is not directly in its contrib's ui/ — settings-tab files must be contrib/<name>/ui/*.tsx, or the UI build, typecheck and lint never see them"
+done < <(git ls-files -co --exclude-standard 'contrib/**/*.tsx' | grep -v /node_modules/)
+
 if [ "$fail" -ne 0 ]; then
   echo "❌ contrib coverage: contrib/ is out of sync with contrib/all-modules.nix"
   exit 1
 fi
-echo "✅ contrib coverage: all ${#on_disk[@]} contribs are imported, with only known halves"
+echo "✅ contrib coverage: all ${#on_disk[@]} contribs are imported, with only known halves and tab files in ui/"

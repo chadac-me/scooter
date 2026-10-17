@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { parsePath, pathFor, SETTINGS_TABS, DEFAULT_TAB } from "./view.js";
+import { parsePath, pathFor, SETTINGS_TABS, DEFAULT_TAB, settingsTabList, resolveTab } from "./view.js";
 
 describe("settings path parsing", () => {
   it("routes the root (and chat deep-links) to chat", () => {
@@ -27,9 +27,14 @@ describe("settings path parsing", () => {
     }
   });
 
-  it("falls back to the default tab for an UNKNOWN settings segment", () => {
-    // A stale bookmark or a renamed tab must still land somewhere usable, not blank.
-    expect(parsePath("/settings/does-not-exist")).toEqual({ view: "settings", tab: DEFAULT_TAB });
+  it("keeps an unknown slug segment, since it may be a contrib tab", () => {
+    // resolveTab decides once the manifest is in; see "tab resolution" below.
+    expect(parsePath("/settings/personalization")).toEqual({ view: "settings", tab: "personalization" });
+  });
+
+  it("falls back to the default tab for a segment that is not a slug", () => {
+    expect(parsePath("/settings/Not_A_Tab")).toEqual({ view: "settings", tab: DEFAULT_TAB });
+    expect(parsePath("/settings/%2e%2e")).toEqual({ view: "settings", tab: DEFAULT_TAB });
   });
 
   it("ignores extra path segments after the tab", () => {
@@ -65,5 +70,35 @@ describe("tab declaration", () => {
 
   it("gives every tab a human label", () => {
     for (const t of SETTINGS_TABS) expect(t.label.length).toBeGreaterThan(0);
+  });
+});
+
+describe("tab list and resolution", () => {
+  const ECHO = { contrib: "echo", label: "Echo", order: 60 };
+
+  it("is the built-ins alone without a manifest", () => {
+    expect(settingsTabList({}).map((t) => t.id)).toEqual(SETTINGS_TABS.map((t) => t.id));
+  });
+
+  it("places contrib tabs by order, ties broken by id", () => {
+    const ids = settingsTabList({
+      echo: ECHO,
+      "echo-b": { ...ECHO, order: 15 },
+      "echo-a": { ...ECHO, order: 15 },
+    }).map((t) => t.id);
+    expect(ids).toEqual(["tasks", "echo-a", "echo-b", "skills", "claude", "modules", "admin", "echo"]);
+  });
+
+  it("never lets a contrib row shadow a built-in", () => {
+    const list = settingsTabList({ skills: { ...ECHO, label: "Hijack" } });
+    expect(list.filter((t) => t.id === "skills")).toEqual([{ id: "skills", label: "Skills", order: 20 }]);
+  });
+
+  it("resolves a contrib tab only when the manifest lists it", () => {
+    // A deep link to /settings/echo survives a refresh with the manifest loaded, and
+    // lands on the default tab on a deployment that does not ship echo.
+    expect(resolveTab("echo", settingsTabList({ echo: ECHO }))).toBe("echo");
+    expect(resolveTab("echo", settingsTabList({}))).toBe(DEFAULT_TAB);
+    expect(resolveTab("skills", settingsTabList({}))).toBe("skills");
   });
 });

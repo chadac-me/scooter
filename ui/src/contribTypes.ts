@@ -48,6 +48,19 @@ export interface ContribApproval {
   blockedHint: string;
 }
 
+
+/** A contrib's page under /settings, keyed by its id (the URL segment). */
+export interface ContribSettingsTab {
+  /** The contrib that declared it. */
+  contrib: string;
+  /** Sidebar label. */
+  label: string;
+  /** Sort key; the built-ins take 10, 20, … */
+  order: number;
+  /** `<contrib>/ui/<file>.tsx`, the key into the lazy module table (contribTabs.ts). */
+  entry: string;
+}
+
 /** The whole `/contrib/manifest.json` document, normalized: the loader fills every
  *  absent key with an empty value, so consumers never branch on undefined. */
 export interface ContribManifest {
@@ -61,4 +74,6 @@ export interface ContribManifest {
   linkProviders: readonly string[];
   /** Approval gating per contrib name (the `metadata.contrib` on the interrupt). */
   approvals: Record<string, ContribApproval>;
+  /** Contrib settings tabs, keyed by tab id. */
+  settingsTabs: Record<string, ContribSettingsTab>;
 }
