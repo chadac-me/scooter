@@ -7,7 +7,7 @@
  * intact.
  */
 
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { agent_host } from "@scooter/schema";
 
@@ -24,6 +24,10 @@ const { conversations } = agent_host;
 /** The store seam the ConversationStore's meta methods delegate to. */
 export interface MetaStore {
   saveMeta(meta: ConversationMeta): Promise<void>;
+  /** Raise a conversation's lastActivityAt to `at` (never lower it), from any replica. */
+  touchActivity(id: SessionId, at: number): Promise<void>;
+  /** The persisted lastActivityAt, or undefined when there is no row. */
+  readLastActivity(id: SessionId): Promise<number | undefined>;
   listConversations(): Promise<ConversationMeta[]>;
   removeConversation(id: SessionId): Promise<void>;
   close(): Promise<void>;
@@ -111,16 +115,43 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
   };
 
   return {
-    /** UPDATE, so a straggler save cannot resurrect a removed row. */
+    /** UPDATE, so a straggler save cannot resurrect a removed row; lastActivityAt only moves
+     *  forward, so a replica holding a stale copy cannot erase activity another one recorded. */
     async saveMeta(meta) {
       try {
-        await db.update(conversations).set(rowValues(meta)).where(eq(conversations.id, meta.id));
+        await db
+          .update(conversations)
+          .set({
+            ...rowValues(meta),
+            lastActivityAt: sql`GREATEST(${conversations.lastActivityAt}, ${meta.lastActivityAt})`,
+          })
+          .where(eq(conversations.id, meta.id));
       } catch (e) {
         log.error("saveMeta failed (metadata not persisted)", {
           conversation_id: meta.id,
           error: formatError(e),
         });
       }
+    },
+
+    async touchActivity(id, at) {
+      try {
+        await db
+          .update(conversations)
+          .set({ lastActivityAt: sql`GREATEST(${conversations.lastActivityAt}, ${at})` })
+          .where(eq(conversations.id, id));
+      } catch (e) {
+        log.error("touchActivity failed (activity not persisted)", { conversation_id: id, error: formatError(e) });
+      }
+    },
+
+    async readLastActivity(id) {
+      const rows = await db
+        .select({ lastActivityAt: conversations.lastActivityAt })
+        .from(conversations)
+        .where(eq(conversations.id, id))
+        .limit(1);
+      return rows.length ? Number(rows[0].lastActivityAt) : undefined;
     },
 
     async listConversations() {

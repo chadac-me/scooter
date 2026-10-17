@@ -920,6 +920,44 @@ describe("SessionManager", () => {
     }
   });
 
+  it("touchById() records activity in the shared store, even on a replica without the conversation", async () => {
+    const store = inMemoryStore();
+    const touchActivity = vi.fn(async () => {});
+    store.touchActivity = touchActivity;
+    const sessions = createSessionManager({ provisioner: fakeProvisioner(), store });
+    // A proxied WebSocket stays on the replica it connected through after ownership moves.
+    sessions.touchById("held-elsewhere" as never);
+    expect(touchActivity).toHaveBeenCalledWith("held-elsewhere", expect.any(Number));
+  });
+
+  it("sweepIdle() spares a conversation whose shared lastActivityAt another replica raised", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const provisioner = fakeProvisioner();
+      const store = inMemoryStore();
+      // Another replica's proxy touched it at t=9min; this owner never saw the traffic.
+      store.readLastActivity = vi.fn(async () => 9 * 60_000);
+      const sessions = createSessionManager({ provisioner, store });
+      const conv = await sessions.start("vscode-thread"); // stamped at t=0
+
+      expect(await sessions.sweepIdle(5 * 60_000, 10 * 60_000)).toEqual([]);
+      expect(sessions.get(conv.id)?.status).toBe("running");
+      // Once that activity is itself past the window, the sweep suspends as usual.
+      expect(await sessions.sweepIdle(5 * 60_000, 15 * 60_000)).toEqual([conv.id]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sweepIdle() falls back to local activity when the shared read fails", async () => {
+    const store = inMemoryStore();
+    store.readLastActivity = vi.fn(async () => { throw new Error("pg down"); });
+    const sessions = createSessionManager({ provisioner: fakeProvisioner(), store });
+    const conv = await sessions.start("t");
+    expect(await sessions.sweepIdle(1, Date.now() + 60_000)).toEqual([conv.id]);
+  });
+
   it("touchById() is a no-op for an unknown conversation", () => {
     const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
     expect(() => sessions.touchById("nope" as never)).not.toThrow();

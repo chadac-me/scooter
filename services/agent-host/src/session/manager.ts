@@ -153,6 +153,11 @@ export interface ConversationStore {
   gooseStatePath(id: SessionId): string;
   /** Persist conversation metadata so the list survives a restart; optional. */
   saveMeta?(meta: ConversationMeta): Promise<void>;
+  /** Raise a conversation's persisted lastActivityAt to `at` without lowering it, whether or not
+   *  this replica holds the conversation; optional. */
+  touchActivity?(id: SessionId, at: number): Promise<void>;
+  /** The persisted lastActivityAt, which another replica's touch may have raised; optional. */
+  readLastActivity?(id: SessionId): Promise<number | undefined>;
   /** Reconstruct all persisted conversations; optional. */
   listConversations?(): Promise<ConversationMeta[]>;
   /** Permanently remove a conversation's persisted state so it does not reappear on the next
@@ -260,7 +265,9 @@ export interface SessionManager {
    *  it), hydrating a persisted one on demand. */
   getByShortId(shortHash: string): Promise<Conversation | undefined>;
   /** Mark a conversation active now so the idle sweep does not suspend it, for non-agent activity
-   *  such as web-service proxy traffic; no-op if not in memory. */
+   *  such as web-service proxy traffic. Recorded in the shared store too, because a long-lived
+   *  proxied WebSocket stays on the replica it connected through while the owner (the one that
+   *  sweeps) may have moved. */
   touchById(id: SessionId): void;
   /** All conversations, newest first. */
   list(): Conversation[];
@@ -1036,7 +1043,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
     touchById(id) {
       const entry = entries.get(id);
-      if (entry) touch(entry); // no-op if not in memory
+      const at = nowMs();
+      if (store.touchActivity) {
+        if (entry) entry.lastActivityAt = Math.max(entry.lastActivityAt, at);
+        void store.touchActivity(id, at);
+      } else if (entry) {
+        touch(entry); // file-only: no shared store, so only the local copy can be bumped
+      }
     },
 
     async getByShortId(shortHash) {
@@ -1262,6 +1275,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // Only the owner sweeps and probes; a non-owner's job probe can resume a sandbox the owner
         // just suspended.
         if (!ownershipGuard.canWrite(entry.id)) continue;
+        if (now - entry.lastActivityAt < idleMs) continue;
+        // Another replica may have recorded activity this one never saw (a proxied WebSocket
+        // bound to the replica it connected through), so re-check the shared value; a failed
+        // read falls back to the local one.
+        const persisted = await store.readLastActivity?.(entry.id).catch(() => undefined);
+        if (persisted !== undefined && persisted > entry.lastActivityAt) entry.lastActivityAt = persisted;
         if (now - entry.lastActivityAt < idleMs) continue;
         if (hasLiveDescendant(entry.id)) continue; // keep the shared pod up
         // A running or queued run is not idle, however long ago lastActivityAt was bumped at the
