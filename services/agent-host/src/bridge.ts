@@ -124,7 +124,7 @@ type AguiEventBase =
   | { type: "PERMISSION_RESOLVED"; toolCallId: string; optionId: string | null }
   // A latest-wins snapshot of the run queue's pending items, persisted and broadcast
   // so queued messages survive a refresh.
-  | { type: "QUEUE_UPDATED"; items: Array<{ id: string; text: string; priority: number }> }
+  | { type: "QUEUE_UPDATED"; items: Array<{ id: string; text: string; priority: number; source?: string }> }
   // Image references (assetId + url, never bytes) attached to a user message, keyed to
   // the messageId they follow.
   | {
@@ -418,7 +418,13 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   const emitQueueSnapshot = () => {
     const items = [...queue]
       .sort((a, b) => b.priority - a.priority || a.enqueuedAt - b.enqueuedAt)
-      .map((q) => ({ id: q.id, text: q.input.text, priority: q.priority }));
+      .map((q) => ({
+        id: q.id,
+        text: q.input.text,
+        priority: q.priority,
+        // A platform-injected item renders as a collapsed system line, not a user bubble.
+        ...(q.input.source ? { source: q.input.source } : {}),
+      }));
     emit({ type: "QUEUE_UPDATED", items });
   };
   let pumping = false;

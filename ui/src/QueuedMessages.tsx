@@ -9,7 +9,9 @@
  * A message with priority > 0 interrupts the current turn and sorts to the top; priority-0
  * messages keep their arrival order. The list is read from the QUEUE_UPDATED snapshots on
  * the integrity stream (via RuntimeProvider context) plus optimistic pending sends, so it
- * survives a refresh and clears itself as the queue drains.
+ * survives a refresh and clears itself as the queue drains. A platform-injected message
+ * (one with a `source`) renders as the same collapsed system-event line it becomes once
+ * persisted, rather than as a user bubble.
  */
 
 import { useLayoutEffect, useRef, useState } from "react";
@@ -18,8 +20,9 @@ import { Loader2Icon } from "lucide-react";
 
 import { useConversationInterrupts } from "./RuntimeProvider.js";
 import { Button } from "@/components/ui/button";
+import { SystemEventMessage } from "@/components/assistant-ui/system-event-message";
 
-type QueuedMessage = { id: string; text: string; priority: number };
+type QueuedMessage = { id: string; text: string; priority: number; source?: string };
 
 /** Lines to show before clamping; spelled out literally so Tailwind's JIT scanner emits the utility. */
 const CLAMP_CLASS = "line-clamp-6";
@@ -121,7 +124,15 @@ export function QueuedMessages() {
   return (
     <div data-testid="queued-messages" aria-label="Queued messages" className="flex flex-col gap-y-3">
       {ordered.map((m) => (
-        <QueuedMessageRow key={m.id} m={m} />
+        // A platform-injected message (webhook, scheduler, subagent…) uses the same collapsed
+        // line as its persisted form, so a burst of queued events doesn't flood the thread.
+        m.source ? (
+          <div key={m.id} data-testid="queued-message" data-role="system-queued" title={statusLabel(m)}>
+            <SystemEventMessage source={m.source} text={m.text} status={m.priority > 0 ? "Interrupting…" : "Queued"} />
+          </div>
+        ) : (
+          <QueuedMessageRow key={m.id} m={m} />
+        )
       ))}
     </div>
   );

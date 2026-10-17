@@ -12,6 +12,7 @@ import {
   ReasoningTrigger,
 } from "@/components/assistant-ui/reasoning";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import { SystemEventMessage } from "@/components/assistant-ui/system-event-message";
 import {
   ToolGroupContent,
   ToolGroupRoot,
@@ -362,60 +363,6 @@ const ThreadMessage: FC = () => {
   return <AssistantMessageComponent />;
 };
 
-/** A per-source glyph so the collapsed event line is scannable. */
-function systemSourceIcon(source: string): string {
-  switch (source) {
-    case "slack": return "💬";
-    case "github": return "🐙";
-    case "gitlab": return "🦊";
-    case "jira": return "📋";
-    case "scheduler": return "⏰";
-    case "background job": return "⚙️";
-    case "broker": return "🔑";
-    case "subagent": return "🤖";
-    default: return "⚙️";
-  }
-}
-
-/** A system event rendered inline at its chronological slot, collapsed to one de-emphasized line until clicked. */
-const SystemEventMessage: FC<{ source: string; text: string }> = ({ source, text }) => {
-  const [open, setOpen] = useState(false);
-  const preview = text.replace(/\s+/g, " ").trim();
-  const short = preview.length > 80 ? preview.slice(0, 80) + "…" : preview;
-
-  return (
-    <div
-      data-slot="aui_system-message"
-      data-source={source}
-      className="mx-auto w-full max-w-(--thread-max-width) px-2"
-    >
-      <button
-        type="button"
-        data-testid="system-event-toggle"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12px] text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-      >
-        <span aria-hidden className="shrink-0">{systemSourceIcon(source)}</span>
-        <span className="shrink-0 font-medium capitalize">{source}</span>
-        {!open && short && (
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">{short}</span>
-        )}
-        <span aria-hidden className="ml-auto shrink-0 text-[10px] opacity-60">
-          {open ? "▲" : "▼"}
-        </span>
-      </button>
-      {open && (
-        <div
-          data-testid="system-event-body"
-          className="mx-2 mb-1 whitespace-pre-wrap break-words border-l-2 border-border/60 pl-3 text-[12px] text-muted-foreground"
-        >
-          {text}
-        </div>
-      )}
-    </div>
-  );
-};
 
 const ThreadScrollToBottom: FC = () => {
   // The stock scroll lands short while the last message is still laying out, so re-assert the bottom over the next few frames.

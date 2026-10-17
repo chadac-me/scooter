@@ -55,7 +55,7 @@ export interface PendingInterrupt {
 type ConnectionOutcome = "not-found" | "closed" | "error" | "auth-error";
 
 /** A stable empty-queue reference so getQueuedMessages keeps the same identity across idle calls. */
-const EMPTY_QUEUE: ReadonlyArray<{ id: string; text: string; priority: number }> = [];
+const EMPTY_QUEUE: ReadonlyArray<{ id: string; text: string; priority: number; source?: string }> = [];
 const EMPTY_INTERRUPTS: readonly PendingInterrupt[] = [];
 
 export class IntegrityAgent extends AbstractAgent {
@@ -229,11 +229,11 @@ export class IntegrityAgent extends AbstractAgent {
   }
 
   /** The messages queued behind the active run, from the server's latest QUEUE_UPDATED snapshot. */
-  private queued: ReadonlyArray<{ id: string; text: string; priority: number }> = [];
+  private queued: ReadonlyArray<{ id: string; text: string; priority: number; source?: string }> = [];
   /** Where the painted window starts in the log (1 = the whole log is loaded). */
   private historyCursor = 1;
   private olderInFlight: Promise<number> | undefined;
-  getQueuedMessages(): ReadonlyArray<{ id: string; text: string; priority: number }> {
+  getQueuedMessages(): ReadonlyArray<{ id: string; text: string; priority: number; source?: string }> {
     // The queue only holds items while a run is draining them, so an idle run reports empty even if the clearing QUEUE_UPDATED never arrived.
     return this.running ? this.queued : EMPTY_QUEUE;
   }
@@ -254,7 +254,7 @@ export class IntegrityAgent extends AbstractAgent {
 
   /** Update `queued` from a QUEUE_UPDATED snapshot; returns true if it changed. */
   private trackQueue(e: BaseEvent): boolean {
-    const ev = e as unknown as { type?: string; items?: Array<{ id: string; text: string; priority: number }> };
+    const ev = e as unknown as { type?: string; items?: Array<{ id: string; text: string; priority: number; source?: string }> };
     if (ev.type !== "QUEUE_UPDATED") return false;
     const next = ev.items ?? [];
     const same =

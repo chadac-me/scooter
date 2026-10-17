@@ -83,4 +83,21 @@ describe("QueuedMessages", () => {
     const html = render([{ id: "q1", text: "stop that", priority: 10 }]);
     expect(html).toContain("Interrupting current turn");
   });
+  it("renders a queued system message as the collapsed system-event line, not a user bubble", () => {
+    const html = render([
+      { id: "q1", text: "PR #12 was approved\n".repeat(40), priority: 0, source: "github" },
+      { id: "q2", text: "user words", priority: 0 },
+    ]);
+    // Both are queued rows, but the system one uses the shared SystemEventMessage renderer.
+    expect(html.match(/data-testid="queued-message"/g)).toHaveLength(2);
+    expect(html).toContain('data-role="system-queued"');
+    expect(html).toContain('data-slot="aui_system-message"');
+    expect(html).toContain('data-source="github"');
+    expect(html).toContain('data-pending="true"');
+    expect(html).toContain('data-testid="system-event-status"');
+    expect(html).toContain("Queued");
+    // Collapsed: the body is not rendered, and only the user message gets a bubble.
+    expect(html).not.toContain('data-testid="system-event-body"');
+    expect(html.match(/data-testid="queued-message-text"/g)).toHaveLength(1);
+  });
 });

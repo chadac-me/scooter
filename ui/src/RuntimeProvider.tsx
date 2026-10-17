@@ -144,7 +144,7 @@ export interface InterruptContextValue {
   /** True while the live stream is rejected with 401/403, self-clearing once a reconnect succeeds. */
   streamAuthError: boolean;
   /** Messages queued behind the active run, from the integrity stream's QUEUE_UPDATED snapshots. */
-  queuedMessages: ReadonlyArray<{ id: string; text: string; priority: number }>;
+  queuedMessages: ReadonlyArray<{ id: string; text: string; priority: number; source?: string }>;
   /** Bumps on every render-pump push, used as the Thread error boundary's reset key. */
   renderTick: number;
 }
@@ -234,7 +234,7 @@ function ConversationRuntime({
 
   // Optimistic pending sends, shown as queued items until the server's queue or log confirms them.
   const [optimisticSends, setOptimisticSends] = useState<
-    ReadonlyArray<{ id: string; text: string; priority: number }>
+    ReadonlyArray<{ id: string; text: string; priority: number; source?: string }>
   >([]);
 
   // The composer send: a resume answers a pending interrupt and an ordinary send goes to agent.send(), with the reply re-entering through the render pump.
@@ -333,7 +333,7 @@ function ConversationRuntime({
   const [runRetrying, setRunRetrying] = useState<{ attempt: number; max: number } | null>(null);
   const [streamAuthError, setStreamAuthError] = useState(false);
   const [queuedMessages, setQueuedMessages] = useState<
-    ReadonlyArray<{ id: string; text: string; priority: number }>
+    ReadonlyArray<{ id: string; text: string; priority: number; source?: string }>
   >([]);
   const [renderTick, setRenderTick] = useState(0);
   const [hasOlder, setHasOlder] = useState(false);
