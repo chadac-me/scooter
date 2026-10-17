@@ -505,8 +505,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.post("/conversations/:id/messages", async (ctx) => {
     const body = await ctx.body<{ text?: string }>();
     if (!body.text) return { status: 400, json: { error: "text required" } };
-    // Find-or-start by thread id, then prompt.
-    await sessions.promptByThread(ctx.params.id, body.text);
+    // 202 once queued, not once the run ends: a caller that gave up waiting on a long turn
+    // would resend a message the agent already has.
+    await sessions.enqueueByThread(ctx.params.id, body.text);
     return { status: 202, json: { ok: true } };
   });
 

@@ -291,6 +291,31 @@ describe("SessionManager", () => {
     expect(optsSeen.at(-1)).toBeUndefined();
   });
 
+  it("enqueueByThread() resolves once the prompt is queued, not when its run ends", async () => {
+    // The bridge settles prompt() only when the run finishes; this one never does.
+    let finish: (id: string) => void = () => {};
+    const prompt = vi.fn(() => new Promise<string>((resolve) => (finish = resolve)));
+    const bridgeFactory = () =>
+      ({
+        start: vi.fn(async () => {}),
+        prompt,
+        stop: vi.fn(async () => {}),
+        onEvent: () => () => {},
+        onPersist: () => () => {},
+        onTitle: () => () => {},
+      }) as never;
+    const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore(), bridgeFactory });
+    await sessions.start("thread-1");
+
+    // POST /messages answers here; a caller that timed out on a long run would resend.
+    await sessions.enqueueByThread("thread-1", "a reviewer answered");
+    expect(prompt).toHaveBeenCalledTimes(1);
+    finish("run-x");
+
+    // Finding the conversation still fails loudly.
+    await expect(sessions.enqueueByThread("never-created", "hi")).rejects.toThrow(UnknownConversationError);
+  });
+
   it("promptByThread() REFUSES an unknown thread instead of creating one", async () => {
     const bridgeFactory = () =>
       ({
