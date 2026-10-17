@@ -25,8 +25,6 @@ function useDark() {
   return [dark, toggle] as const;
 }
 
-const POLL_MS = 3000;
-
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 function useLive() {
@@ -91,26 +89,43 @@ export function App() {
     });
   }, [path, load]);
 
-  // Pending comments flip to delivered once the broker acks; poll fast while any are pending.
+  const [live, toggleLive] = useLive();
+
+  // Pending comments flip to delivered once the broker acks. Live, the ack arrives as
+  // an event; otherwise poll fast while any are pending.
   useEffect(() => {
-    if (!path || !annotations.some((a) => a.state === "pending")) return;
+    if (!path || live || !annotations.some((a) => a.state === "pending")) return;
     const t = setTimeout(() => load(path).catch(() => {}), 1500);
     return () => clearTimeout(t);
-  }, [annotations, path, load]);
+  }, [annotations, path, load, live]);
 
-  // Auto-refresh: pick up the agent's edits and replies while the tab is visible.
-  const [live, toggleLive] = useLive();
+  // Live: the server pushes an event when the file or its notes change, and the page
+  // refetches through the ordinary routes (the file costs nothing if it is unchanged).
   useEffect(() => {
     if (!path || !live) return;
-    const tick = () => {
-      if (document.visibilityState === "visible") load(path).catch(() => {});
+    // One load at a time; events that land mid-load fold into one more.
+    let busy = false;
+    let again = false;
+    const refetch = async () => {
+      if (busy) return void (again = true);
+      busy = true;
+      do {
+        again = false;
+        await load(path).catch(() => {});
+      } while (again);
+      busy = false;
     };
-    const t = setInterval(tick, POLL_MS);
-    document.addEventListener("visibilitychange", tick);
-    return () => {
-      clearInterval(t);
-      document.removeEventListener("visibilitychange", tick);
+    let opened = false;
+    const es = api.events(path);
+    // EventSource reconnects by itself; anything missed while it was down is picked
+    // up by refetching on every reopen after the first.
+    es.onopen = () => {
+      if (opened) refetch();
+      opened = true;
     };
+    es.addEventListener("file", refetch);
+    es.addEventListener("notes", refetch);
+    return () => es.close();
   }, [path, live, load]);
 
   const threads = useMemo(() => threadsOf(annotations), [annotations]);
