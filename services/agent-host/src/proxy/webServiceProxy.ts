@@ -14,7 +14,7 @@ import { request as httpRequest, type IncomingMessage, type ServerResponse } fro
 import { connect, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
-import { inboundIdentityHeaders, withHandoffIdentity, type UserContext } from "../auth/identity.js";
+import { inboundIdentityHeaders, stripSessionSetCookies, withHandoffIdentity, type UserContext } from "../auth/identity.js";
 import { logger } from "../log.js";
 import type { Conversation, SandboxProvisioner, SessionManager } from "../session/manager.js";
 import type { SandboxRef, SessionId } from "../types.js";
@@ -199,6 +199,22 @@ export function renderLoadingPage(service: string, basePath: string): string {
  tick();
 </script>
 </body></html>`;
+}
+
+/** Upper bound on an upgrade response's header block before the splice gives up. */
+const MAX_HANDSHAKE_BYTES = 64 * 1024;
+
+/** An upgrade response's header block (no trailing CRLFCRLF) without Set-Cookie lines that set the ingress session. */
+export function filterHandshakeSetCookies(block: string): string {
+  return block
+    .split("\r\n")
+    .filter((line, i) => {
+      if (i === 0) return true; // the status line
+      const colon = line.indexOf(":");
+      if (colon < 0 || line.slice(0, colon).trim().toLowerCase() !== "set-cookie") return true;
+      return stripSessionSetCookies(line.slice(colon + 1).trim()) !== undefined;
+    })
+    .join("\r\n");
 }
 
 export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProxy {
@@ -443,7 +459,12 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
         };
         if (fields.total_ms >= SLOW_REQUEST_MS) log.info("slow web-service request", fields);
         else log.debug("web-service request", fields);
-        res.writeHead(up.statusCode ?? 502, up.headers);
+        // A pod must not be able to set or overwrite the ingress session (fixation, forced logout).
+        const upHeaders = { ...up.headers };
+        const setCookie = stripSessionSetCookies(upHeaders["set-cookie"]);
+        if (setCookie) upHeaders["set-cookie"] = setCookie;
+        else delete upHeaders["set-cookie"];
+        res.writeHead(up.statusCode ?? 502, upHeaders);
         up.pipe(res);
       },
     );
@@ -498,9 +519,25 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       // Frames in either direction count as active use.
       const onData = () => touch(conversationId);
       socket.on("data", onData);
-      upstream.on("data", onData);
-      upstream.pipe(socket);
       socket.pipe(upstream);
+      // The handshake response is filtered like an HTTP response's headers; frames after it pass through.
+      let pending: Buffer = Buffer.alloc(0);
+      const onHandshake = (chunk: Buffer) => {
+        pending = Buffer.concat([pending, chunk]);
+        const end = pending.indexOf("\r\n\r\n");
+        if (end < 0) {
+          if (pending.length > MAX_HANDSHAKE_BYTES) teardown();
+          return;
+        }
+        upstream.off("data", onHandshake);
+        socket.write(filterHandshakeSetCookies(pending.subarray(0, end).toString("latin1")) + "\r\n\r\n");
+        const rest = pending.subarray(end + 4);
+        if (rest.length) socket.write(rest);
+        upstream.on("data", onData);
+        upstream.pipe(socket);
+        onData();
+      };
+      upstream.on("data", onHandshake);
     });
     const teardown = () => { socket.destroy(); upstream.destroy(); };
     upstream.on("error", (err: NodeJS.ErrnoException) => {
