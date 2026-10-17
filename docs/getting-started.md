@@ -187,47 +187,12 @@ kubectl -n scooter create secret generic agent-claude-code-token \
 Users can also connect their own Claude subscription from their laptop with
 [bring-your-own-Claude](features/byoc.md) (`scooter.byoc.enable = true`).
 
-### Integrations
+### Integrations and webhooks
 
-Integrations are **contribs**, and each is off until you enable it. Their credentials
-live in the broker, so the agent can use them without ever seeing them.
-
-```nix
-contribs = {
-  # Git over HTTPS and the GitHub API, through a GitHub App.
-  github = {
-    enable = true;
-    appId = "123456";
-    installationId = "7890123";
-    privateKeySecret = { name = "github-app-key"; key = "private-key"; };
-  };
-  # Web search. duckduckgo needs no key.
-  duckduckgo.enable = true;
-  brave = { enable = true; apiKeySecret.name = "brave-search"; };
-  # The in-browser file viewer, with review comments that wake the agent.
-  files.enable = true;
-};
-```
-
-Other contribs include `aws` (scoped, time-limited AWS access with human approval),
-`grafana`, `datadog`, `slack`, `jira`, `gitlab` and `airtable`. See
-[Integrations](features/integrations.md).
-
-### Webhooks: starting work from GitHub, Slack and Jira
-
-The webhooks service turns events (a mention, a PR review) into conversations. It needs
-its own **unauthenticated** ingress host, because providers sign their requests instead
-of logging in.
-
-```nix
-scooter.webhooks = {
-  enable = true;
-  githubEnabled = true;
-  githubApp = { appId = "123456"; privateKeySecret = { name = "github-app-key"; key = "private-key"; }; };
-  secretName = "agent-webhooks-providers";  # holds GITHUB_WEBHOOK_SECRET
-  ingress = { enable = true; host = "scooter-webhooks.example.com"; className = "nginx"; };
-};
-```
+Integrations such as GitHub, Slack and web search are **contribs**, and each is off until
+you enable it. [Setting up contribs](tutorial/contribs.md) walks through them, and
+[Configuring webhooks](tutorial/webhooks.md) shows how to start conversations from
+GitHub, GitLab, Slack and Jira.
 
 ### Scheduled tasks
 
@@ -255,30 +220,6 @@ scooter = {
 };
 ```
 
-### Skills
-
-Skills are markdown files the agent reads at the start of each conversation. The
-built-in ones come from the flake input (`inputs.scooter.lib.scooterSkills`), so the
-simplest place to add your own is the module in `flake.nix`:
-
-```nix
-perSystem = { system, ... }: {
-  packages.default =
-    (inputs.scooter.lib.evalPlatform {
-      inherit system;
-      module = {
-        imports = [ ./scooter.nix ];
-        # Later entries win, so a file named like a built-in skill replaces it.
-        scooter.agent.skills = inputs.scooter.lib.scooterSkills // {
-          "our-repos.md" = builtins.readFile ./skills/our-repos.md;
-        };
-      };
-    }).config.kubernetes.result;
-};
-```
-
-Skills are read when a conversation starts, so changing one only needs a redeploy.
-
 ### Storage on single-node clusters
 
 The agent-host shares two volumes across replicas, and they need `ReadWriteMany`.
@@ -295,6 +236,19 @@ scooter.conversationController = {
 This only works while every agent-host pod runs on the same node.
 
 ## Next steps
+
+The rest of the tutorial builds on this deployment:
+
+1. [Customizing skills](tutorial/skills.md): include Scooter's platform skills and teach
+   the agent about your repos.
+2. [Setting up contribs](tutorial/contribs.md): GitHub, GitLab, Slack, search, AWS and
+   more.
+3. [Configuring webhooks](tutorial/webhooks.md): start conversations from comments,
+   labels and mentions.
+4. [Writing a contrib](tutorial/writing-a-contrib/index.md): add an integration of your
+   own.
+
+Also useful:
 
 - [`examples/kubenix-config.nix`](https://github.com/chadac/scooter/blob/main/examples/kubenix-config.nix)
   is a kitchen-sink example with every feature on. CI renders it, so it always evaluates.
