@@ -344,7 +344,7 @@ shell can't run that copy, and its read tool can't see it.
 declaration stays lib-only. The kubenix eval and the image build fetch the pinned
 commit (`builtins.fetchTree` with its `narHash`). The in-pod re-converge can't
 fetch, because it has no network, and pinned or not, `fetchTree` still goes to
-the network (#TBD). So `reconverge-inputs.nix` bakes each directory into the
+the network (Why: PR #827). So `reconverge-inputs.nix` bakes each directory into the
 vendored tree with a module (`contrib-skills/module.nix`) that re-declares it from
 there. The content and store path name are the same, so the store path is the
 same, and a self-modify neither fetches nor churns `/etc`.
