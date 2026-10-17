@@ -47,10 +47,19 @@ in
       default = false;
       description = "Enable the Slack events handler (/webhooks/slack).";
     };
-    jiraEnabled = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Enable the Jira webhook handler (/webhooks/jira). Needs JIRA_WEBHOOK_SECRET in the provider Secret.";
+
+    # A contrib's deployment.nix adds env to the Deployment declared here through
+    # this seam, gated on its own `enable`, so provider-specific flags stay in the
+    # contrib.
+    extraEnv = mkOption {
+      type = types.listOf (types.attrsOf types.anything);
+      default = [ ];
+      example = literalExpression ''[ { name = "JIRA_ENABLED"; value = "true"; } ]'';
+      description = ''
+        Extra env entries appended to the webhooks container. A NAME declared twice
+        is not an error here and k8s silently keeps the last value, so a contrib
+        must own its prefix.
+      '';
     };
 
     # --- Trigger convention -------------------------------------------------
@@ -245,7 +254,6 @@ in
                   { name = "GITHUB_ENABLED"; value = lib.boolToString wcfg.githubEnabled; }
                   { name = "GITLAB_ENABLED"; value = lib.boolToString wcfg.gitlabEnabled; }
                   { name = "SLACK_ENABLED"; value = lib.boolToString wcfg.slackEnabled; }
-                  { name = "JIRA_ENABLED"; value = lib.boolToString wcfg.jiraEnabled; }
                   { name = "MENTION_PATTERN"; value = wcfg.mentionPattern; }
                   { name = "LABEL_TRIGGER"; value = wcfg.labelTrigger; }
                   { name = "IGNORE_USERNAMES"; value = lib.concatStringsSep "," wcfg.ignoreUsernames; }
@@ -268,7 +276,8 @@ in
                   { name = "DB_NAME"; value = "webhooks"; }
                   { name = "DB_USER"; value = "webhooks"; }
                   { name = "DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-webhooks"; key = "password"; }; }
-                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; };
+                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; }
+                  ++ wcfg.extraEnv;
                 # Provider signing secrets come from a Secret whose keys match the
                 # env var names.
                 envFrom = lib.optionals (wcfg.secretName != "") [
