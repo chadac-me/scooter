@@ -25,6 +25,8 @@ interface IdentEcho {
   handoffEmail: string | null;
   ingress: string | null;
   oidcToken: string | null;
+  cookie: string | null;
+  accessToken: string | null;
 }
 
 function identEcho(headers: Record<string, unknown>): string {
@@ -33,8 +35,13 @@ function identEcho(headers: Record<string, unknown>): string {
     handoffEmail: headers["x-scooter-user-email"] ?? null,
     ingress: headers["x-auth-user"] ?? null,
     oidcToken: headers["x-amzn-oidc-accesstoken"] ?? null,
+    cookie: headers["cookie"] ?? null,
+    accessToken: headers["x-forwarded-access-token"] ?? null,
   });
 }
+
+/** What a hostile pod answers with on a path containing "set-cookie": an ingress session plus a cookie of its own. */
+const POD_SET_COOKIES = ["_oauth2_proxy=attacker; Domain=.example.com; Path=/", "AWSELBAuthSessionCookie-0=x", "app=1; Path=/"];
 
 // A fake in-pod service that echoes HTTP requests, raw bytes on an `upgrade`, and identity headers.
 function fakeInPodService(): Promise<{ server: Server; port: number }> {
@@ -47,13 +54,15 @@ function fakeInPodService(): Promise<{ server: Server; port: number }> {
           "content-type": "text/plain",
           "x-echo-path": req.url ?? "",
           "x-echo-ident": identEcho(req.headers as Record<string, unknown>),
+          ...(req.url?.includes("set-cookie") ? { "set-cookie": POD_SET_COOKIES } : {}),
         });
         res.end(`${req.method} ${req.url} ${body}`);
       });
     });
     server.on("upgrade", (req, socket, head) => {
+      const cookies = req.url?.includes("set-cookie") ? POD_SET_COOKIES.map((c) => `Set-Cookie: ${c}\r\n`).join("") : "";
       socket.write(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n${cookies}\r\n`,
       );
       socket.write(`IDENT ${identEcho(req.headers as Record<string, unknown>)}\n`);
       if (head?.length) socket.write(head);
@@ -482,6 +491,8 @@ describe("web-service proxy", () => {
       handoffEmail: "alice@example.com",
       ingress: null,
       oidcToken: null,
+      cookie: null,
+      accessToken: null,
     });
   });
 
@@ -493,6 +504,49 @@ describe("web-service proxy", () => {
     const ident = JSON.parse(raw.slice(raw.indexOf("IDENT ") + 6, raw.indexOf("\n", raw.indexOf("IDENT "))));
     expect(ident.handoff).toBe("alice");
     expect(ident.ingress).toBeNull();
+  });
+
+  // --- ingress session cookies -------------------------------------------------
+
+  const SESSION_COOKIES =
+    "_oauth2_proxy=sess; theme=dark; _oauth2_proxy_csrf=c; _oauth2_proxy_1=part; AWSELBAuthSessionCookie-0=alb; marimo_ui=1";
+
+  it("keeps the ingress session cookies out of the pod and forwards the service's own (HTTP)", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app", {
+      headers: { cookie: SESSION_COOKIES, "x-forwarded-access-token": "gho_provider_token" },
+    });
+    expect(ident).toMatchObject({ cookie: "theme=dark; marimo_ui=1", accessToken: null });
+  });
+
+  it("drops the Cookie header entirely when only session cookies were sent", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app", { headers: { cookie: "_oauth2_proxy=sess" } });
+    expect(ident).toMatchObject({ cookie: null });
+  });
+
+  it("keeps the ingress session cookies out of the UPGRADE handshake too", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { raw } = await proxyUpgrade(proxy, "/c/conv-1/marimo/ws", "ping", { headers: { cookie: SESSION_COOKIES } });
+    const ident = JSON.parse(raw.slice(raw.indexOf("IDENT ") + 6, raw.indexOf("\n", raw.indexOf("IDENT "))));
+    expect(ident.cookie).toBe("theme=dark; marimo_ui=1");
+  });
+
+  it("a pod cannot set the ingress session cookie (HTTP response)", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { status, setCookie } = await proxyGet(proxy, "/c/conv-1/marimo/set-cookie");
+    expect(status).toBe(200);
+    expect(setCookie).toEqual(["app=1; Path=/"]);
+  });
+
+  it("a pod cannot set the ingress session cookie (UPGRADE response)", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { statusLine, echoed, raw } = await proxyUpgrade(proxy, "/c/conv-1/marimo/set-cookie/ws", "ping");
+    expect(statusLine).toContain("101");
+    expect(echoed).toBe("ping"); // frames after the filtered handshake still flow
+    const handshake = raw.slice(0, raw.indexOf("\r\n\r\n"));
+    expect(handshake).toContain("Set-Cookie: app=1; Path=/");
+    expect(handshake).not.toMatch(/_oauth2_proxy|AWSELBAuthSessionCookie/);
   });
 
   it("an anonymous caller hands off NO identity (not the string \"anonymous\")", async () => {
@@ -621,7 +675,7 @@ function proxyGet(
   proxy: WebServiceProxy,
   path: string,
   opts: { accept?: string; headers?: Record<string, string> } = {},
-): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null }> {
+): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null; setCookie: string[] }> {
   return new Promise((resolve, reject) => {
     void withFront(proxy, (port) =>
       new Promise<void>((done) => {
@@ -639,6 +693,7 @@ function proxyGet(
               body,
               echoPath: String(res.headers["x-echo-path"] ?? ""),
               ident: raw ? (JSON.parse(String(raw)) as IdentEcho) : null,
+              setCookie: res.headers["set-cookie"] ?? [],
             });
             done();
           });

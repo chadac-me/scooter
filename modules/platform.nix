@@ -777,6 +777,19 @@ in
         example = "x-forwarded-email";
         description = "header mode: request header carrying the user's email (optional; set by the ingress).";
       };
+      sessionCookies = mkOption {
+        type = types.listOf types.str;
+        default = [ "_oauth2_proxy" "AWSELBAuthSessionCookie" ];
+        example = [ "_my_proxy_session" ];
+        description = ''
+          Name prefixes of the ingress's session cookies (oauth2-proxy's
+          `cookie_name`, the ALB's auth cookie). The web-service proxy strips them
+          from requests forwarded into a sandbox, and from `Set-Cookie` on the
+          responses coming out of one: a pod that receives the user's session
+          cookie can replay it as that user. Set this to your ingress's cookie name
+          if you changed it.
+        '';
+      };
       # ALB OIDC only puts the `sub` in a header, so this static sub -> email map
       # seeds the learned identity store.
       subEmailMap = mkOption {
@@ -1248,6 +1261,9 @@ in
                   { name = "AUTH_USER_HEADER"; value = cfg.auth.userHeader; }
                 ++ lib.optional (cfg.auth.emailHeader != "x-auth-email")
                   { name = "AUTH_EMAIL_HEADER"; value = cfg.auth.emailHeader; }
+                ++ lib.optional (cfg.auth.sessionCookies != [ "_oauth2_proxy" "AWSELBAuthSessionCookie" ])
+                  # Session-cookie prefixes the web-service proxy keeps out of sandboxes.
+                  { name = "AUTH_SESSION_COOKIES"; value = lib.concatStringsSep "," cfg.auth.sessionCookies; }
                 ++ lib.optional (cfg.auth.subEmailMap != { })
                   # Static sub->email seed for the learned identity store ("k=v,k=v").
                   { name = "AUTH_SUB_EMAIL_MAP";
