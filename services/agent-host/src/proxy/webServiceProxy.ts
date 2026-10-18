@@ -514,8 +514,11 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
 
     const r = await resolve(url.pathname, label);
     const resolvedAt = Date.now();
+    // A text body, not an empty one: Chromium replaces an empty 4xx navigation with its own
+    // error page (and Playwright's goto fails with ERR_HTTP_RESPONSE_CODE_FAILURE).
+    const notFound = () => res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("not found\n");
     if (!r) {
-      res.writeHead(404).end();
+      notFound();
       return;
     }
     if (!r.ok) {
@@ -531,7 +534,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
             .end(`${r.service} is asleep — resume the conversation and try again.`);
         }
       } else {
-        res.writeHead(404).end();
+        notFound();
       }
       return;
     }

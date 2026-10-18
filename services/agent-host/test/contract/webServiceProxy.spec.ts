@@ -301,8 +301,10 @@ describe("web-service proxy", () => {
     });
 
     it("with sandbox hosts on, the main host serves no services", async () => {
-      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`, { method: "POST" });
+      const { status, body } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`, { method: "POST" });
       expect(status).toBe(404);
+      // Non-empty, so a browser navigation renders it rather than its own error page.
+      expect(body).toBe("not found\n");
       const status2 = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/__scooter_status`);
       expect(status2.status).toBe(404);
     });
