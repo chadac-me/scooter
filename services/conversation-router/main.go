@@ -46,6 +46,9 @@ type config struct {
 	sandboxDomain string
 	// The sandbox listener's address, the only one serving sandbox hosts (see sandboxhost.go).
 	sandboxListenAddr string
+	// Whether sandbox hosts are proxied straight to the pod (sandboxdirect.go) rather than
+	// through the agent-host. SANDBOX_DIRECT=0 turns it off.
+	sandboxDirect bool
 }
 
 func configFromEnv() config {
@@ -56,6 +59,7 @@ func configFromEnv() config {
 		clusterIPService:  env("AGENT_HOST_SERVICE", "agent-host"),
 		sandboxDomain:     env("SANDBOX_DOMAIN", ""),
 		sandboxListenAddr: env("SANDBOX_LISTEN_ADDR", ":8081"),
+		sandboxDirect:     env("SANDBOX_DIRECT", "1") != "0",
 	}
 }
 

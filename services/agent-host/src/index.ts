@@ -1353,6 +1353,7 @@ export async function main(
         wake: createWake({ sessions, provisioner, registry: webServices }),
         resolveUser,
         sandboxDomain: sandboxOrigins?.domain,
+        sandboxScheme: sandboxOrigins?.scheme,
         publicHost: (() => {
           try {
             return process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).host : "";

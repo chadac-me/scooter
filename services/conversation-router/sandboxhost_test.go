@@ -134,7 +134,7 @@ func TestSandboxListenerServesOnlyServices(t *testing.T) {
 	}))
 	defer upstream.Close()
 	cfg := config{sandboxDomain: "scooter.example.com", fallback: mustURL(t, upstream.URL)}
-	h := newSandboxHandler(context.Background(), cfg, nil, fakeLabels{"5a515e73": {id}}, cfg.fallback)
+	h := newSandboxHandler(context.Background(), cfg, nil, fakeLabels{"5a515e73": {id}}, cfg.fallback, nil)
 
 	for _, c := range []struct{ host, path string }{
 		{"scooter.example.com", "/conversations"},        // the main host

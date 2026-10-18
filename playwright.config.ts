@@ -19,6 +19,11 @@ const external = process.env.RUN_EXTERNAL_E2E === "1";
 // real cluster, the only place the browser meets the real server.
 const full = process.env.E2E_TARGET === "full";
 const clusterUrl = process.env.E2E_CLUSTER_URL ?? "";
+// Set by .github/scripts/e2e-full-serve.sh when the platform has per-conversation service origins.
+const sandboxRules =
+  process.env.E2E_SANDBOX_DOMAIN && process.env.E2E_SANDBOX_EDGE
+    ? `MAP *.${process.env.E2E_SANDBOX_DOMAIN} ${process.env.E2E_SANDBOX_EDGE}`
+    : undefined;
 
 export default defineConfig({
   testDir: "./test/e2e",
@@ -54,9 +59,13 @@ export default defineConfig({
             use: {
               ...devices["Desktop Chrome"],
               baseURL: clusterUrl,
-              ...(process.env.PW_CHROME
-                ? { launchOptions: { executablePath: process.env.PW_CHROME } }
-                : {}),
+              // Sandbox origins (https://<label>.<domain>/) resolve to the local edge that
+              // stands in for the wildcard Ingress; its certificate is self-signed.
+              ...(sandboxRules ? { ignoreHTTPSErrors: true } : {}),
+              launchOptions: {
+                ...(process.env.PW_CHROME ? { executablePath: process.env.PW_CHROME } : {}),
+                ...(sandboxRules ? { args: [`--host-resolver-rules=${sandboxRules}`] } : {}),
+              },
             },
           },
         ]

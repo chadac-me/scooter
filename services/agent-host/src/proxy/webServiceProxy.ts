@@ -8,16 +8,23 @@
  * Nothing on the forwarding path execs into the pod: liveness is read off the
  * connection. Why: PR #791. The pod address is cached briefly rather than listed
  * from the API server per request. Why: PR #800.
+ *
+ * On a sandbox host the conversation-router carries the bytes itself: it asks
+ * `GET /internal/web-services/target` for the pod address, port and caller (everything
+ * this file resolves), caches the answer, and proxies straight to the pod. Only a request
+ * the router cannot route directly (the pod asleep, the unit down, the loading page's
+ * poll) comes through handleHttp/handleUpgrade here.
  */
 
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { connect, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
-import { inboundIdentityHeaders, stripSessionSetCookies, withHandoffIdentity, type UserContext } from "../auth/identity.js";
+import { inboundIdentityHeaders, sessionCookiePrefixes, stripSessionSetCookies, withHandoffIdentity, type UserContext } from "../auth/identity.js";
 import { logger } from "../log.js";
 import type { Conversation, SandboxProvisioner, SessionManager } from "../session/manager.js";
 import type { SandboxRef, SessionId } from "../types.js";
+import { sandboxOrigin } from "./sandboxOrigin.js";
 
 const log = logger("webServiceProxy");
 
@@ -90,6 +97,8 @@ export interface WebServiceProxyDeps {
   /** Parent domain of the per-conversation service hosts (SANDBOX_DOMAIN). When set, services are
    *  served only on their conversation's own host, at /<service>/, and never on the main host. */
   sandboxDomain?: string;
+  /** Scheme of the sandbox hosts ("https" unless PUBLIC_URL says otherwise), for redirects to them. */
+  sandboxScheme?: string;
 }
 
 /** Set by the conversation-router, and only by it, on a request it routed from a sandbox host
@@ -129,6 +138,28 @@ export interface WebServiceProxy {
   matches(pathname: string): boolean;
   handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void>;
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>;
+  /** The router's cluster-internal routes (INTERNAL_PREFIX); returns false for any other path. */
+  handleInternal(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
+}
+
+/** The cluster-internal routes the conversation-router calls to proxy a sandbox host straight to
+ *  the pod. Never routed by the UI's nginx, like /internal/revive. */
+export const INTERNAL_PREFIX = "/internal/web-services";
+
+/** GET <INTERNAL_PREFIX>/target: where a sandbox-host request goes, so the router can carry it. */
+export interface DirectTarget {
+  conversationId: string;
+  podIP: string;
+  port: number;
+  stripBasePath: boolean;
+  /** The caller to stamp as x-scooter-user / -email, absent for anonymous. */
+  user?: { id: string; email?: string };
+  /** Inbound headers the router must remove before forwarding (ingress identity, forged handoffs). */
+  dropHeaders: string[];
+  /** Cookie-name prefixes of the ingress session, removed from Cookie and the pod's Set-Cookie. */
+  sessionCookies: string[];
+  /** How long the router may reuse this answer. */
+  ttlMs: number;
 }
 
 /** A proxy request resolved to its pod target, or why not: `asleep` means the pod is down, so it carries what the wake and loading page need. */
@@ -454,6 +485,15 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     return err.code === "ECONNREFUSED" || err.code === "EHOSTUNREACH" || err.code === "ENETUNREACH";
   }
 
+  /** Where a main-host /c/<id>/<service>/... URL lives on its sandbox host, or undefined. */
+  async function sandboxHostLocation(url: URL): Promise<string | undefined> {
+    const parsed = parseProxyPath(url.pathname);
+    if (!parsed) return undefined;
+    const conv = await lookup(parsed.conversationId);
+    const origin = conv && sandboxOrigin(conv.id, { domain: sandboxDomain!, scheme: deps.sandboxScheme || "https" });
+    return origin ? `${origin}/${encodeURIComponent(parsed.service)}${parsed.rest}${url.search}` : undefined;
+  }
+
   async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const startedAt = Date.now();
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -462,10 +502,23 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     const label = sandboxLabelOf(req);
     if (await handleStatus(url.pathname, label, res)) return;
 
+    // With sandbox hosts on, an old main-host link (/c/<id>/<service>/...) moves to the
+    // conversation's own host. Only a navigation or fetch can follow a redirect; anything else 404s.
+    if (sandboxDomain && label === undefined && (req.method === "GET" || req.method === "HEAD")) {
+      const location = await sandboxHostLocation(url);
+      if (location) {
+        res.writeHead(302, { location, "cache-control": "no-store" }).end();
+        return;
+      }
+    }
+
     const r = await resolve(url.pathname, label);
     const resolvedAt = Date.now();
+    // A text body, not an empty one: Chromium replaces an empty 4xx navigation with its own
+    // error page (and Playwright's goto fails with ERR_HTTP_RESPONSE_CODE_FAILURE).
+    const notFound = () => res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("not found\n");
     if (!r) {
-      res.writeHead(404).end();
+      notFound();
       return;
     }
     if (!r.ok) {
@@ -481,7 +534,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
             .end(`${r.service} is asleep — resume the conversation and try again.`);
         }
       } else {
-        res.writeHead(404).end();
+        notFound();
       }
       return;
     }
@@ -600,5 +653,52 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     socket.on("error", teardown);
   }
 
-  return { matches, handleHttp, handleUpgrade };
+  /** The router's routes. `target` answers 200 only when the request can go straight to the
+   *  pod; anything else (asleep, unknown, not host-routed) is a non-200 and the router sends the
+   *  request here instead, where handleHttp wakes, starts and shows the loading page. */
+  async function handleInternal(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (!url.pathname.startsWith(INTERNAL_PREFIX + "/")) return false;
+    const op = url.pathname.slice(INTERNAL_PREFIX.length + 1);
+    const conversationId = url.searchParams.get("conversation") ?? "";
+    const json = (status: number, body: unknown) =>
+      res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" })
+        .end(JSON.stringify(body));
+
+    if (op === "touch" && req.method === "POST") {
+      if (!conversationId) return json(400, { error: "conversation required" }), true;
+      touch(conversationId);
+      json(202, { ok: true });
+      return true;
+    }
+    if (op !== "target" || req.method !== "GET") {
+      res.writeHead(404).end();
+      return true;
+    }
+    const service = url.searchParams.get("service") ?? "";
+    const label = url.searchParams.get("label") || undefined;
+    // Only a sandbox host is carried by the router; the main host stays on handleHttp.
+    if (!sandboxDomain || !label || !conversationId || !service) return json(404, { reason: "not-routable" }), true;
+
+    const r = await resolve(`/c/${encodeURIComponent(conversationId)}/${encodeURIComponent(service)}/`, label).catch(() => null);
+    if (!r) return json(404, { reason: "not-routable" }), true;
+    if (!r.ok) return json(r.kind === "asleep" ? 503 : 404, { reason: r.kind === "asleep" ? "asleep" : "not-found" }), true;
+
+    touch(r.conversationId);
+    const user = await userFor(req);
+    const body: DirectTarget = {
+      conversationId: r.conversationId,
+      podIP: r.podIP,
+      port: r.port,
+      stripBasePath: r.stripBasePath,
+      ...(user && !user.anonymous && user.id ? { user: { id: user.id, ...(user.email ? { email: user.email } : {}) } } : {}),
+      dropHeaders: identityHeaders,
+      sessionCookies: sessionCookiePrefixes(),
+      ttlMs: POD_TARGET_TTL_MS,
+    };
+    json(200, body);
+    return true;
+  }
+
+  return { matches, handleHttp, handleUpgrade, handleInternal };
 }

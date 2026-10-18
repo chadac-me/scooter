@@ -5,6 +5,9 @@
 // serves, and marks it with SandboxHostHeader so the proxy forwards /<service>/...
 // (not /c/<id>/...) to the pod.
 //
+// The bytes go straight to the sandbox pod when the agent-host says the service is up
+// (sandboxdirect.go); otherwise, and for the loading page's poll, the agent-host serves it.
+//
 // Sandbox hosts are served by their own listener (newSandboxRouter, on
 // SANDBOX_LISTEN_ADDR), which is all the public wildcard Ingress reaches. It serves a
 // conversation's web services and nothing else: an unknown host, a bad label or a
@@ -154,10 +157,15 @@ func newSandboxRouter(shutdownCtx context.Context, cfg config, resolver ownerRes
 	if store != nil {
 		labels = store
 	}
-	return newSandboxHandler(shutdownCtx, cfg, resolver, labels, fallback)
+	var direct *directProxy
+	if cfg.sandboxDirect {
+		direct = newDirectProxy()
+	}
+	return newSandboxHandler(shutdownCtx, cfg, resolver, labels, fallback, direct)
 }
 
-func newSandboxHandler(shutdownCtx context.Context, cfg config, resolver ownerResolver, labels labelResolver, fallback *url.URL) http.Handler {
+// newSandboxHandler: direct nil sends every request through the agent-host.
+func newSandboxHandler(shutdownCtx context.Context, cfg config, resolver ownerResolver, labels labelResolver, fallback *url.URL, direct *directProxy) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del(SandboxHostHeader)
 		label, ok := SandboxLabel(r.Host, cfg.sandboxDomain)
@@ -165,6 +173,7 @@ func newSandboxHandler(shutdownCtx context.Context, cfg config, resolver ownerRe
 			http.NotFound(w, r)
 			return
 		}
+		browserPath := r.URL.EscapedPath()
 		if !rewriteSandboxRequest(w, r, label, labels) {
 			return
 		}
@@ -174,6 +183,17 @@ func newSandboxHandler(shutdownCtx context.Context, cfg config, resolver ownerRe
 			http.Error(w, "no agent-host pod is ready", http.StatusServiceUnavailable)
 			return
 		}
-		serveVia(shutdownCtx, w, r, target, fallback, target.Host != fallback.Host, convID)
+		viaAgentHost := func(ww http.ResponseWriter, rr *http.Request) {
+			serveVia(shutdownCtx, ww, rr, target, fallback, target.Host != fallback.Host, convID)
+		}
+		if direct != nil {
+			if service, rest, ok := sandboxService(browserPath); ok && rest != "/"+statusSegment {
+				if t := direct.lookup(r.Context(), target, fallback, convID, service, label, r); t != nil {
+					direct.serve(shutdownCtx, w, r, t, target, browserPath, rest, viaAgentHost)
+					return
+				}
+			}
+		}
+		viaAgentHost(w, r)
 	})
 }

@@ -9,6 +9,9 @@ import { expect } from "@playwright/test";
 import { test } from "./fixtures.js";
 import { fullOnly } from "./target.js";
 
+/** Parent domain of the per-conversation service origins, set when the platform has them on. */
+const SANDBOX_DOMAIN = process.env.E2E_SANDBOX_DOMAIN ?? "";
+
 fullOnly("needs multiple agent-host pods behind the router")(
   "multi-pod conversation routing",
   () => {
@@ -122,9 +125,64 @@ fullOnly("needs a real sandbox pod and its declared web services behind the rout
       // From then on whichever pod answers must keep listing it, not a stale empty set.
       for (let i = 0; i < 5; i++) expect(await serviceNames()).toContain("terminal");
 
+      // ttyd's WebSocket carrying output proves the upgrade made it through every hop.
+      const wsOutput = page
+        .waitForEvent("websocket", { predicate: (ws) => ws.url().includes("/terminal/"), timeout: 300_000 })
+        .then(async (ws) => {
+        await ws.waitForEvent("framereceived", { timeout: 60_000 });
+        return ws.url();
+      });
+
       // A stopped service gets the loading page, whose poll starts it and reloads into ttyd.
       await page.goto(`${base}/c/${encodeURIComponent(thread!)}/terminal/`);
       await expect(page.locator(".xterm")).toBeVisible({ timeout: 300_000 });
+
+      if (!SANDBOX_DOMAIN) {
+        await wsOutput;
+        return;
+      }
+      // With per-conversation service origins on, that old main-host link moved to the
+      // conversation's own host, and the router carried the bytes straight from the pod.
+      const origin = `https://${thread!.slice(0, 8)}.${SANDBOX_DOMAIN}`;
+      expect(page.url()).toBe(`${origin}/terminal/`);
+      expect(await wsOutput).toMatch(new RegExp(`^wss://${thread!.slice(0, 8)}\\.`));
+      const route = await page.evaluate(async () => (await fetch(location.href, { cache: "no-store" })).headers.get("x-scooter-route"));
+      expect(route, "the router must serve a running service directly, not via the agent-host").toBe("direct");
+    });
+  },
+);
+
+fullOnly("needs the router's sandbox listener behind a wildcard host")(
+  "per-conversation service origins",
+  () => {
+    test.skip(!SANDBOX_DOMAIN, "the platform has no ingress.sandboxDomain");
+
+    test("a sandbox host serves its conversation's services and nothing else", async ({ chat, page, request, baseURL }) => {
+      test.setTimeout(300_000);
+      const base = (baseURL ?? "").replace(/\/$/, "");
+      // A host no conversation owns: the router 404s it before anything is woken.
+      const unknown = await page.goto(`https://ffffffff.${SANDBOX_DOMAIN}/terminal/`);
+      expect(unknown?.status()).toBe(404);
+
+      await chat.open();
+      await chat.completeTurn("a conversation to own a host", 100_000);
+      const thread = new URL(page.url()).searchParams.get("thread");
+      expect(thread, "the URL must name a conversation").toBeTruthy();
+      const origin = `https://${thread!.slice(0, 8)}.${SANDBOX_DOMAIN}`;
+      // Until boot renders the manifest an undeclared name looks like a sleeping service (the
+      // loading page), so wait for it before asserting what is not a service.
+      await expect
+        .poll(async () => {
+          const res = await request.get(`${base}/conversations/${encodeURIComponent(thread!)}/web-services`);
+          return res.ok() ? ((await res.json()) as { services: Array<{ name: string }> }).services.map((s) => s.name) : [];
+        }, { timeout: 120_000 })
+        .toContain("terminal");
+
+      // The host's root and the main app's routes are not services, so none of them is served there.
+      for (const path of ["/", "/conversations", "/agui", `/c/${thread}/terminal/`]) {
+        const res = await page.goto(`${origin}${path}`);
+        expect(res?.status(), `${path} on the sandbox host`).toBe(404);
+      }
     });
   },
 );

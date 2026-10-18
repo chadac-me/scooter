@@ -255,7 +255,12 @@ describe("web-service proxy", () => {
 
     function sandboxProxy(registry: WebServiceRegistry, sandboxDomain: string | undefined = "scooter.example.com") {
       return createWebServiceProxy({
-        sessions: { get: () => ({ id: ID, threadId: ID }), touchById: () => {} } as never,
+        sessions: {
+          get: (id: string) => (id === ID ? { id: ID, threadId: ID } : undefined),
+          getByShortId: async () => undefined,
+          ensureReadable: async () => false,
+          touchById: () => {},
+        } as never,
         resolvePodTarget: (async () => ({ name: "pod", podIP: "127.0.0.1" })) as never,
         registry,
         publicHost: "scooter.example.com",
@@ -296,10 +301,27 @@ describe("web-service proxy", () => {
     });
 
     it("with sandbox hosts on, the main host serves no services", async () => {
-      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`);
+      const { status, body } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`, { method: "POST" });
       expect(status).toBe(404);
+      // Non-empty, so a browser navigation renders it rather than its own error page.
+      expect(body).toBe("not found\n");
       const status2 = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/__scooter_status`);
       expect(status2.status).toBe(404);
+    });
+
+    it("an old main-host link redirects to the conversation's host, path and query intact", async () => {
+      const { status, location, echoPath } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app/x?file=a.py`);
+      expect(status).toBe(302);
+      expect(location).toBe("https://5a515e73.scooter.example.com/marimo/app/x?file=a.py");
+      expect(echoPath).toBe(""); // nothing reached the pod
+      const bare = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo`);
+      expect(bare.location).toBe("https://5a515e73.scooter.example.com/marimo/");
+    });
+
+    it("an old link to an unknown conversation is a 404, not a redirect", async () => {
+      const { status, location } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/ffffffff-0000-0000-0000-000000000000/marimo/`);
+      expect(status).toBe(404);
+      expect(location).toBe("");
     });
 
     it("with sandbox hosts off, a host-routed request is refused", async () => {
@@ -310,6 +332,76 @@ describe("web-service proxy", () => {
     it("a label that is not the conversation's prefix is refused", async () => {
       const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`, { headers: { "x-scooter-sandbox-host": "deadbeef" } });
       expect(status).toBe(404);
+    });
+
+    // --- the router's direct path: GET /internal/web-services/target ---------------
+
+    const target = (q: string, headers: Record<string, string> = {}) =>
+      proxyGet(sandboxProxyAs(fakeRegistry(svc.port)), `/internal/web-services/target?${q}`, { headers });
+
+    function sandboxProxyAs(registry: WebServiceRegistry, opts: { user?: { id: string; email?: string; anonymous: boolean }; touched?: string[]; podDown?: boolean; sandboxDomain?: string } = {}) {
+      return createWebServiceProxy({
+        sessions: { get: () => ({ id: ID, threadId: ID }), touchById: (id: string) => opts.touched?.push(id) } as never,
+        resolvePodTarget: (async () => {
+          if (opts.podDown) throw new Error("no ready pod");
+          return { name: "pod", podIP: "127.0.0.1" };
+        }) as never,
+        registry,
+        publicHost: "scooter.example.com",
+        resolveUser: () => opts.user ?? ANON,
+        sandboxDomain: opts.sandboxDomain ?? "scooter.example.com",
+      });
+    }
+
+    it("target: answers the pod address, port, caller and what to strip", async () => {
+      const touched: string[] = [];
+      const proxy = sandboxProxyAs(fakeRegistry(svc.port), { user: { id: "alice", email: "a@x", anonymous: false }, touched });
+      const { status, body } = await proxyGet(proxy, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`);
+      expect(status).toBe(200);
+      const t = JSON.parse(body);
+      expect(t).toMatchObject({ conversationId: ID, podIP: "127.0.0.1", port: svc.port, stripBasePath: false, user: { id: "alice", email: "a@x" } });
+      expect(t.dropHeaders).toEqual(expect.arrayContaining(["x-scooter-user", "x-amzn-oidc-accesstoken"]));
+      expect(t.sessionCookies).toEqual(expect.arrayContaining(["_oauth2_proxy"]));
+      expect(t.ttlMs).toBeGreaterThan(0);
+      // Asking for the target is the router's sign of live traffic.
+      expect(touched).toContain(ID);
+    });
+
+    it("target: anonymous callers carry no user", async () => {
+      const { body } = await target(`conversation=${ID}&service=marimo&label=5a515e73`);
+      expect(JSON.parse(body).user).toBeUndefined();
+    });
+
+    it("target: a pod that is down is 503, so the router sends the request here to wake it", async () => {
+      const proxy = sandboxProxyAs(fakeRegistry(svc.port), { podDown: true });
+      const { status, body } = await proxyGet(proxy, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`);
+      expect(status).toBe(503);
+      expect(JSON.parse(body).reason).toBe("asleep");
+    });
+
+    it("target: refuses a wrong label, an unknown service, a missing label and sandbox hosts off", async () => {
+      expect((await target(`conversation=${ID}&service=marimo&label=deadbeef`)).status).toBe(404);
+      expect((await target(`conversation=${ID}&service=nope&label=5a515e73`)).status).toBe(404);
+      expect((await target(`conversation=${ID}&service=marimo`)).status).toBe(404);
+      const off = sandboxProxyAs(fakeRegistry(svc.port), { sandboxDomain: "" });
+      expect((await proxyGet(off, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`)).status).toBe(404);
+    });
+
+    it("touch: marks the conversation active", async () => {
+      const touched: string[] = [];
+      const proxy = sandboxProxyAs(fakeRegistry(svc.port), { touched });
+      const status = await new Promise<number>((resolve, reject) => {
+        void withFront(proxy, (port) => new Promise<void>((done) => {
+          const req = request({ host: "127.0.0.1", port, path: `/internal/web-services/touch?conversation=${ID}`, method: "POST" }, (res) => {
+            res.resume();
+            res.on("end", () => { resolve(res.statusCode ?? 0); done(); });
+          });
+          req.on("error", reject);
+          req.end();
+        })).catch(reject);
+      });
+      expect(status).toBe(202);
+      expect(touched).toContain(ID);
     });
 
     it("WebSockets forward the short path", async () => {
@@ -725,7 +817,8 @@ async function withFront(
   proxy: WebServiceProxy,
   fn: (port: number) => Promise<void>,
 ): Promise<void> {
-  const front = createServer((req, res) => {
+  const front = createServer(async (req, res) => {
+    if (await proxy.handleInternal(req, res)) return;
     if (proxy.matches(new URL(req.url ?? "/", "http://x").pathname)) void proxy.handleHttp(req, res);
     else res.writeHead(404).end();
   });
@@ -745,8 +838,8 @@ async function withFront(
 function proxyGet(
   proxy: WebServiceProxy,
   path: string,
-  opts: { accept?: string; headers?: Record<string, string> } = {},
-): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null; setCookie: string[] }> {
+  opts: { accept?: string; headers?: Record<string, string>; method?: string } = {},
+): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null; setCookie: string[]; location: string }> {
   return new Promise((resolve, reject) => {
     void withFront(proxy, (port) =>
       new Promise<void>((done) => {
@@ -754,7 +847,7 @@ function proxyGet(
           ...(opts.accept ? { accept: opts.accept } : {}),
           ...(opts.headers ?? {}),
         };
-        const req = request({ host: "127.0.0.1", port, path, method: "GET", headers }, (res) => {
+        const req = request({ host: "127.0.0.1", port, path, method: opts.method ?? "GET", headers }, (res) => {
           let body = "";
           res.on("data", (c) => (body += c));
           res.on("end", () => {
@@ -765,6 +858,7 @@ function proxyGet(
               echoPath: String(res.headers["x-echo-path"] ?? ""),
               ident: raw ? (JSON.parse(String(raw)) as IdentEcho) : null,
               setCookie: res.headers["set-cookie"] ?? [],
+              location: String(res.headers.location ?? ""),
             });
             done();
           });
