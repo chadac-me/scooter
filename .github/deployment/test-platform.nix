@@ -43,6 +43,10 @@ prefix:
       "model-cloud-only" = { hint = "claude-code exclusive."; };
     };
   };
+  # Per-conversation service origins, so e2e-full drives the router's sandbox listener
+  # and its direct-to-pod path. No DNS or certificate: test/e2e/support/sandboxEdge.mjs
+  # plays the wildcard Ingress and Chromium resolves `*.sandbox.e2e.test` to it.
+  ingress.sandboxDomain = "sandbox.e2e.test";
   # e2e configures no credentials; drop contribs needing one.
   contribs = testContribs;
 }

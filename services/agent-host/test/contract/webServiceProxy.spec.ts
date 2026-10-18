@@ -255,7 +255,12 @@ describe("web-service proxy", () => {
 
     function sandboxProxy(registry: WebServiceRegistry, sandboxDomain: string | undefined = "scooter.example.com") {
       return createWebServiceProxy({
-        sessions: { get: () => ({ id: ID, threadId: ID }), touchById: () => {} } as never,
+        sessions: {
+          get: (id: string) => (id === ID ? { id: ID, threadId: ID } : undefined),
+          getByShortId: async () => undefined,
+          ensureReadable: async () => false,
+          touchById: () => {},
+        } as never,
         resolvePodTarget: (async () => ({ name: "pod", podIP: "127.0.0.1" })) as never,
         registry,
         publicHost: "scooter.example.com",
@@ -296,10 +301,25 @@ describe("web-service proxy", () => {
     });
 
     it("with sandbox hosts on, the main host serves no services", async () => {
-      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`);
+      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`, { method: "POST" });
       expect(status).toBe(404);
       const status2 = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/__scooter_status`);
       expect(status2.status).toBe(404);
+    });
+
+    it("an old main-host link redirects to the conversation's host, path and query intact", async () => {
+      const { status, location, echoPath } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app/x?file=a.py`);
+      expect(status).toBe(302);
+      expect(location).toBe("https://5a515e73.scooter.example.com/marimo/app/x?file=a.py");
+      expect(echoPath).toBe(""); // nothing reached the pod
+      const bare = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo`);
+      expect(bare.location).toBe("https://5a515e73.scooter.example.com/marimo/");
+    });
+
+    it("an old link to an unknown conversation is a 404, not a redirect", async () => {
+      const { status, location } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/ffffffff-0000-0000-0000-000000000000/marimo/`);
+      expect(status).toBe(404);
+      expect(location).toBe("");
     });
 
     it("with sandbox hosts off, a host-routed request is refused", async () => {
@@ -816,8 +836,8 @@ async function withFront(
 function proxyGet(
   proxy: WebServiceProxy,
   path: string,
-  opts: { accept?: string; headers?: Record<string, string> } = {},
-): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null; setCookie: string[] }> {
+  opts: { accept?: string; headers?: Record<string, string>; method?: string } = {},
+): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null; setCookie: string[]; location: string }> {
   return new Promise((resolve, reject) => {
     void withFront(proxy, (port) =>
       new Promise<void>((done) => {
@@ -825,7 +845,7 @@ function proxyGet(
           ...(opts.accept ? { accept: opts.accept } : {}),
           ...(opts.headers ?? {}),
         };
-        const req = request({ host: "127.0.0.1", port, path, method: "GET", headers }, (res) => {
+        const req = request({ host: "127.0.0.1", port, path, method: opts.method ?? "GET", headers }, (res) => {
           let body = "";
           res.on("data", (c) => (body += c));
           res.on("end", () => {
@@ -836,6 +856,7 @@ function proxyGet(
               echoPath: String(res.headers["x-echo-path"] ?? ""),
               ident: raw ? (JSON.parse(String(raw)) as IdentEcho) : null,
               setCookie: res.headers["set-cookie"] ?? [],
+              location: String(res.headers.location ?? ""),
             });
             done();
           });

@@ -30,6 +30,9 @@ import (
 	"time"
 )
 
+// DirectRouteHeader marks a response the router carried straight from the sandbox pod.
+const DirectRouteHeader = "X-Scooter-Route"
+
 // internalPrefix is the agent-host's cluster-internal web-service routes
 // (services/agent-host/src/proxy/webServiceProxy.ts INTERNAL_PREFIX).
 const internalPrefix = "/internal/web-services"
@@ -394,6 +397,9 @@ func (d *directProxy) serve(shutdownCtx context.Context, w http.ResponseWriter, 
 		ModifyResponse: func(res *http.Response) error {
 			// A pod must not set or overwrite the ingress session (fixation, forced logout).
 			stripSetCookies(res.Header, t.SessionCookies)
+			// Which path served the response, for debugging and the e2e that checks the
+			// direct path is the one in use.
+			res.Header.Set(DirectRouteHeader, "direct")
 			if res.StatusCode == http.StatusSwitchingProtocols {
 				if rwc, ok := res.Body.(io.ReadWriteCloser); ok {
 					res.Body = touchingConn{ReadWriteCloser: rwc, touch: touch}

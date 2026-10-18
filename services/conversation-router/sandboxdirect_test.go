@@ -155,6 +155,9 @@ func TestDirectProxiesToThePod(t *testing.T) {
 	if rec.Code != 200 || rec.Body.String() != "pod GET" {
 		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
 	}
+	if got := rec.Header().Get(DirectRouteHeader); got != "direct" {
+		t.Errorf("%s = %q, want direct", DirectRouteHeader, got)
+	}
 	if got := rec.Header().Get("X-Pod-Path"); got != "/marimo/app%2Fx?x=1" {
 		t.Errorf("pod path = %q, want the browser path", got)
 	}
@@ -225,6 +228,9 @@ func TestDirectFallsBackToTheAgentHost(t *testing.T) {
 	rec := sandboxGet(t, h, "GET", "/marimo/app", nil)
 	if rec.Header().Get("X-Served-By") != "agent-host" {
 		t.Fatalf("not served by the agent-host: %d %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get(DirectRouteHeader); got != "" {
+		t.Errorf("%s = %q on an agent-host response", DirectRouteHeader, got)
 	}
 	sandboxGet(t, h, "GET", "/marimo/"+statusSegment, nil)
 	if n := ah.lookups.Load(); n != 1 {

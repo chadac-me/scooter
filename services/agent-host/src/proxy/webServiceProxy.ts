@@ -24,6 +24,7 @@ import { inboundIdentityHeaders, sessionCookiePrefixes, stripSessionSetCookies, 
 import { logger } from "../log.js";
 import type { Conversation, SandboxProvisioner, SessionManager } from "../session/manager.js";
 import type { SandboxRef, SessionId } from "../types.js";
+import { sandboxOrigin } from "./sandboxOrigin.js";
 
 const log = logger("webServiceProxy");
 
@@ -96,6 +97,8 @@ export interface WebServiceProxyDeps {
   /** Parent domain of the per-conversation service hosts (SANDBOX_DOMAIN). When set, services are
    *  served only on their conversation's own host, at /<service>/, and never on the main host. */
   sandboxDomain?: string;
+  /** Scheme of the sandbox hosts ("https" unless PUBLIC_URL says otherwise), for redirects to them. */
+  sandboxScheme?: string;
 }
 
 /** Set by the conversation-router, and only by it, on a request it routed from a sandbox host
@@ -482,6 +485,15 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     return err.code === "ECONNREFUSED" || err.code === "EHOSTUNREACH" || err.code === "ENETUNREACH";
   }
 
+  /** Where a main-host /c/<id>/<service>/... URL lives on its sandbox host, or undefined. */
+  async function sandboxHostLocation(url: URL): Promise<string | undefined> {
+    const parsed = parseProxyPath(url.pathname);
+    if (!parsed) return undefined;
+    const conv = await lookup(parsed.conversationId);
+    const origin = conv && sandboxOrigin(conv.id, { domain: sandboxDomain!, scheme: deps.sandboxScheme || "https" });
+    return origin ? `${origin}/${encodeURIComponent(parsed.service)}${parsed.rest}${url.search}` : undefined;
+  }
+
   async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const startedAt = Date.now();
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -489,6 +501,16 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     // Answer the loading page's poll before the normal resolve, which would 502 while the unit is down.
     const label = sandboxLabelOf(req);
     if (await handleStatus(url.pathname, label, res)) return;
+
+    // With sandbox hosts on, an old main-host link (/c/<id>/<service>/...) moves to the
+    // conversation's own host. Only a navigation or fetch can follow a redirect; anything else 404s.
+    if (sandboxDomain && label === undefined && (req.method === "GET" || req.method === "HEAD")) {
+      const location = await sandboxHostLocation(url);
+      if (location) {
+        res.writeHead(302, { location, "cache-control": "no-store" }).end();
+        return;
+      }
+    }
 
     const r = await resolve(url.pathname, label);
     const resolvedAt = Date.now();
