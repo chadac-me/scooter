@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -618,4 +619,32 @@ func TestPgResourceLinksNotifyNamesTheConversation(t *testing.T) {
 			t.Fatalf("a ref-only update must not notify; first frame named %q", id)
 		}
 	})
+}
+
+func TestPgConversationByLabel(t *testing.T) {
+	pool := startPG(t)
+	s := &Store{pool: pool}
+	ctx := context.Background()
+	insertConv(t, pool, "5a515e73-860b-49ba-bc3f-6ff8d5fda5ff", "", "")
+	// A subagent sharing the prefix is not a sandbox of its own.
+	insertConv(t, pool, "5a515e73-ffff-0000-0000-000000000000", "5a515e73-860b-49ba-bc3f-6ff8d5fda5ff", "")
+	insertConv(t, pool, "aaaaaaaa-0000-0000-0000-000000000001", "", "")
+	insertConv(t, pool, "aaaaaaaa-0000-0000-0000-000000000002", "", "")
+
+	if id, ok, err := s.ConversationByLabel(ctx, "5a515e73"); err != nil || !ok || id != "5a515e73-860b-49ba-bc3f-6ff8d5fda5ff" {
+		t.Errorf("unique label = (%q, %v, %v)", id, ok, err)
+	}
+	if _, ok, err := s.ConversationByLabel(ctx, "bbbbbbbb"); err != nil || ok {
+		t.Errorf("unknown label = (%v, %v)", ok, err)
+	}
+	if _, _, err := s.ConversationByLabel(ctx, "aaaaaaaa"); !errors.Is(err, ErrAmbiguousLabel) {
+		t.Errorf("shared prefix: err = %v, want ErrAmbiguousLabel", err)
+	}
+	if id, ok, err := s.ConversationByLabel(ctx, "aaaaaaaa-0000-0000-0000-000000000002"); err != nil || !ok || id != "aaaaaaaa-0000-0000-0000-000000000002" {
+		t.Errorf("a longer label disambiguates: (%q, %v, %v)", id, ok, err)
+	}
+	// LIKE wildcards are not interpreted.
+	if _, ok, _ := s.ConversationByLabel(ctx, "5a51%"); ok {
+		t.Error("a wildcard label matched")
+	}
 }

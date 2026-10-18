@@ -38,7 +38,7 @@ in
       set -euo pipefail
       # CONVERSATION_ID arrives via the unit's conv.env; this must match the prefix
       # the proxy forwards or every asset 404s.
-      export SCOOTER_FILES_BASE="/c/''${CONVERSATION_ID:-unknown}/files"
+      export SCOOTER_FILES_BASE="''${SCOOTER_SERVICE_PREFIX-/c/''${CONVERSATION_ID:-unknown}}/files"
       export SCOOTER_FILES_PORT="${toString cfg.port}"
       export SCOOTER_FILES_ROOT="''${SCOOTER_FILES_ROOT:-/workspace}"
       # Without this the root is a "frontend not built" note; /api/health reports

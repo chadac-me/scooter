@@ -455,7 +455,9 @@ in
                 imagePullPolicy = cfg.pullPolicy;
                 command = [ "conversation-router" ];
                 ports = [{ containerPort = 8080; name = "agui"; }]
-                  ++ lib.optional ccfg.selfAccess.enable { containerPort = ccfg.selfAccess.port; name = "self"; };
+                  ++ lib.optional ccfg.selfAccess.enable { containerPort = ccfg.selfAccess.port; name = "self"; }
+                  # The sandbox-host listener: the only port the public wildcard Ingress reaches.
+                  ++ lib.optional (cfg.ingress.sandboxDomain != "") { containerPort = 8081; name = "sandbox"; };
                 env = [
                   { name = "NAMESPACE"; value = cfg.namespace; }
                   # The fallback Service for unassigned requests must select the
@@ -463,6 +465,10 @@ in
                   { name = "AGENT_HOST_SERVICE"; value = "agent-host-pods"; }
                   { name = "UPSTREAM_PORT"; value = "8080"; }
                   { name = "LISTEN_ADDR"; value = ":8080"; }
+                  # Requests to <label>.<sandboxDomain> are a conversation's web services,
+                  # served only on SANDBOX_LISTEN_ADDR; the main listener refuses those hosts.
+                  { name = "SANDBOX_DOMAIN"; value = cfg.ingress.sandboxDomain; }
+                  { name = "SANDBOX_LISTEN_ADDR"; value = ":8081"; }
                   # Read-only handle on the agent_host database via the router's own role.
                   { name = "AGENT_HOST_DB_HOST"; value = cfg.postgres.host; }
                   { name = "AGENT_HOST_DB_PORT"; value = toString cfg.postgres.port; }
