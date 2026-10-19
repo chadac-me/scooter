@@ -145,16 +145,45 @@ let
   # verbs; each contrib's deployment.nix sets its own row inside its own `mkIf`.
   approvalContribsJson =
     if cfg.approvals == { } then null else builtins.toJSON cfg.approvals;
-  builtins' = lib.optionalAttrs cfg.agent.builtinSkills
-    (lib.mapAttrs (_: file: builtins.readFile file)
-      (lib.concatMapAttrs (_: skills: skills) contribSkills));
+  # Skill DIRECTORIES ship SKILL.md to the agent as `<name>.md`, with a note naming
+  # the sandbox copy (modules/skills/sandbox.nix) after the frontmatter,
+  # since a skill resolves its scripts/ against "the directory it was loaded from"
+  # and the agent-host's copy is not the one the agent's shell can run.
+  withSandboxNote = name: text:
+    let
+      lines = lib.splitString "\n" text;
+      note = "> In Scooter this skill's directory is `/etc/scooter/skills/${name}`, in your sandbox. "
+        + "Resolve its `scripts/` and `reference/` paths against that directory and run them with your shell.";
+      # The index of the frontmatter's closing `---`, or null when there is none.
+      close = if lines != [ ] && lib.head lines == "---"
+        then lib.findFirst (i: lib.elemAt lines i == "---") null (lib.range 1 (lib.length lines - 1))
+        else null;
+    in
+    if close == null then note + "\n\n" + text
+    else lib.concatStringsSep "\n"
+      (lib.take (close + 1) lines ++ [ "" note ] ++ lib.drop (close + 1) lines);
+  dirSkills = lib.mapAttrs'
+    (name: src: lib.nameValuePair "${name}.md" (withSandboxNote name (builtins.readFile "${src}/SKILL.md")))
+    config.resolvedSkillDirs;
+  # The directories an enabled contrib added are its own skills, gated like its files;
+  # the ones the deployment declared always ship.
+  contribDirNames = map (n: "${n}.md") (lib.concatMap (c: lib.attrNames c.skillDirs)
+    (lib.attrValues (lib.filterAttrs (_: c: c.enable) config.contribs)));
+  deploymentDirSkills = removeAttrs dirSkills contribDirNames;
+
+  fileSkills = lib.mapAttrs (_: file: builtins.readFile file)
+    (lib.concatMapAttrs (_: skills: skills) contribSkills);
+  builtins' =
+    let clash = lib.intersectLists (lib.attrNames fileSkills) (lib.attrNames dirSkills); in
+    if clash != [ ] then throw "skills: ${lib.concatStringsSep ", " clash} is both a contrib skill file and a skill directory."
+    else lib.optionalAttrs cfg.agent.builtinSkills (fileSkills // dirSkills) // deploymentDirSkills;
   allSkills = builtins' // cfg.agent.skills;
 in
 {
   # ./testing.nix is absent on purpose (test-only overrides are opted into by a test
   # manifest), and the contribs arrive via `contribModules`, each declaring its own
   # `contribs.<name>` options and manifests with contrib/spec.nix as their schema.
-  imports = [ kubenix.modules.k8s ./images.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./legacy-state-migration.nix ./event-backfill.nix ]
+  imports = [ kubenix.modules.k8s ./images.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./legacy-state-migration.nix ./event-backfill.nix ./skills ]
     ++ contribModules;
 
   # Declared only so a definition on the old root reaches `legacyRoot`'s message; no

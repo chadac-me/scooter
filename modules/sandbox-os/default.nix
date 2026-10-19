@@ -13,6 +13,8 @@
     ./injected-tools.nix
     ./sample-service.nix
     ./web-services.nix
+    # Skill directories are a platform feature (modules/skills); this is their install.
+    ../skills/sandbox.nix
     ./mcp-servers.nix
     ./carry-over.nix
     ./runtime-converge.nix

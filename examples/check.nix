@@ -395,6 +395,48 @@ let
     contribs.echo.skills.${echoSkillFile} = ../skills/scooter-intro.md;
   };
   echoSkillsRender = (builtins.tryEval (builtins.deepSeq echoSkills true)).success;
+
+  # Skill DIRECTORIES: echo's fixture ships SKILL.md as echo-skill.md only once echo
+  # is built, with the sandbox note after the frontmatter rather than before it
+  # (the agent-host reads `description` from frontmatter that must open the file).
+  skillDataWith = extra:
+    let
+      e = evalPlatform {
+        module = { ... }: {
+          imports = [ ./kubenix-config.nix ];
+          config = extra;
+        };
+      };
+    in (e.config.kubernetes.resources.configMaps or { }).agent-skills.data or { };
+  echoDirSkill = (skillDataWith { contribs.echo.enable = nixpkgsLib.mkForce true; })."echo-skill.md" or null;
+  dirSkillProblems =
+    (if builtins.elem "echo-skill.md" echoSkills then
+    [ "echo's skill DIRECTORY shipped with echo disabled — skillDirs is not gated on `enable`" ] else [ ])
+    ++ (if echoDirSkill == null then
+    [ "echo-skill.md is missing with echo enabled — a contrib's skillDirs do not reach the agent-skills ConfigMap" ]
+    else if !(nixpkgsLib.hasPrefix "---\nname: echo-skill\n" echoDirSkill) then
+    [ "echo-skill.md does not open with its frontmatter — the sandbox note went in front of it, so the agent-host loses the skill's description" ]
+    else if !(nixpkgsLib.hasInfix "/etc/scooter/skills/echo-skill" echoDirSkill) then
+    [ "echo-skill.md lacks the note naming /etc/scooter/skills/echo-skill — the agent would resolve scripts/ against the agent-host's copy" ]
+    else [ ])
+    # A `source` with no pin in modules/skills/skills.lock must fail the render, not fetch an unpinned HEAD.
+    ++ (if renders {
+          contribs.echo.enable = nixpkgsLib.mkForce true;
+          contribs.echo.skillDirs.unpinned.source = "github:example/unpinned";
+        }
+        then [ "a skill directory whose source is not in modules/skills/skills.lock rendered — it must fail and point at `just lock-skills`" ]
+        else [ ])
+    # Skill directories are a platform feature: a deployment declares one with no
+    # contrib, and it ships even with the contribs' own skills turned off.
+    ++ (let d = skillDataWith {
+              skillDirs.core-skill.path = ../contrib/echo/skills/echo-skill;
+              scooter.agent.builtinSkills = false;
+            }; in
+        if !(d ? "core-skill.md") then
+        [ "a deployment-level skillDirs entry did not reach the agent-skills ConfigMap — skill directories only work through a contrib" ]
+        else if !(nixpkgsLib.hasInfix "/etc/scooter/skills/core-skill" d."core-skill.md") then
+        [ "core-skill.md lacks the note naming /etc/scooter/skills/core-skill" ]
+        else [ ]);
   disabledContribProblems =
     (if disabled != [ ] then [ ] else
     [ "every contrib is enabled — the disabled-contrib checks below test nothing; keep one disabled fixture (echo) or delete them" ])
@@ -719,7 +761,7 @@ let
       (containersOf w))
     allWorkloads;
 
-  allProblems = disabledContribProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  allProblems = disabledContribProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

@@ -278,6 +278,24 @@ in
       '';
     };
 
+    skillDirs = mkOption {
+      default = { };
+      example = literalExpression ''
+        {
+          marimo-pair = {
+            source = "github:marimo-team/marimo-pair";
+            dir = "skills/marimo-pair";
+          };
+        }
+      '';
+      description = ''
+        Skill DIRECTORIES this contrib adds to the platform's `skillDirs`
+        (modules/skills) when it is enabled. Same shape as `skillDirs.<name>`;
+        see there for how a directory reaches the agent and the sandbox.
+      '';
+      type = types.attrsOf (types.submodule ../modules/skills/dir.nix);
+    };
+
     services = mkOption {
       default = { };
       description = "Which services this contrib plugs into. Fixed key set, so a typo is an eval error.";
