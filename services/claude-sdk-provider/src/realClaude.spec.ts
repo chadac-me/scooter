@@ -60,6 +60,8 @@ function cleanConfigDir(): string {
 /** Drive one real turn and collect what happened. */
 async function realTurn(prompt: string) {
   const { createSdkAcpClient } = await import("./sdkClient.js");
+  /** The tool names the CLI reports exposing to the model, from its init message. */
+  const initTools: string[] = [];
   const client = await createSdkAcpClient({
     // Isolate from this machine's `claude` config, whose pre-approved tools the in-cluster agent-host does not have.
     extraEnv: { CLAUDE_CONFIG_DIR: cleanConfigDir() },
@@ -67,6 +69,10 @@ async function realTurn(prompt: string) {
     model: process.env.REAL_CLAUDE_MODEL ?? "claude-sonnet-4-5",
     exec: localExec(),
     systemPrompt: "You are a test agent. Do exactly what is asked, briefly.",
+    recordRaw: (msg) => {
+      const m = msg as { type?: string; subtype?: string; tools?: unknown };
+      if (m.type === "system" && m.subtype === "init" && Array.isArray(m.tools)) initTools.push(...(m.tools as string[]));
+    },
   });
 
   const text: string[] = [];
@@ -87,7 +93,7 @@ async function realTurn(prompt: string) {
     threw = e as Error;
   }
   await client.close().catch(() => {});
-  return { text: text.join(""), toolCalls, threw, stopReason };
+  return { text: text.join(""), toolCalls, threw, stopReason, initTools };
 }
 
 describe.skipIf(!run)("real Claude — tool policy", () => {
@@ -133,6 +139,25 @@ describe.skipIf(!run)("real Claude — tool policy", () => {
       );
       expect(threw).toBeUndefined();
       expect(`${text} ${toolCalls.join(" ")}`).toMatch(/scooter-policy-ok/);
+    },
+    TIMEOUT,
+  );
+});
+
+describe.skipIf(!run)("real Claude — the CLI's built-ins match the policy", () => {
+  it(
+    "every built-in the CLI exposes is one the policy names, and no native subagent tool is visible @proves",
+    async () => {
+      // A CLI release that renames or adds a built-in (Task became Agent) must fail here, not silently in production.
+      const { ALLOWED_BUILTINS, SUBAGENT_BUILTINS, TOOL_REDIRECTS } = await import("./toolPolicy.js");
+      const { initTools, threw } = await realTurn("Reply with the single word: ok");
+      expect(threw).toBeUndefined();
+      expect(initTools.length, "the CLI must report its tools in the init message").toBeGreaterThan(0);
+
+      const builtins = initTools.filter((t) => !t.startsWith("mcp__"));
+      const known = new Set<string>([...ALLOWED_BUILTINS, ...Object.keys(TOOL_REDIRECTS)]);
+      expect(builtins.filter((t) => !known.has(t)), "built-ins the policy does not name").toEqual([]);
+      expect(builtins.filter((t) => (SUBAGENT_BUILTINS as readonly string[]).includes(t))).toEqual([]);
     },
     TIMEOUT,
   );

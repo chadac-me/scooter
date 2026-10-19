@@ -1,7 +1,7 @@
 /** The policy that keeps an unwired tool from hanging the turn on a headless permission prompt. */
 import { describe, it, expect } from "vitest";
 
-import { decideTool, TOOL_REDIRECTS } from "./toolPolicy.js";
+import { decideTool, SUBAGENT_BUILTINS, TOOL_REDIRECTS } from "./toolPolicy.js";
 
 const ALIASES = ["mcp__sandbox__bash", "mcp__sandbox__glob"];
 
@@ -26,6 +26,22 @@ describe("decideTool", () => {
     expect(decideTool("WebSearch", ALIASES)).toMatchObject({ reason: /web_search/ });
     expect(decideTool("WebFetch", ALIASES)).toMatchObject({ reason: /web_fetch/ });
     expect(decideTool("Task", ALIASES)).toMatchObject({ reason: /spawn_subagent/ });
+  });
+
+  it("THE BUG: the CLI renamed Task to Agent, so subagents ran natively and never appeared in the UI @proves", () => {
+    // Every name the CLI has given its subagent tool must land on spawn_subagent, not the generic refusal.
+    for (const tool of ["Task", "Agent", "Workflow"]) {
+      const d = decideTool(tool, ALIASES);
+      expect(d.allow, `${tool} must be denied`).toBe(false);
+      expect(d.allow === false && d.reason, `${tool} must redirect to spawn_subagent`).toMatch(/spawn_subagent/);
+      expect(d.allow === false && d.reason).not.toMatch(/do not retry/i);
+    }
+    expect(SUBAGENT_BUILTINS).toEqual(expect.arrayContaining(["Task", "Agent"]));
+  });
+
+  it("redirects the native subagent messaging tools to their scooter-env equivalents", () => {
+    expect(decideTool("SendMessage", ALIASES)).toMatchObject({ reason: /send_to_subagent/ });
+    expect(decideTool("ListAgents", ALIASES)).toMatchObject({ reason: /list_subagents/ });
   });
 
   it("tells AskUserQuestion to state the question and proceed, not block @proves", () => {

@@ -134,7 +134,9 @@ describe("sandbox MCP tool handlers", () => {
     expect(TOOL_ALIASES.Glob).toBe("mcp__sandbox__glob");
     expect(TOOL_ALIASES.Grep).toBe("mcp__sandbox__grep");
     // Every aliased built-in must also be disabled, or the model can call the local one.
-    expect([...DISABLED_BUILTINS].sort()).toEqual(Object.keys(TOOL_ALIASES).sort());
+    expect(DISABLED_BUILTINS).toEqual(expect.arrayContaining(Object.keys(TOOL_ALIASES)));
+    // The native subagent tools are hidden too, so the model reaches for spawn_subagent, whose subagents the UI shows.
+    expect(DISABLED_BUILTINS).toEqual(expect.arrayContaining(["Task", "Agent"]));
   });
 });
 
