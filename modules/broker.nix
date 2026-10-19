@@ -279,6 +279,9 @@ in
                   # The agent-host relays a user's action as itself, so core auth
                   # admits it as a non-sandbox caller and sets is_approver.
                   { name = "APPROVER_SERVICE_ACCOUNTS"; value = "system:serviceaccount:${cfg.namespace}:agent-host"; }
+                  # The agent-host's /contrib-api relay names the signed-in user in
+                  # X-Scooter-User; the broker trusts that header from this account only.
+                  { name = "USER_RELAY_SERVICE_ACCOUNTS"; value = "system:serviceaccount:${cfg.namespace}:agent-host"; }
 
                   # --- The agent-facing MCP endpoint ---------------------------------
                   # Who may act for a conversation by presenting a signed conversation

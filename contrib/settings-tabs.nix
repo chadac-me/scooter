@@ -25,6 +25,8 @@ let
       "entry \"${tab.entry}\" must be a .tsx file directly in the contrib's ui/ directory";
     assert check (builtins.pathExists (c.src + "/${tab.entry}"))
       "entry \"${tab.entry}\" does not exist in contrib/${name}/";
+    assert check (!tab.api || c.services.broker.enable)
+      "api = true relays to this contrib's broker routes, so it needs services.broker.enable";
     {
       inherit id;
       value = {

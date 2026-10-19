@@ -45,3 +45,37 @@ async def _noop_auth():  # pragma: no cover
         namespace="test",
         service_account="system:serviceaccount:test:sandbox-test",
     )
+
+
+def _client(identity):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from scooter_contrib_echo.broker_provider import echo_contrib
+
+    async def authed():
+        return identity
+
+    echo = echo_contrib()
+    app = FastAPI()
+    app.include_router(echo.transports[0].routes(echo, authed=authed), prefix="/echo")
+    return TestClient(app)
+
+
+def test_user_whoami_returns_the_relayed_user():
+    """The settings tab's round-trip answers with the user the relay named."""
+    from scooter_broker_lib.types import Identity
+
+    ident = Identity(conversation_id="", namespace="ns", service_account="host", relayed_user="alice")
+    res = _client(ident).get("/echo/user/whoami")
+    assert res.status_code == 200
+    assert res.json() == {"provider": "echo", "user": "alice"}
+
+
+def test_user_whoami_refuses_a_sandbox():
+    """A sandbox's own header names nobody: the core never sets relayed_user for it."""
+    from scooter_broker_lib.types import Identity
+
+    ident = Identity(conversation_id="c1", namespace="ns", service_account="sandbox-c1")
+    res = _client(ident).get("/echo/user/whoami", headers={"X-Scooter-User": "alice"})
+    assert res.status_code == 403

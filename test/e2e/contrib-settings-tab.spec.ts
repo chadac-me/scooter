@@ -2,8 +2,9 @@
  * Tier 3 E2E for contrib settings tabs: a tab the runtime manifest lists appears in the
  * sidebar in `order`, deep-links and survives a refresh, and a broken tab (an entry the
  * bundle lacks, or a component that throws) shows an error card in that tab only while
- * the others keep working. The manifest is served by a route, since the fast stack's
- * vite dev server has none; the modules are the echo contrib's real ui/ files.
+ * the others keep working; and a tab's contribFetch reaches the /contrib-api relay. The
+ * manifest is served by a route, since the fast stack's vite dev server has none; the
+ * modules are the echo contrib's real ui/ files.
  */
 
 import { type Page } from "@playwright/test";
@@ -89,4 +90,26 @@ test.describe("contrib settings tabs", () => {
       await expect(page.locator('[data-testid="settings-panel-skills"]')).toBeVisible();
     });
   }
+
+  // contribFetch: the tab's one round-trip. The broker half is stubbed at the browser,
+  // since the fast stack runs no broker; the URL shape is the SDK's contract.
+  test("contribFetch reaches /contrib-api/<contrib>/<path> and renders the reply", async ({ page }) => {
+    await serveTabs(page, { echo: ECHO });
+    let seen = "";
+    await page.route("**/contrib-api/echo/whoami", (route) => {
+      seen = new URL(route.request().url()).pathname;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: "alice" }) });
+    });
+    await page.goto("/settings/echo");
+    await expect(page.locator('[data-testid="echo-relayed-user"]')).toHaveText("The broker sees alice.", { timeout: 20_000 });
+    expect(seen).toBe("/contrib-api/echo/whoami");
+  });
+
+  // Unstubbed, the call goes through the dev proxy to the real agent-host, whose relay
+  // refuses a caller with no ingress identity before looking anything up.
+  test("the real relay refuses an anonymous caller", async ({ page }) => {
+    await serveTabs(page, { echo: ECHO });
+    await page.goto("/settings/echo");
+    await expect(page.locator('[data-testid="echo-relayed-user"]')).toHaveText("The broker sees HTTP 401.", { timeout: 20_000 });
+  });
 });

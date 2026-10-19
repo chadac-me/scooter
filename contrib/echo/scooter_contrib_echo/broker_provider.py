@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends
 from scooter_broker_lib.registry import register_provider
 from scooter_broker_lib.transports.mcp_tools import McpTools
 from scooter_broker_lib.types import AuthDependency, Identity, Provider, Transport
+from scooter_broker_lib.user import user_identity
 
 from .approvals import EchoApprovals
 from .mcp_tools import echo_mcp_server
@@ -39,6 +40,13 @@ class EchoTransport(Transport):
                 "conversation_id": identity.conversation_id,
                 "pong": "echo",
             }
+
+        user = user_identity(authed)
+
+        @router.get("/user/whoami")
+        async def whoami(user_id: str = Depends(user)) -> dict[str, str]:
+            """The settings tab's round-trip: the user the /contrib-api relay named."""
+            return {"provider": provider.name, "user": user_id}
 
         return router
 

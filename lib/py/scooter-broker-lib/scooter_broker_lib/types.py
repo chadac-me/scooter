@@ -31,6 +31,10 @@ class Identity:
     is_approver: bool = False
     # The conversation's owner from the conversation token's `owner` claim; a sandbox SA carries none, so it stays None there.
     owner: str | None = None
+    # The signed-in user a settings tab acts for, named by the agent-host's /contrib-api
+    # relay. Set only when the caller authenticated as a USER_RELAY_SERVICE_ACCOUNTS
+    # account; from any other caller the header is ignored, so this stays None.
+    relayed_user: str | None = None
 
 
 # ---------------------------------------------------------------------------

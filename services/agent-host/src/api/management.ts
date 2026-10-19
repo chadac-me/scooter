@@ -26,6 +26,7 @@ import type { WebServiceRegistry } from "../proxy/webServiceProxy.js";
 import type { IdentityStore } from "../auth/identityStore.js";
 import type { AssetStore } from "../session/assetStore.js";
 import type { SchedulerClient } from "../agent/schedulerTools.js";
+import { mountContribApi, type ContribApiDeps } from "./contribApi.js";
 import { UserSkillError, type UserSkill, type UserSkillStore } from "../session/userSkillStore.js";
 import type { SandboxResources } from "../session/resources.js";
 import { fitAdvice, fitSummary } from "../session/resourceFit.js";
@@ -123,6 +124,8 @@ export interface ManagementDeps {
   scheduler?: SchedulerClient;
   /** Personal-skills store for the settings page's CRUD, always scoped to the caller; absent (no agent_host DSN) means the routes report it unconfigured. */
   userSkills?: UserSkillStore;
+  /** The /contrib-api relay for contrib settings tabs; absent means the routes are not mounted. */
+  contribApi?: ContribApiDeps;
   /** The deployment skills' names, so the settings form can warn that a personal skill of the same name replaces one. */
   builtinSkillNames?: () => string[];
   /** Summarize older turns and continue on summary+recent; null when too short to compact, throws on summarizer failure. */
@@ -1129,6 +1132,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
     const gone = await userSkills.remove(skillOwner(ctx), ctx.params.id);
     return gone ? { status: 204, json: null } : { status: 404, json: { error: "not found" } };
   });
+
+  // --- Contrib settings-tab API -------------------------------------------------
+  if (deps.contribApi) mountContribApi(r, deps.contribApi);
 
   return r;
 }

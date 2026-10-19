@@ -58,16 +58,40 @@ async def _review(token: str) -> str:
     return status.user.username if status.user else ""
 
 
+RELAYED_USER_HEADER = "x-scooter-user"
+
+
+def _csv(raw: str) -> set[str]:
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+def _relayed_user(request: Request, username: str) -> str | None:
+    """The user named in X-Scooter-User, trusted only from a user-relay account; None from anyone else."""
+    if username not in _csv(settings.user_relay_service_accounts):
+        return None
+    user = request.headers.get(RELAYED_USER_HEADER, "").strip()
+    return user or None
+
+
 async def authenticate(request: Request) -> Identity:
     """FastAPI dependency: validate the Bearer SA token and return Identity."""
     token = _bearer(request)
     username = await _review(token)
 
+    relayed_user = _relayed_user(request, username)
+
     # Approver SAs are not sandboxes: they have no conversation_id but may approve.
-    approvers = {s.strip() for s in settings.approver_service_accounts.split(",") if s.strip()}
+    approvers = _csv(settings.approver_service_accounts)
     if username in approvers:
         return Identity(conversation_id="", namespace=settings.sandbox_namespace,
-                        service_account=username, is_approver=True)
+                        service_account=username, is_approver=True,
+                        relayed_user=relayed_user)
+
+    if username in _csv(settings.user_relay_service_accounts):
+        # A relay account that is not also an approver is still not a sandbox; without
+        # the header it names nobody, and user routes refuse it.
+        return Identity(conversation_id="", namespace=settings.sandbox_namespace,
+                        service_account=username, relayed_user=relayed_user)
 
     m = _SA_PATTERN.match(username or "")
     if not m:

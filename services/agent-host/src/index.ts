@@ -33,6 +33,7 @@ import { historyAfterCompaction, compactConversation } from "./session/compactio
 import { createK8sProvisioner, type K8sProvisioner } from "./session/k8sProvisioner.js";
 import type { SandboxResources } from "./session/resources.js";
 import { brokerAuthHeaders as sharedBrokerAuthHeaders } from "./session/brokerAuth.js";
+import { parseContribUserApi } from "./api/contribApi.js";
 import type { SandboxProvisioner } from "./session/manager.js";
 import { createFileConversationStore } from "./session/fileStore.js";
 import { createPgEventStore, withPgEvents } from "./session/eventStore.js";
@@ -1277,6 +1278,12 @@ export async function main(
       assets,
       scheduler: schedulerClient,
       userSkills: userSkillStore,
+      // Settings tabs reach their contrib's broker half as the signed-in user.
+      contribApi: {
+        contribs: parseContribUserApi(process.env.CONTRIB_USER_API_JSON),
+        brokerUrl: process.env.BROKER_URL ?? "",
+        authHeaders: brokerAuthHeaders,
+      },
       // Read fresh rather than cached: the ConfigMap is editable without a restart, so a
       // cached list would warn about a shadow that no longer exists.
       builtinSkillNames: () => loadSkills(config.skillsDir).map((s) => s.name),
