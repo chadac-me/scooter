@@ -51,6 +51,10 @@ gates:
     name: fast checks (flake + typecheck + unit + python)
     require: always
 
+  - id: images
+    name: image builds (every published image)
+    require: always
+
   - id: size
     name: image size benchmark
     require: always

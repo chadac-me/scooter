@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # check-image-coverage.sh — every image a module tells a deploy to pull must be
-# published, every published image must be size-benchmarked and in the multi-arch
+# published, every published image must be size-benchmarked, built on PRs and in the multi-arch
 # manifest job, and every cluster image must have a ghcrImages content-tag ref.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit
@@ -45,6 +45,22 @@ while read -r img attr; do
 done < <(grep -oE '\{ name: [a-z-]+, attr: [a-z-]+' .github/workflows/publish-images.yml \
           | sed 's/{ name: //;s/, attr:/ /')
 [ "$missing_bench" = 0 ] && echo "  (none)"
+
+# Every published image must also be built on PRs (ci.yml's image-build matrix),
+# or it can break on a PR and only fail at publish time on main.
+echo "published images missing from ci.yml's PR image-build matrix:"
+mapfile -t pr_built < <(
+  awk '/^  image-build:/,/^  image-build-report:/' .github/workflows/ci.yml \
+    | grep -oE '\{ attr: [a-z-]+' | sed 's/{ attr: //' | sort -u
+)
+missing_pr=0
+while read -r img attr; do
+  printf '%s\n' "${pr_built[@]}" | grep -qx "$attr" || {
+    echo "  - $img (add attr $attr to ci.yml's image-build matrix)"; missing_pr=1; fail=1
+  }
+done < <(grep -oE '\{ name: [a-z-]+, attr: [a-z-]+' .github/workflows/publish-images.yml \
+          | sed 's/{ name: //;s/, attr:/ /')
+[ "$missing_pr" = 0 ] && echo "  (none)"
 
 # Every published image must also be in the manifest job, or its per-arch tags are
 # pushed and never joined into the shared tag.
