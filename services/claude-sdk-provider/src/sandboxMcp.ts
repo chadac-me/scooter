@@ -8,6 +8,7 @@
  */
 
 import type { ExecBackend } from "./types.js";
+import { SUBAGENT_BUILTINS } from "./toolPolicy.js";
 
 /** The MCP CallToolResult shape, redeclared locally so the handlers do not depend on the SDK at type time. */
 export interface ToolResult {
@@ -25,8 +26,8 @@ export const TOOL_ALIASES: Record<string, string> = {
   Glob: "mcp__sandbox__glob",
   Grep: "mcp__sandbox__grep",
 };
-/** The built-in tools disabled so the model cannot run them locally. */
-export const DISABLED_BUILTINS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"];
+/** The built-ins hidden from the model: the local shell/file tools (aliased into the sandbox) and the native subagent tools, whose subagents never reach the UI, so the model sees only `spawn_subagent`. */
+export const DISABLED_BUILTINS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", ...SUBAGENT_BUILTINS];
 
 /** Commands run under /workspace unless an absolute /workspace path is given. */
 const DEFAULT_CWD = "/workspace";

@@ -11,12 +11,22 @@ export const ALIASED_BUILTINS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"
 /** Built-ins that are safe as-is, where ToolSearch enumerates the deferred scooter-env tools and Skill invokes a discovered .claude/skills entry. */
 export const ALLOWED_BUILTINS = ["TodoWrite", "ToolSearch", "Skill"] as const;
 
+/** The CLI's native subagent built-ins across releases (`Task` was renamed `Agent`); a native subagent runs inside the CLI, so it never becomes a conversation and never appears in the UI. */
+export const SUBAGENT_BUILTINS = ["Task", "Agent", "Workflow"] as const;
+
+/** What the model sees when it reaches for a native subagent tool. */
+export const SUBAGENT_REDIRECT =
+  "Native subagents are not available here. Use the scooter-env `spawn_subagent` tool " +
+  "instead (load it with ToolSearch if needed): it runs the subagent in this " +
+  "conversation's sandbox and reports back through the UI.";
+
 /** Built-ins that are not supported, with the instruction the model sees so it retries on the right tool. */
 export const TOOL_REDIRECTS: Record<string, string> = {
-  Task:
-    "The Task tool is not available here. Use the scooter-env `spawn_subagent` tool " +
-    "instead: it runs the subagent in this conversation's sandbox and reports back " +
-    "through the UI.",
+  ...Object.fromEntries(SUBAGENT_BUILTINS.map((t) => [t, SUBAGENT_REDIRECT])),
+  SendMessage:
+    "SendMessage is not available here. Use the scooter-env `send_to_subagent` tool " +
+    "to message a subagent you spawned with `spawn_subagent`.",
+  ListAgents: "ListAgents is not available here. Use the scooter-env `list_subagents` tool.",
   AskUserQuestion:
     "There is no interactive question channel here — the user reads this conversation " +
     "asynchronously. State the question and the options in your REPLY, say which option " +

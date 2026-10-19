@@ -149,6 +149,40 @@ describe("SDK client platform MCP tools (scooter-env)", () => {
   });
 });
 
+describe("SDK client native subagents (the CLI's Task/Agent tools)", () => {
+  /** Run one turn and return the options handed to query(). */
+  const optionsOfOneTurn = async () => {
+    const fq = fakeQuery();
+    const client = await createSdkAcpClient({
+      oauthToken: "t", model: "claude-x", exec: fakeExec, systemPrompt: "hi",
+      mcpEndpointUrl: "http://127.0.0.1:8080/mcp?conv=c1",
+      queryImpl: fq.queryImpl,
+    });
+    await client.newSession({ threadId: "c1" } as never);
+    await client.prompt({ prompt: [{ type: "text", text: "fan out" }] } as never);
+    return fq.calls[0].options;
+  };
+
+  it("THE BUG: hides Task AND Agent from the model, so subagents go through spawn_subagent and show in the UI @proves", async () => {
+    // A native subagent runs inside the CLI and is never a conversation, so the UI cannot list it.
+    const opts = await optionsOfOneTurn();
+    expect(opts.disallowedTools as string[]).toEqual(expect.arrayContaining(["Task", "Agent"]));
+  });
+
+  it("the PreToolUse hook redirects an Agent call to spawn_subagent if one gets through", async () => {
+    const opts = await optionsOfOneTurn();
+    const hooks = opts.hooks as { PreToolUse: Array<{ hooks: Array<(i: unknown) => Promise<unknown>> }> };
+    const hook = hooks.PreToolUse[0].hooks[0];
+    for (const tool_name of ["Task", "Agent"]) {
+      const out = (await hook({ tool_name })) as {
+        hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+      };
+      expect(out.hookSpecificOutput?.permissionDecision, tool_name).toBe("deny");
+      expect(out.hookSpecificOutput?.permissionDecisionReason, tool_name).toMatch(/spawn_subagent/);
+    }
+  });
+});
+
 describe("SDK client back-pressure (canUseTool yields to a queued priority item)", () => {
   const clientWith = (shouldYield?: () => boolean) => {
     const fq = fakeQuery();
