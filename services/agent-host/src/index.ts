@@ -37,7 +37,8 @@ import type { SandboxProvisioner } from "./session/manager.js";
 import { createFileConversationStore } from "./session/fileStore.js";
 import { createPgEventStore, withPgEvents } from "./session/eventStore.js";
 import { agentHostDsnFromEnv } from "./db/agentHostDsn.js";
-import { createK8sOwnershipGuard } from "./session/k8sOwnershipGuard.js";
+import { createPgAssignmentSource, createPgOwnershipGuard } from "./session/pgOwnershipGuard.js";
+import { createPgPool } from "./db/pgPool.js";
 import { createK8sConversationRegistry } from "./session/k8sConversationRegistry.js";
 import { withConversationRows } from "./session/pgConversationRegistry.js";
 import type { ConversationStore, ConversationLink } from "./session/manager.js";
@@ -673,11 +674,18 @@ export async function main(
     metrics.persistenceError?.({ conversationId });
   });
 
-  // Multi-replica fencing: with POD_NAME set, watch the Conversation CRD so this pod stops
-  // appending to a conversation reassigned away from it.
-  const ownership = podName
-    ? createK8sOwnershipGuard(podName, config.namespace)
-    : undefined;
+  // Multi-replica fencing: with POD_NAME set, follow the conversations row (the store the append
+  // fence checks) so this pod stops appending to a conversation reassigned away from it.
+  if (podName && !agentHostDsn) {
+    hostLog.warn("POD_NAME set without an agent_host DSN: no ownership source, running unfenced");
+  }
+  const ownership =
+    podName && agentHostDsn
+      ? createPgOwnershipGuard(
+          podName,
+          createPgAssignmentSource(agentHostDsn, createPgPool("ownershipGuard", { connectionString: agentHostDsn, max: 2 })),
+        )
+      : undefined;
   // Hand the tracker's cached epoch to the append fence; undefined narrows the fence to pod
   // identity.
   observedGeneration = (id) => ownership?.guard.observedGeneration?.(id);
@@ -726,7 +734,7 @@ export async function main(
     },
   });
 
-  // Settlement on ownership gain: the CR watch always fires when a conversation moves to
+  // Settlement on ownership gain: the row feed always fires when a conversation moves to
   // this pod, so a stranded run gets terminated or resume-nudged there.
   if (ownership) {
     ownership.guard.onGained = (id, generation) => {
@@ -1399,10 +1407,14 @@ export async function main(
     jobCleanupTimer = setInterval(() => {
       for (const c of sessions.list()) {
         if (c.status !== "running") continue;
-        // Owner-only, like sweepIdle: a stale local entry for a conversation that moved away
-        // would otherwise be exec-probed into a resume of a sandbox that may be gone.
-        if (ownership && !ownership.guard.canWrite(c.id)) continue;
-        void jobManager.cleanup(c.id).catch(() => {});
+        // Positive owner only, like sweepIdle: the exec probe would resume (recreate) the sandbox of
+        // a conversation that moved away or was deleted through another pod. The cached check
+        // filters cheaply; the row confirms just before the probe.
+        if (ownership && !ownership.guard.owns(c.id)) continue;
+        void (async () => {
+          if (ownership && !(await ownership.guard.confirmOwns(c.id as SessionId))) return;
+          await jobManager.cleanup(c.id);
+        })().catch(() => {});
       }
     }, config.idleSweepIntervalMs);
     jobCleanupTimer.unref?.();
@@ -1418,9 +1430,10 @@ export async function main(
       for (const c of sessions.list()) {
         // A suspended conversation's completions are announced on its next revive.
         if (c.status !== "running") continue;
-        // Owner-only, like the cleanup sweep above.
-        if (ownership && !ownership.guard.canWrite(c.id)) continue;
+        // Positive owner only, confirmed against the row, like the cleanup sweep above.
+        if (ownership && !ownership.guard.owns(c.id)) continue;
         void (async () => {
+          if (ownership && !(await ownership.guard.confirmOwns(c.id as SessionId))) return;
           const done = await jobManager!.pollCompletions(c.id).catch(() => [] as JobStatus[]);
           for (const st of done) {
             const tail = st.output.trim();
@@ -1501,7 +1514,7 @@ export async function main(
     if (subagentWatchTimer) clearInterval(subagentWatchTimer);
     await metrics.shutdown();
     await server.close();
-    ownership?.stop(); // end the Conversation-CRD watch (multi-replica only)
+    ownership?.stop(); // end the assignment LISTEN (multi-replica only)
   };
 
   // --- helpers ---

@@ -838,7 +838,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       // The controller pushes this on a conversation's new host right after assigning it.
 
       // A positive "another pod owns it" verdict can be a stale cache, since the controller pushes
-      // right after writing hostPod and the watch event often lands later: a push whose generation
+      // right after writing host_pod and the row notification can land later: a push whose generation
       // is newer than anything observed is trusted and adopted, while one at or below the observed
       // generation is fenced out loudly.
       if (!ownershipGuard.canWrite(id)) {
@@ -854,7 +854,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           return; // a genuinely stale push
         }
         ownershipGuard.adoptAssignment(id, expectedGen);
-        log.info("reviveFromMirror: push is ahead of the CR watch — adopting the assignment", {
+        log.info("reviveFromMirror: push is ahead of the row feed — adopting the assignment", {
           conversation_id: id,
           observed_generation: observed ?? null,
           pushed_generation: expectedGen,
@@ -1299,9 +1299,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       };
       for (const entry of entries.values()) {
         if (entry.status !== "running") continue;
-        // Only the owner sweeps and probes; a non-owner's job probe can resume a sandbox the owner
-        // just suspended.
-        if (!ownershipGuard.canWrite(entry.id)) continue;
+        // Positive owner only: the job probe resumes a missing pod, so probing a conversation deleted
+        // elsewhere (canWrite fails open once its row is gone) recreates its sandbox as a zombie.
+        if (!(ownershipGuard.owns?.(entry.id) ?? ownershipGuard.canWrite(entry.id))) continue;
         if (now - entry.lastActivityAt < idleMs) continue;
         // Another replica may have recorded activity this one never saw (a proxied WebSocket
         // bound to the replica it connected through), so re-check the shared value; a failed
@@ -1316,6 +1316,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (qs && (qs.running || qs.queued > 0)) continue;
         // A running background job is not idle either; the probe fails open so an error cannot pin
         // the pod up forever.
+        // The cache trails the row by a notification; confirm against the row before the probe.
+        if (ownershipGuard.confirmOwns && !(await ownershipGuard.confirmOwns(entry.id))) continue;
         if (deps.hasRunningBackgroundJob) {
           let jobRunning = false;
           try {

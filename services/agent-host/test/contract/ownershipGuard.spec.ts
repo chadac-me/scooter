@@ -1,6 +1,6 @@
 /**
  * The OwnershipGuard fencing core, the multi-replica guard that stops a reassigned pod
- * from appending to a conversation the new owner drives. The watch loop feeds observe().
+ * from appending to a conversation the new owner drives. The row feed (pgOwnershipGuard) feeds observe().
  */
 import { describe, it, expect } from "vitest";
 
@@ -16,7 +16,7 @@ describe("allowAllGuard (fencing disabled)", () => {
 });
 
 describe("OwnershipTracker", () => {
-  it("fails OPEN for an unobserved conversation (no CR yet)", () => {
+  it("fails OPEN for an unobserved conversation (no row yet)", () => {
     const t = new OwnershipTracker("agent-host-0");
     expect(t.canWrite(C)).toBe(true);
   });
@@ -49,11 +49,26 @@ describe("OwnershipTracker", () => {
     expect(t.canWrite(C)).toBe(true);
   });
 
-  it("treats a DELETED CR (null) as unobserved -> fail open", () => {
+  it("treats a DELETED row (null) as unobserved -> fail open", () => {
     const t = new OwnershipTracker("agent-host-0");
     t.observe("conv-1", { hostPod: "agent-host-1", generation: 1 });
     expect(t.canWrite(C)).toBe(false);
     t.observe("conv-1", null);
     expect(t.canWrite(C)).toBe(true);
+  });
+});
+
+describe("OwnershipTracker.owns — positive ownership only", () => {
+  it("is false for unobserved, deleted and other-pod conversations; true only for ours", () => {
+    const t = new OwnershipTracker("host-a");
+    expect(t.owns("c" as never)).toBe(false); // unobserved: canWrite fails open, owns does not
+    expect(t.canWrite("c" as never)).toBe(true);
+    t.observe("c", { hostPod: "host-a", generation: 1 });
+    expect(t.owns("c" as never)).toBe(true);
+    t.observe("c", { hostPod: "host-b", generation: 2 });
+    expect(t.owns("c" as never)).toBe(false);
+    t.observe("c", null); // deleted
+    expect(t.owns("c" as never)).toBe(false);
+    expect(t.canWrite("c" as never)).toBe(true);
   });
 });
