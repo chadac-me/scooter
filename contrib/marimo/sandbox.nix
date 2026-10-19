@@ -1,5 +1,8 @@
-# marimo's sandbox half: a notebook served as webServices.marimo under
-# /c/<id>/marimo/, with `--base-url` and `--proxy` read from the pod env at start.
+# marimo's sandbox half. The user-facing service is webServices.notebook, "marimo + chat":
+# a static page with this conversation beside the notebook. The marimo server it frames
+# is webServices.marimo, unlisted (no Services panel entry), started and stopped with
+# it, and served under /c/<id>/marimo/ with `--base-url` and `--proxy` read from the
+# pod env at start.
 # `pkgs.marimo` is a nix-stubs shim (modules/sandbox-os/stubs.nix) that materializes
 # on first start, so declaring the service costs a manifest entry and no running
 # process. curl and jq are here for marimo-pair's scripts
@@ -37,7 +40,7 @@ let
   # bookmark that wakes the sandbox, so it should arrive computed. This is a user-level
   # default: it is written only while marimo has no settings of its own, and anything the
   # user or agent sets afterwards wins.
-  # Printed by `scooter-service start|status marimo` (and notebook), since the skill's body
+  # Printed by `scooter-service start|status notebook`, since the skill's body
   # can drop out of a long session's context. Mirrors scooter-marimo.md.
   hint = ''
     Packages: marimo-pair's ctx.packages.add(), never pip, a venv or a pyproject.toml (each notebook has its own environment).
@@ -72,16 +75,22 @@ in
     stripBasePath = lib.mkDefault true;
     command = lib.mkDefault "${notebookServer}";
     hint = lib.mkDefault hint;
+    # Starting the page starts the server it frames.
+    extraConfig.wants = [ "webservice-marimo.service" ];
   };
+
+  # The marimo server itself: unlisted, so "marimo + chat" is the only way in. It is
+  # PartOf the page's unit, so stopping or restarting `notebook` does the same to it.
 
   webServices.marimo = {
     enable = lib.mkDefault true;
     port = lib.mkDefault 2718;
     displayName = lib.mkDefault "marimo";
+    visibleInMenu = lib.mkDefault false;
+    extraConfig.partOf = [ "webservice-notebook.service" ];
     # Root, like the agent's own exec'd shell, so notebooks land on the /workspace PVC.
     user = lib.mkDefault "root";
     workingDirectory = lib.mkDefault "/workspace";
-    hint = lib.mkDefault hint;
     environment = lib.mkDefault ({
       # marimo's settings live in the agent's own ~/.config on the workspace PVC, not in
       # root's home, which a pod rebuild discards. uv's cache stays out of the PVC.

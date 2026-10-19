@@ -361,6 +361,7 @@
               notebookPort = shipped.nixos.config.webServices.notebook.port;
               marimoCfg = shipped.nixos.config.webServices.marimo;
               marimoStart = shipped.nixos.config.systemd.services.webservice-marimo.serviceConfig.ExecStart;
+              notebookCfg = shipped.nixos.config.webServices.notebook;
             in
             assert sandboxWithEcho.nixos.config.environment.etc ? "scooter/contrib-echo";
             assert echoOnly == [ "contrib/echo/sandbox.nix" ];
@@ -372,12 +373,16 @@
             # marimo's settings are on the workspace PVC, beside the agent's own ~/.config.
             assert marimoCfg.environment.XDG_CONFIG_HOME == "/workspace/.config";
             # Its rules are printed whenever the agent starts or checks it (scooter-service).
-            assert lib.hasInfix "ctx.packages.add()" marimoCfg.hint;
-            assert shipped.nixos.config.webServices.notebook.hint == marimoCfg.hint;
+            assert lib.hasInfix "ctx.packages.add()" notebookCfg.hint;
             assert shipped.nixos.config.environment.etc ? "scooter/skills/marimo-pair";
             # "marimo + chat" ships with it, served at root so its ../marimo/ resolves on either base path.
             assert shipped.nixos.config.webServices.notebook.enable;
             assert shipped.nixos.config.webServices.notebook.stripBasePath;
+            # "marimo + chat" is the only marimo the user sees: the server is unlisted, starts
+            # with the page and stops or restarts with it.
+            assert notebookCfg.displayName == "marimo + chat" && notebookCfg.visibleInMenu && !marimoCfg.visibleInMenu;
+            assert builtins.elem "webservice-marimo.service" shipped.nixos.config.systemd.services.webservice-notebook.wants;
+            assert builtins.elem "webservice-notebook.service" shipped.nixos.config.systemd.services.webservice-marimo.partOf;
             assert shipped.nixos.config.systemd.services ? "scooter-aws-config";
             assert skillCfg.environment.etc ? "scooter/skills/echo-skill";
             assert builtins.elem "skill-dirs/module.nix"

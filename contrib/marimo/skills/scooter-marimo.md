@@ -1,7 +1,7 @@
 ---
 name: scooter-marimo
 description: >-
-  marimo notebooks in this sandbox: the `marimo` web service and how to pair on it
+  marimo notebooks in this sandbox: the `notebook` web service and how to pair on it
   with the marimo-pair skill. Use when the user wants a notebook, data exploration,
   plots or an interactive report, asks you to work in their open notebook, or a
   notebook needs a package or a setting changed. Each notebook has its own
@@ -11,7 +11,7 @@ description: >-
 
 # marimo in Scooter
 
-Your sandbox can serve a **marimo notebook** to the user as the `marimo` web
+Your sandbox can serve a **marimo notebook** to the user as the `notebook` web
 service, and you can drive that same notebook yourself with the **marimo-pair**
 skill: run code in its kernel, read live variables, and add, edit and run cells.
 The user watches and edits in their browser at the same time.
@@ -23,15 +23,14 @@ shell for that.
 ## 1. Start it and give the user the link
 
 ```bash
-scooter-service start marimo     # prints the notebook's URL
-scooter-service start notebook   # "marimo + chat": this conversation beside the notebook
+scooter-service start notebook   # prints the URL to give the user
 ```
 
-Give the user the **notebook** link (`marimo + chat`) by default. It shows this
-conversation on the left and marimo on the right, so they can ask you for changes
-without leaving the notebook. The marimo link alone is for a full-screen notebook.
-The user can also start either from the **Services panel**. The first start
-materializes marimo, which takes a while. Notebooks live in `/workspace`.
+The `notebook` service is **"marimo + chat"**: this conversation on the left and the
+notebook on the right, so the user can ask you for changes without leaving it. It
+starts the marimo server behind it, the unlisted `marimo` service; don't give the
+user that service's link. The user can also start it from the **Services panel**. The
+first start materializes marimo, which takes a while. Notebooks live in `/workspace`.
 
 **marimo-pair can only reach a notebook the user has open in the browser.** A
 session exists only while a tab has the notebook open. So ask the user to open
@@ -128,7 +127,8 @@ reads it whenever a notebook opens, so changes need no restart.
 ## If something is off
 
 - `scooter-service status marimo` and `journalctl -u webservice-marimo -n 50`
-  show the server's state and log.
+  show the server's state and log. `scooter-service restart notebook` restarts both,
+  which ends every open kernel.
 - "Failed to connect": the service isn't running, or the URL lacks marimo's base
   path (`$MARIMO_BASE` above).
 - "No sessions": nobody has the notebook open. Ask the user to open the link.
