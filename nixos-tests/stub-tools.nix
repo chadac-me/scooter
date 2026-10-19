@@ -11,7 +11,8 @@ let
     overlays = [ stubOverlay ];
   };
 
-  realUv = pkgs.uv;
+  # What the uv stub wraps (uv-nix), read off the stub so the seed follows stubs.nix.
+  realUv = stubbedPkgs.uv.real;
   realAwsOut = builtins.unsafeDiscardStringContext (toString pkgs.awscli2);
 
   # The contribs' sandbox halves, composed exactly as pkgs/sandbox-os does, since the
