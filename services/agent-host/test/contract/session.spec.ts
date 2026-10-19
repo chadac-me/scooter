@@ -1236,6 +1236,49 @@ describe("sweepIdle is OWNER-ONLY (the zombie-sandbox bug)", () => {
     expect((provisioner.suspend as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
 
+  it("an UNOBSERVED conversation (deleted through another pod) is neither suspended NOR probed", async () => {
+    // Its row is gone so canWrite fails open, but the probe would recreate the deleted sandbox.
+    const provisioner = fakeProvisioner();
+    let probes = 0;
+    const sessions = createSessionManager({
+      provisioner,
+      store: inMemoryStore(),
+      hasRunningBackgroundJob: async () => {
+        probes++;
+        return false;
+      },
+      ownershipGuard: { canWrite: () => true, owns: () => false },
+    });
+    const conv = await sessions.start("thread-deleted-elsewhere");
+    const idleAt = sessions.get(conv.id)!.lastActivityAt + 61_000;
+
+    expect(await sessions.sweepIdle(60_000, idleAt)).not.toContain(conv.id);
+    expect(probes, "an unobserved conversation must not be exec-probed").toBe(0);
+    expect((provisioner.suspend as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+  });
+
+  it("the cache says owned but the ROW disagrees: neither suspended NOR probed", async () => {
+    const provisioner = fakeProvisioner();
+    let probes = 0;
+    const confirmOwns = vi.fn(async () => false);
+    const sessions = createSessionManager({
+      provisioner,
+      store: inMemoryStore(),
+      hasRunningBackgroundJob: async () => {
+        probes++;
+        return false;
+      },
+      ownershipGuard: { canWrite: () => true, owns: () => true, confirmOwns },
+    });
+    const conv = await sessions.start("thread-lagging-cache");
+    const idleAt = sessions.get(conv.id)!.lastActivityAt + 61_000;
+
+    expect(await sessions.sweepIdle(60_000, idleAt)).not.toContain(conv.id);
+    expect(confirmOwns).toHaveBeenCalledWith(conv.id);
+    expect(probes).toBe(0);
+    expect((provisioner.suspend as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+  });
+
   it("the owner still sweeps normally", async () => {
     const provisioner = fakeProvisioner();
     const sessions = createSessionManager({
