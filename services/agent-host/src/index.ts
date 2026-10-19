@@ -68,7 +68,7 @@ import {
 } from "./agent/skills.js";
 import { createSdkAcpClient } from "@scooter/claude-sdk-provider";
 import { ensureGooseConfig } from "./agent/gooseConfig.js";
-import { catalogFromEnv, availableIds, type ModelCatalog } from "./agent/models.js";
+import { catalogFromEnv, availableIds, contextLimitOf, type ModelCatalog } from "./agent/models.js";
 import { createJobManager, type JobStatus, type JobRegistry } from "./session/jobManager.js";
 import { createPgJobStore } from "./session/jobStore.js";
 import { createPgUserSkillStore } from "./session/userSkillStore.js";
@@ -347,26 +347,47 @@ async function collectEventsSafe(it: AsyncIterable<AguiEvent>): Promise<AguiEven
   return out;
 }
 
-/** Pass AWS/Bedrock config through to goose, including the IRSA web-identity vars the EKS
- *  pod-identity webhook injects. */
-function bedrockEnv(): Record<string, string> {
+/** Env vars always forwarded from the agent-host to goose: provider/model selection, AWS
+ *  credentials (including the IRSA vars the EKS pod-identity webhook injects), and Ollama. */
+export const GOOSE_ENV_ALLOWLIST: readonly string[] = [
+  "GOOSE_PROVIDER", "GOOSE_MODEL", "GOOSE_CONTEXT_LIMIT",
+  "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION",
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+  // IRSA (EKS pod identity) — the credential source in-cluster.
+  "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_STS_REGIONAL_ENDPOINTS",
+  "AWS_ROLE_SESSION_NAME",
+  // Ollama: GOOSE_PROVIDER=ollama + OLLAMA_HOST points goose at it.
+  "OLLAMA_HOST",
+];
+
+/** goose's pod-level env: the allowlist plus the deployer's extra names from
+ *  AGENT_ENV_PASSTHROUGH (comma or whitespace separated), each copied only when set. */
+export function bedrockEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const extra = (env.AGENT_ENV_PASSTHROUGH ?? "").split(/[\s,]+/).filter(Boolean);
   const out: Record<string, string> = {};
-  for (const k of [
-    "GOOSE_PROVIDER", "GOOSE_MODEL",
-    "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION",
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-    // IRSA (EKS pod identity) — the credential source in-cluster.
-    "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_STS_REGIONAL_ENDPOINTS",
-    "AWS_ROLE_SESSION_NAME",
-    // Ollama: GOOSE_PROVIDER=ollama + OLLAMA_HOST points goose at it.
-    "OLLAMA_HOST",
-  ]) {
-    if (process.env[k]) out[k] = process.env[k]!;
+  for (const k of [...GOOSE_ENV_ALLOWLIST, ...extra]) {
+    if (env[k]) out[k] = env[k]!;
   }
   // Auto-compaction threshold (fraction of the context window, 0.0 disables), set
   // explicitly so it is visible per deploy and cannot drift with goose versions.
-  out.GOOSE_AUTO_COMPACT_THRESHOLD = process.env.GOOSE_AUTO_COMPACT_THRESHOLD ?? "0.8";
+  out.GOOSE_AUTO_COMPACT_THRESHOLD = env.GOOSE_AUTO_COMPACT_THRESHOLD ?? "0.8";
   return out;
+}
+
+/** goose's launch env for one conversation: the pod-level env plus the resolved model and
+ *  that model's declared context window. A pod-level GOOSE_CONTEXT_LIMIT wins over the
+ *  per-model value, and with neither goose falls back to its own model table. */
+export function gooseLaunchEnv(
+  base: Record<string, string>,
+  catalog: ModelCatalog,
+  model: string | undefined,
+): Record<string, string> {
+  const limit = contextLimitOf(catalog, model);
+  return {
+    ...base,
+    ...(model ? { GOOSE_MODEL: model } : {}),
+    ...(limit !== undefined && !base.GOOSE_CONTEXT_LIMIT ? { GOOSE_CONTEXT_LIMIT: String(limit) } : {}),
+  };
 }
 
 /** Wall-clock budget for the startup hydrate (see hydrateWithRetry). */
@@ -1572,14 +1593,14 @@ export async function main(
         : deferredSandboxApi(sandbox, () => provisioner.resume(sandbox).then(() => {})),
       { commandTimeoutMs: config.commandTimeoutMs },
     );
-    // Per-conversation model override: GOOSE_MODEL in the agent's launch env.
+    // Per-conversation model override: GOOSE_MODEL (and its GOOSE_CONTEXT_LIMIT) in the
+    // agent's launch env.
     const resolved = resolveModel(model, cfg);
     // GOOSE_MODE=approve enables the per-tool permission gate the ACP client auto-answers
     // for back-pressure, off when SUBAGENT_BACKPRESSURE=0.
     const backpressureOn = process.env.SUBAGENT_BACKPRESSURE !== "0";
     const agentEnv = {
-      ...cfg.agent.env,
-      ...(resolved ? { GOOSE_MODEL: resolved } : {}),
+      ...gooseLaunchEnv(cfg.agent.env, cfg.modelCatalog, resolved),
       ...(backpressureOn ? { GOOSE_MODE: "approve" } : {}),
     };
     // goose runs in this pod, so its cwd must be a real writable dir here: ephemeral

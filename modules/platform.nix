@@ -124,6 +124,11 @@ let
     let hints = lib.filter (h: h != "")
       (map (p: cfg.agent.availableModels.${p}.${id}.hint or "") (providersOf id));
     in if hints != [ ] then lib.head hints else "";
+  # A model's context window: the first provider group declaring one.
+  contextLimitOf = id:
+    let limits = lib.filter (l: l != null)
+      (map (p: cfg.agent.availableModels.${p}.${id}.contextLimit or null) (providersOf id));
+    in if limits != [ ] then lib.head limits else null;
   modelsJson = builtins.toJSON (map (id: {
     inherit id;
     hint = hintOf id;
@@ -132,8 +137,23 @@ let
     providers = providersOf id;
     # The providers this model is the default for.
     defaultFor = lib.filter (p: providerDefaults.${p} == id) (lib.attrNames providerDefaults);
-  }) modelIds);
+  } // lib.optionalAttrs (contextLimitOf id != null) { contextLimit = contextLimitOf id; }) modelIds);
   hasModels = modelIds != [ ];
+
+  # agent.env is set on the agent-host and, with agent.envPassthrough, forwarded to goose;
+  # a name the platform already sets would be silently shadowed by k8s, so it throws.
+  agentPassthrough = lib.unique (cfg.agent.envPassthrough ++ lib.attrNames cfg.agent.env);
+  withAgentEnv = base:
+    let
+      clashes = lib.filter (n: builtins.any (e: e.name == n) base) (lib.attrNames cfg.agent.env);
+    in
+    if clashes != [ ] then
+      throw "scooter.agent.env sets ${lib.concatStringsSep ", " clashes}, which the platform already sets on the agent-host; use the dedicated option instead."
+    else
+      base
+      ++ lib.mapAttrsToList (name: value: { inherit name value; }) cfg.agent.env
+      ++ lib.optional (agentPassthrough != [ ])
+        { name = "AGENT_ENV_PASSTHROUGH"; value = lib.concatStringsSep "," agentPassthrough; };
 
   # Contrib skills read off `config.contribs` and gated on each contrib's `enable`, so
   # an unshipped contrib's skill never documents a route no image serves; deployment
@@ -610,6 +630,19 @@ in
                 slow/powerful). Empty = no hint.
               '';
             };
+            contextLimit = mkOption {
+              type = types.nullOr types.ints.positive;
+              default = null;
+              example = 1000000;
+              description = ''
+                The model's context window in tokens, passed to goose as
+                GOOSE_CONTEXT_LIMIT for conversations on this model. Set it when
+                goose's built-in model table does not know the id (it then assumes
+                128000, which compacts early and makes the agent think it is out of
+                context). null = goose's own table. A global GOOSE_CONTEXT_LIMIT in
+                `agent.env` takes precedence over this.
+              '';
+            };
           };
         }));
         default = { };
@@ -643,6 +676,29 @@ in
         type = types.str;
         default = "us-east-1";
         description = "AWS_REGION for the agent process (Bedrock region).";
+      };
+      env = mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        example = { GOOSE_AUTO_COMPACT_THRESHOLD = "0.7"; GOOSE_MAX_TURNS = "200"; };
+        description = ''
+          Extra environment for the goose agent process: set on the agent-host
+          container and forwarded to goose. goose only receives an allowlist of the
+          agent-host's env (provider, model, AWS credentials, GOOSE_CONTEXT_LIMIT,
+          …); every name here is added to it. A name the platform already sets on
+          the agent-host is an error.
+        '';
+      };
+      envPassthrough = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "GOOSE_TOOLSHIM" ];
+        description = ''
+          Names of agent-host env vars to forward to goose in addition to the
+          built-in allowlist, for vars set on the agent-host some other way (e.g. a
+          secretKeyRef patched onto the Deployment). Names in `agent.env` are
+          forwarded automatically. Rendered as AGENT_ENV_PASSTHROUGH.
+        '';
       };
       claudeCode = {
         tokenSecret = mkOption {
@@ -1238,7 +1294,7 @@ in
                   limits = { memory = "2Gi"; };
                 };
                 ports = [{ containerPort = 8080; name = "agui"; }];
-                env = [
+                env = withAgentEnv ([
                   { name = "PORT"; value = "8080"; }
                   { name = "NAMESPACE"; value = cfg.namespace; }
                   # This pod's own name (downward API): its identity for the Conversation
@@ -1485,7 +1541,7 @@ in
                   { name = "AGENT_HOST_DB_NAME"; value = "agent_host"; }
                   { name = "AGENT_HOST_DB_USER"; value = "agent_host"; }
                   { name = "AGENT_HOST_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-agent-host"; key = "password"; }; }
-                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; };
+                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; });
                 volumeMounts = [
                   # Per-pod hot history cache.
                   { name = "state"; mountPath = "/var/lib/agent-host"; }

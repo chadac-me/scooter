@@ -117,6 +117,9 @@ let
     module = { lib, ... }: {
       imports = [ ./kubenix-config.nix ];
       scooter.fakeAgent = lib.mkForce false;
+      scooter.agent.availableModels.goose."us.anthropic.claude-opus-4-8".contextLimit = 1000000;
+      scooter.agent.env.GOOSE_MAX_TURNS = "200";
+      scooter.agent.envPassthrough = [ "GOOSE_TOOLSHIM" ];
     };
   };
   mHostEnv =
@@ -132,7 +135,26 @@ let
     ++ (if gooseModel == "us.anthropic.claude-sonnet-4-6" then [ ]
         else [ "GOOSE_MODEL should be the default (sonnet), got '${gooseModel}'" ])
     ++ (if sonnetEntry != [ ] && (builtins.head sonnetEntry).default && (builtins.head sonnetEntry).hint != "" then [ ]
-        else [ "AGENT_MODELS_JSON: sonnet should be default:true with a hint" ]);
+        else [ "AGENT_MODELS_JSON: sonnet should be default:true with a hint" ])
+    ++ (if (builtins.head (opusEntry ++ [ { } ])).contextLimit or null == 1000000 then [ ]
+        else [ "AGENT_MODELS_JSON: opus should carry contextLimit 1000000" ])
+    ++ (if sonnetEntry != [ ] && !((builtins.head sonnetEntry) ? contextLimit) then [ ]
+        else [ "AGENT_MODELS_JSON: sonnet declares no contextLimit, so it must render none" ])
+    ++ (if mEnvVal "GOOSE_MAX_TURNS" == "200" then [ ]
+        else [ "agent.env.GOOSE_MAX_TURNS not rendered onto the agent-host" ])
+    ++ (if mEnvVal "AGENT_ENV_PASSTHROUGH" == "GOOSE_TOOLSHIM,GOOSE_MAX_TURNS" then [ ]
+        else [ "AGENT_ENV_PASSTHROUGH should be 'GOOSE_TOOLSHIM,GOOSE_MAX_TURNS', got '${mEnvVal "AGENT_ENV_PASSTHROUGH"}'" ])
+    ++ (let ctrs = builtins.attrValues (clashPlatform.config.kubernetes.resources.deployments.agent-host.spec.template.spec.containers or { });
+        in if !(builtins.tryEval (builtins.deepSeq (map (c: c.env or [ ]) ctrs) true)).success then [ ]
+           else [ "agent.env.GOOSE_PROVIDER should throw (the platform already sets it)" ]);
+  opusEntry = builtins.filter (m: m.id == "us.anthropic.claude-opus-4-8") parsedModels;
+  clashPlatform = evalPlatform {
+    module = { lib, ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.fakeAgent = lib.mkForce false;
+      scooter.agent.env.GOOSE_PROVIDER = "anthropic";
+    };
+  };
 
   # With no `goose` provider group the global default falls through to a provider's
   # explicit `default`, which here is `claude-opus-5` even though `claude-fable-5`
