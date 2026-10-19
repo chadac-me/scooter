@@ -57,6 +57,10 @@ const CONTRIB_OVERLAY_KEY = "contrib.yaml";
 const POD_GONE_TIMEOUT_MS = 60_000;
 const POD_GONE_POLL_MS = 1_500;
 
+type EnvVar = { name: string; value?: string };
+/** The container env vars `conversationEnv` owns; resume reconciles exactly these. */
+const CONVERSATION_ENV = ["CONVERSATION_URL", "CONVERSATION_ID", "SCOOTER_SERVICES_ORIGIN"];
+
 /** The tag portion of an OCI ref (the part after the last ':' that is not a registry port), or ""
  *  when untagged; agrees with the kubenix and controller derivations of the pool version key. */
 export function imageTagOf(imageRef: string): string {
@@ -198,6 +202,36 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     return have && opts.sandboxImage && have !== opts.sandboxImage ? have : undefined;
   };
 
+  /** The env derived from the conversation, which resume reconciles like the image: a sandbox
+   *  created before a platform change (e.g. sandbox origins) otherwise keeps its old values. */
+  const conversationEnv = (urlThread: string): Array<{ name: string; value: string }> => {
+    const origin = sandboxOrigin(urlThread, opts.sandboxOrigins);
+    return [
+      // A shareable link to this conversation, when a public URL is configured.
+      ...(opts.publicUrl
+        ? [{ name: "CONVERSATION_URL", value: `${opts.publicUrl.replace(/\/$/, "")}/?thread=${encodeURIComponent(urlThread)}` }]
+        : []),
+      // The full threadId, which web services read to serve under /c/$CONVERSATION_ID/<name>; always set.
+      { name: "CONVERSATION_ID", value: urlThread },
+      // This conversation's own services origin (https://<label>.<domain>), when configured.
+      ...(origin ? [{ name: "SCOOTER_SERVICES_ORIGIN", value: origin }] : []),
+    ];
+  };
+
+  /** The container env with the conversation-derived vars brought up to date, or undefined when
+   *  they already are. The thread comes from the CR's own CONVERSATION_ID, so resume callers
+   *  that don't know it still reconcile; an unset var the platform no longer sets is removed. */
+  const staleEnv = (container: { env?: EnvVar[] } | undefined): EnvVar[] | undefined => {
+    const env = container?.env ?? [];
+    const thread = env.find((e) => e.name === "CONVERSATION_ID")?.value;
+    if (!thread) return undefined;
+    const want = conversationEnv(thread);
+    const owned = (e: EnvVar) => CONVERSATION_ENV.includes(e.name);
+    const key = (vs: EnvVar[]) => JSON.stringify(vs.filter(owned).map((e) => [e.name, e.value ?? null]).sort());
+    if (key(env) === key(want)) return undefined;
+    return [...env.filter((e) => !owned(e)), ...want];
+  };
+
   /** True once the Sandbox's pod is gone (both lookups the controller may use). */
   const podGone = async (ref: SandboxRef): Promise<boolean> => {
     const pods = await core.listNamespacedPod({
@@ -240,8 +274,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     return Object.keys(merged).length > 0 ? merged : undefined;
   };
 
-  /** Reconcile `ref`'s image onto the deployment's current one, cycling the pod if it is up on a
-   *  stale one; throws only a 404, and any other failure is logged and swallowed. */
+  /** Reconcile `ref`'s image and conversation env onto what the deployment would render now, cycling
+   *  the pod if it is up on stale ones; throws only a 404, and any other failure is logged and swallowed. */
   const reconcileImage = async (ref: SandboxRef): Promise<void> => {
     const sb = (await custom.getNamespacedCustomObject({
       group: GROUP,
@@ -249,15 +283,17 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       namespace: refNs(ref),
       plural: PLURAL,
       name: ref.name,
-    })) as { spec?: { operatingMode?: string; podTemplate?: { spec?: { containers?: Array<{ image?: string }> } } } };
+    })) as { spec?: { operatingMode?: string; podTemplate?: { spec?: { containers?: Array<{ image?: string; env?: EnvVar[] }> } } } };
     const containers = sb.spec?.podTemplate?.spec?.containers ?? [];
     const wasRunning = (sb.spec?.operatingMode ?? "Running") !== "Suspended";
     const stale = staleImage(containers);
-    if (stale) {
-      log.warn("sandbox image skew: adopting the deployment's current sandbox image", {
+    const env = staleEnv(containers[0]);
+    if (stale || env) {
+      log.warn("sandbox template skew: adopting the deployment's current image and conversation env", {
         sandbox: ref.name,
         from_image: stale,
-        to_image: opts.sandboxImage,
+        to_image: stale ? opts.sandboxImage : undefined,
+        env_changed: env ? CONVERSATION_ENV : undefined,
         cycling_pod: wasRunning,
       });
       await custom.patchNamespacedCustomObject(
@@ -270,7 +306,12 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
           body: {
             spec: {
               podTemplate: {
-                spec: { containers: [{ ...containers[0], image: opts.sandboxImage }, ...containers.slice(1)] },
+                spec: {
+                  containers: [
+                    { ...containers[0], ...(stale ? { image: opts.sandboxImage } : {}), ...(env ? { env } : {}) },
+                    ...containers.slice(1),
+                  ],
+                },
               },
             },
           },
@@ -328,21 +369,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         scooterConfigMap: opts.scooterConfigMap,
         configFilesConfigMap: opts.configFilesConfigMap,
         extraTokenAudiences: opts.extraTokenAudiences ?? [],
-        // A shareable link to this conversation, when a public URL is configured.
-        extraEnv: [
-          ...(opts.publicUrl
-            ? [{ name: "CONVERSATION_URL", value: `${opts.publicUrl.replace(/\/$/, "")}/?thread=${encodeURIComponent(urlThread)}` }]
-            : []),
-          // The full threadId, which web services read to serve under /c/$CONVERSATION_ID/<name>;
-          // always set.
-          { name: "CONVERSATION_ID", value: urlThread },
-          // This conversation's own services origin (https://<label>.<domain>), when configured.
-          ...(() => {
-            const origin = sandboxOrigin(urlThread, opts.sandboxOrigins);
-            return origin ? [{ name: "SCOOTER_SERVICES_ORIGIN", value: origin }] : [];
-          })(),
-          ...(opts.extraEnv ?? []),
-        ],
+        extraEnv: [...conversationEnv(urlThread), ...(opts.extraEnv ?? [])],
         overlayStore: opts.overlayStore ?? false,
         overlayStorage: opts.overlayStorage,
         pullPolicy: opts.sandboxPullPolicy,
