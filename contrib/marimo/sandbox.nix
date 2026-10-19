@@ -11,7 +11,7 @@
 # Supplies mkDefault values only and must not gate on `cfg.enable` (infinite
 # recursion); web-services.nix filters on `.enable` when it renders units.
 
-{ config, lib, pkgs, uvNix ? null, ... }:
+{ config, lib, pkgs, ... }:
 
 let
   cfg = config.webServices.marimo;
@@ -63,10 +63,7 @@ in
 {
   # The marimo shim on PATH, so the agent can run it by hand, and what marimo-pair's
   # scripts call: they talk to the running server's HTTP API with curl and jq.
-  # The uv-nix uv outranks the plain-uv stub, so `uv run nb.py` in the shell resolves its
-  # Python from nixpkgs and patches wheels, as the server does.
-  environment.systemPackages = lib.mkIf cfg.enable ([ pkgs.marimo pkgs.curl pkgs.jq ]
-    ++ lib.optional (uvNix != null) (lib.hiPrio uvNix));
+  environment.systemPackages = lib.mkIf cfg.enable [ pkgs.marimo pkgs.curl pkgs.jq ];
 
   # The conversation beside the notebook: a static page framing `/chat/<id>` (left) and
   # marimo (right), both ingress URLs, so nothing is proxied here. Served at root
@@ -98,22 +95,16 @@ in
       # marimo's settings live in the agent's own ~/.config on the workspace PVC, not in
       # root's home, which a pod rebuild discards. uv's cache stays out of the PVC.
       XDG_CONFIG_HOME = "/workspace/.config";
-    } // lib.optionalAttrs (uvNix != null) {
       # Pin uv to a Nix-provided Python, since a downloaded CPython cannot exec on NixOS.
       UV_PYTHON = "${pkgs.python314}/bin/python3.14";
       UV_PYTHON_DOWNLOADS = "never";
     });
 
-    # Under uv-nix each notebook gets a uv-managed venv with patched wheels so native deps import; without it, a bare `marimo edit` still boots.
+    # `pkgs.uv` is the uv-nix stub (modules/sandbox-os/stubs.nix): each notebook gets a
+    # uv-managed venv with patched wheels, so native deps import, and --sandbox makes it
+    # self-contained with its inline PEP 723 deps.
     command =
-      let
-        uvBin = if uvNix != null then "${uvNix}/bin/uv" else null;
-        runner =
-          if uvBin != null
-          # --sandbox makes each notebook self-contained with its inline PEP 723 deps.
-          then ''exec ${uvBin} run --with marimo marimo edit --sandbox''
-          else "exec ${pkgs.marimo}/bin/marimo edit";
-      in
+      let runner = "exec ${pkgs.uv}/bin/uv run --with marimo marimo edit --sandbox"; in
       # `command` is types.str, so the derivation is interpolated to its store path for the re-converge eval.
       lib.mkDefault "${pkgs.writeShellScript "marimo-web-service" ''
         set -euo pipefail

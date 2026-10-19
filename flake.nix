@@ -173,8 +173,12 @@
           # Broker tools (agent-broker / git-credential-broker), prebuilt
           brokerTools = pkgs.callPackage ./pkgs/broker-tools { };
 
+          # stubs.nix's arguments beyond `pkgs`, also vendored for the in-pod re-converge.
+          stubArgs = { uvNixSrc = uv-nix.outPath; };
+
           # The stub overlay, applied at pkgs construction.
           stubOverlay = import ./modules/sandbox-os/stub-overlay.nix {
+            inherit stubArgs;
             lockLib = nix-stubs.lib;
             flakeLock = ./flake.lock;
             nix-stubs = nix-stubs.packages.${system}.nix-stubs;
@@ -183,18 +187,16 @@
           # A pkgs with the stubs applied
           sandboxPkgs = import nixpkgs { inherit system; overlays = [ stubOverlay ]; };
 
-          # The uv-nix uv (patched for Nix)
-          uvNix = uv-nix.packages.${system}.default;
-
           # The NixOS dev-environment sandbox image (systemd as PID 1).
           sandboxOsImage = import ./pkgs/sandbox-os/image.nix {
                 inherit deploymentModules;
-            inherit lib n2c uvNix;
+            inherit lib n2c;
             pkgs = sandboxPkgs;
             # For the in-pod re-converge
             nixStubs = {
               src = nix-stubs;
               package = nix-stubs.packages.${system}.nix-stubs;
+              inherit stubArgs;
             };
           };
 
@@ -314,11 +316,12 @@
               # Through `extraModuleFiles`
               sandboxWithEcho = import ./pkgs/sandbox-os/image.nix {
                 inherit deploymentModules;
-                inherit lib n2c uvNix;
+                inherit lib n2c;
                 pkgs = sandboxPkgs;
                 nixStubs = {
                   src = nix-stubs;
                   package = nix-stubs.packages.${system}.nix-stubs;
+                  inherit stubArgs;
                 };
                 extraModuleFiles = echoOnly;
               };
@@ -330,11 +333,12 @@
               # The image as it ships.
               shipped = import ./pkgs/sandbox-os/image.nix {
                 inherit deploymentModules;
-                inherit lib n2c uvNix;
+                inherit lib n2c;
                 pkgs = sandboxPkgs;
                 nixStubs = {
                   src = nix-stubs;
                   package = nix-stubs.packages.${system}.nix-stubs;
+                  inherit stubArgs;
                 };
               };
               # The baked re-converge list, as the image renders it
@@ -345,11 +349,12 @@
               # DIRECTORY goes through modules/skills like a shipped one would.
               withEchoSkills = import ./pkgs/sandbox-os/image.nix {
                 deploymentModules = deploymentModules ++ [{ contribs.echo.enable = lib.mkForce true; }];
-                inherit lib n2c uvNix;
+                inherit lib n2c;
                 pkgs = sandboxPkgs;
                 nixStubs = {
                   src = nix-stubs;
                   package = nix-stubs.packages.${system}.nix-stubs;
+                  inherit stubArgs;
                 };
               };
               skillCfg = withEchoSkills.nixos.config;
@@ -660,6 +665,7 @@
         stubs = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ]
           (system: import ./modules/sandbox-os/stubs.nix {
             pkgs = nixpkgs.legacyPackages.${system};
+            uvNixSrc = uv-nix.outPath;
           });
 
         # The built-in agent skills as a `filename -> content` attrset

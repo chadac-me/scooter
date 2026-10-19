@@ -41,6 +41,11 @@ let
     cp -r ${nixStubs.src}/nix $out/nix-stubs
     # The binary as a bare store path, already in the image closure so the in-pod eval resolves it offline.
     printf '%s' ${lib.escapeShellArg "${nixStubs.package}"} > $out/nix-stubs-bin
+    # stubs.nix's extra arguments (uv-nix's source), one directory each, read back by base-config.nix.
+    mkdir -p $out/stub-args
+    ${lib.concatStrings (lib.mapAttrsToList (name: src: ''
+      cp -r ${src} $out/stub-args/${name}
+    '') (nixStubs.stubArgs or { }))}
   '' + lib.optionalString (skillDirs != { }) ''
     mkdir -p $out/skill-dirs
     ${lib.concatStrings (lib.mapAttrsToList (name: src: ''

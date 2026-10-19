@@ -40,7 +40,7 @@ in
   config = lib.mkIf (cfg.enable && stubBits != null) {
     nixpkgs.overlays = [
       (import ./stub-overlay.nix {
-        inherit (stubBits) lockLib flakeLock nix-stubs;
+        inherit (stubBits) lockLib flakeLock nix-stubs stubArgs;
         stubs = cfg.declarations;
         inherit (cfg) lock;
       })

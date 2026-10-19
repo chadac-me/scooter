@@ -52,6 +52,12 @@ let
         lib = import (nixpkgsPath + "/lib");
       };
       flakeLock = stubBitsRoot + "/flake.lock";
+      # stubs.nix's extra arguments, vendored by reconverge-inputs.nix.
+      stubArgs =
+        let dir = stubBitsRoot + "/stub-args"; in
+        if builtins.pathExists dir
+        then builtins.mapAttrs (name: _: dir + "/${name}") (builtins.readDir dir)
+        else { };
       # The baked binary, referenced via storePath in impure eval and appendContext
       # in pure eval.
       nix-stubs =

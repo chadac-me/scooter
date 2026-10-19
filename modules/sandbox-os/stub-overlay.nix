@@ -7,9 +7,14 @@
 , nix-stubs # the prebuilt binary, since a callPackage here would compile Rust in-pod
 , stubs ? ./stubs.nix
 , lock ? ./stubs.lock
+  # Extra arguments for stubs.nix beyond `pkgs` (e.g. `uvNixSrc`). A stubs.nix gets only
+  # the ones it declares, so a deployment's own `{ pkgs }:` set still works.
+, stubArgs ? { }
 }:
 
 lockLib.mkOverlay {
-  stubs = p: import stubs { pkgs = p; };
+  stubs = p:
+    let f = import stubs; in
+    f (builtins.intersectAttrs (builtins.functionArgs f) ({ pkgs = p; } // stubArgs));
   inherit lock flakeLock nix-stubs;
 }

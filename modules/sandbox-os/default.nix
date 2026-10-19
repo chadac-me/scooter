@@ -34,10 +34,6 @@
     "L+ /etc/scooter/modules - - - - /workspace/.scooter/modules"
   ];
 
-  # The uv-nix uv for contrib/marimo/sandbox.nix, null when a nixosTest imports this
-  # bare.
-  _module.args.uvNix = lib.mkDefault null;
-
   # --- systemd base ----------------------------------------------------------
   system.stateVersion = "24.11";
 
