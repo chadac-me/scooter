@@ -9,7 +9,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>marimo + chat</title>
+<title>marimo</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B5%3C/text%3E%3C/svg%3E">
 <style>
   :root { color-scheme: light dark; --rail: 28px; --line: #d4d4d8; --muted: #71717a; --bg: #fafafa; }
@@ -43,7 +43,7 @@
     <a id="app" href="@APP_URL@" target="_blank" rel="noopener" aria-label="Open in Scooter" title="Open in Scooter">🛴</a>
     <a id="full" href="../marimo/" target="_top" aria-label="marimo full screen" title="marimo full screen">⤢</a>
   </div>
-  <div id="notebook"><iframe title="marimo" src="../marimo/" allow="clipboard-read; clipboard-write; fullscreen"></iframe></div>
+  <div id="notebook"><iframe id="marimo" title="marimo" allow="clipboard-read; clipboard-write; fullscreen"></iframe></div>
 </div>
 <script>
   "use strict";
@@ -91,6 +91,71 @@
   };
   rail.addEventListener("pointerup", endDrag);
   rail.addEventListener("pointercancel", endDrag);
+
+  // The page is "just marimo" with a chat beside it: marimo's URL (its routes are a query,
+  // e.g. ?file=x.py) is mirrored in the address bar both ways, and its title and icon are
+  // ours. marimo is same-origin, so the frame is read directly.
+  const MARIMO = new URL("../marimo/", location.href);
+  const frame = document.getElementById("marimo");
+  const full = document.getElementById("full");
+  const icon = document.querySelector("link[rel~=icon]");
+  frame.src = MARIMO.pathname + location.search + location.hash;
+
+  const sync = () => {
+    let loc;
+    try { loc = frame.contentWindow.location; } catch { return; } // not marimo any more
+    if (loc.origin !== MARIMO.origin || loc.pathname !== MARIMO.pathname) return;
+    full.href = loc.href;
+    const next = location.pathname + loc.search + loc.hash;
+    // replaceState only: the frame's own pushes already make the Back entries.
+    if (next !== location.pathname + location.search + location.hash) history.replaceState(null, "", next);
+  };
+  const syncHead = () => {
+    try {
+      const doc = frame.contentDocument;
+      document.title = doc.title || "marimo";
+      const theirs = doc.querySelector("link[rel~=icon]");
+      if (theirs && theirs.href) icon.href = theirs.href;
+    } catch { /* cross-origin */ }
+  };
+  frame.addEventListener("load", () => {
+    try {
+      const w = frame.contentWindow;
+      for (const m of ["pushState", "replaceState"]) {
+        const orig = w.history[m].bind(w.history);
+        w.history[m] = (...args) => { const r = orig(...args); sync(); return r; };
+      }
+      w.addEventListener("popstate", sync);
+      // marimo opens notebooks in other tabs (a named target per file). Open them as this page
+      // instead, so every notebook keeps its chat; in-frame navigation is left alone.
+      const asPage = (href) => {
+        const u = new URL(href, w.location.href);
+        return u.origin === MARIMO.origin && u.pathname === MARIMO.pathname ? location.pathname + u.search + u.hash : null;
+      };
+      const origOpen = w.open.bind(w);
+      w.open = (url, target, features) => {
+        const page = url ? asPage(String(url)) : null;
+        return page ? window.open(page, target || "_blank", features) : origOpen(url, target, features);
+      };
+      const onLink = (e) => {
+        const a = e.target.closest && e.target.closest("a[href]");
+        const page = a && asPage(a.href);
+        if (!page) return;
+        const newTab = e.type === "auxclick" || e.metaKey || e.ctrlKey || e.shiftKey;
+        const target = newTab ? "_blank" : (a.target || "_self").toLowerCase();
+        if (target === "_self") return;
+        e.preventDefault();
+        if (target === "_top" || target === "_parent") location.href = page;
+        else window.open(page, target);
+      };
+      w.document.addEventListener("click", onLink, true);
+      w.document.addEventListener("auxclick", (e) => { if (e.button === 1) onLink(e); }, true);
+      w.addEventListener("hashchange", sync);
+      new MutationObserver(syncHead).observe(w.document.head, { subtree: true, childList: true, characterData: true, attributes: true });
+    } catch { /* cross-origin: nothing to follow */ }
+    sync();
+    syncHead();
+  });
 </script>
 </body>
 </html>

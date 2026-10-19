@@ -413,7 +413,7 @@
               for _ in $(seq 50); do ${pkgs.curl}/bin/curl -sf -o $TMPDIR/page.html http://127.0.0.1:${toString notebookPort}/ && break; sleep 0.1; done
               grep -F 'const CHAT_URL = "https://scooter.example.com/chat/5a515e73-860b-49ba-bc3f-6ff8d5fda5ff";' $TMPDIR/page.html
               grep -F 'href="https://scooter.example.com/?thread=5a515e73-860b-49ba-bc3f-6ff8d5fda5ff&x=1"' $TMPDIR/page.html
-              grep -F 'src="../marimo/"' $TMPDIR/page.html
+              grep -F 'new URL("../marimo/", location.href)' $TMPDIR/page.html
               if grep -F '@CHAT_URL@' $TMPDIR/page.html; then echo 'FAIL: placeholder left in the page' >&2; exit 1; fi
               # Only the page: conv.env, beside it in the runtime dir, is not served.
               test "$(${pkgs.curl}/bin/curl --path-as-is -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${toString notebookPort}/../conv.env)" != 200
