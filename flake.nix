@@ -380,7 +380,7 @@
             assert shipped.nixos.config.webServices.notebook.stripBasePath;
             # "marimo + chat" is the only marimo the user sees: the server is unlisted, starts
             # with the page and stops or restarts with it.
-            assert notebookCfg.displayName == "marimo + chat" && notebookCfg.listed && !marimoCfg.listed;
+            assert notebookCfg.displayName == "marimo + chat" && notebookCfg.visibleInMenu && !marimoCfg.visibleInMenu;
             assert builtins.elem "webservice-marimo.service" shipped.nixos.config.systemd.services.webservice-notebook.wants;
             assert builtins.elem "webservice-notebook.service" shipped.nixos.config.systemd.services.webservice-marimo.partOf;
             assert shipped.nixos.config.systemd.services ? "scooter-aws-config";

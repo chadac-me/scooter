@@ -54,7 +54,7 @@ export function parseManifest(json: string): WebServiceDescriptor[] {
         basePath: typeof o.basePath === "string" ? o.basePath : `/c/*/${o.name}`,
         unit: typeof o.unit === "string" ? o.unit : `webservice-${o.name}`,
         stripBasePath: o.stripBasePath === true,
-        ...(o.listed === false ? { listed: false } : {}),
+        ...(o.visibleInMenu === false ? { visibleInMenu: false } : {}),
         ...parseNeed(o.resources),
       }];
     });

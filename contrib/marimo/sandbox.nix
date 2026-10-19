@@ -86,7 +86,7 @@ in
     enable = lib.mkDefault true;
     port = lib.mkDefault 2718;
     displayName = lib.mkDefault "marimo";
-    listed = lib.mkDefault false;
+    visibleInMenu = lib.mkDefault false;
     extraConfig.partOf = [ "webservice-notebook.service" ];
     # Root, like the agent's own exec'd shell, so notebooks land on the /workspace PVC.
     user = lib.mkDefault "root";

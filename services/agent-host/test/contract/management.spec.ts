@@ -662,7 +662,7 @@ describe("management API", () => {
       webServices: fakeWebServices({
         list: async () => [
           { name: "notebook", displayName: "marimo + chat", port: 2720, basePath: "/c/c1/notebook", unit: "webservice-notebook" },
-          { name: "marimo", displayName: "marimo", port: 2718, basePath: "/c/c1/marimo", unit: "webservice-marimo", listed: false },
+          { name: "marimo", displayName: "marimo", port: 2718, basePath: "/c/c1/marimo", unit: "webservice-marimo", visibleInMenu: false },
         ],
       }),
     });

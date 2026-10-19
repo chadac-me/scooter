@@ -865,7 +865,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
     // ?refresh=1 re-reads the in-pod manifest, since nothing in the pod signals a `scooter-rebuild`.
     const force = ctx.query.get("refresh") === "1";
     // An unlisted service is a backend another one frames (marimo's server); it stays proxied.
-    const services = (await deps.webServices.list(id, { force })).filter((s) => s.listed !== false);
+    const services = (await deps.webServices.list(id, { force })).filter((s) => s.visibleInMenu !== false);
     // One size read for the whole list; absent (fake mode / no broker) leaves every `fit`
     // undefined, which the UI renders as no warning.
     const size = deps.sandboxResources ? await deps.sandboxResources(id).catch(() => undefined) : undefined;

@@ -70,13 +70,13 @@ describe("parseManifest", () => {
     expect(parseManifest(JSON.stringify({ services: [{ name: "x" }] }))).toEqual([]);
   });
 
-  it("marks a service unlisted only when the manifest says listed: false", () => {
+  it("marks a service unlisted only when the manifest says visibleInMenu: false", () => {
     const json = JSON.stringify({
-      services: [{ name: "notebook", port: 2720 }, { name: "marimo", port: 2718, listed: false }],
+      services: [{ name: "notebook", port: 2720 }, { name: "marimo", port: 2718, visibleInMenu: false }],
     });
     const [page, server] = parseManifest(json);
-    expect(page.listed).toBeUndefined();
-    expect(server.listed).toBe(false);
+    expect(page.visibleInMenu).toBeUndefined();
+    expect(server.visibleInMenu).toBe(false);
   });
 
   it("carries a declared resource requirement through", () => {

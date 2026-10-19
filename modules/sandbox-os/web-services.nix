@@ -27,8 +27,8 @@ let
       basePath = s.basePath;
       unit = unitName name;
       stripBasePath = s.stripBasePath;
-    } // lib.optionalAttrs (!s.listed) {
-      listed = false;
+    } // lib.optionalAttrs (!s.visibleInMenu) {
+      visibleInMenu = false;
     } // lib.optionalAttrs (s.hint != "") {
       inherit (s) hint;
     } // lib.optionalAttrs (s.resources != null) {
@@ -125,7 +125,7 @@ let
           while IFS=$'\t' read -r n u; do
             [ -n "$n" ] || continue
             out="$out"$'\n'"$(printf '%-16s %-9s %s' "$n" "$(state "$u")" "$(url_of "$n")")"
-          done <<< "$(jq -r '.services[] | select(.listed != false) | "\(.name)\t\(.unit)"' "$MANIFEST")"
+          done <<< "$(jq -r '.services[] | select(.visibleInMenu != false) | "\(.name)\t\(.unit)"' "$MANIFEST")"
           # Tolerate a reader closing the pipe early.
           printf '%s\n' "$out" || true
           ;;
@@ -205,7 +205,7 @@ let
         description = "Human label shown in the UI Services panel.";
       };
 
-      listed = lib.mkOption {
+      visibleInMenu = lib.mkOption {
         type = lib.types.bool;
         default = true;
         description = ''

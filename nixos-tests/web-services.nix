@@ -70,7 +70,7 @@ pkgs.testers.runNixOSTest {
     webServices.backend = {
       enable = true;
       port = 9912;
-      listed = false;
+      visibleInMenu = false;
       command = "${pkgs.coreutils}/bin/sleep infinity";
       extraConfig.partOf = [ "webservice-demo.service" ];
     };
@@ -133,8 +133,8 @@ pkgs.testers.runNixOSTest {
     #     `list`; it starts with the service that wants it, answers status by name, and
     #     stops with the service it is PartOf.
     services = { s["name"]: s for s in data["services"] }
-    assert services["backend"].get("listed") is False, services["backend"]
-    assert "listed" not in services["demo"], services["demo"]
+    assert services["backend"].get("visibleInMenu") is False, services["backend"]
+    assert "visibleInMenu" not in services["demo"], services["demo"]
     machine.succeed("! scooter-service list | grep -q backend")
     machine.wait_until_succeeds("systemctl is-active --quiet webservice-backend.service", timeout=30)
     machine.succeed("scooter-service status backend | grep -q active")
