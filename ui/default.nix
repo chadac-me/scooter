@@ -31,6 +31,10 @@ buildNpmPackage {
   # A contrib tab lives outside ui/, so its bare imports (react, …) resolve by walking
   # up from contrib/<name>/ui and never meet ui/node_modules. In the repo the npm
   # workspace hoists node_modules to the root; mirror that here.
+  # Only sourceRoot is writable after unpack; the link goes in its parent.
+  postUnpack = ''
+    chmod u+w "$sourceRoot/.."
+  '';
   postConfigure = ''
     ln -s "$PWD/node_modules" ../node_modules
   '';
