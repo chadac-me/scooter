@@ -105,6 +105,9 @@ type State = {
   pendingSelect?: string;
   /** The conversation whose title is being renamed inline, during which mergeFromServer does not run; transient. */
   editingId?: string;
+  /** The conversation whose row actions (star/rename/delete) are under the pointer. Holds the list
+   *  still like editingId does, so a reorder cannot slide a different row under a click; transient. */
+  hoverId?: string;
   /** Stream frames that arrived while the rename lock held, replayed in order once it clears; transient.
    *  A frame the lock drops is lost for good, since nothing re-reads the list. Why: PR #783. */
   pendingFrames?: PendingFrame[];
@@ -303,6 +306,9 @@ const queueFrame = (frame: PendingFrame) => {
   setState({ ...state, pendingFrames: [...kept, frame] });
 };
 
+/** The row an interaction is holding the list still for: an open rename, else a hovered action tile. */
+const heldRowId = (s: State): string | undefined => s.editingId ?? s.hoverId;
+
 /** Replay the frames that arrived while the rename lock held; called wherever that lock clears. */
 const flushPendingFrames = () => {
   const queued = state.pendingFrames;
@@ -392,15 +398,24 @@ export const sessionStore = {
     const fullList = opts?.fullList ?? true;
     const authoritative = opts?.sourcesAuthoritative ?? true;
     if (convs.length === 0) return;
-    // While an inline rename input is open, the merge must not re-render the sidebar at all, since reconciliation can detach the input.
-    if (state.editingId !== undefined) {
-      // The lock only holds while the editing row is still rendered, because nothing else could clear it once the row is gone.
-      if (filteredSessions(state).some((s) => s.id === state.editingId)) {
+    // While an inline rename input is open, the merge must not re-render the sidebar at all, since
+    // reconciliation can detach the input. A pointer on a row's actions holds it the same way, so a
+    // reorder cannot move a different conversation under the click.
+    if (heldRowId(state) !== undefined) {
+      // A hold only lasts while its row is still rendered, because nothing else could clear it
+      // once the row is gone; each hold is checked on its own so one going stale keeps the other.
+      const rendered = filteredSessions(state);
+      const live = (id?: string) => (id !== undefined && rendered.some((s) => s.id === id) ? id : undefined);
+      const editingId = live(state.editingId);
+      const hoverId = live(state.hoverId);
+      if (editingId !== state.editingId || hoverId !== state.hoverId) {
+        setState({ ...state, editingId, hoverId });
+      }
+      if (heldRowId(state) !== undefined) {
         // Deferred, not dropped: the stream sends each change once. Why: PR #783.
         queueFrame({ kind: "merge", convs, opts });
         return;
       }
-      setState({ ...state, editingId: undefined });
       flushPendingFrames();
     }
     const serverIds = new Set(convs.map((c) => c.id));
@@ -481,7 +496,7 @@ export const sessionStore = {
     // An open rename input would be detached by the re-render, so the removal waits for the
     // lock to clear. It cannot simply be skipped: the stream sends a remove frame once, and
     // with no poll behind it a dropped one leaves a dead row in the sidebar. Why: PR #780.
-    if (state.editingId !== undefined) {
+    if (heldRowId(state) !== undefined) {
       queueFrame({ kind: "remove", serverId });
       return;
     }
@@ -526,7 +541,8 @@ export const sessionStore = {
   /** Mark a conversation as being renamed inline, which pauses mergeFromServer. */
   setEditing(id: string) {
     if (state.editingId === id) return;
-    setState({ ...state, editingId: id });
+    // The action tiles unmount while editing, so no pointerleave would ever release a hover hold.
+    setState({ ...state, editingId: id, hoverId: undefined });
   },
 
   /** Clear the rename lock, ignoring a stale clear for a row that is not the editing one. */
@@ -534,7 +550,21 @@ export const sessionStore = {
     if (state.editingId === undefined) return;
     if (id !== undefined && state.editingId !== id) return;
     setState({ ...state, editingId: undefined });
-    flushPendingFrames();
+    if (state.hoverId === undefined) flushPendingFrames();
+  },
+
+  /** Hold the list still while the pointer is on a row's action tiles (star/rename/delete). */
+  setHover(id: string) {
+    if (state.hoverId === id) return;
+    setState({ ...state, hoverId: id });
+  },
+
+  /** Release a hover hold, ignoring a stale release from a row that no longer holds it. */
+  clearHover(id?: string) {
+    if (state.hoverId === undefined) return;
+    if (id !== undefined && state.hoverId !== id) return;
+    setState({ ...state, hoverId: undefined });
+    if (state.editingId === undefined) flushPendingFrames();
   },
 
   /** Optimistically set a user-chosen title and lock it against agent titles; the caller persists via renameConversation. */
@@ -553,7 +583,15 @@ export const sessionStore = {
     if (!s || s.starred === starred) return;
     const sessions = state.sessions.map((x) => (x.id === id ? { ...x, starred } : x));
     sessions.sort(byStarredThenRecent);
-    setState({ ...state, sessions });
+    // A frame queued behind a hold predates this click, so replaying its star flag would undo
+    // it (the pointer is usually still on the tiles when the user stars); the click wins.
+    const key = s.serverId ?? s.id;
+    const pendingFrames = state.pendingFrames?.map((f) =>
+      f.kind === "merge" && f.convs.some((c) => c.id === key)
+        ? { ...f, convs: f.convs.map((c) => (c.id === key ? { ...c, starred: undefined } : c)) }
+        : f,
+    );
+    setState({ ...state, sessions, pendingFrames });
   },
 
   /** Set a conversation's model, which the next prompt carries via the X-Agent-Model header. */
@@ -738,6 +776,12 @@ export function splitSections(rows: SidebarRow[]): { starred: SidebarRow[]; rece
 export function useSessions(): State {
   // The in-memory snapshot doubles as getServerSnapshot so SSR renders work.
   return useSyncExternalStore(sessionStore.subscribe, sessionStore.get, sessionStore.get);
+}
+
+/** Whether a conversation title is being renamed inline; re-renders only when that flips. */
+export function useRenaming(): boolean {
+  const get = () => sessionStore.get().editingId !== undefined;
+  return useSyncExternalStore(sessionStore.subscribe, get, get);
 }
 
 /** The signed-in caller from /whoami, for the header user badge. */

@@ -21,6 +21,7 @@ beforeEach(() => {
   globalThis.localStorage?.clear?.();
   // The store is a module singleton, so a leaked rename lock would freeze every later test's mergeFromServer.
   sessionStore.clearEditing();
+  sessionStore.clearHover();
   // A leaked query would decide whether a rename lock is still honored.
   sessionStore.setQuery("");
 });
@@ -948,5 +949,98 @@ describe("removeFromServer (the stream's remove frame)", () => {
     sessionStore.removeFromServer("cur");
     expect(sessionStore.get().currentId).not.toBe(cur.id);
     expect(sessionStore.get().sessions.some((s) => s.serverId === "cur")).toBe(false);
+  });
+});
+
+describe("hover hold on a row's action tiles", () => {
+  const order = () => sessionStore.get().sessions.map((x) => x.serverId);
+
+  it("holds a reorder while the pointer is on a row's actions, then applies it on leave", () => {
+    // An agent's activity bumps its conversation to the top; doing that under the pointer
+    // slides a different row beneath a star/rename click.
+    sessionStore.mergeFromServer([
+      { id: "h-1", lastActivityAt: 200 },
+      { id: "h-2", lastActivityAt: 100 },
+    ]);
+    const hovered = sessionStore.get().sessions.find((x) => x.serverId === "h-1")!;
+    sessionStore.setHover(hovered.id);
+    sessionStore.mergeFromServer([{ id: "h-2", lastActivityAt: 300 }], { fullList: false });
+    expect(order().filter((id) => id === "h-1" || id === "h-2"), "no reorder under the pointer").toEqual(["h-1", "h-2"]);
+
+    sessionStore.clearHover(hovered.id);
+    expect(order().filter((id) => id === "h-1" || id === "h-2"), "the held reorder lands on leave").toEqual(["h-2", "h-1"]);
+  });
+
+  it("ignores a stale release from a row that does not hold it", () => {
+    sessionStore.mergeFromServer([{ id: "h-3" }, { id: "h-4" }]);
+    const [a, b] = ["h-3", "h-4"].map((id) => sessionStore.get().sessions.find((x) => x.serverId === id)!);
+    sessionStore.setHover(a.id);
+    sessionStore.clearHover(b.id);
+    expect(sessionStore.get().hoverId).toBe(a.id);
+  });
+
+  it("opening a rename takes over the hold, since the action tiles unmount", () => {
+    sessionStore.mergeFromServer([{ id: "h-5" }, { id: "h-6" }]);
+    const row = sessionStore.get().sessions.find((x) => x.serverId === "h-5")!;
+    sessionStore.setHover(row.id);
+    sessionStore.setEditing(row.id);
+    expect(sessionStore.get().hoverId).toBeUndefined();
+    sessionStore.mergeFromServer([{ id: "h-6", title: "Renamed elsewhere", userTitled: true }], { fullList: false });
+    sessionStore.clearEditing(row.id);
+    expect(sessionStore.get().sessions.find((x) => x.serverId === "h-6")!.title).toBe("Renamed elsewhere");
+  });
+
+  it("keeps frames queued until BOTH the rename and the hover hold are released", () => {
+    sessionStore.mergeFromServer([{ id: "h-7" }, { id: "h-8" }]);
+    const [a, b] = ["h-7", "h-8"].map((id) => sessionStore.get().sessions.find((x) => x.serverId === id)!);
+    sessionStore.setEditing(a.id);
+    sessionStore.setHover(b.id);
+    sessionStore.removeFromServer("h-8");
+    sessionStore.clearEditing(a.id);
+    expect(order(), "the hover still holds").toContain("h-8");
+    sessionStore.clearHover(b.id);
+    expect(order()).not.toContain("h-8");
+  });
+
+  it("a queued server frame cannot undo a star the user toggled after it", () => {
+    // Star, the server's echo queues behind the hover hold, then unstar: the replayed
+    // echo must not star the row again.
+    sessionStore.mergeFromServer([{ id: "h-21", title: "keep" }], { fullList: false });
+    const row = sessionStore.get().sessions.find((x) => x.serverId === "h-21")!;
+    sessionStore.setHover(row.id);
+    sessionStore.setStarred(row.id, true);
+    sessionStore.mergeFromServer([{ id: "h-21", starred: true }], { fullList: false });
+    sessionStore.setStarred(row.id, false);
+    sessionStore.clearHover(row.id);
+    expect(sessionStore.get().sessions.find((x) => x.id === row.id)?.starred).toBe(false);
+  });
+
+  it("keeps a live hover hold when only the rename row has gone stale", () => {
+    sessionStore.mergeFromServer([
+      { id: "h-11", title: "alpha" },
+      { id: "h-12", title: "beta" },
+    ]);
+    const [a, b] = ["h-11", "h-12"].map((id) => sessionStore.get().sessions.find((x) => x.serverId === id)!);
+    sessionStore.setEditing(a.id);
+    sessionStore.setHover(b.id);
+    sessionStore.setQuery("beta"); // the rename row is filtered out; the hovered one stays
+    sessionStore.mergeFromServer([{ id: "h-12", title: "Held", userTitled: true }], { fullList: false });
+    expect(sessionStore.get().editingId).toBeUndefined();
+    expect(sessionStore.get().hoverId).toBe(b.id);
+    expect(sessionStore.get().sessions.find((x) => x.serverId === "h-12")!.title, "still held").toBe("beta");
+    sessionStore.clearHover(b.id);
+    expect(sessionStore.get().sessions.find((x) => x.serverId === "h-12")!.title).toBe("Held");
+  });
+
+  it("releases the hold once the hovered row is no longer rendered", () => {
+    // Nothing would fire pointerleave for a row that is gone, so a merge must not queue forever.
+    sessionStore.mergeFromServer([{ id: "h-9" }, { id: "h-10" }]);
+    const row = sessionStore.get().sessions.find((x) => x.serverId === "h-9")!;
+    sessionStore.setHover(row.id);
+    sessionStore.setQuery("no-such-title");
+    sessionStore.mergeFromServer([{ id: "h-10", title: "Lands", userTitled: true }], { fullList: false });
+    sessionStore.setQuery("");
+    expect(sessionStore.get().hoverId).toBeUndefined();
+    expect(sessionStore.get().sessions.find((x) => x.serverId === "h-10")!.title).toBe("Lands");
   });
 });

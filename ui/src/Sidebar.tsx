@@ -117,6 +117,10 @@ const SessionRow = memo(function SessionRow({
 
   const toggleStar = () => void toggleStarAction(s);
 
+  // A row unmounting under the pointer (deleted, filtered out) never fires pointerleave, so it
+  // releases its own hover hold rather than leave the list frozen.
+  useEffect(() => () => sessionStore.clearHover(s.id), [s.id]);
+
   const remove = () => {
     const msg = s.starred
       ? `"${s.title}" is starred. Deleting destroys its sandbox and data permanently. Delete anyway?`
@@ -207,7 +211,13 @@ const SessionRow = memo(function SessionRow({
 
       {/* Row actions, absolutely positioned to overlay the row's right edge and fade in on hover. */}
       {!editing && (
-        <div className="absolute inset-y-0 right-1 flex items-center gap-0.5 rounded-lg bg-gradient-to-l from-accent from-70% to-transparent pl-6 opacity-0 transition-opacity group-hover:opacity-100">
+        <div
+          data-testid="session-actions"
+          // The pointer on the action tiles holds the list still, so an incoming reorder cannot
+          // slide a different conversation under a star/rename/delete click.
+          onPointerEnter={() => sessionStore.setHover(s.id)}
+          onPointerLeave={() => sessionStore.clearHover(s.id)}
+          className="absolute inset-y-0 right-1 flex items-center gap-0.5 rounded-lg bg-gradient-to-l from-accent from-70% to-transparent pl-6 opacity-0 transition-opacity group-hover:opacity-100">
           {/* Star is top-level only; subagents are not independently retained. */}
           {depth === 0 && (
             <Button
