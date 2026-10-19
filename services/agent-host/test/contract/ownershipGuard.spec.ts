@@ -12,6 +12,7 @@ const C = "conv-1" as SessionId;
 describe("allowAllGuard (fencing disabled)", () => {
   it("always allows (single-replica default is a no-op)", () => {
     expect(allowAllGuard.canWrite(C)).toBe(true);
+    expect(allowAllGuard.owns?.(C)).toBe(true);
   });
 });
 
@@ -55,5 +56,18 @@ describe("OwnershipTracker", () => {
     expect(t.canWrite(C)).toBe(false);
     t.observe("conv-1", null);
     expect(t.canWrite(C)).toBe(true);
+  });
+
+  it("owns() is POSITIVE: unobserved, deleted or foreign is not owned", () => {
+    const t = new OwnershipTracker("agent-host-0");
+    expect(t.owns(C), "unobserved").toBe(false);
+    t.observe("conv-1", { hostPod: "agent-host-0", generation: 1 });
+    expect(t.owns(C), "this pod is the host").toBe(true);
+    t.observe("conv-1", { hostPod: "agent-host-1", generation: 2 });
+    expect(t.owns(C), "reassigned away").toBe(false);
+    t.observe("conv-1", { hostPod: "agent-host-0", generation: 3 });
+    t.observe("conv-1", null);
+    expect(t.owns(C), "CR deleted").toBe(false);
+    expect(t.canWrite(C), "while canWrite still fails open").toBe(true);
   });
 });

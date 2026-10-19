@@ -1430,9 +1430,9 @@ export async function main(
     jobCleanupTimer = setInterval(() => {
       for (const c of sessions.list()) {
         if (c.status !== "running") continue;
-        // Owner-only, like sweepIdle: a stale local entry for a conversation that moved away
-        // would otherwise be exec-probed into a resume of a sandbox that may be gone.
-        if (ownership && !ownership.guard.canWrite(c.id)) continue;
+        // Positive owner only, like sweepIdle: the exec probe would resume (recreate) the sandbox of a
+        // conversation that moved away or was deleted through another pod.
+        if (ownership && !ownership.guard.owns(c.id)) continue;
         void jobManager.cleanup(c.id).catch(() => {});
       }
     }, config.idleSweepIntervalMs);
@@ -1449,8 +1449,8 @@ export async function main(
       for (const c of sessions.list()) {
         // A suspended conversation's completions are announced on its next revive.
         if (c.status !== "running") continue;
-        // Owner-only, like the cleanup sweep above.
-        if (ownership && !ownership.guard.canWrite(c.id)) continue;
+        // Positive owner only, like the cleanup sweep above.
+        if (ownership && !ownership.guard.owns(c.id)) continue;
         void (async () => {
           const done = await jobManager!.pollCompletions(c.id).catch(() => [] as JobStatus[]);
           for (const st of done) {

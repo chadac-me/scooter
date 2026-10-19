@@ -15,6 +15,9 @@ export interface OwnershipGuard {
   /** Whether this pod may append to `id`'s log right now; fails open when the conversation is not
    *  yet in the cache. */
   canWrite(id: SessionId): boolean;
+  /** Whether this pod is positively the host of `id`; unlike canWrite, unobserved (no CR, or a
+   *  deleted one) is NOT owned. Exec-probing sweeps must use this; optional, absent means canWrite. */
+  owns?(id: SessionId): boolean;
   /** The generation of the cached assignment for `id` (undefined when unobserved), so a caller
    *  holding a pushed generation can tell a stale cache from a stale push; optional. */
   observedGeneration?(id: SessionId): number | undefined;
@@ -24,7 +27,7 @@ export interface OwnershipGuard {
 }
 
 /** A guard that always allows, the single-replica default. */
-export const allowAllGuard: OwnershipGuard = { canWrite: () => true };
+export const allowAllGuard: OwnershipGuard = { canWrite: () => true, owns: () => true };
 
 /** One conversation's assignment as observed from its Conversation CR. */
 export interface Assignment {
@@ -76,6 +79,10 @@ export class OwnershipTracker implements OwnershipGuard {
     // The caller has verified this push is newer than the cached view; a later watch event
     // overwrites this entry.
     this.observe(id as string, { hostPod: this.selfPod, generation });
+  }
+
+  owns(id: SessionId): boolean {
+    return this.assignments.get(id as string)?.hostPod === this.selfPod;
   }
 
   canWrite(id: SessionId): boolean {

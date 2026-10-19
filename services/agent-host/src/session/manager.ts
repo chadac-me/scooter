@@ -1299,9 +1299,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       };
       for (const entry of entries.values()) {
         if (entry.status !== "running") continue;
-        // Only the owner sweeps and probes; a non-owner's job probe can resume a sandbox the owner
-        // just suspended.
-        if (!ownershipGuard.canWrite(entry.id)) continue;
+        // Positive owner only: the job probe resumes a missing pod, so probing a conversation deleted
+        // elsewhere (canWrite fails open once its CR is gone) recreates its sandbox as a zombie.
+        if (!(ownershipGuard.owns?.(entry.id) ?? ownershipGuard.canWrite(entry.id))) continue;
         if (now - entry.lastActivityAt < idleMs) continue;
         // Another replica may have recorded activity this one never saw (a proxied WebSocket
         // bound to the replica it connected through), so re-check the shared value; a failed
