@@ -116,8 +116,8 @@ never `pip install` for one.** None of these reach it.
 There is no `python` on PATH: use `uv`, never `python` or `pip`. `uv run nb.py` runs
 the notebook as a script in the environment its header declares, so it is how you
 check a notebook you wrote before the user opens it. The `uv` on PATH is the uv-nix one
-the server uses, pinned to a Nix Python: a CPython that uv downloads cannot run on
-NixOS (`Could not start dynamically linked executable`).
+the server uses: it takes its Python from nixpkgs rather than downloading one, and
+patches native wheels so they import on NixOS.
 
 ## 4. Settings
 

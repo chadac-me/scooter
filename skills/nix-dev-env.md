@@ -38,8 +38,8 @@ uv pip install ...
 No `nix profile install` needed for these — they're already on `PATH`.
 
 There is no bare `python` on PATH: run Python through `uv` (`uv run script.py`,
-`uv run --with pandas python -c ...`), never a system `python` or `pip`. A CPython
-that uv downloads cannot exec on NixOS, so if `uv` reports `Could not start dynamically
+`uv run --with pandas python -c ...`), never a system `python` or `pip`. Plain uv
+downloads a CPython, which cannot exec on NixOS, so if `uv` reports `Could not start dynamically
 linked executable`, point it at a Nix one:
 `export UV_PYTHON=$(nix build --no-link --print-out-paths nixpkgs#python3)/bin/python3 UV_PYTHON_DOWNLOADS=never`.
 
