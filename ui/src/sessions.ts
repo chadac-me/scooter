@@ -583,7 +583,15 @@ export const sessionStore = {
     if (!s || s.starred === starred) return;
     const sessions = state.sessions.map((x) => (x.id === id ? { ...x, starred } : x));
     sessions.sort(byStarredThenRecent);
-    setState({ ...state, sessions });
+    // A frame queued behind a hold predates this click, so replaying its star flag would undo
+    // it (the pointer is usually still on the tiles when the user stars); the click wins.
+    const key = s.serverId ?? s.id;
+    const pendingFrames = state.pendingFrames?.map((f) =>
+      f.kind === "merge" && f.convs.some((c) => c.id === key)
+        ? { ...f, convs: f.convs.map((c) => (c.id === key ? { ...c, starred: undefined } : c)) }
+        : f,
+    );
+    setState({ ...state, sessions, pendingFrames });
   },
 
   /** Set a conversation's model, which the next prompt carries via the X-Agent-Model header. */

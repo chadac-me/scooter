@@ -1002,6 +1002,19 @@ describe("hover hold on a row's action tiles", () => {
     expect(order()).not.toContain("h-8");
   });
 
+  it("a queued server frame cannot undo a star the user toggled after it", () => {
+    // Star, the server's echo queues behind the hover hold, then unstar: the replayed
+    // echo must not star the row again.
+    sessionStore.mergeFromServer([{ id: "h-21", title: "keep" }], { fullList: false });
+    const row = sessionStore.get().sessions.find((x) => x.serverId === "h-21")!;
+    sessionStore.setHover(row.id);
+    sessionStore.setStarred(row.id, true);
+    sessionStore.mergeFromServer([{ id: "h-21", starred: true }], { fullList: false });
+    sessionStore.setStarred(row.id, false);
+    sessionStore.clearHover(row.id);
+    expect(sessionStore.get().sessions.find((x) => x.id === row.id)?.starred).toBe(false);
+  });
+
   it("keeps a live hover hold when only the rename row has gone stale", () => {
     sessionStore.mergeFromServer([
       { id: "h-11", title: "alpha" },
