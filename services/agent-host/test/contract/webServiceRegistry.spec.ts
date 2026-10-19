@@ -72,7 +72,7 @@ describe("parseManifest", () => {
 
   it("marks a service unlisted only when the manifest says listed: false", () => {
     const json = JSON.stringify({
-      services: [{ name: "marimo", port: 2720 }, { name: "marimo-server", port: 2718, listed: false }],
+      services: [{ name: "notebook", port: 2720 }, { name: "marimo", port: 2718, listed: false }],
     });
     const [page, server] = parseManifest(json);
     expect(page.listed).toBeUndefined();

@@ -66,7 +66,7 @@ pkgs.testers.runNixOSTest {
       };
     };
 
-    # An unlisted backend the demo starts, as marimo-server is to "marimo + chat".
+    # An unlisted backend the demo starts, as marimo is to "marimo + chat" (notebook).
     webServices.backend = {
       enable = true;
       port = 9912;

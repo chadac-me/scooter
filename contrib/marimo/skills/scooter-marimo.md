@@ -1,7 +1,7 @@
 ---
 name: scooter-marimo
 description: >-
-  marimo notebooks in this sandbox: the `marimo` web service and how to pair on it
+  marimo notebooks in this sandbox: the `notebook` web service and how to pair on it
   with the marimo-pair skill. Use when the user wants a notebook, data exploration,
   plots or an interactive report, asks you to work in their open notebook, or a
   notebook needs a package or a setting changed. Each notebook has its own
@@ -11,7 +11,7 @@ description: >-
 
 # marimo in Scooter
 
-Your sandbox can serve a **marimo notebook** to the user as the `marimo` web
+Your sandbox can serve a **marimo notebook** to the user as the `notebook` web
 service, and you can drive that same notebook yourself with the **marimo-pair**
 skill: run code in its kernel, read live variables, and add, edit and run cells.
 The user watches and edits in their browser at the same time.
@@ -23,14 +23,14 @@ shell for that.
 ## 1. Start it and give the user the link
 
 ```bash
-scooter-service start marimo     # prints the URL to give the user
+scooter-service start notebook   # prints the URL to give the user
 ```
 
-The `marimo` service is **"marimo + chat"**: this conversation on the left and the
+The `notebook` service is **"marimo + chat"**: this conversation on the left and the
 notebook on the right, so the user can ask you for changes without leaving it. It
-starts the marimo server behind it, `marimo-server`, which isn't listed; don't give
-the user that link. The user can also start it from the **Services panel**. The first
-start materializes marimo, which takes a while. Notebooks live in `/workspace`.
+starts the marimo server behind it, the unlisted `marimo` service; don't give the
+user that service's link. The user can also start it from the **Services panel**. The
+first start materializes marimo, which takes a while. Notebooks live in `/workspace`.
 
 **marimo-pair can only reach a notebook the user has open in the browser.** A
 session exists only while a tab has the notebook open. So ask the user to open
@@ -44,8 +44,8 @@ Read the **marimo-pair** skill and follow it. Two things differ here:
   `discover-servers.sh` won't find it. Use:
 
   ```bash
-  # The server is at /marimo-server on the conversation's own origin, else /c/<id>/marimo-server.
-  MARIMO_BASE=${SCOOTER_SERVICES_ORIGIN:+/marimo-server}; MARIMO_BASE=${MARIMO_BASE:-/c/$CONVERSATION_ID/marimo-server}
+  # marimo serves at /marimo on the conversation's own origin, else under /c/<id>/marimo.
+  MARIMO_BASE=${SCOOTER_SERVICES_ORIGIN:+/marimo}; MARIMO_BASE=${MARIMO_BASE:-/c/$CONVERSATION_ID/marimo}
   bash /etc/scooter/skills/marimo-pair/scripts/execute-code.sh \
     --url "http://localhost:2718$MARIMO_BASE" \
     -c "import marimo._code_mode as cm; help(cm)"
@@ -126,8 +126,8 @@ reads it whenever a notebook opens, so changes need no restart.
 
 ## If something is off
 
-- `scooter-service status marimo-server` and `journalctl -u webservice-marimo-server -n 50`
-  show the server's state and log. `scooter-service restart marimo` restarts both,
+- `scooter-service status marimo` and `journalctl -u webservice-marimo -n 50`
+  show the server's state and log. `scooter-service restart notebook` restarts both,
   which ends every open kernel.
 - "Failed to connect": the service isn't running, or the URL lacks marimo's base
   path (`$MARIMO_BASE` above).
