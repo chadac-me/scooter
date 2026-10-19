@@ -84,9 +84,44 @@ export function ContextFillBar() {
   );
 }
 
-/** The inline indicator, Stop button and error banner above the composer; null when
- *  idle with no error. */
+/** The send-error banner plus the run indicator above the composer; null when idle with no error. */
 export function InlineRunStatus() {
+  return (
+    <>
+      <SendErrorBanner />
+      <RunStatus />
+    </>
+  );
+}
+
+/** A send or resume the server never accepted (e.g. a 413 for an oversized image) starts no run, so say so here or the message just vanishes. */
+function SendErrorBanner() {
+  const { sendError, clearSendError } = useConversationInterrupts();
+  if (!sendError) return null;
+  return (
+    <div
+      data-testid="send-error-bar"
+      role="alert"
+      className="mx-auto flex w-full max-w-(--thread-max-width) items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+    >
+      <span aria-hidden className="mt-0.5 font-semibold">⚠</span>
+      <span data-testid="send-error-message" className="flex-1">{sendError}</span>
+      <button
+        type="button"
+        data-testid="send-error-dismiss"
+        aria-label="Dismiss"
+        onClick={() => clearSendError?.()}
+        className="shrink-0 leading-none opacity-70 hover:opacity-100"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+/** The inline indicator, Stop button and error banner; null when
+ *  idle with no error. */
+function RunStatus() {
   const { isRunning, activeTool, runStartedAt, cancel, cancelState, runError, runRetrying, streamAuthError, conversationId } = useConversationInterrupts();
 
   // Tick once a second while running so the elapsed time advances.

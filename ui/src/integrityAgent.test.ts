@@ -8,7 +8,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { firstValueFrom, take, toArray } from "rxjs";
 
-import { createIntegrityAgent } from "./integrityAgent.js";
+import { createIntegrityAgent, describeSendError, SendError } from "./integrityAgent.js";
 import type { RunAgentInput } from "@ag-ui/client";
 
 // A scripted integrity stream whose inner events are @ag-ui/core BaseEvents.
@@ -162,9 +162,38 @@ describe("IntegrityAgent", () => {
     const agent2 = createIntegrityAgent({
       baseUrl: "http://host", conversationId: "c1", model: "opus", fetchImpl: bad, onModelSent: (m) => failed.push(m),
     });
-    await agent2.send("hi");
+    await expect(agent2.send("hi")).rejects.toBeInstanceOf(SendError);
     expect(failed, "a refused send must keep the pick pending").toEqual([]);
     agent2.dispose();
+  });
+
+  it("send() REJECTS with a SendError carrying the status when POST /agui is refused (e.g. a 413 for an oversized image)", async () => {
+    const cancel = vi.fn(async () => {});
+    const body = { cancel } as unknown as ReadableStream<Uint8Array>;
+    const tooLarge = vi.fn(async () => ({ ok: false, status: 413, body }) as unknown as Response) as unknown as typeof fetch;
+    const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: tooLarge });
+    const err = await agent.send("look", { images: [{ data: "AAAA", mimeType: "image/png" }] }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SendError);
+    expect((err as SendError).status).toBe(413);
+    expect(cancel, "a refused POST still releases its body").toHaveBeenCalledTimes(1);
+    expect(describeSendError(err)).toMatch(/too large/);
+    agent.dispose();
+  });
+
+  it("send() and submitResume() REJECT with a status-less SendError when the POST never reaches the server", async () => {
+    const down = vi.fn(async () => { throw new TypeError("Failed to fetch"); }) as unknown as typeof fetch;
+    const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: down });
+    const sendErr = await agent.send("hi").catch((e: unknown) => e);
+    expect(sendErr).toBeInstanceOf(SendError);
+    expect((sendErr as SendError).status).toBeNull();
+    expect(describeSendError(sendErr)).toMatch(/couldn't be reached/);
+    await expect(agent.submitResume([{ interruptId: "i1", status: "resolved" }])).rejects.toBeInstanceOf(SendError);
+    agent.dispose();
+  });
+
+  it("describeSendError names the status for other refusals", () => {
+    expect(describeSendError(new SendError(502))).toBe("Your message wasn't sent (HTTP 502). Try again.");
+    expect(describeSendError(new Error("no conversation selected"))).toBe("Your message wasn't sent: no conversation selected");
   });
 
   it("send() cancels the POST /agui response body (frees the HTTP/2 flow-control window)", async () => {

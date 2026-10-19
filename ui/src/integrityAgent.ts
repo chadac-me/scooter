@@ -15,6 +15,27 @@ import type { AgentHostConfig } from "./client.js";
 import { AWAITING_ID, hasId, type MaybeConversationId } from "./conversation.js";
 import { ATTR, record } from "./telemetry.js";
 
+/** A POST /agui the server refused (`status` set) or that never reached it (`status` null), so the message was not delivered. */
+export class SendError extends Error {
+  constructor(readonly status: number | null, cause?: unknown) {
+    super(status == null ? "send failed: network error" : `send failed: HTTP ${status}`, { cause });
+    this.name = "SendError";
+  }
+}
+
+/** The user-facing text for a failed send; a 413 means the body (usually its images) was too large for the server. */
+export function describeSendError(e: unknown): string {
+  if (!(e instanceof SendError)) {
+    return `Your message wasn't sent: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  const status = e.status;
+  if (status === 413) {
+    return "Your message was too large to send, so it and its attachments weren't delivered. Try a smaller image or fewer attachments.";
+  }
+  if (status != null) return `Your message wasn't sent (HTTP ${status}). Try again.`;
+  return "Your message wasn't sent because the server couldn't be reached. Check your connection and try again.";
+}
+
 export interface IntegrityAgentConfig extends AgentHostConfig {
   /** The server's conversation id, or AWAITING_ID until the server has created it; narrow with hasId(). */
   conversationId: MaybeConversationId;
@@ -845,7 +866,7 @@ export class IntegrityAgent extends AbstractAgent {
     throw new Error(`cancel request failed: ${last}`);
   }
 
-  /** Fire-and-forget POST /agui that cancels the response body instead of reading it. */
+  /** Fire-and-forget POST /agui that cancels the response body instead of reading it; throws SendError when the POST is refused or never lands, since no run will follow to report it. */
   private async postAgui(body: Record<string, unknown>): Promise<void> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -858,13 +879,17 @@ export class IntegrityAgent extends AbstractAgent {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-    }).catch(() => {
-      /* a failed POST surfaces on the integrity stream as a missing RUN_STARTED */
-      return null;
+    }).catch((e: unknown) => {
+      record("send.network_error", {});
+      throw new SendError(null, e);
     });
-    if (sentModel && res?.ok) this.cfg.onModelSent?.(sentModel);
     // POST /agui streams the whole run as SSE, and an unread body would fill the HTTP/2 flow-control window and stall every other stream on the connection.
-    res?.body?.cancel().catch(() => {});
+    res.body?.cancel().catch(() => {});
+    if (!res.ok) {
+      record("send.refused", { status: res.status });
+      throw new SendError(res.status);
+    }
+    if (sentModel) this.cfg.onModelSent?.(sentModel);
   }
 
   /** Close all live integrity subscriptions and release resources. */
