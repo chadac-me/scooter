@@ -359,6 +359,8 @@
                 skillCfg.system.extraDependencies);
               notebookStart = shipped.nixos.config.systemd.services.webservice-notebook.serviceConfig.ExecStart;
               notebookPort = shipped.nixos.config.webServices.notebook.port;
+              marimoCfg = shipped.nixos.config.webServices.marimo;
+              marimoStart = shipped.nixos.config.systemd.services.webservice-marimo.serviceConfig.ExecStart;
             in
             assert sandboxWithEcho.nixos.config.environment.etc ? "scooter/contrib-echo";
             assert echoOnly == [ "contrib/echo/sandbox.nix" ];
@@ -367,6 +369,8 @@
             # marimo ships as a contrib: its service, and marimo-pair's directory for the agent's shell.
             assert builtins.elem "contrib/marimo/sandbox.nix" (derive [ ]).treeRelative;
             assert shipped.nixos.config.webServices.marimo.enable;
+            # marimo's settings are on the workspace PVC, beside the agent's own ~/.config.
+            assert marimoCfg.environment.XDG_CONFIG_HOME == "/workspace/.config";
             assert shipped.nixos.config.environment.etc ? "scooter/skills/marimo-pair";
             # "marimo + chat" ships with it, served at root so its ../marimo/ resolves on either base path.
             assert shipped.nixos.config.webServices.notebook.enable;
@@ -418,6 +422,18 @@
               # Only the page: conv.env, beside it in the runtime dir, is not served.
               test "$(${pkgs.curl}/bin/curl --path-as-is -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${toString notebookPort}/../conv.env)" != 200
               kill %1
+
+              # marimo opens notebooks computed: its start seeds runtime.auto_instantiate, but
+              # only while marimo has no settings (it leaves an empty file), never over the user's.
+              seed=$(grep -o '/nix/store/[^ ]*-marimo-seed-settings' ${marimoStart})
+              export HOME=$TMPDIR/home XDG_CONFIG_HOME=$TMPDIR/xdg
+              mkdir -p $HOME && cd $HOME
+              $seed && grep -Fx 'auto_instantiate = true' $XDG_CONFIG_HOME/marimo/marimo.toml
+              : > $XDG_CONFIG_HOME/marimo/marimo.toml && $seed && grep -Fx 'auto_instantiate = true' $XDG_CONFIG_HOME/marimo/marimo.toml
+              printf '[runtime]\nauto_instantiate = false\n' > $XDG_CONFIG_HOME/marimo/marimo.toml && $seed
+              grep -Fx 'auto_instantiate = false' $XDG_CONFIG_HOME/marimo/marimo.toml
+              rm $XDG_CONFIG_HOME/marimo/marimo.toml && echo '[display]' > $HOME/.marimo.toml && $seed
+              test ! -e $XDG_CONFIG_HOME/marimo/marimo.toml
               touch $out
             '';
 

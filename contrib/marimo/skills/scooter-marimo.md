@@ -56,9 +56,51 @@ Read the **marimo-pair** skill and follow it. Two things differ here:
 marimo-pair's rules hold as written:
 - Don't edit the `.py` file while a session is running.
 - Make notebook changes through `marimo._code_mode`.
-- Add packages with `ctx.packages.add()`, not `pip` or `uv`. Each notebook is a
-  `--sandbox` notebook with its own environment and inline (PEP 723)
-  dependencies.
+- Add packages with `ctx.packages.add()` (next section).
+
+## 3. Packages: each notebook has its own environment
+
+A notebook's dependencies are its inline (PEP 723) header, and marimo builds the
+notebook's own environment from it. That environment is not your shell's Python.
+**Never create a `pyproject.toml`, `requirements.txt` or venv for a notebook, and
+never `pip install` for one.** None of these reach it.
+
+- **The notebook is open:** add packages through marimo-pair, then re-run the cells
+  that need them. Adding a package doesn't re-run anything.
+
+  ```python
+  async with cm.get_context() as ctx:
+      ctx.packages.add("polars", "altair")   # or ctx.packages.remove(...)
+  ```
+
+  It installs into the running kernel and pins the version in the header. Don't edit
+  the header on disk instead: the open kernel ignores it until it restarts.
+- **"restart the kernel to use them":** ask the user before restarting. A restart
+  loses everything the notebook holds in memory.
+- **A new notebook nobody has open yet:** write the header when you create the file.
+
+  ```python
+  # /// script
+  # requires-python = ">=3.12"
+  # dependencies = ["marimo", "polars"]
+  # ///
+  ```
+- **Not a Python package** (a CLI tool, or a C library a wheel needs): it comes from
+  Nix. Add it with a module under `/etc/scooter/modules/` (the scooter-env skill).
+- Leave `~/.cache/uv/environments-v2/` alone; marimo owns it.
+
+## 4. Settings
+
+marimo's settings are in `~/.config/marimo/marimo.toml`, on the workspace volume.
+The marimo settings panel writes the same file, so the user and you share it. marimo
+reads it whenever a notebook opens, so changes need no restart.
+
+- Notebooks **run when opened** (`runtime.auto_instantiate = true`), so a bookmark
+  that wakes the sandbox lands on a computed notebook. Leave that on unless the user
+  asks otherwise.
+- **Never put marimo settings in a `pyproject.toml`.** The server only reads
+  `/workspace/pyproject.toml`, never one beside a notebook, and creating that one
+  makes the whole workspace a uv project.
 
 ## If something is off
 

@@ -31,6 +31,24 @@ let
       ${./notebook/index.html} > "$www/index.html"
     exec ${pkgs.darkhttpd}/bin/darkhttpd "$www" --addr 0.0.0.0 --port ${toString nb.port} --no-listing --no-server-id
   '';
+
+  # marimo 0.25 opens a notebook with every cell stale (runtime.auto_instantiate
+  # defaults to false). Here a visit is how the user asks for the notebook, often from a
+  # bookmark that wakes the sandbox, so it should arrive computed. This is a user-level
+  # default: it is written only while marimo has no settings of its own, and anything the
+  # user or agent sets afterwards wins.
+  defaultSettings = (pkgs.formats.toml { }).generate "marimo-default-settings.toml" {
+    runtime.auto_instantiate = true;
+  };
+  # Every place marimo reads user settings from counts; marimo itself leaves an empty file.
+  seedSettings = pkgs.writeShellScript "marimo-seed-settings" ''
+    set -eu
+    settings="''${XDG_CONFIG_HOME:-$HOME/.config}/marimo/marimo.toml"
+    if [ ! -s "$settings" ] && [ ! -s "$HOME/.marimo.toml" ] && [ ! -s .marimo.toml ]; then
+      ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$settings")"
+      ${pkgs.coreutils}/bin/install -m 644 ${defaultSettings} "$settings"
+    fi
+  '';
 in
 {
   # The marimo shim on PATH, so the agent can run it by hand, and what marimo-pair's
@@ -55,8 +73,12 @@ in
     # Root, like the agent's own exec'd shell, so notebooks land on the /workspace PVC.
     user = lib.mkDefault "root";
     workingDirectory = lib.mkDefault "/workspace";
-    # Pin uv to a Nix-provided Python, since a downloaded CPython cannot exec on NixOS.
-    environment = lib.mkIf (uvNix != null) (lib.mkDefault {
+    environment = lib.mkDefault ({
+      # marimo's settings live in the agent's own ~/.config on the workspace PVC, not in
+      # root's home, which a pod rebuild discards. uv's cache stays out of the PVC.
+      XDG_CONFIG_HOME = "/workspace/.config";
+    } // lib.optionalAttrs (uvNix != null) {
+      # Pin uv to a Nix-provided Python, since a downloaded CPython cannot exec on NixOS.
       UV_PYTHON = "${pkgs.python314}/bin/python3.14";
       UV_PYTHON_DOWNLOADS = "never";
     });
@@ -77,6 +99,7 @@ in
         base="''${SCOOTER_SERVICE_PREFIX-/c/''${CONVERSATION_ID:-unknown}}/marimo"
         proxy_args=()
         if [ -n "''${PUBLIC_HOST:-}" ]; then proxy_args+=(--proxy "''${PUBLIC_HOST}"); fi
+        ${seedSettings}
         # --no-token: access is gated by the platform proxy, and marimo-pair needs a token-less server.
         ${runner} \
           --host 0.0.0.0 --port ${toString cfg.port} \
