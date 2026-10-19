@@ -20,6 +20,7 @@
     ./jira/contrib.nix
     ./kagi/contrib.nix
     ./marimo/contrib.nix
+    ./personalization/contrib.nix
     ./slack/contrib.nix
   ];
 }

@@ -74,6 +74,14 @@ sql_dir = "contrib/files/sql"
 [contrib_files.tables]
 annotations = { writers = ["broker"], readers = [] }
 
+[contrib_personalization]
+owner = "broker"
+sql_dir = "contrib/personalization/sql"
+
+[contrib_personalization.tables]
+personalization_notes    = { writers = ["broker"], readers = [] }
+personalization_profiles = { writers = ["broker"], readers = [] }
+
 [scheduler]
 owner = "scheduler"
 

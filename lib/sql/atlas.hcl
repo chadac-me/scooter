@@ -72,6 +72,17 @@ env "contrib_files" {
   }
 }
 
+env "contrib_personalization" {
+  src = "file://../../contrib/personalization/sql/schema.sql"
+  dev = var.dev_url
+  migration { dir = "file://../../contrib/personalization/sql/migrations" }
+  format {
+    migrate {
+      diff = "{{ sql . \"  \" }}"
+    }
+  }
+}
+
 env "scheduler" {
   src = "file://scheduler/schema.sql"
   dev = var.dev_url

@@ -520,6 +520,7 @@
             # files' broker half is the annotation store; its build carries the whole
             # suite, the sandbox viewer's stdlib tests included, as check inputs.
             contrib-files = contribs.packages.files.broker;
+            contrib-personalization = contribs.packages.personalization.broker;
 
             # nix build .#contribs-all -> every variant of every contrib
             contribs-all = contribsAll;
@@ -656,6 +657,7 @@
             contrib-slack = contribs.packages.slack.broker;
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
             contrib-files = contribs.packages.files.broker;
+            contrib-personalization = contribs.packages.personalization.broker;
             # The shared Python libraries.
             inherit scooterLib scooterBrokerLib scooterWebhooksLib;
           } // devEnvTests // contribSandboxChecks;
