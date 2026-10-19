@@ -13,6 +13,15 @@
       '';
     };
 
+    options.webhooksEnabled = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Enable the Jira webhook handler (/webhooks/jira). Needs JIRA_WEBHOOK_SECRET
+        in the webhooks provider Secret: without it every delivery gets a 401.
+      '';
+    };
+
     config = {
       src = ./.;
       services.broker.enable = true;

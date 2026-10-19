@@ -17,8 +17,10 @@ triggers:
 
 # Showing the user a file in the workspace (scooter-files)
 
-You can give the user a **read-only view of your workspace in their browser** at
-`https://<host>/c/$CONVERSATION_ID/files/`. It is a web service like the terminal
+You can give the user a **read-only view of your workspace in their browser**, at
+the `files` service's URL: `$SCOOTER_SERVICES_ORIGIN/files/` when the deployment
+gives each conversation its own origin, else `https://<host>/c/$CONVERSATION_ID/files/`.
+It is a web service like the terminal
 or marimo — same Services panel, same `scooter-service` commands — but scoped to
 one job: looking at a file together.
 
@@ -29,18 +31,16 @@ a module you are about to change, a config the user needs to eyeball. Pasting a
 ## Opening it
 
 ```bash
-scooter-service start files          # also survives a suspend/resume
+# Starts it (it also survives a suspend/resume) and builds the full link.
+FILES=$(scooter-service start files | sed -n 's/^url: //p')
+# A path (/c/<id>/files/) means the main host: prefix the origin of $CONVERSATION_URL.
+case "$FILES" in /*) FILES="$(echo "$CONVERSATION_URL" | sed -E 's#^(https?://[^/]+).*#\1#')$FILES" ;; esac
+echo "${FILES}?path=docs/design.md"
 ```
 
 Then give the user the link. Deep-link straight to what you are talking about
-rather than dropping them at the root — the viewer takes the file as a query
-parameter:
-
-```
-https://<host>/c/$CONVERSATION_ID/files/?path=docs/design.md
-```
-
-`$CONVERSATION_URL` has the origin if you need to build the whole URL. You do not
+rather than dropping them at the root: the viewer takes the file as the `path`
+query parameter, as above. You do not
 have to pre-start it: if the user opens a declared service that isn't running, the
 platform auto-starts it.
 
@@ -71,7 +71,7 @@ viewer, and each remark wakes you. See the `scooter-design-review` skill.
 
 The viewer has no write path. If the user asks for a change while looking at it,
 **you** make the edit with your normal tools. The open page picks it up within
-a few seconds, so there is no need to ask them to reload.
+a second or so, so there is no need to ask them to reload.
 
 Nor is it a way for *you* to read files — you have the filesystem directly. Open
 the viewer only to show the **user** something. Reading a file into your own

@@ -6,9 +6,12 @@ auto-forwarded.
 """
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 
 from scooter_webhooks_lib import store as db
 from scooter_webhooks_lib.store import PENDING_CONVERSATION_ID, is_pending
@@ -23,6 +26,27 @@ from .responses import post_jira_comment
 logger = logging.getLogger(__name__)
 _C = {"component": "handlers.jira"}
 router = APIRouter()
+
+# WebSub `method=signature`; Jira sends sha256 today but the method is part of the header.
+_SIGNATURE_METHODS = {"sha256": hashlib.sha256, "sha384": hashlib.sha384, "sha512": hashlib.sha512}
+
+
+def _verify_signature(body: bytes, header: str) -> bool:
+    """Whether `X-Hub-Signature` is a valid HMAC of the body; fails closed when no secret is configured."""
+    if not settings.jira_webhook_secret:
+        return False
+    method, sep, signature = (header or "").partition("=")
+    digest = _SIGNATURE_METHODS.get(method.strip().lower())
+    if not sep or digest is None:
+        return False
+    expected = hmac.new(settings.jira_webhook_secret.encode(), body, digest).hexdigest()
+    return hmac.compare_digest(expected, signature.strip().lower())
+
+
+def _added_labels(item: dict) -> set[str]:
+    """Labels a `labels` changelog item adds; Jira sends both sides as space-separated lists."""
+    before = set((item.get("fromString") or "").split())
+    return set((item.get("toString") or "").split()) - before
 
 
 def _is_own_comment(body: str, author_account_id: str) -> bool:
@@ -66,12 +90,19 @@ def _response_instructions(issue_key: str) -> str:
 
 
 @router.post("/webhooks/jira")
-async def handle_jira_webhook(request: Request):
+async def handle_jira_webhook(
+    request: Request,
+    x_hub_signature: str = Header(default=""),
+):
     """Receive Jira webhook events (comment_created, issue_updated, etc.)."""
     if not settings.jira_enabled:
         return {"status": "disabled"}
 
-    payload = await request.json()
+    body = await request.body()
+    if not _verify_signature(body, x_hub_signature):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    payload = json.loads(body)
     event_type = payload.get("webhookEvent", "")
 
     logger.info("received event", extra={**_C, "source": "jira", "event_type": event_type})
@@ -174,11 +205,11 @@ async def _handle_issue_updated(payload: dict):
     changelog = payload.get("changelog", {})
     items = changelog.get("items", [])
 
-    label_added = False
-    for item in items:
-        if item.get("field") == "labels" and "openhands" in (item.get("toString", "") or "").lower():
-            label_added = True
-            break
+    label_added = any(
+        policy.is_trigger_label(label)
+        for item in items if item.get("field") == "labels"
+        for label in _added_labels(item)
+    )
 
     if not label_added:
         return

@@ -8,16 +8,23 @@
  * Nothing on the forwarding path execs into the pod: liveness is read off the
  * connection. Why: PR #791. The pod address is cached briefly rather than listed
  * from the API server per request. Why: PR #800.
+ *
+ * On a sandbox host the conversation-router carries the bytes itself: it asks
+ * `GET /internal/web-services/target` for the pod address, port and caller (everything
+ * this file resolves), caches the answer, and proxies straight to the pod. Only a request
+ * the router cannot route directly (the pod asleep, the unit down, the loading page's
+ * poll) comes through handleHttp/handleUpgrade here.
  */
 
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { connect, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
-import { inboundIdentityHeaders, withHandoffIdentity, type UserContext } from "../auth/identity.js";
+import { inboundIdentityHeaders, sessionCookiePrefixes, stripSessionSetCookies, withHandoffIdentity, type UserContext } from "../auth/identity.js";
 import { logger } from "../log.js";
 import type { Conversation, SandboxProvisioner, SessionManager } from "../session/manager.js";
 import type { SandboxRef, SessionId } from "../types.js";
+import { sandboxOrigin } from "./sandboxOrigin.js";
 
 const log = logger("webServiceProxy");
 
@@ -87,6 +94,23 @@ export interface WebServiceProxyDeps {
   wake?: (conversationId: string) => Promise<void>;
   /** The request's ingress identity. */
   resolveUser: (req: IncomingMessage) => UserContext | Promise<UserContext>;
+  /** Parent domain of the per-conversation service hosts (SANDBOX_DOMAIN). When set, services are
+   *  served only on their conversation's own host, at /<service>/, and never on the main host. */
+  sandboxDomain?: string;
+  /** Scheme of the sandbox hosts ("https" unless PUBLIC_URL says otherwise), for redirects to them. */
+  sandboxScheme?: string;
+}
+
+/** Set by the conversation-router, and only by it, on a request it routed from a sandbox host
+ *  (<label>.<sandbox domain>): the value is the label. The router has already rewritten the path
+ *  to /c/<id>/<service>/..., so the browser-visible path is /<service>/... */
+export const SANDBOX_HOST_HEADER = "x-scooter-sandbox-host";
+
+/** The sandbox label of a host-routed request, or undefined. */
+export function sandboxLabelOf(req: IncomingMessage): string | undefined {
+  const v = req.headers[SANDBOX_HOST_HEADER];
+  const label = Array.isArray(v) ? v[0] : v;
+  return label ? label : undefined;
 }
 
 /** Parsed shape of a proxy path: /c/<id>/<service>/<rest...> */
@@ -114,6 +138,28 @@ export interface WebServiceProxy {
   matches(pathname: string): boolean;
   handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void>;
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>;
+  /** The router's cluster-internal routes (INTERNAL_PREFIX); returns false for any other path. */
+  handleInternal(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
+}
+
+/** The cluster-internal routes the conversation-router calls to proxy a sandbox host straight to
+ *  the pod. Never routed by the UI's nginx, like /internal/revive. */
+export const INTERNAL_PREFIX = "/internal/web-services";
+
+/** GET <INTERNAL_PREFIX>/target: where a sandbox-host request goes, so the router can carry it. */
+export interface DirectTarget {
+  conversationId: string;
+  podIP: string;
+  port: number;
+  stripBasePath: boolean;
+  /** The caller to stamp as x-scooter-user / -email, absent for anonymous. */
+  user?: { id: string; email?: string };
+  /** Inbound headers the router must remove before forwarding (ingress identity, forged handoffs). */
+  dropHeaders: string[];
+  /** Cookie-name prefixes of the ingress session, removed from Cookie and the pod's Set-Cookie. */
+  sessionCookies: string[];
+  /** How long the router may reuse this answer. */
+  ttlMs: number;
 }
 
 /** A proxy request resolved to its pod target, or why not: `asleep` means the pod is down, so it carries what the wake and loading page need. */
@@ -159,8 +205,10 @@ export function createWake(deps: {
   };
 }
 
-/** The `/c/<id>/<service>` prefix exactly as the browser addressed it. Not the manifest's basePath, which carries an unexpanded `${CONVERSATION_ID}`. */
-export function requestBasePath(p: ParsedProxyPath): string {
+/** The service's prefix exactly as the browser addressed it: `/<service>` on a sandbox host,
+ *  `/c/<id>/<service>` on the main host. Not the manifest's basePath, which is unexpanded. */
+export function requestBasePath(p: ParsedProxyPath, hostRouted = false): string {
+  if (hostRouted) return `/${encodeURIComponent(p.service)}`;
   return `/c/${encodeURIComponent(p.conversationId)}/${encodeURIComponent(p.service)}`;
 }
 
@@ -201,8 +249,51 @@ export function renderLoadingPage(service: string, basePath: string): string {
 </body></html>`;
 }
 
+/** Upper bound on an upgrade response's header block before the splice gives up. */
+const MAX_HANDSHAKE_BYTES = 64 * 1024;
+
+/** An upgrade response's header block (no trailing CRLFCRLF) without Set-Cookie lines that set the ingress session. */
+export function filterHandshakeSetCookies(block: string): string {
+  return block
+    .split("\r\n")
+    .filter((line, i) => {
+      if (i === 0) return true; // the status line
+      const colon = line.indexOf(":");
+      if (colon < 0 || line.slice(0, colon).trim().toLowerCase() !== "set-cookie") return true;
+      return stripSessionSetCookies(line.slice(colon + 1).trim()) !== undefined;
+    })
+    .join("\r\n");
+}
+
+/** The path the pod sees: the remainder alone for a stripBasePath service, otherwise the
+ *  browser-visible path byte for byte: `/<service>/...` on a sandbox host (the router's
+ *  `/c/<id>` prefix removed), `/c/<id>/<service>/...` on the main host. */
+export function upstreamPathFor(r: { stripBasePath: boolean; rest: string }, url: URL, hostRouted: boolean): string {
+  const search = url.search ?? "";
+  if (r.stripBasePath) return r.rest + search;
+  if (!hostRouted) return url.pathname + search;
+  const m = /^\/c\/[^/]+(\/.*)$/.exec(url.pathname);
+  return (m ? m[1] : url.pathname) + search;
+}
+
+/** Request headers for the pod: the router's routing marker is not the service's business. */
+function podHeaders(headers: IncomingMessage["headers"], host?: string): IncomingMessage["headers"] {
+  const out = { ...headers };
+  delete out[SANDBOX_HOST_HEADER];
+  if (host !== undefined) out.host = host;
+  return out;
+}
+
 export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProxy {
   const { sessions, resolvePodTarget, registry, wake, resolveUser } = deps;
+  const sandboxDomain = deps.sandboxDomain || undefined;
+
+  /** Whether this request may reach a service at all: with sandbox hosts on, only through the
+   *  conversation's own host; with them off, only through the main host. */
+  const routedHere = (label: string | undefined) => (sandboxDomain ? label !== undefined : label === undefined);
+  /** The host label must belong to the conversation it was resolved to. */
+  const labelMatches = (label: string | undefined, conversationId: string) =>
+    label === undefined || conversationId.startsWith(label);
 
   // Wake/start kicks from navigations and the loading page's 1.2s poll, at most one per key per
   // window: revive and `systemctl start` are not free, and a wake already in flight covers later polls.
@@ -298,15 +389,16 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     return sessions.get(urlId);
   }
 
-  async function resolve(pathname: string): Promise<Resolution | null> {
+  async function resolve(pathname: string, label: string | undefined): Promise<Resolution | null> {
+    if (!routedHere(label)) return null;
     const parsed = parseProxyPath(pathname);
     if (!parsed) return null;
     const { conversationId, service, rest } = parsed;
 
     const conv = await lookup(conversationId);
     const threadId = conv?.threadId ?? conversationId;
-    if (!conv) return { ok: false, kind: "error", status: 404, service, threadId };
-    const basePath = requestBasePath(parsed);
+    if (!conv || !labelMatches(label, conv.id)) return { ok: false, kind: "error", status: 404, service, threadId };
+    const basePath = requestBasePath(parsed, label !== undefined);
     await sessions.refreshSandbox?.(conv.id);
 
     const desc = await registry.get(conv.id, service);
@@ -331,11 +423,15 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
   }
 
   /** The readiness/log endpoint the loading page polls; returns true if it handled the request. */
-  async function handleStatus(pathname: string, res: ServerResponse): Promise<boolean> {
+  async function handleStatus(pathname: string, label: string | undefined, res: ServerResponse): Promise<boolean> {
     const parsed = parseProxyPath(pathname);
     if (!parsed || parsed.rest !== `/${STATUS_SEGMENT}`) return false;
+    if (!routedHere(label)) {
+      res.writeHead(404).end();
+      return true;
+    }
     const conv = await lookup(parsed.conversationId);
-    if (!conv) {
+    if (!conv || !labelMatches(label, conv.id)) {
       res.writeHead(404).end();
       return true;
     }
@@ -389,17 +485,40 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     return err.code === "ECONNREFUSED" || err.code === "EHOSTUNREACH" || err.code === "ENETUNREACH";
   }
 
+  /** Where a main-host /c/<id>/<service>/... URL lives on its sandbox host, or undefined. */
+  async function sandboxHostLocation(url: URL): Promise<string | undefined> {
+    const parsed = parseProxyPath(url.pathname);
+    if (!parsed) return undefined;
+    const conv = await lookup(parsed.conversationId);
+    const origin = conv && sandboxOrigin(conv.id, { domain: sandboxDomain!, scheme: deps.sandboxScheme || "https" });
+    return origin ? `${origin}/${encodeURIComponent(parsed.service)}${parsed.rest}${url.search}` : undefined;
+  }
+
   async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const startedAt = Date.now();
     const url = new URL(req.url ?? "/", "http://localhost");
 
     // Answer the loading page's poll before the normal resolve, which would 502 while the unit is down.
-    if (await handleStatus(url.pathname, res)) return;
+    const label = sandboxLabelOf(req);
+    if (await handleStatus(url.pathname, label, res)) return;
 
-    const r = await resolve(url.pathname);
+    // With sandbox hosts on, an old main-host link (/c/<id>/<service>/...) moves to the
+    // conversation's own host. Only a navigation or fetch can follow a redirect; anything else 404s.
+    if (sandboxDomain && label === undefined && (req.method === "GET" || req.method === "HEAD")) {
+      const location = await sandboxHostLocation(url);
+      if (location) {
+        res.writeHead(302, { location, "cache-control": "no-store" }).end();
+        return;
+      }
+    }
+
+    const r = await resolve(url.pathname, label);
     const resolvedAt = Date.now();
+    // A text body, not an empty one: Chromium replaces an empty 4xx navigation with its own
+    // error page (and Playwright's goto fails with ERR_HTTP_RESPONSE_CODE_FAILURE).
+    const notFound = () => res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("not found\n");
     if (!r) {
-      res.writeHead(404).end();
+      notFound();
       return;
     }
     if (!r.ok) {
@@ -415,7 +534,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
             .end(`${r.service} is asleep — resume the conversation and try again.`);
         }
       } else {
-        res.writeHead(404).end();
+        notFound();
       }
       return;
     }
@@ -425,8 +544,8 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
 
     // Preserve the full external path for a sub-path-aware service, or forward only the
     // remainder when stripBasePath is set so the service serves at root.
-    const upstreamPath = (r.stripBasePath ? r.rest : url.pathname) + (url.search ?? "");
-    const headers = withHandoffIdentity({ ...req.headers, host: `${r.podIP}:${r.port}` }, await userFor(req));
+    const upstreamPath = upstreamPathFor(r, url, label !== undefined);
+    const headers = withHandoffIdentity(podHeaders(req.headers, `${r.podIP}:${r.port}`), await userFor(req));
     const upstream = httpRequest(
       { host: r.podIP, port: r.port, method: req.method, path: upstreamPath, headers },
       (up) => {
@@ -443,7 +562,12 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
         };
         if (fields.total_ms >= SLOW_REQUEST_MS) log.info("slow web-service request", fields);
         else log.debug("web-service request", fields);
-        res.writeHead(up.statusCode ?? 502, up.headers);
+        // A pod must not be able to set or overwrite the ingress session (fixation, forced logout).
+        const upHeaders = { ...up.headers };
+        const setCookie = stripSessionSetCookies(upHeaders["set-cookie"]);
+        if (setCookie) upHeaders["set-cookie"] = setCookie;
+        else delete upHeaders["set-cookie"];
+        res.writeHead(up.statusCode ?? 502, upHeaders);
         up.pipe(res);
       },
     );
@@ -464,7 +588,8 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
 
   async function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
-    const r = await resolve(url.pathname);
+    const label = sandboxLabelOf(req);
+    const r = await resolve(url.pathname, label);
     if (!r || !r.ok) {
       // A WebSocket to a dead/unreachable service just fails; the navigation that owns
       // the page handles the auto-start.
@@ -482,8 +607,8 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
 
     // Splice: open a raw TCP connection to the pod, replay the upgrade handshake with
     // the Host rewritten, forward the buffered head, then pipe both ways.
-    const upstreamPath = (r.stripBasePath ? r.rest : url.pathname) + (url.search ?? "");
-    const handoff = withHandoffIdentity(req.headers, await userFor(req));
+    const upstreamPath = upstreamPathFor(r, url, label !== undefined);
+    const handoff = withHandoffIdentity(podHeaders(req.headers), await userFor(req));
     const upstream: Socket = connect(r.port, r.podIP, () => {
       const lines = [
         `${req.method ?? "GET"} ${upstreamPath} HTTP/1.1`,
@@ -498,9 +623,25 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       // Frames in either direction count as active use.
       const onData = () => touch(conversationId);
       socket.on("data", onData);
-      upstream.on("data", onData);
-      upstream.pipe(socket);
       socket.pipe(upstream);
+      // The handshake response is filtered like an HTTP response's headers; frames after it pass through.
+      let pending: Buffer = Buffer.alloc(0);
+      const onHandshake = (chunk: Buffer) => {
+        pending = Buffer.concat([pending, chunk]);
+        const end = pending.indexOf("\r\n\r\n");
+        if (end < 0) {
+          if (pending.length > MAX_HANDSHAKE_BYTES) teardown();
+          return;
+        }
+        upstream.off("data", onHandshake);
+        socket.write(filterHandshakeSetCookies(pending.subarray(0, end).toString("latin1")) + "\r\n\r\n");
+        const rest = pending.subarray(end + 4);
+        if (rest.length) socket.write(rest);
+        upstream.on("data", onData);
+        upstream.pipe(socket);
+        onData();
+      };
+      upstream.on("data", onHandshake);
     });
     const teardown = () => { socket.destroy(); upstream.destroy(); };
     upstream.on("error", (err: NodeJS.ErrnoException) => {
@@ -512,5 +653,52 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     socket.on("error", teardown);
   }
 
-  return { matches, handleHttp, handleUpgrade };
+  /** The router's routes. `target` answers 200 only when the request can go straight to the
+   *  pod; anything else (asleep, unknown, not host-routed) is a non-200 and the router sends the
+   *  request here instead, where handleHttp wakes, starts and shows the loading page. */
+  async function handleInternal(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (!url.pathname.startsWith(INTERNAL_PREFIX + "/")) return false;
+    const op = url.pathname.slice(INTERNAL_PREFIX.length + 1);
+    const conversationId = url.searchParams.get("conversation") ?? "";
+    const json = (status: number, body: unknown) =>
+      res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" })
+        .end(JSON.stringify(body));
+
+    if (op === "touch" && req.method === "POST") {
+      if (!conversationId) return json(400, { error: "conversation required" }), true;
+      touch(conversationId);
+      json(202, { ok: true });
+      return true;
+    }
+    if (op !== "target" || req.method !== "GET") {
+      res.writeHead(404).end();
+      return true;
+    }
+    const service = url.searchParams.get("service") ?? "";
+    const label = url.searchParams.get("label") || undefined;
+    // Only a sandbox host is carried by the router; the main host stays on handleHttp.
+    if (!sandboxDomain || !label || !conversationId || !service) return json(404, { reason: "not-routable" }), true;
+
+    const r = await resolve(`/c/${encodeURIComponent(conversationId)}/${encodeURIComponent(service)}/`, label).catch(() => null);
+    if (!r) return json(404, { reason: "not-routable" }), true;
+    if (!r.ok) return json(r.kind === "asleep" ? 503 : 404, { reason: r.kind === "asleep" ? "asleep" : "not-found" }), true;
+
+    touch(r.conversationId);
+    const user = await userFor(req);
+    const body: DirectTarget = {
+      conversationId: r.conversationId,
+      podIP: r.podIP,
+      port: r.port,
+      stripBasePath: r.stripBasePath,
+      ...(user && !user.anonymous && user.id ? { user: { id: user.id, ...(user.email ? { email: user.email } : {}) } } : {}),
+      dropHeaders: identityHeaders,
+      sessionCookies: sessionCookiePrefixes(),
+      ttlMs: POD_TARGET_TTL_MS,
+    };
+    json(200, body);
+    return true;
+  }
+
+  return { matches, handleHttp, handleUpgrade, handleInternal };
 }

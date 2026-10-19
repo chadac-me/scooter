@@ -806,6 +806,19 @@ in
         example = "x-forwarded-email";
         description = "header mode: request header carrying the user's email (optional; set by the ingress).";
       };
+      sessionCookies = mkOption {
+        type = types.listOf types.str;
+        default = [ "_oauth2_proxy" "AWSELBAuthSessionCookie" ];
+        example = [ "_my_proxy_session" ];
+        description = ''
+          Name prefixes of the ingress's session cookies (oauth2-proxy's
+          `cookie_name`, the ALB's auth cookie). The web-service proxy strips them
+          from requests forwarded into a sandbox, and from `Set-Cookie` on the
+          responses coming out of one: a pod that receives the user's session
+          cookie can replay it as that user. Set this to your ingress's cookie name
+          if you changed it.
+        '';
+      };
       # ALB OIDC only puts the `sub` in a header, so this static sub -> email map
       # seeds the learned identity store.
       subEmailMap = mkOption {
@@ -991,6 +1004,44 @@ in
           your CD, etc.). Empty + tls=true emits a spec.tls entry WITHOUT a
           secretName (some controllers, e.g. cert-manager with an annotation,
           accept that).
+        '';
+      };
+      sandboxDomain = mkOption {
+        type = types.str;
+        default = "";
+        example = "scooter.example.com";
+        description = ''
+          Parent domain of the per-conversation service origins. When set, each
+          conversation's web services (marimo, files, the terminal, VS Code, ...) are
+          served from their own origin, `https://<label>.<sandboxDomain>/<service>/`,
+          where `<label>` is the first 8 characters of the conversation id, and no
+          longer under `/c/<id>/<service>/` on `host`. A page a sandbox serves then
+          can't script the Scooter UI or another conversation's services.
+
+          Needs a wildcard DNS record and certificate for `*.<sandboxDomain>`, and
+          renders a second Ingress for that wildcard host (`sandboxAnnotations`,
+          `sandboxTlsSecretName`) straight to the conversation-router. Every label
+          under it belongs to sandboxes, so don't put other hosts there. Empty keeps
+          services on `host`.
+
+          The ingress must authenticate the wildcard host the same way as `host`
+          (e.g. the same ForwardAuth middleware, whose cookie must be valid on the
+          sandbox domain too).
+        '';
+      };
+      sandboxAnnotations = mkOption {
+        type = types.attrsOf types.str;
+        default = cfg.ingress.annotations;
+        defaultText = literalExpression "config.scooter.ingress.annotations";
+        description = "Annotations for the sandbox-services Ingress (`*.<sandboxDomain>`); defaults to the main Ingress's.";
+      };
+      sandboxTlsSecretName = mkOption {
+        type = types.str;
+        default = "";
+        example = "scooter-sandbox-wildcard-tls";
+        description = ''
+          The TLS Secret holding the wildcard cert for `*.<sandboxDomain>`. Empty +
+          tls=true emits a spec.tls entry without a secretName (e.g. ACM on an ALB).
         '';
       };
       # The webhooks receiver has its own ingress options under
@@ -1261,6 +1312,10 @@ in
                   # on the host rather than ingress.enable because the host is public
                   # even when an external proxy fronts it.
                   { name = "PUBLIC_URL"; value = "https://${cfg.ingress.host}"; }
+                ++ lib.optional (cfg.ingress.sandboxDomain != "")
+                  # Per-conversation service origins: the provisioner hands each sandbox its
+                  # origin and the proxy serves services only there.
+                  { name = "SANDBOX_DOMAIN"; value = cfg.ingress.sandboxDomain; }
                 ++ lib.optional (cfg.auth.mode != "header")
                   # Identity provider: header (default) or alb-oidc.
                   { name = "AUTH_MODE"; value = cfg.auth.mode; }
@@ -1277,6 +1332,9 @@ in
                   { name = "AUTH_USER_HEADER"; value = cfg.auth.userHeader; }
                 ++ lib.optional (cfg.auth.emailHeader != "x-auth-email")
                   { name = "AUTH_EMAIL_HEADER"; value = cfg.auth.emailHeader; }
+                ++ lib.optional (cfg.auth.sessionCookies != [ "_oauth2_proxy" "AWSELBAuthSessionCookie" ])
+                  # Session-cookie prefixes the web-service proxy keeps out of sandboxes.
+                  { name = "AUTH_SESSION_COOKIES"; value = lib.concatStringsSep "," cfg.auth.sessionCookies; }
                 ++ lib.optional (cfg.auth.subEmailMap != { })
                   # Static sub->email seed for the learned identity store ("k=v,k=v").
                   { name = "AUTH_SUB_EMAIL_MAP";
@@ -1549,7 +1607,9 @@ in
         metadata = { name = "agent-host"; namespace = cfg.namespace; };
         spec = {
           selector.app = "conversation-router";  # the front door always fronts the router
-          ports = [{ port = 8080; targetPort = "agui"; name = "agui"; }];
+          ports = [{ port = 8080; targetPort = "agui"; name = "agui"; }]
+            # The router's sandbox-host listener, for the wildcard Ingress only.
+            ++ lib.optional (cfg.ingress.sandboxDomain != "") { port = 8081; targetPort = "sandbox"; name = "sandbox"; };
         };
       };
       # ClusterIP Service selecting the agent-host pods directly: the router's fallback
@@ -1711,6 +1771,36 @@ in
             ({ hosts = [ cfg.ingress.host ]; }
               // lib.optionalAttrs (cfg.ingress.tlsSecretName != "") {
                 secretName = cfg.ingress.tlsSecretName;
+              })
+          ];
+        };
+      };
+    })
+    # The per-conversation service origins: `*.<sandboxDomain>` straight to the
+    # conversation-router's sandbox listener (port `sandbox` on the `agent-host`
+    # Service). That listener serves a conversation's web services and nothing else,
+    # so no other router endpoint is reachable through the wildcard host.
+    (lib.mkIf (cfg.ingress.enable && cfg.ingress.sandboxDomain != "") {
+      ingresses.sandbox-services = {
+        metadata = {
+          name = "sandbox-services";
+          namespace = cfg.namespace;
+          annotations = cfg.ingress.sandboxAnnotations;
+        };
+        spec = {
+          ingressClassName = lib.mkIf (cfg.ingress.className != "") cfg.ingress.className;
+          rules = [{
+            host = "*.${cfg.ingress.sandboxDomain}";
+            http.paths = [{
+              path = "/";
+              pathType = "Prefix";
+              backend.service = { name = "agent-host"; port.name = "sandbox"; };
+            }];
+          }];
+          tls = lib.optionals cfg.ingress.tls [
+            ({ hosts = [ "*.${cfg.ingress.sandboxDomain}" ]; }
+              // lib.optionalAttrs (cfg.ingress.sandboxTlsSecretName != "") {
+                secretName = cfg.ingress.sandboxTlsSecretName;
               })
           ];
         };

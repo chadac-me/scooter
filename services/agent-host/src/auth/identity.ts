@@ -134,18 +134,60 @@ export function inboundIdentityHeaders(): string[] {
     (process.env.AUTH_ALB_IDENTITY_HEADER || "x-amzn-oidc-identity").toLowerCase(),
     (process.env.AUTH_ALB_DATA_HEADER || "x-amzn-oidc-data").toLowerCase(),
     "x-amzn-oidc-accesstoken",
+    // oauth2-proxy's provider token headers (pass_access_token / set_xauthrequest).
+    "x-forwarded-access-token",
+    "x-auth-request-access-token",
     HANDOFF_USER_HEADER,
     HANDOFF_EMAIL_HEADER,
   ];
 }
 
-/** `headers` with inbound identity stripped and `user` stamped on; anonymous stamps nothing. */
+/** Name prefixes of the ingress's session cookies: oauth2-proxy's (incl. `_0`/`_csrf` splits) and the ALB's `-0`/`-1` shards. */
+export const DEFAULT_SESSION_COOKIES = ["_oauth2_proxy", "AWSELBAuthSessionCookie"];
+
+/** The session-cookie prefixes to strip, from AUTH_SESSION_COOKIES (comma-separated). */
+export function sessionCookiePrefixes(): string[] {
+  const raw = process.env.AUTH_SESSION_COOKIES;
+  if (raw === undefined) return DEFAULT_SESSION_COOKIES;
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+/** A Cookie header without the ingress's session cookies, or undefined when nothing is left. */
+export function stripSessionCookies(cookie: string | undefined, prefixes = sessionCookiePrefixes()): string | undefined {
+  if (!cookie) return undefined;
+  const nameOf = (c: string) => (c.includes("=") ? c.slice(0, c.indexOf("=")) : c).trim();
+  const kept = cookie
+    .split(";")
+    .map((c) => c.trim())
+    .filter((c) => c && !prefixes.some((p) => nameOf(c).startsWith(p)));
+  return kept.length ? kept.join("; ") : undefined;
+}
+
+/** Upstream Set-Cookie values minus any that would set the ingress's session cookies, or undefined when none remain. */
+export function stripSessionSetCookies(
+  setCookie: string | string[] | undefined,
+  prefixes = sessionCookiePrefixes(),
+): string[] | undefined {
+  if (setCookie === undefined) return undefined;
+  const values = Array.isArray(setCookie) ? setCookie : [setCookie];
+  const kept = values.filter((v) => {
+    const name = (v.includes("=") ? v.slice(0, v.indexOf("=")) : v).trim();
+    return !prefixes.some((p) => name.startsWith(p));
+  });
+  return kept.length ? kept : undefined;
+}
+
+/** `headers` with inbound identity and the ingress session cookies stripped, and `user` stamped on; anonymous stamps nothing. */
 export function withHandoffIdentity<T extends Record<string, unknown>>(
   headers: T,
   user: UserContext | undefined,
 ): T {
   const out = { ...headers } as Record<string, unknown>;
   for (const name of inboundIdentityHeaders()) delete out[name];
+  // The ingress session cookie is the user's whole login; whatever receives it can replay it. Why: PR #826.
+  const cookie = stripSessionCookies(typeof out.cookie === "string" ? out.cookie : undefined);
+  if (cookie === undefined) delete out.cookie;
+  else out.cookie = cookie;
   if (user && !user.anonymous && user.id) {
     out[HANDOFF_USER_HEADER] = user.id;
     if (user.email) out[HANDOFF_EMAIL_HEADER] = user.email;

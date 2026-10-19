@@ -1,6 +1,6 @@
 /** User identity from the trusted ingress header. */
 
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import type { IncomingMessage } from "node:http";
 
 import {
@@ -9,7 +9,11 @@ import {
   ANONYMOUS_USER,
   createAlbOidcResolver,
   decodeJwtClaims,
+  sessionCookiePrefixes,
+  stripSessionCookies,
+  stripSessionSetCookies,
 } from "../../src/auth/identity.js";
+import { filterHandshakeSetCookies } from "../../src/proxy/webServiceProxy.js";
 
 const DEFAULT = { userHeader: "x-auth-user", emailHeader: "x-auth-email" };
 
@@ -98,5 +102,49 @@ describe("ALB OIDC resolver", () => {
   it("decodeJwtClaims returns {} for garbage", () => {
     expect(decodeJwtClaims("garbage")).toEqual({});
     expect(decodeJwtClaims("a.b.c")).toEqual({});
+  });
+});
+
+describe("ingress session cookies (kept out of sandboxes)", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("strips oauth2-proxy's cookie and its split/csrf siblings, and the ALB shards, keeping the rest", () => {
+    expect(
+      stripSessionCookies("a=1; _oauth2_proxy=s; _oauth2_proxy_0=p; _oauth2_proxy_csrf=c; AWSELBAuthSessionCookie-1=x;b=2"),
+    ).toBe("a=1; b=2");
+  });
+
+  it("returns undefined when nothing is left, or nothing was sent", () => {
+    expect(stripSessionCookies("_oauth2_proxy=s")).toBeUndefined();
+    expect(stripSessionCookies(undefined)).toBeUndefined();
+    expect(stripSessionCookies("")).toBeUndefined();
+  });
+
+  it("matches on the cookie NAME, not a value that happens to contain a prefix", () => {
+    expect(stripSessionCookies("next=_oauth2_proxy")).toBe("next=_oauth2_proxy");
+  });
+
+  it("AUTH_SESSION_COOKIES replaces the defaults (an ingress with a renamed cookie)", () => {
+    vi.stubEnv("AUTH_SESSION_COOKIES", "_my_session, other");
+    expect(sessionCookiePrefixes()).toEqual(["_my_session", "other"]);
+    expect(stripSessionCookies("_my_session=s; _oauth2_proxy=kept; other_1=x")).toBe("_oauth2_proxy=kept");
+  });
+
+  it("drops Set-Cookie values that would set a session cookie", () => {
+    expect(stripSessionSetCookies(["_oauth2_proxy=evil; Domain=.example.com", "app=1"])).toEqual(["app=1"]);
+    expect(stripSessionSetCookies("_oauth2_proxy_csrf=x")).toBeUndefined();
+    expect(stripSessionSetCookies(undefined)).toBeUndefined();
+  });
+
+  it("filters an upgrade handshake's Set-Cookie lines case-insensitively and keeps the rest", () => {
+    const block = [
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "set-cookie: _oauth2_proxy=evil",
+      "SET-COOKIE: app=1",
+    ].join("\r\n");
+    expect(filterHandshakeSetCookies(block)).toBe(
+      ["HTTP/1.1 101 Switching Protocols", "Upgrade: websocket", "SET-COOKIE: app=1"].join("\r\n"),
+    );
   });
 });

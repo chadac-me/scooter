@@ -402,6 +402,7 @@
           };
         in
         {
+          # Deprecated alias of `lib.evalPlatform` (which reads it); kept for existing deploys.
           legacyPackages.evalPlatform = evalPlatform;
           legacyPackages.imageModules = imageModules;
 
@@ -613,6 +614,12 @@
 
         # The built-in agent skills as a `filename -> content` attrset
         lib.scooterSkills = scooterSkills;
+
+        # The entry point for a deployment: render the platform from your own config module.
+        #   (scooter.lib.evalPlatform { system = "x86_64-linux"; module = ./scooter.nix; })
+        #     .config.kubernetes.result
+        lib.evalPlatform = { system, module }:
+          self.legacyPackages.${system}.evalPlatform { inherit module; };
 
         # kubenix modules
         kubenixModules.scooter = ./modules;

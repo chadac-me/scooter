@@ -253,6 +253,10 @@ export interface SessionManager {
    *  conversation newly started here, and `images`/`files` are attachments the bridge resolves
    *  or writes to /workspace/uploads. */
   promptByThread(threadId: ThreadId, text: string, model?: string, priority?: number, owner?: string, images?: PromptImage[], files?: PromptFile[], source?: string, provider?: string): Promise<void>;
+  /** promptByThread, but resolved once the prompt is queued rather than when its run ends, for a
+   *  caller that only hands a message over (POST /messages): a caller that timed out waiting for
+   *  the run would resend a message the agent already has. Finding or reviving still throws. */
+  enqueueByThread(threadId: ThreadId, text: string): Promise<void>;
   /** Switch a running conversation's model mid-turn for the switch_model tool, cancelling the
    *  in-flight run, rebuilding goose on the new model and re-nudging it to continue; a no-op if
    *  `model` is current, throws on an unknown conversation, and returns whether a switch happened. */
@@ -604,6 +608,46 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     await saveMeta(e);
   };
 
+  /** Find or revive the thread's conversation and queue the prompt. The run comes back boxed:
+   *  an async function returning a bare promise would wait for that run to end. */
+  async function queueByThread(
+    threadId: ThreadId,
+    text: string,
+    model?: string,
+    priority?: number,
+    images?: PromptImage[],
+    files?: PromptFile[],
+    source?: string,
+    provider?: string,
+  ): Promise<{ run?: Promise<unknown> }> {
+    // Find the conversation for this thread: in memory (revive if no live bridge), persisted
+    // but not in memory (hydrate on demand and revive so a follow-up continues the existing
+    // conversation), or genuinely new (start one, with the first prompt's model picking the
+    // conversation's model).
+    let entry = [...entries.values()].find((e) => e.threadId === threadId);
+    if (!entry) {
+      entry = await hydrateByThread(threadId);
+    }
+    if (!entry) {
+      // Callers create explicitly via the router and prompt the id returned.
+      throw new UnknownConversationError(threadId);
+    }
+    await applyModelSwitch(entry, model, provider);
+    if (!entry.bridge) {
+      // No live bridge, so revive.
+      await api.revive(entry.id);
+    }
+    touch(entry);
+    // A priority prompt (a webhook @mention) preempts with the "thinking" policy, which
+    // interrupts idle text generation but lets an in-flight tool call finish.
+    return {
+      run: entry.bridge?.prompt(
+        { threadId, text, images, files, source },
+        priority ? { priority, interrupt: "thinking" } : undefined,
+      ),
+    };
+  }
+
   const api: SessionManager = {
     async start(threadId, model, owner) {
       // The conversation id is the thread id; the k8s name is a short hash of it.
@@ -942,31 +986,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     },
 
     async promptByThread(threadId, text, model, priority, owner, images, files, source, provider) {
-      // Find the conversation for this thread: in memory (revive if no live bridge), persisted
-      // but not in memory (hydrate on demand and revive so a follow-up continues the existing
-      // conversation), or genuinely new (start one, with the first prompt's model picking the
-      // conversation's model).
-      let entry = [...entries.values()].find((e) => e.threadId === threadId);
-      if (!entry) {
-        entry = await hydrateByThread(threadId);
-      }
-      if (!entry) {
-        // Callers create explicitly via the router and prompt the id returned.
-        throw new UnknownConversationError(threadId);
-      } else {
-        await applyModelSwitch(entry, model, provider);
-        if (!entry.bridge) {
-          // No live bridge, so revive.
-          await this.revive(entry.id);
-        }
-      }
-      touch(entry);
-      // A priority prompt (a webhook @mention) preempts with the "thinking" policy, which
-      // interrupts idle text generation but lets an in-flight tool call finish.
-      await entry.bridge?.prompt(
-        { threadId, text, images, files, source },
-        priority ? { priority, interrupt: "thinking" } : undefined,
-      );
+      const { run } = await queueByThread(threadId, text, model, priority, images, files, source, provider);
+      await run;
+    },
+
+    async enqueueByThread(threadId, text) {
+      const { run } = await queueByThread(threadId, text);
+      // The bridge records a failed run in the conversation itself; nobody awaits this one.
+      run?.catch((err: unknown) => log.warn("queued prompt failed", { conversation_id: threadId, error: formatError(err) }));
     },
 
     async switchModelNow(id, model) {

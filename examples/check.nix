@@ -6,7 +6,7 @@ let
   flake = builtins.getFlake (toString ../.);
   system = builtins.currentSystem;
   # The vended entry point: it loads platform.nix and the image modules.
-  evalPlatform = flake.legacyPackages.${system}.evalPlatform;
+  evalPlatform = { module }: flake.lib.evalPlatform { inherit system module; };
 
   platform = evalPlatform {
     module = ./kubenix-config.nix;
@@ -689,6 +689,44 @@ let
   };
   tlsRes = tlsPlatform.config.kubernetes.resources;
   # Every container of every workload kind.
+  # Per-conversation service origins: with ingress.sandboxDomain set, a wildcard Ingress
+  # goes straight to the router, and the router and agent-host both learn the domain.
+  sandboxRes = (evalPlatform {
+    module = { lib, ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.ingress.sandboxDomain = "sandbox.example.com";
+      scooter.ingress.sandboxTlsSecretName = "sandbox-wildcard-tls";
+    };
+  }).config.kubernetes.resources;
+  envIn = dep: name:
+    let env = builtins.concatMap (c: c.env or [ ])
+          (builtins.attrValues (sandboxRes.deployments.${dep}.spec.template.spec.containers or { }));
+        m = builtins.filter (e: e.name == name) env;
+    in if m == [ ] then null else (builtins.head m).value;
+  sbIngress = sandboxRes.ingresses.sandbox-services or null;
+  sandboxOriginProblems =
+    (if (res.ingresses or { }) ? sandbox-services then
+    [ "the sandbox-services Ingress renders with no ingress.sandboxDomain" ] else [ ])
+    ++ (if sbIngress == null then
+    [ "ingress.sandboxDomain set but no sandbox-services Ingress rendered" ]
+    else
+      let rule = builtins.head sbIngress.spec.rules; in
+      (if rule.host != "*.sandbox.example.com" then [ "sandbox-services Ingress host is ${rule.host}, not *.sandbox.example.com" ] else [ ])
+      ++ (let b = (builtins.head rule.http.paths).backend.service; in
+          if b.name != "agent-host" || (b.port.name or "") != "sandbox" then
+          [ "sandbox-services Ingress must go to the router's sandbox listener (agent-host Service, port `sandbox`); any other port exposes the router's API on the wildcard host" ] else [ ])
+      ++ (if !(builtins.any (p: p.name == "sandbox" && p.targetPort == "sandbox") (sandboxRes.services.agent-host.spec.ports or [ ])) then
+          [ "the agent-host Service has no `sandbox` port for the wildcard Ingress" ] else [ ])
+      ++ (if builtins.any (p: p.name == "sandbox") (res.services.agent-host.spec.ports or [ ]) then
+          [ "the agent-host Service exposes a `sandbox` port with no ingress.sandboxDomain" ] else [ ])
+      ++ (if (builtins.head (sbIngress.spec.tls or [ { } ])).secretName or "" != "sandbox-wildcard-tls" then
+          [ "sandbox-services Ingress does not use sandboxTlsSecretName" ] else [ ]))
+    ++ (if envIn "conversation-router" "SANDBOX_LISTEN_ADDR" != ":8081" then
+    [ "the conversation-router does not get SANDBOX_LISTEN_ADDR, so its sandbox listener is not the port the Service targets" ] else [ ])
+    ++ (if envIn "conversation-router" "SANDBOX_DOMAIN" != "sandbox.example.com" then
+    [ "the conversation-router does not get SANDBOX_DOMAIN, so it never routes sandbox hosts" ] else [ ])
+    ++ (if envIn "agent-host" "SANDBOX_DOMAIN" != "sandbox.example.com" then
+    [ "the agent-host does not get SANDBOX_DOMAIN, so sandboxes never learn their origin" ] else [ ]);
   allWorkloads = builtins.concatMap
     (kind: builtins.attrValues (tlsRes.${kind} or { }))
     [ "deployments" "statefulSets" "jobs" "cronJobs" ];
@@ -721,7 +759,7 @@ let
       (containersOf w))
     allWorkloads;
 
-  allProblems = disabledContribProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems;
+  allProblems = disabledContribProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

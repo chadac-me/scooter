@@ -36,3 +36,11 @@ scan retained only for development.
 Long-running services the agent starts in its sandbox (a dev server, a notebook, a terminal)
 are proxied out through the platform with per-conversation URLs, and survive suspend/resume:
 enabled services restart when the sandbox wakes.
+
+By default they're served under `https://<host>/c/<conversation-id>/<service>/`, on the
+same origin as the Scooter UI. Setting `scooter.ingress.sandboxDomain` gives each
+conversation its own origin instead, `https://<label>.<sandboxDomain>/<service>/` (the
+label is the first 8 characters of the conversation id), so a page a sandbox serves can't
+script the Scooter UI or another conversation's services. That needs a wildcard DNS record
+and certificate for `*.<sandboxDomain>`, authenticated by the ingress like the main host.
+Sandboxes created before the setting changes keep their old URLs until they're recreated.

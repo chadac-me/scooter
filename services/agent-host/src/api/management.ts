@@ -33,6 +33,7 @@ import { fitAdvice, fitSummary } from "../session/resourceFit.js";
 import type { SandboxSizePreset } from "../session/resources.js";
 import type { AguiEvent, ApproverIdentity, SessionBridge } from "../bridge.js";
 import { logger } from "../log.js";
+import { serviceUrl, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
 
 const log = logger("agent-host");
@@ -104,6 +105,8 @@ export interface ManagementDeps {
   resolveUser?: ResolveUser;
   /** In-pod web-service registry powering the UI Services panel; absent in fake/local mode. */
   webServices?: WebServiceRegistry;
+  /** Per-conversation service origins (SANDBOX_DOMAIN); absent keeps services under /c/<id>/. */
+  sandboxOrigins?: SandboxOrigins;
   /** In-pod module registry (search/attach via scooter-rebuild); absent in fake/local mode. */
   moduleRegistry?: ModuleRegistry;
   /** Identity store for the email-to-user reverse lookup; absent means the lookup route reports no match. */
@@ -505,8 +508,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.post("/conversations/:id/messages", async (ctx) => {
     const body = await ctx.body<{ text?: string }>();
     if (!body.text) return { status: 400, json: { error: "text required" } };
-    // Find-or-start by thread id, then prompt.
-    await sessions.promptByThread(ctx.params.id, body.text);
+    // 202 once queued, not once the run ends: a caller that gave up waiting on a long turn
+    // would resend a message the agent already has.
+    await sessions.enqueueByThread(ctx.params.id, body.text);
     return { status: 202, json: { ok: true } };
   });
 
@@ -868,8 +872,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
       services.map(async (s) => ({
         name: s.name,
         displayName: s.displayName,
-        // The browser opens the service under the full threadId path.
-        url: `/c/${encodeURIComponent(sessions.get(id)?.threadId ?? id)}/${s.name}/`,
+        // The conversation's own services origin when configured, else the main-host path.
+        url: serviceUrl(sessions.get(id)?.threadId ?? id, s.name, deps.sandboxOrigins),
         running: await deps.webServices!.isRunning(id, s.name).catch(() => false),
         resources: s.resources,
         // `fitShort` fits the card; `fit` is the full sentence shown on hover.

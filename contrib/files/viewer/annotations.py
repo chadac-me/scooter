@@ -19,6 +19,7 @@ no site-packages.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -69,11 +70,19 @@ class TransportError(Exception):
     """A push failed; `status` carries the upstream's code when there was one."""
 
     def __init__(
-        self, message: str, *, status: int | None = None, retry_after: float | None = None
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        retry_after: float | None = None,
+        maybe_delivered: bool = False,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
+        # The request went out but no answer came back, so it may have landed. A
+        # retry could then deliver it twice.
+        self.maybe_delivered = maybe_delivered
 
 
 def _now_iso() -> str:
@@ -146,7 +155,8 @@ class Record:
     attempts: int = 0
     error: str = ""
     next_attempt: float = 0.0
-    # "", pending, sent or failed; pulled records stay "".
+    # "", pending, sending, sent or failed; pulled records stay "". "sending" is saved
+    # before the request goes out, so a restart mid-send never sends it again.
     notify: str = ""
 
     @property
@@ -249,6 +259,7 @@ class SelfTransport:
         return bool(self.base_url and self.token_path and self.conversation_id)
 
     def send(self, text: str) -> None:
+        """Deliver once. A failure with maybe_delivered set must not be retried."""
         try:
             token = Path(self.token_path).read_text().strip()
         except OSError as exc:
@@ -269,10 +280,18 @@ class SelfTransport:
             except ValueError:
                 retry_after = None
             raise TransportError(
-                f"self-access {exc.code}: {detail}", status=exc.code, retry_after=retry_after
+                f"self-access {exc.code}: {detail}",
+                status=exc.code,
+                retry_after=retry_after,
+                # A gateway timeout: the upstream may have taken it before giving up.
+                maybe_delivered=exc.code == 504,
             ) from exc
-        except (urllib.error.URLError, OSError) as exc:
+        except urllib.error.URLError as exc:
+            # urllib wraps only failures to connect or send, so it never arrived.
             raise TransportError(str(exc)) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # Sent, but the answer never came (a read timeout, a dropped connection).
+            raise TransportError(f"no answer: {exc}", maybe_delivered=True) from exc
 
 
 def notify_message(records: list[Record], root: Path) -> str:
@@ -326,6 +345,9 @@ class Annotations:
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _worker: threading.Thread | None = None
     _stop: threading.Event = field(default_factory=threading.Event)
+    # Bumped on every write, so an open page's event stream knows to refetch.
+    generation: int = 0
+    _changed: threading.Condition = field(default_factory=threading.Condition)
 
     def __post_init__(self) -> None:
         self.state_path = Path(self.state_path)
@@ -348,6 +370,10 @@ class Annotations:
             # Stored but not yet announced.
             elif record.state == "acked" and record.notify == "pending":
                 self.queue.append(_Op(kind="notify", key=record.id))
+            # Caught mid-send. It may have arrived, and a duplicate wakes the agent
+            # again, so it counts as sent.
+            if record.notify == "sending":
+                record.notify = "sent"
 
     def _save(self) -> None:
         # Atomic replace: a half-written state file would lose every thread, and this
@@ -357,6 +383,15 @@ class Annotations:
         payload = {"version": 1, "records": [asdict(r) for r in self.records.values()]}
         tmp.write_text(json.dumps(payload, indent=1))
         os.replace(tmp, self.state_path)
+        with self._changed:
+            self.generation += 1
+            self._changed.notify_all()
+
+    def wait_change(self, since: int, timeout: float) -> int:
+        """The generation once it passes `since`, or the current one after `timeout`."""
+        with self._changed:
+            self._changed.wait_for(lambda: self.generation != since, timeout)
+            return self.generation
 
     # --- writes -----------------------------------------------------------------
 
@@ -606,20 +641,36 @@ class Annotations:
             live = []
             for op in ops:
                 record = self.records.get(op.key)
-                # Deleted or already announced.
-                if record is None or record.notify != "pending" or not self._can_notify:
+                # Deleted, already announced, or queued twice in this batch.
+                if (
+                    record is None
+                    or record.notify != "pending"
+                    or not self._can_notify
+                    or any(r is record for _, r in live)
+                ):
                     self._drop(op)
                 else:
                     live.append((op, record))
-        if not live:
-            return 0
+            if not live:
+                return 0
+            # On disk before the request goes out: see _load.
+            for _, record in live:
+                record.notify = "sending"
+            self._save()
         records = sorted((r for _, r in live), key=lambda r: (r.path, r.line, r.created_at))
         try:
             self.notifier.send(notify_message(records, self.root))
         except TransportError as exc:
-            for op, _ in live:
-                self._failed(op, exc, now)
-            return 0
+            if exc.maybe_delivered:
+                # Possibly delivered: once is better than twice.
+                logger.warning("annotation notify got no answer; not resending: %s", exc)
+            else:
+                with self._lock:
+                    for op, record in live:
+                        record.notify = "pending"
+                for op, _ in live:
+                    self._failed(op, exc, now)
+                return 0
         with self._lock:
             for op, record in live:
                 record.notify = "sent"

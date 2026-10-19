@@ -25,6 +25,8 @@ interface IdentEcho {
   handoffEmail: string | null;
   ingress: string | null;
   oidcToken: string | null;
+  cookie: string | null;
+  accessToken: string | null;
 }
 
 function identEcho(headers: Record<string, unknown>): string {
@@ -33,8 +35,13 @@ function identEcho(headers: Record<string, unknown>): string {
     handoffEmail: headers["x-scooter-user-email"] ?? null,
     ingress: headers["x-auth-user"] ?? null,
     oidcToken: headers["x-amzn-oidc-accesstoken"] ?? null,
+    cookie: headers["cookie"] ?? null,
+    accessToken: headers["x-forwarded-access-token"] ?? null,
   });
 }
+
+/** What a hostile pod answers with on a path containing "set-cookie": an ingress session plus a cookie of its own. */
+const POD_SET_COOKIES = ["_oauth2_proxy=attacker; Domain=.example.com; Path=/", "AWSELBAuthSessionCookie-0=x", "app=1; Path=/"];
 
 // A fake in-pod service that echoes HTTP requests, raw bytes on an `upgrade`, and identity headers.
 function fakeInPodService(): Promise<{ server: Server; port: number }> {
@@ -47,13 +54,15 @@ function fakeInPodService(): Promise<{ server: Server; port: number }> {
           "content-type": "text/plain",
           "x-echo-path": req.url ?? "",
           "x-echo-ident": identEcho(req.headers as Record<string, unknown>),
+          ...(req.url?.includes("set-cookie") ? { "set-cookie": POD_SET_COOKIES } : {}),
         });
         res.end(`${req.method} ${req.url} ${body}`);
       });
     });
     server.on("upgrade", (req, socket, head) => {
+      const cookies = req.url?.includes("set-cookie") ? POD_SET_COOKIES.map((c) => `Set-Cookie: ${c}\r\n`).join("") : "";
       socket.write(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n${cookies}\r\n`,
       );
       socket.write(`IDENT ${identEcho(req.headers as Record<string, unknown>)}\n`);
       if (head?.length) socket.write(head);
@@ -236,6 +245,169 @@ describe("web-service proxy", () => {
     const { status, echoPath } = await proxyGet(proxy, "/c/conv-1/marimo/app?x=1");
     expect(status).toBe(200);
     expect(echoPath).toBe("/app?x=1");
+  });
+
+  // --- sandbox hosts (<label>.<sandbox domain>/<service>/) --------------------
+
+  describe("sandbox hosts", () => {
+    const ID = "5a515e73-860b-49ba-bc3f-6ff8d5fda5ff";
+    const HOST = { "x-scooter-sandbox-host": "5a515e73" };
+
+    function sandboxProxy(registry: WebServiceRegistry, sandboxDomain: string | undefined = "scooter.example.com") {
+      return createWebServiceProxy({
+        sessions: {
+          get: (id: string) => (id === ID ? { id: ID, threadId: ID } : undefined),
+          getByShortId: async () => undefined,
+          ensureReadable: async () => false,
+          touchById: () => {},
+        } as never,
+        resolvePodTarget: (async () => ({ name: "pod", podIP: "127.0.0.1" })) as never,
+        registry,
+        publicHost: "scooter.example.com",
+        resolveUser: () => ANON,
+        sandboxDomain,
+      });
+    }
+
+    it("forwards the browser-visible /<service>/... path, not the router's /c/<id> prefix", async () => {
+      const { status, echoPath } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app%2Fx?x=1`, { headers: HOST });
+      expect(status).toBe(200);
+      expect(echoPath).toBe("/marimo/app%2Fx?x=1");
+    });
+
+    it("does not pass the routing header on to the pod", async () => {
+      const seen: Record<string, unknown>[] = [];
+      const pod = createServer((req, res) => { seen.push(req.headers); res.end("ok"); });
+      await new Promise<void>((r) => pod.listen(0, "127.0.0.1", () => r()));
+      try {
+        await proxyGet(sandboxProxy(fakeRegistry((pod.address() as AddressInfo).port)), `/c/${ID}/marimo/`, { headers: HOST });
+        expect(seen[0]?.["x-scooter-sandbox-host"]).toBeUndefined();
+      } finally {
+        pod.close();
+      }
+    });
+
+    it("stripBasePath still forwards only the remainder", async () => {
+      const desc = { ...MARIMO, port: svc.port, stripBasePath: true };
+      const registry = { ...fakeRegistry(svc.port), get: async (_id: string, n: string) => (n === "marimo" ? desc : null) } as WebServiceRegistry;
+      const { echoPath } = await proxyGet(sandboxProxy(registry), `/c/${ID}/marimo/app?x=1`, { headers: HOST });
+      expect(echoPath).toBe("/app?x=1");
+    });
+
+    it("the loading page polls the short base path", async () => {
+      const { body } = await proxyGet(sandboxProxy(startingRegistry(await deadPort())), `/c/${ID}/marimo/`, { headers: HOST, accept: "text/html" });
+      expect(body).toContain("/marimo/__scooter_status");
+      expect(body).not.toContain(`/c/${ID}`);
+    });
+
+    it("with sandbox hosts on, the main host serves no services", async () => {
+      const { status, body } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`, { method: "POST" });
+      expect(status).toBe(404);
+      // Non-empty, so a browser navigation renders it rather than its own error page.
+      expect(body).toBe("not found\n");
+      const status2 = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/__scooter_status`);
+      expect(status2.status).toBe(404);
+    });
+
+    it("an old main-host link redirects to the conversation's host, path and query intact", async () => {
+      const { status, location, echoPath } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app/x?file=a.py`);
+      expect(status).toBe(302);
+      expect(location).toBe("https://5a515e73.scooter.example.com/marimo/app/x?file=a.py");
+      expect(echoPath).toBe(""); // nothing reached the pod
+      const bare = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo`);
+      expect(bare.location).toBe("https://5a515e73.scooter.example.com/marimo/");
+    });
+
+    it("an old link to an unknown conversation is a 404, not a redirect", async () => {
+      const { status, location } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/ffffffff-0000-0000-0000-000000000000/marimo/`);
+      expect(status).toBe(404);
+      expect(location).toBe("");
+    });
+
+    it("with sandbox hosts off, a host-routed request is refused", async () => {
+      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port), ""), `/c/${ID}/marimo/app`, { headers: HOST });
+      expect(status).toBe(404);
+    });
+
+    it("a label that is not the conversation's prefix is refused", async () => {
+      const { status } = await proxyGet(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/app`, { headers: { "x-scooter-sandbox-host": "deadbeef" } });
+      expect(status).toBe(404);
+    });
+
+    // --- the router's direct path: GET /internal/web-services/target ---------------
+
+    const target = (q: string, headers: Record<string, string> = {}) =>
+      proxyGet(sandboxProxyAs(fakeRegistry(svc.port)), `/internal/web-services/target?${q}`, { headers });
+
+    function sandboxProxyAs(registry: WebServiceRegistry, opts: { user?: { id: string; email?: string; anonymous: boolean }; touched?: string[]; podDown?: boolean; sandboxDomain?: string } = {}) {
+      return createWebServiceProxy({
+        sessions: { get: () => ({ id: ID, threadId: ID }), touchById: (id: string) => opts.touched?.push(id) } as never,
+        resolvePodTarget: (async () => {
+          if (opts.podDown) throw new Error("no ready pod");
+          return { name: "pod", podIP: "127.0.0.1" };
+        }) as never,
+        registry,
+        publicHost: "scooter.example.com",
+        resolveUser: () => opts.user ?? ANON,
+        sandboxDomain: opts.sandboxDomain ?? "scooter.example.com",
+      });
+    }
+
+    it("target: answers the pod address, port, caller and what to strip", async () => {
+      const touched: string[] = [];
+      const proxy = sandboxProxyAs(fakeRegistry(svc.port), { user: { id: "alice", email: "a@x", anonymous: false }, touched });
+      const { status, body } = await proxyGet(proxy, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`);
+      expect(status).toBe(200);
+      const t = JSON.parse(body);
+      expect(t).toMatchObject({ conversationId: ID, podIP: "127.0.0.1", port: svc.port, stripBasePath: false, user: { id: "alice", email: "a@x" } });
+      expect(t.dropHeaders).toEqual(expect.arrayContaining(["x-scooter-user", "x-amzn-oidc-accesstoken"]));
+      expect(t.sessionCookies).toEqual(expect.arrayContaining(["_oauth2_proxy"]));
+      expect(t.ttlMs).toBeGreaterThan(0);
+      // Asking for the target is the router's sign of live traffic.
+      expect(touched).toContain(ID);
+    });
+
+    it("target: anonymous callers carry no user", async () => {
+      const { body } = await target(`conversation=${ID}&service=marimo&label=5a515e73`);
+      expect(JSON.parse(body).user).toBeUndefined();
+    });
+
+    it("target: a pod that is down is 503, so the router sends the request here to wake it", async () => {
+      const proxy = sandboxProxyAs(fakeRegistry(svc.port), { podDown: true });
+      const { status, body } = await proxyGet(proxy, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`);
+      expect(status).toBe(503);
+      expect(JSON.parse(body).reason).toBe("asleep");
+    });
+
+    it("target: refuses a wrong label, an unknown service, a missing label and sandbox hosts off", async () => {
+      expect((await target(`conversation=${ID}&service=marimo&label=deadbeef`)).status).toBe(404);
+      expect((await target(`conversation=${ID}&service=nope&label=5a515e73`)).status).toBe(404);
+      expect((await target(`conversation=${ID}&service=marimo`)).status).toBe(404);
+      const off = sandboxProxyAs(fakeRegistry(svc.port), { sandboxDomain: "" });
+      expect((await proxyGet(off, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`)).status).toBe(404);
+    });
+
+    it("touch: marks the conversation active", async () => {
+      const touched: string[] = [];
+      const proxy = sandboxProxyAs(fakeRegistry(svc.port), { touched });
+      const status = await new Promise<number>((resolve, reject) => {
+        void withFront(proxy, (port) => new Promise<void>((done) => {
+          const req = request({ host: "127.0.0.1", port, path: `/internal/web-services/touch?conversation=${ID}`, method: "POST" }, (res) => {
+            res.resume();
+            res.on("end", () => { resolve(res.statusCode ?? 0); done(); });
+          });
+          req.on("error", reject);
+          req.end();
+        })).catch(reject);
+      });
+      expect(status).toBe(202);
+      expect(touched).toContain(ID);
+    });
+
+    it("WebSockets forward the short path", async () => {
+      const { statusLine } = await proxyUpgrade(sandboxProxy(fakeRegistry(svc.port)), `/c/${ID}/marimo/ws`, "ping", { headers: HOST });
+      expect(statusLine).toContain("101");
+    });
   });
 
   it("unknown service -> 404", async () => {
@@ -482,6 +654,8 @@ describe("web-service proxy", () => {
       handoffEmail: "alice@example.com",
       ingress: null,
       oidcToken: null,
+      cookie: null,
+      accessToken: null,
     });
   });
 
@@ -493,6 +667,49 @@ describe("web-service proxy", () => {
     const ident = JSON.parse(raw.slice(raw.indexOf("IDENT ") + 6, raw.indexOf("\n", raw.indexOf("IDENT "))));
     expect(ident.handoff).toBe("alice");
     expect(ident.ingress).toBeNull();
+  });
+
+  // --- ingress session cookies -------------------------------------------------
+
+  const SESSION_COOKIES =
+    "_oauth2_proxy=sess; theme=dark; _oauth2_proxy_csrf=c; _oauth2_proxy_1=part; AWSELBAuthSessionCookie-0=alb; marimo_ui=1";
+
+  it("keeps the ingress session cookies out of the pod and forwards the service's own (HTTP)", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app", {
+      headers: { cookie: SESSION_COOKIES, "x-forwarded-access-token": "gho_provider_token" },
+    });
+    expect(ident).toMatchObject({ cookie: "theme=dark; marimo_ui=1", accessToken: null });
+  });
+
+  it("drops the Cookie header entirely when only session cookies were sent", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { ident } = await proxyGet(proxy, "/c/conv-1/marimo/app", { headers: { cookie: "_oauth2_proxy=sess" } });
+    expect(ident).toMatchObject({ cookie: null });
+  });
+
+  it("keeps the ingress session cookies out of the UPGRADE handshake too", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { raw } = await proxyUpgrade(proxy, "/c/conv-1/marimo/ws", "ping", { headers: { cookie: SESSION_COOKIES } });
+    const ident = JSON.parse(raw.slice(raw.indexOf("IDENT ") + 6, raw.indexOf("\n", raw.indexOf("IDENT "))));
+    expect(ident.cookie).toBe("theme=dark; marimo_ui=1");
+  });
+
+  it("a pod cannot set the ingress session cookie (HTTP response)", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { status, setCookie } = await proxyGet(proxy, "/c/conv-1/marimo/set-cookie");
+    expect(status).toBe(200);
+    expect(setCookie).toEqual(["app=1; Path=/"]);
+  });
+
+  it("a pod cannot set the ingress session cookie (UPGRADE response)", async () => {
+    const proxy = makeProxy(fakeRegistry(svc.port), undefined, undefined, { owner: "alice", user: ALICE });
+    const { statusLine, echoed, raw } = await proxyUpgrade(proxy, "/c/conv-1/marimo/set-cookie/ws", "ping");
+    expect(statusLine).toContain("101");
+    expect(echoed).toBe("ping"); // frames after the filtered handshake still flow
+    const handshake = raw.slice(0, raw.indexOf("\r\n\r\n"));
+    expect(handshake).toContain("Set-Cookie: app=1; Path=/");
+    expect(handshake).not.toMatch(/_oauth2_proxy|AWSELBAuthSessionCookie/);
   });
 
   it("an anonymous caller hands off NO identity (not the string \"anonymous\")", async () => {
@@ -600,7 +817,8 @@ async function withFront(
   proxy: WebServiceProxy,
   fn: (port: number) => Promise<void>,
 ): Promise<void> {
-  const front = createServer((req, res) => {
+  const front = createServer(async (req, res) => {
+    if (await proxy.handleInternal(req, res)) return;
     if (proxy.matches(new URL(req.url ?? "/", "http://x").pathname)) void proxy.handleHttp(req, res);
     else res.writeHead(404).end();
   });
@@ -620,8 +838,8 @@ async function withFront(
 function proxyGet(
   proxy: WebServiceProxy,
   path: string,
-  opts: { accept?: string; headers?: Record<string, string> } = {},
-): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null }> {
+  opts: { accept?: string; headers?: Record<string, string>; method?: string } = {},
+): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null; setCookie: string[]; location: string }> {
   return new Promise((resolve, reject) => {
     void withFront(proxy, (port) =>
       new Promise<void>((done) => {
@@ -629,7 +847,7 @@ function proxyGet(
           ...(opts.accept ? { accept: opts.accept } : {}),
           ...(opts.headers ?? {}),
         };
-        const req = request({ host: "127.0.0.1", port, path, method: "GET", headers }, (res) => {
+        const req = request({ host: "127.0.0.1", port, path, method: opts.method ?? "GET", headers }, (res) => {
           let body = "";
           res.on("data", (c) => (body += c));
           res.on("end", () => {
@@ -639,6 +857,8 @@ function proxyGet(
               body,
               echoPath: String(res.headers["x-echo-path"] ?? ""),
               ident: raw ? (JSON.parse(String(raw)) as IdentEcho) : null,
+              setCookie: res.headers["set-cookie"] ?? [],
+              location: String(res.headers.location ?? ""),
             });
             done();
           });

@@ -655,6 +655,115 @@ def test_the_self_transport_posts_to_its_own_conversation_with_its_token(tmp_pat
     assert not ann.SelfTransport("http://x", str(token), "").configured
 
 
+# --- never twice -----------------------------------------------------------------
+#
+# The router's POST /messages used to answer only once the agent had finished the
+# turn it started, so the viewer timed out, retried, and woke the agent with the
+# same remark up to five times.
+
+
+def test_a_notify_that_got_no_answer_is_never_resent(told):
+    store, clock = told
+    record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x")
+    store.flush()
+    store.notifier.fail = ann.TransportError("timed out", maybe_delivered=True)
+    _past_the_delay(clock)
+    store.flush()
+
+    # It may well have landed, so it is never sent again.
+    assert store.get(record.id).notify == "sent"
+    assert not [op for op in store.queue if op.kind == "notify"]
+    clock.advance(600)
+    store.flush()
+    assert store.notifier.sent == []
+
+
+def test_a_restart_mid_send_does_not_send_again(tmp_path: Path):
+    path = tmp_path / "annotations.json"
+    clock = FakeClock()
+    first = ann.Annotations(
+        state_path=path, transport=FakeTransport(), notifier=FakeNotifier(), clock=clock
+    )
+    record = first.add(content=DOC, path="doc.md", line=2, quote="bravo", text="x")
+    first.flush()
+    _past_the_delay(clock)
+
+    # The process dies inside send(): what is on disk then is what a restart sees.
+    on_disk: list[dict] = []
+
+    def die(_text: str) -> None:
+        on_disk.extend(json.loads(path.read_text())["records"])
+        raise SystemExit
+
+    first.notifier.send = die
+    with pytest.raises(SystemExit):
+        first.flush()
+    assert [r["notify"] for r in on_disk] == ["sending"]
+
+    second = ann.Annotations(
+        state_path=path, transport=FakeTransport(), notifier=FakeNotifier(), clock=clock
+    )
+    clock.advance(600)
+    second.flush()
+    assert second.notifier.sent == []
+    assert second.get(record.id).notify == "sent"
+
+
+def test_a_remark_queued_twice_is_named_once(told):
+    store, clock = told
+    record = store.add(content=DOC, path="doc.md", line=2, quote="bravo", text="only once")
+    store.flush()
+    # A second notify op for the same remark, however it got there.
+    store.queue.append(ann._Op(kind="notify", key=record.id))
+    _past_the_delay(clock)
+    store.flush()
+    (message,) = store.notifier.sent
+    assert message.count("only once") == 1
+    assert not [op for op in store.queue if op.kind == "notify"]
+
+
+def test_the_self_transport_tells_a_lost_answer_from_a_refused_connection(tmp_path: Path):
+    import http.server
+    import socket
+
+    class Slow(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers["content-length"]))
+            time.sleep(1.5)  # past the client's timeout: it has the message, no answer
+            self.send_response(202)
+            self.send_header("content-length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    token = tmp_path / "token"
+    token.write_text("t")
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        client = ann.SelfTransport(
+            f"http://127.0.0.1:{httpd.server_address[1]}", str(token), "c", timeout=0.5
+        )
+        with pytest.raises(ann.TransportError) as caught:
+            client.send("hello")
+        assert caught.value.maybe_delivered
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    # Nothing listening: it never arrived, so a retry is safe.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free = s.getsockname()[1]
+    client = ann.SelfTransport(f"http://127.0.0.1:{free}", str(token), "c", timeout=0.5)
+    with pytest.raises(ann.TransportError) as caught:
+        client.send("hello")
+    assert not caught.value.maybe_delivered
+
+
+
+
 # --- over HTTP ------------------------------------------------------------------
 #
 # The write routes are reached through the proxy prefix like every other route, so
@@ -662,6 +771,7 @@ def test_the_self_transport_posts_to_its_own_conversation_with_its_token(tmp_pat
 
 import contextlib  # noqa: E402
 import threading  # noqa: E402
+import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
@@ -703,6 +813,8 @@ def viewer(tmp_path: Path, *, with_store: bool = True, doc: str = DOC, name: str
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read() or b"{}")
 
+    call.url = f"http://127.0.0.1:{port}{cfg.base}"
+    call.root = root
     try:
         yield call, store
     finally:
@@ -820,3 +932,74 @@ def test_a_write_to_a_read_route_is_refused_as_read_only(tmp_path: Path):
         assert call("POST", "/api/file?path=doc.md", {})[0] == 405
         assert call("POST", "/api/list", {})[0] == 405
         assert call("POST", "/api/nope", {})[0] == 404
+
+
+# --- the event stream ----------------------------------------------------------------
+
+
+class _Events:
+    """An open /api/events stream; next() is the next named event, or None on timeout."""
+
+    def __init__(self, call, path: str = "doc.md") -> None:
+        self.response = urllib.request.urlopen(f"{call.url}/api/events?path={path}", timeout=5)
+
+    def next(self) -> str | None:
+        try:
+            while line := self.response.readline():
+                if line.startswith(b"event: "):
+                    return line[len(b"event: "):].strip().decode()
+        except TimeoutError:
+            return None
+        return None
+
+    def close(self) -> None:
+        self.response.close()
+
+
+def test_events_is_a_stream_and_a_write_to_the_store_is_a_notes_event(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        events = _Events(call)
+        try:
+            assert events.response.headers["content-type"] == "text/event-stream"
+            # The retry hint comes first, so the browser's reconnect delay is ours.
+            assert events.response.readline() == b"retry: 2000\n"
+            call("POST", "/api/annotations", {"path": "doc.md", "line": 2, "quote": "bravo", "text": "hm"})
+            assert events.next() == "notes"
+        finally:
+            events.close()
+
+
+def test_an_edit_on_disk_is_a_file_event(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        events = _Events(call)
+        try:
+            (call.root / "doc.md").write_text(DOC + "echo\n")
+            assert events.next() == "file"
+        finally:
+            events.close()
+
+
+def test_a_viewer_without_a_store_still_streams_file_changes(tmp_path: Path):
+    with viewer(tmp_path, with_store=False) as (call, _store):
+        events = _Events(call)
+        try:
+            (call.root / "doc.md").unlink()
+            assert events.next() == "file"
+        finally:
+            events.close()
+
+
+def test_shutdown_ends_an_open_stream(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        events = _Events(call)
+    # The server closed the stream (EOF in about a second) rather than leaving its
+    # thread waiting for the 5s read timeout.
+    started = time.monotonic()
+    assert events.next() is None
+    assert time.monotonic() - started < 3
+    events.close()
+
+
+def test_events_refuses_a_path_outside_the_root(tmp_path: Path):
+    with viewer(tmp_path) as (call, _store):
+        assert call("GET", "/api/events?path=../outside")[0] in (400, 403, 404)
