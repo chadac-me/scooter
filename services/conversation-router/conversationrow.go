@@ -1,5 +1,5 @@
 // The create-time `conversations` row, one definition shared by the cluster path
-// (dualCreator) and the kube-less path (devCreator) so the two stacks cannot disagree
+// (rowCreator) and the kube-less path (devCreator) so the two stacks cannot disagree
 // about what a new conversation looks like.
 package main
 

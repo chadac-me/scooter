@@ -98,7 +98,7 @@ describe("SessionManager", () => {
     expect(sessions.get(conv.id)?.status).toBe("suspended");
   });
 
-  it("suspend() publishes phase=Suspended to the CR when we OWN the conversation", async () => {
+  it("suspend() publishes phase=Suspended to the row when we OWN the conversation", async () => {
     const setPhase = vi.fn(async () => {});
     const registry = { register: vi.fn(async () => {}), setPhase };
     // A guard that always allows, as the owner.
@@ -128,7 +128,7 @@ describe("SessionManager", () => {
     expect(setPhase).not.toHaveBeenCalled();
   });
 
-  it("revive() RE-REGISTERS the CR (self-heals a conversation whose CR was lost/never made)", async () => {
+  it("revive() RE-REGISTERS the row (self-heals a conversation whose row was lost/never made)", async () => {
     const order: string[] = [];
     const register = vi.fn(async () => {
       order.push("register");
@@ -141,7 +141,7 @@ describe("SessionManager", () => {
     await sessions.suspend(conv.id);
     register.mockClear();
     await sessions.revive(conv.id);
-    // revive() re-registers idempotently so a CR lost across a restart is re-created.
+    // revive() re-registers idempotently so a row lost across a restart is re-created.
     expect(register).toHaveBeenCalledWith(conv.id, expect.objectContaining({ sandboxRef: expect.any(String) }));
   });
 
@@ -339,8 +339,8 @@ describe("SessionManager", () => {
     expect(provisioner.create).not.toHaveBeenCalled();
   });
 
-  it("promptByThread() ADOPTS a conversation that exists only as a CR (create-then-prompt race)", async () => {
-    // The router returns the id before assignment, so a prompt can reach a pod whose local store has never seen it and the CR is adopted as the authority for existence.
+  it("promptByThread() ADOPTS a conversation that exists only as a row (create-then-prompt race)", async () => {
+    // The router returns the id before assignment, so a prompt can reach a pod whose local store has never seen it and the row is adopted as the authority for existence.
     const prompt = vi.fn(async () => "run-x");
     const bridgeFactory = () =>
       ({
@@ -361,7 +361,7 @@ describe("SessionManager", () => {
       register,
       get: vi.fn(async (id: string) => ({
         id,
-        // No sandboxRef, because the router creates the CR without provisioning.
+        // No sandboxRef, because the router creates the row without provisioning.
         spec: { owner: "user-alice", model: "sonnet" },
       })),
     } as never;
@@ -385,7 +385,7 @@ describe("SessionManager", () => {
       sessions.promptByThread(threadId, "first message", undefined, undefined, "user-alice"),
     ).resolves.not.toThrow();
 
-    // The entry carries the CR's spec.
+    // The entry carries the row's spec.
     const [conv] = sessions.list();
     expect(conv.threadId).toBe(threadId);
     expect(conv.owner).toBe("user-alice");
@@ -1292,9 +1292,9 @@ describe("sweepIdle is OWNER-ONLY (the zombie-sandbox bug)", () => {
   });
 });
 
-/** The CR is the source of truth for existence, so ending a conversation must remove it. */
-describe("end() removes the Conversation CR", () => {
-  it("deletes the CR, not just local state", async () => {
+/** The registry row is the source of truth for existence, so ending a conversation must remove it. */
+describe("end() removes the conversation from the registry", () => {
+  it("removes the registry entry, not just local state", async () => {
     const remove = vi.fn(async () => {});
     const conversationRegistry = { ...noopRegistry, remove } as never;
     const sessions = createSessionManager({
@@ -1306,7 +1306,7 @@ describe("end() removes the Conversation CR", () => {
     const conv = await sessions.start("thread-cr-remove" as never);
     await sessions.end(conv.id as SessionId);
 
-    // Otherwise hydrate() re-adopts the conversation from its surviving CR.
+    // Otherwise hydrate() re-adopts the conversation from its surviving row.
     expect(remove).toHaveBeenCalledWith(conv.id);
     expect(sessions.get(conv.id as SessionId), "and it is gone locally").toBeUndefined();
   });

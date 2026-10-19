@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// fakeCreator records what would have been written to the API server.
+// fakeCreator records the conversations the route asked to create.
 type fakeCreator struct {
 	calls []struct {
 		name  string
@@ -251,8 +251,8 @@ func TestCreateBodyOwnerCannotOverrideTheHeaderIdentityUnverified(t *testing.T) 
 	}
 }
 
-// The title is create-time row metadata, never a CR spec key.
-func TestCreateKeepsTitleOutOfTheCRSpec(t *testing.T) {
+// The title is its own field, never a spec key.
+func TestCreateKeepsTitleOutOfTheSpec(t *testing.T) {
 	c := &fakeCreator{}
 	w := postCreate(t, c, `{"title":"Seeded one"}`, nil)
 
@@ -260,7 +260,7 @@ func TestCreateKeepsTitleOutOfTheCRSpec(t *testing.T) {
 		t.Fatalf("want 201, got %d (%s)", w.Code, w.Body.String())
 	}
 	if _, present := c.calls[0].spec["title"]; present {
-		t.Fatalf("title must not be a CR spec key, got spec=%+v", c.calls[0].spec)
+		t.Fatalf("title must not be a spec key, got spec=%+v", c.calls[0].spec)
 	}
 	if c.calls[0].title != "Seeded one" {
 		t.Fatalf("title must reach the creator as its own field, got %q", c.calls[0].title)
@@ -281,7 +281,7 @@ func TestCreateEchoesTheRequestedTitle(t *testing.T) {
 	}
 }
 
-// fakeRowWriter is the row half of a dual create.
+// fakeRowWriter records row inserts, failing with err when set.
 type fakeRowWriter struct {
 	calls []NewConversation
 	err   error
@@ -295,95 +295,33 @@ func (f *fakeRowWriter) CreateConversation(_ context.Context, c NewConversation)
 	return nil
 }
 
-// A create must land in both stores carrying the same id.
-func TestDualCreatorWritesBothStores(t *testing.T) {
-	cr, rows := &fakeCreator{}, &fakeRowWriter{}
-	d := &dualCreator{cr: cr, rows: rows}
-	if err := d.Create(context.Background(), NewConversation{
+// The cluster create is the row insert, carrying the id, the spec and the title.
+func TestRowCreatorWritesTheRow(t *testing.T) {
+	rows := &fakeRowWriter{}
+	if err := (rowCreator{rows: rows}).Create(context.Background(), NewConversation{
 		Name: "conv-1", Title: "Seeded", Spec: map[string]interface{}{"owner": "alice"},
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if len(cr.calls) != 1 || cr.calls[0].name != "conv-1" {
-		t.Errorf("CR not written: %+v", cr.calls)
-	}
-	if len(rows.calls) != 1 || rows.calls[0].Name != "conv-1" {
-		t.Fatalf("row not written: %+v", rows.calls)
-	}
-	// The title reaches the row even though the CR drops it.
-	if rows.calls[0].Title != "Seeded" {
-		t.Errorf("title should reach the row: %q", rows.calls[0].Title)
+	if len(rows.calls) != 1 || rows.calls[0].Name != "conv-1" || rows.calls[0].Title != "Seeded" {
+		t.Fatalf("row not written as asked: %+v", rows.calls)
 	}
 }
 
-// The CR is authoritative: its failure fails the create, and the row must not be written.
-func TestDualCreatorPropagatesCRFailureAndSkipsTheRow(t *testing.T) {
-	boom := errors.New("apiserver down")
-	rows := &fakeRowWriter{}
-	d := &dualCreator{cr: &fakeCreator{err: boom}, rows: rows}
-	if err := d.Create(context.Background(), NewConversation{Name: "conv-1"}); !errors.Is(err, boom) {
-		t.Fatalf("CR error must propagate, got %v", err)
-	}
-	if len(rows.calls) != 0 {
-		t.Errorf("row must not be written when the CR failed: %+v", rows.calls)
-	}
-}
-
-// removableCreator can roll its CR back; fakeCreator deliberately cannot.
-type removableCreator struct {
-	fakeCreator
-	removed   []string
-	removeErr error
-}
-
-func (r *removableCreator) Remove(_ context.Context, name string) error {
-	if r.removeErr != nil {
-		return r.removeErr
-	}
-	r.removed = append(r.removed, name)
-	return nil
-}
-
-// A row failure fails the create and rolls the CR back.
-func TestDualCreatorFailsTheCreateOnARowFailureAndRollsBackTheCR(t *testing.T) {
-	cr := &removableCreator{}
-	d := &dualCreator{cr: cr, rows: &fakeRowWriter{err: errors.New("pg down")}}
-
-	err := d.Create(context.Background(), NewConversation{Name: "conv-1"})
-	if err == nil {
-		t.Fatal("a row failure must fail the create")
-	}
-	if !strings.Contains(err.Error(), "pg down") {
-		t.Errorf("the cause should survive: %v", err)
-	}
-	if len(cr.calls) != 1 {
-		t.Errorf("the CR write should have happened before the row: %+v", cr.calls)
-	}
-	if len(cr.removed) != 1 || cr.removed[0] != "conv-1" {
-		t.Errorf("the CR must be rolled back, got %+v", cr.removed)
-	}
-}
-
-// The rollback is best-effort, so the create still fails.
-func TestDualCreatorStillFailsWhenTheRollbackCannotHappen(t *testing.T) {
-	cannotRemove := &dualCreator{cr: &fakeCreator{}, rows: &fakeRowWriter{err: errors.New("pg down")}}
-	if err := cannotRemove.Create(context.Background(), NewConversation{Name: "conv-1"}); err == nil {
-		t.Error("a creator with no rollback must still fail the create")
-	}
-
-	removeFails := &dualCreator{
-		cr:   &removableCreator{removeErr: errors.New("apiserver down")},
-		rows: &fakeRowWriter{err: errors.New("pg down")},
-	}
-	if err := removeFails.Create(context.Background(), NewConversation{Name: "conv-1"}); err == nil {
-		t.Error("a failed rollback must still fail the create")
-	}
-}
-
-// The route surfaces the row failure rather than reporting success.
+// The route surfaces a row failure rather than reporting success: no row, no conversation.
 func TestCreateSurfacesARowFailure(t *testing.T) {
-	d := &dualCreator{cr: &removableCreator{}, rows: &fakeRowWriter{err: errors.New("pg down")}}
-	w := postCreate(t, d, `{}`, nil)
+	w := postCreate(t, rowCreator{rows: &fakeRowWriter{err: errors.New("pg down")}}, `{}`, nil)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("want 502, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "pg down") {
+		t.Errorf("the cause should survive: %s", w.Body.String())
+	}
+}
+
+// A cluster router with no write store refuses creates instead of minting ids nothing records.
+func TestCreateWithoutAWriteStoreIsRefused(t *testing.T) {
+	w := postCreate(t, unavailableCreator{}, `{}`, nil)
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("want 502, got %d (%s)", w.Code, w.Body.String())
 	}

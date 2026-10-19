@@ -50,7 +50,7 @@ const inMemoryStore = (): ConversationStore => {
   } as ConversationStore;
 };
 
-/** A registry serving `records` as the CR list. */
+/** A registry serving `records` as the row list. */
 const registryWith = (records: ConversationRecord[], opts: { listError?: Error } = {}) => ({
   register: vi.fn(async () => {}),
   setPhase: vi.fn(async () => {}),
@@ -77,9 +77,9 @@ const provisionerWithLive = (names: string[]) => {
   return p;
 };
 
-describe("hydrate() adopts from the Conversation CR", () => {
-  it("THE REGRESSION: an EMPTY local store still adopts a CR whose Sandbox is running", async () => {
-    // The pod restarts with local state wiped while the CR and the Sandbox both survive.
+describe("hydrate() adopts from the conversation registry", () => {
+  it("THE REGRESSION: an EMPTY local store still adopts a row whose Sandbox is running", async () => {
+    // The pod restarts with local state wiped while the row and the Sandbox both survive.
     const prov = provisionerWithLive(["conv-gamma"]);
     const registry = registryWith([cr("gamma")]);
     const sessions = createSessionManager({
@@ -91,7 +91,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
 
     await sessions.hydrate();
 
-    expect(sessions.list(), "the CR is the source of truth; local was empty").toHaveLength(1);
+    expect(sessions.list(), "the row is the source of truth; local was empty").toHaveLength(1);
     expect(sessions.get("gamma")?.status).toBe("running");
 
     // The sweep can therefore reclaim it.
@@ -115,7 +115,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
     expect(prov.suspend).not.toHaveBeenCalled();
   });
 
-  it("does NOT adopt an UNASSIGNED CR — the controller is the single assigner (decision Q1)", async () => {
+  it("does NOT adopt an UNASSIGNED row — the controller is the single assigner (decision Q1)", async () => {
     // hostPod unset means the controller has not placed it yet, and self-assigning would race its load accounting.
     const prov = provisionerWithLive(["conv-pending"]);
     const registry = registryWith([cr("pending", { hostPod: undefined, phase: undefined })]);
@@ -128,8 +128,8 @@ describe("hydrate() adopts from the Conversation CR", () => {
     expect(sessions.list()).toHaveLength(0);
   });
 
-  it("adopts a CR with NO local meta and NO history — enough to SUSPEND it (I5)", async () => {
-    // suspend() throws for anything not in `entries`, so the adopted CR needs a synthesized entry.
+  it("adopts a row with NO local meta and NO history — enough to SUSPEND it (I5)", async () => {
+    // suspend() throws for anything not in `entries`, so the adopted row needs a synthesized entry.
     const prov = provisionerWithLive(["conv-bare"]);
     const registry = registryWith([cr("bare")]);
     const sessions = createSessionManager({
@@ -142,7 +142,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
     expect(prov.suspend).toHaveBeenCalledOnce();
   });
 
-  it("a CR whose Sandbox is NOT running hydrates as suspended (not a phantom live pod)", async () => {
+  it("a row whose Sandbox is NOT running hydrates as suspended (not a phantom live pod)", async () => {
     const prov = provisionerWithLive([]);
     const registry = registryWith([cr("sleepy", { phase: "Suspended" })]);
     const sessions = createSessionManager({
@@ -157,7 +157,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
     expect(prov.suspend).not.toHaveBeenCalled();
   });
 
-  it("carries the CR's spec onto the adopted entry (owner survives the restart)", async () => {
+  it("carries the row's spec onto the adopted entry (owner survives the restart)", async () => {
     const prov = provisionerWithLive(["conv-owned"]);
     const registry = registryWith([cr("owned", { spec: { owner: "bob", sandboxRef: "conv-owned", model: "m1" } })]);
     const sessions = createSessionManager({
@@ -181,7 +181,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
     } as never);
     await m1.start("orphan-local");
 
-    // Same store, still no CR for it.
+    // Same store, still no row for it.
     const reg2 = registryWith([]);
     const m2 = createSessionManager({
       provisioner: provisionerWithLive([]), store: root,
@@ -192,7 +192,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
     expect(reg2.register, "boot must not rewrite every row's creator_pod").not.toHaveBeenCalled();
   });
 
-  it("PROPAGATES a CR list failure — a pod that cannot read the truth must not serve (Q4)", async () => {
+  it("PROPAGATES a row list failure — a pod that cannot read the truth must not serve (Q4)", async () => {
     // Returning [] would be indistinguishable from owning nothing, so the pod would serve blind.
     const registry = registryWith([], { listError: new Error("apiserver unavailable") });
     const sessions = createSessionManager({
@@ -204,7 +204,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
   });
 
   it("single-replica (noop registry, no selfPod) still hydrates from the local store", async () => {
-    // No CRs exist in single-replica, so the local store must remain the path there.
+    // No rows exist in single-replica, so the local store must remain the path there.
     const root = inMemoryStore();
     const m1 = createSessionManager({ provisioner: fakeProvisioner(), store: root });
     await m1.start("solo");

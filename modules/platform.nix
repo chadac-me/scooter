@@ -1202,7 +1202,7 @@ in
       };
 
       # A Deployment with maxSurge=1/maxUnavailable=0, so a new pod is Ready before any
-      # old pod drains; routing is by pod IP (status.hostIP), and the per-pod `state`
+      # old pod drains; routing is by the owner pod's IP, and the per-pod `state`
       # volume is an emptyDir hot cache of the durable history mirror.
       deployments.agent-host = {
         metadata = { name = "agent-host"; namespace = cfg.namespace; };

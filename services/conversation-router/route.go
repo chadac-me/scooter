@@ -80,7 +80,7 @@ func IsNonScoped(path string) bool {
 	return false
 }
 
-// TargetURL builds the upstream base URL for an owner pod, addressed by the pod IP the controller recorded in status.hostIP.
+// TargetURL builds the upstream base URL for an owner pod, addressed by its pod IP from the agent-host pod watch.
 func TargetURL(hostIP string, port int) *url.URL {
 	return &url.URL{
 		Scheme: "http",

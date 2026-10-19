@@ -3,25 +3,21 @@
  *
  * With the full platform deployed (agent-host Deployment, conversation-controller,
  * conversation-router, fakeAgent), a conversation posted through the front-door `agent-host`
- * Service must be created as a Conversation CR, assigned a host (status.hostPod) and given a
- * routing address (status.hostIP). The workflow deploys the platform before running this; the
+ * Service must get a `conversations` row assigned a host pod (host_pod) that has a routing
+ * address (its pod IP). The workflow deploys the platform before running this; the
  * spec talks to the already-live `agent-sandbox` namespace and is gated on RUN_CLUSTER_TESTS=1.
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
 
 import { withCluster, clusterTestsEnabled, type Cluster } from "../support/cluster.js";
+import { waitForConversationRow } from "../support/conversationRow.js";
 
 const maybe = clusterTestsEnabled() ? describe : describe.skip;
 
 const NS = process.env.PLATFORM_NS ?? "agent-sandbox";
 // The public front door (Service `agent-host`, fronting the router), the same path the UI, broker and webhooks use.
 const AGENT_HOST = `http://agent-host.${NS}.svc.cluster.local:8080`;
-
-type ConversationCR = {
-  spec?: { sandboxRef?: string };
-  status?: { phase?: string; hostPod?: string; hostIP?: string; generation?: number };
-};
 
 /** Create a conversation via POST /conversations through the front door and return the server-assigned id. */
 async function createConversation(cluster: Cluster): Promise<string> {
@@ -43,10 +39,10 @@ maybe("multi-replica platform smoke", () => {
     cluster = await withCluster({ namespace: NS });
   });
 
-  it("a conversation routed through the front door is assigned a hostPod + hostIP", async () => {
+  it("a conversation routed through the front door is assigned a host pod with an IP", async () => {
     const threadId = await createConversation(cluster);
 
-    // The run only needs to start so the agent-host registers the Conversation CR.
+    // The run only needs to start so the conversation is claimed and its sandbox provisioned.
     const body = await cluster.curlInCluster(`${AGENT_HOST}/agui`, {
       method: "POST",
       headers: ["Content-Type: application/json", "Accept: text/event-stream"],
@@ -64,20 +60,18 @@ maybe("multi-replica platform smoke", () => {
     // A RUN_ERROR means the path routed but the run failed, which should fail distinctly here.
     expect(body, "the run reached the agent but errored").toContain("RUN_FINISHED");
 
-    // Poll until the controller's reconcile has written both the owner name and the routing address.
-    const cr = await cluster.waitFor<ConversationCR>(
-      "Conversation",
-      threadId,
-      (c) => !!c.status?.hostPod && !!c.status?.hostIP,
-      90_000,
+    // Poll until the row names its owner pod.
+    const row = await waitForConversationRow(NS, threadId, (r) => !!r.host_pod && r.phase === "Assigned");
+    expect(row.host_generation).toBeGreaterThanOrEqual(1);
+    // The router proxies to the owner pod's IP.
+    const owner = await cluster.waitFor<{ status?: { podIP?: string } }>(
+      "Pod",
+      row.host_pod as string,
+      (p) => !!p.status?.podIP,
+      30_000,
       NS,
     );
-
-    expect(cr.status?.phase).toBe("Assigned");
-    expect(cr.status?.hostPod, "controller assigned an owner pod").toBeTruthy();
-    // hostIP is the pod IP the router proxies to.
-    expect(cr.status?.hostIP, "controller wrote a routing IP").toMatch(/^\d+\.\d+\.\d+\.\d+$/);
-    expect(cr.status?.generation ?? 0).toBeGreaterThanOrEqual(1);
+    expect(owner.status?.podIP, "the owner pod has a routing IP").toMatch(/^\d+\.\d+\.\d+\.\d+$/);
   });
 
   it("a SHORT-ID-addressed request routes to the OWNER, not a random pod", async () => {
@@ -94,16 +88,10 @@ maybe("multi-replica platform smoke", () => {
       timeoutMs: 60_000,
     });
 
-    // Wait for assignment so the CR carries both ids and a routing address.
-    const cr = await cluster.waitFor<ConversationCR>(
-      "Conversation",
-      threadId,
-      (c) => !!c.status?.hostIP && !!c.spec?.sandboxRef,
-      90_000,
-      NS,
-    );
-    const shortId = (cr.spec?.sandboxRef ?? "").replace(/^conv-/, "");
-    expect(shortId, "the CR must carry a sandboxRef to derive a short-id from").toMatch(/\S/);
+    // Wait for assignment so the row carries both the owner and the sandbox the short-id names.
+    const row = await waitForConversationRow(NS, threadId, (r) => !!r.host_pod && !!r.sandbox_ref);
+    const shortId = (row.sandbox_ref ?? "").replace(/^conv-/, "");
+    expect(shortId, "the row must carry a sandbox_ref to derive a short-id from").toMatch(/\S/);
 
     // Repeated because a misrouted request only fails on the attempts that land on a non-owner.
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -139,18 +127,14 @@ maybe("multi-replica platform smoke", () => {
         timeoutMs: 60_000,
       });
       // Wait for assignment so the controller has spread it before creating the next one.
-      await cluster.waitFor<ConversationCR>(
-        "Conversation", threadId, (c) => !!c.status?.hostIP, 90_000, NS,
-      );
+      await waitForConversationRow(NS, threadId, (r) => !!r.host_pod);
     }
 
     // The assertion below only has teeth when the conversations span more than one pod.
     const hosts = new Set<string>();
     for (const threadId of ids) {
-      const cr = await cluster.waitFor<ConversationCR>(
-        "Conversation", threadId, (c) => !!c.status?.hostPod, 30_000, NS,
-      );
-      if (cr.status?.hostPod) hosts.add(cr.status.hostPod);
+      const row = await waitForConversationRow(NS, threadId, (r) => !!r.host_pod, 30_000);
+      if (row.host_pod) hosts.add(row.host_pod);
     }
     expect(hosts.size, "conversations must span >1 pod for this regression to be meaningful").toBeGreaterThan(1);
 

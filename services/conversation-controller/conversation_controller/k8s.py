@@ -1,4 +1,4 @@
-"""Thin k8s access for the controller: Conversation CRs, agent-host pods, Sandboxes and the agent-host Deployment."""
+"""Thin k8s access for the controller: agent-host pods, Sandboxes and the agent-host Deployment."""
 
 from __future__ import annotations
 
@@ -30,9 +30,6 @@ def _ignore_404(e: client.ApiException) -> None:
     if e.status != 404:
         raise e
 
-GROUP = "scooter.chadac.dev"
-VERSION = "v1alpha1"
-PLURAL = "conversations"
 AGENT_HOST_LABEL = "app=agent-host"
 DELETION_COST_ANNOTATION = "controller.kubernetes.io/pod-deletion-cost"
 AGENT_HOST_DEPLOYMENT = "agent-host"  # the Deployment the controller autoscales
@@ -124,7 +121,7 @@ class ControllerK8s:
 
     # --- revive-push (seamless rollout) ------------------------------------
     def notify_revive(self, host_ip: str, conv_name: str, generation: int) -> None:
-        """POST a fire-and-forget revive for `conv_name` to the newly assigned host from a daemon thread, so an unroutable hostIP can never block the reconcile loop."""
+        """POST a fire-and-forget revive for `conv_name` to the newly assigned host from a daemon thread, so an unroutable pod IP can never block the reconcile loop."""
         url = f"http://{host_ip}:{AGENT_HOST_PORT}/internal/revive/{conv_name}?gen={generation}"
 
         def _push() -> None:
@@ -156,19 +153,6 @@ class ControllerK8s:
                 )
 
         threading.Thread(target=_push, name=f"revive-{conv_name}", daemon=True).start()
-
-    # --- Conversation CRs --------------------------------------------------
-    def list_conversations(self) -> list[dict]:
-        _, custom, _ = _apis()
-        resp = custom.list_namespaced_custom_object(GROUP, VERSION, self.namespace, PLURAL)
-        return resp.get("items", [])
-
-    def patch_status(self, name: str, status: dict) -> None:
-        """Patch a Conversation's status subresource."""
-        _, custom, _ = _apis()
-        custom.patch_namespaced_custom_object_status(
-            GROUP, VERSION, self.namespace, PLURAL, name, {"status": status}
-        )
 
     # --- orphaned-Sandbox reaper -------------------------------------------
     def suspend_sandbox(self, name: str) -> None:

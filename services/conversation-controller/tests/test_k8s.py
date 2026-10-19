@@ -14,14 +14,13 @@ import conversation_controller.k8s as k8s_mod
 from conversation_controller.k8s import ControllerK8s
 from conversation_controller.loop import reconcile_once
 
-from .test_loop import FakeRows
+from .test_loop import FakeRows, RowStore
 
 NS = "agent-sandbox"
 
 # What a real cluster serves; a request to anything else is a 404.
 SERVED = {
     ("agents.x-k8s.io", "v1beta1", "sandboxes"),
-    ("scooter.chadac.dev", "v1alpha1", "conversations"),
 }
 
 
@@ -39,29 +38,22 @@ def _merge(dst: dict, patch: dict) -> None:
 
 
 class FakeCustomObjects:
-    """Version-aware CustomObjectsApi over two in-memory collections."""
+    """Version-aware CustomObjectsApi over the in-memory Sandboxes."""
 
-    def __init__(self, sandboxes=None, conversations=None):
+    def __init__(self, sandboxes=None):
         self.sandboxes = {cr["metadata"]["name"]: cr for cr in (sandboxes or [])}
-        self.conversations = {cr["metadata"]["name"]: cr for cr in (conversations or [])}
         self.requests: list[tuple[str, str, str, str]] = []  # (verb, group, version, plural)
 
     def _store(self, group, version, plural, verb):
         self.requests.append((verb, group, version, plural))
         if (group, version, plural) not in SERVED:
             raise _not_found(f"{group}/{version} {plural}")
-        return self.sandboxes if plural == "sandboxes" else self.conversations
+        return self.sandboxes
 
     def patch_namespaced_custom_object(
         self, group=None, version=None, namespace=None, plural=None, name=None, body=None, **_kw
     ):
         store = self._store(group, version, plural, "patch")
-        if name not in store:
-            raise _not_found(name)
-        _merge(store[name], body)
-
-    def patch_namespaced_custom_object_status(self, group, version, namespace, plural, name, body, **_kw):
-        store = self._store(group, version, plural, "patch-status")
         if name not in store:
             raise _not_found(name)
         _merge(store[name], body)
@@ -128,7 +120,7 @@ def _sandbox_cr(name, mode="Running", age="2026-10-05T01:00:00Z"):
     }
 
 
-def _conversation_cr(name, sandbox_ref, phase="Suspended", gen=2):
+def _conversation_row(name, sandbox_ref, phase="Suspended", gen=2):
     return {
         "metadata": {"name": name},
         "spec": {"sandboxRef": sandbox_ref},
@@ -138,20 +130,18 @@ def _conversation_cr(name, sandbox_ref, phase="Suspended", gen=2):
 
 @pytest.fixture
 def cluster(monkeypatch):
-    """A ControllerK8s wired to the fake apiserver, plus handles on both stores."""
-    custom = FakeCustomObjects(
-        sandboxes=[_sandbox_cr("conv-fv25vg")],
-        conversations=[_conversation_cr("fv25vg", "conv-fv25vg")],
-    )
+    """A ControllerK8s wired to the fake apiserver, plus handles on it and on the rows."""
+    custom = FakeCustomObjects(sandboxes=[_sandbox_cr("conv-fv25vg")])
     core = FakeCore(host_pods=[_ready_pod()], sandbox_pods=["conv-fv25vg"])
     monkeypatch.setattr(k8s_mod, "_apis", lambda: (core, custom, None))
-    return ControllerK8s(namespace=NS), core, custom
+    rows = FakeRows(RowStore([_conversation_row("fv25vg", "conv-fv25vg")]))
+    return ControllerK8s(namespace=NS), core, custom, rows
 
 
 # --- the suspend patch addresses a served version --------------------------------------
 
 def test_suspend_sandbox_patches_the_api_version_the_cluster_serves(cluster):
-    k8s, _core, custom = cluster
+    k8s, _core, custom, _rows = cluster
     k8s.suspend_sandbox("conv-fv25vg")
     assert custom.sandboxes["conv-fv25vg"]["spec"]["operatingMode"] == "Suspended", (
         "the suspend never landed — it was addressed to an API version the cluster does not serve"
@@ -160,7 +150,7 @@ def test_suspend_sandbox_patches_the_api_version_the_cluster_serves(cluster):
 
 def test_every_sandbox_call_uses_one_api_version(cluster):
     # Pin the whole Sandbox surface to one version.
-    k8s, _core, custom = cluster
+    k8s, _core, custom, _rows = cluster
     k8s.suspend_sandbox("conv-fv25vg")
     k8s.list_sandboxes()
     k8s.reclaim_sandbox_pod("conv-fv25vg")
@@ -173,9 +163,9 @@ def test_every_sandbox_call_uses_one_api_version(cluster):
 
 def test_a_zombie_is_repaired_by_the_suspend_and_never_escalates(cluster):
     # One suspend lands and the destructive escalation is never reached.
-    k8s, core, custom = cluster
+    k8s, core, custom, rows = cluster
     for _ in range(50):
-        reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+        reconcile_once(k8s, cap=10, rows=rows)
     assert custom.sandboxes["conv-fv25vg"]["spec"]["operatingMode"] == "Suspended"
     assert core.deleted_pods == [], "a sandbox that suspended cleanly needs no pod reclaim"
 
@@ -183,9 +173,9 @@ def test_a_zombie_is_repaired_by_the_suspend_and_never_escalates(cluster):
 def test_zombie_escalation_reclaims_the_pod_but_keeps_the_workspace_pvc(cluster):
     # A sandbox that will not stay down gets its pod reclaimed while the Sandbox CR, and so the
     # workspace PVC, survives.
-    k8s, core, custom = cluster
+    k8s, core, custom, rows = cluster
     for _ in range(50):
-        reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+        reconcile_once(k8s, cap=10, rows=rows)
         # The resume race, re-armed each tick only while the Sandbox still exists.
         if "conv-fv25vg" in custom.sandboxes:
             custom.sandboxes["conv-fv25vg"]["spec"] = {"operatingMode": "Running"}
@@ -198,14 +188,14 @@ def test_zombie_escalation_reclaims_the_pod_but_keeps_the_workspace_pvc(cluster)
 
 
 def test_reclaim_sandbox_pod_is_tolerant_of_an_already_gone_pod(cluster):
-    k8s, core, _custom = cluster
+    k8s, core, _custom, _rows = cluster
     core.sandbox_pods.clear()
     k8s.reclaim_sandbox_pod("conv-fv25vg")
     assert core.deleted_pods == []
 
 
 def test_delete_sandbox_tree_removes_the_sa_and_module_configmap(cluster):
-    k8s, core, custom = cluster
+    k8s, core, custom, rows = cluster
     k8s.delete_sandbox_tree("conv-fv25vg")
     assert "conv-fv25vg" not in custom.sandboxes
     assert core.deleted_sas == ["sandbox-fv25vg"]
@@ -222,7 +212,7 @@ def test_suspended_seconds_comes_from_the_suspended_condition(monkeypatch):
         {"type": "Suspended", "status": "True", "lastTransitionTime": "2026-10-01T00:00:00Z"},
     ]}
     running = _sandbox_cr("conv-live")
-    custom = FakeCustomObjects(sandboxes=[sb, running], conversations=[])
+    custom = FakeCustomObjects(sandboxes=[sb, running])
     monkeypatch.setattr(k8s_mod, "_apis", lambda: (FakeCore(), custom, None))
     got = {s.name: s.suspended_seconds for s in ControllerK8s(namespace=NS).list_sandboxes()}
     assert got["conv-live"] is None
@@ -234,5 +224,5 @@ def test_delete_pvc_tolerates_one_already_gone(monkeypatch):
         def delete_namespaced_persistent_volume_claim(self, name, namespace, **_kw):
             raise _not_found(name)
 
-    monkeypatch.setattr(k8s_mod, "_apis", lambda: (Core(), FakeCustomObjects(sandboxes=[], conversations=[]), None))
+    monkeypatch.setattr(k8s_mod, "_apis", lambda: (Core(), FakeCustomObjects(sandboxes=[]), None))
     ControllerK8s(namespace=NS).delete_pvc("scooter-rw-conv-gone")  # must not raise

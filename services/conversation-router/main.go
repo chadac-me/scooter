@@ -1,5 +1,5 @@
 // conversation-router fronts the agent-host Service and reverse-proxies each request to
-// the agent-host pod that owns the conversation (status.hostIP on the Conversation CR).
+// the agent-host pod that owns the conversation (the `conversations` row's host_pod).
 // httputil.ReverseProxy handles HTTP, SSE and WebSocket upgrades alike.
 //
 // Flow per request:
@@ -75,7 +75,6 @@ func main() {
 	var creator ConversationCreator
 	// Nil in dev mode, where every request goes to AGENT_HOST_URL.
 	var pods *ReadyPods
-	var dynClient dynamic.Interface
 	// Body-`owner` trust for in-cluster callers; nil outside a cluster, where a body owner is never honored.
 	var trusted TrustedCaller
 	// The apiserver credentials, for the self-access TokenReview; nil in dev mode.
@@ -103,10 +102,10 @@ func main() {
 			log.Error("k8s client init failed", errAttr(err))
 			os.Exit(1)
 		}
-		dynClient = dyn
 		pods = NewReadyPods()
 		go pods.Run(ctx, dyn, cfg.namespace)
-		creator = &dynamicCreator{dyn: dyn, namespace: cfg.namespace}
+		// The row is the conversation; rowCreator replaces this once the write store connects.
+		creator = unavailableCreator{}
 		cfg.fallback = FallbackURL(cfg.clusterIPService, cfg.namespace, cfg.upstreamPort)
 		trusted = buildTrustedCaller(kubeCfg, log)
 	}
@@ -146,10 +145,11 @@ func main() {
 		}
 	}
 
-	// Dual-write the create row alongside the CR in the cluster path; dev already writes the row and has no CR.
+	// The cluster path creates by inserting the row; dev's creator already does.
 	if writeStore != nil {
-		creator = &dualCreator{cr: creator, rows: writeStore}
-		log.Info("conversation create dual-writes the row alongside the CR")
+		creator = rowCreator{rows: writeStore}
+	} else if !devModeEnabled() {
+		log.Error("no write store: conversation create is refused")
 	}
 
 	// Optional read-only handle on the webhooks database for link enrichment; without it the list serves bare rows.
@@ -168,7 +168,6 @@ func main() {
 	var resolver ownerResolver
 	if pods != nil && writeStore != nil {
 		assigner := NewAssigner(&PgAssignStore{pool: writeStore.pool}, pods)
-		assigner.OnClaim = mirrorClaim(dynClient, cfg.namespace)
 		go runAssignListener(ctx, writeStore.pool.Config().ConnConfig, assigner)
 		resolver = assigner
 		log.Info("routing by the conversations row")

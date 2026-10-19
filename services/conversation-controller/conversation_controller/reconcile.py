@@ -1,10 +1,10 @@
 """The pure reconcile core: decides what to do with one Conversation given the current
 agent-host pods and their load, with no k8s and no I/O.
 
-A Conversation is pinned to exactly one ready agent-host pod (`status.hostPod`), chosen
-least-loaded under a per-pod cap; it is reassigned with a bumped fence `generation` when
+A Conversation is pinned to exactly one ready agent-host pod (the row's `host_pod`), chosen
+least-loaded under a per-pod cap; it is reassigned with a bumped fence `host_generation` when
 its pod is gone or NotReady, and left Pending when no pod can take it. A subagent
-(spec.parentId set) is pinned to its parent's pod, bypassing the cap, and stays Pending
+(`parent_id` set) is pinned to its parent's pod, bypassing the cap, and stays Pending
 until the parent is on a ready pod.
 """
 
@@ -17,25 +17,25 @@ from dataclasses import dataclass
 class Pod:
     name: str
     ready: bool
-    ip: str | None = None      # status.podIP, the routing address written into the CR
+    ip: str | None = None      # status.podIP, the routing address the revive push dials
     deletion_cost: int | None = None  # the pod's current pod-deletion-cost annotation, None when unset
     terminating: bool = False  # metadata.deletionTimestamp is set, though the pod may still report Ready
 
 
 @dataclass(frozen=True)
 class ConversationState:
-    """The bits of a Conversation CR the decision depends on."""
+    """The bits of a conversations row the decision depends on."""
 
     name: str
-    host_pod: str | None       # status.hostPod, the owner pod name used as the fencing identity
-    phase: str                 # status.phase, defaulting to "Pending"
-    generation: int            # status.generation, the fence epoch
-    host_ip: str | None = None # status.hostIP, the owner pod's routing address
-    creator_pod: str | None = None  # spec.creatorPod, where the conversation physically runs
-    parent_id: str | None = None  # spec.parentId, so a subagent co-locates on its parent's pod
-    phase_present: bool = True  # False when the CR carries no status.phase yet
+    host_pod: str | None       # host_pod, the owner pod name used as the fencing identity
+    phase: str                 # phase, defaulting to "Pending"
+    generation: int            # host_generation, the fence epoch
+    host_ip: str | None = None # the owner pod's IP, looked up from host_pod
+    creator_pod: str | None = None  # creator_pod, where the conversation physically runs
+    parent_id: str | None = None  # parent_id, so a subagent co-locates on its parent's pod
+    phase_present: bool = True  # False when the row carries no phase yet
     sandbox_mode: str | None = None  # the backing Sandbox's spec.operatingMode, or None when it does not exist
-    sandbox_ref: str | None = None  # spec.sandboxRef, the Sandbox object SuspendSandbox patches
+    sandbox_ref: str | None = None  # sandbox_ref, the Sandbox object SuspendSandbox patches
 
 
 # --- Actions the shell will apply -----------------------------------------
@@ -61,7 +61,7 @@ class LeavePending:
 
 @dataclass(frozen=True)
 class Detach:
-    """Release a suspended conversation's placement (both hostPod and hostIP), leaving the phase to the agent-host."""
+    """Release a suspended conversation's placement (host_pod), leaving the phase to the agent-host."""
     reason: str
 
 
@@ -110,10 +110,10 @@ def reconcile(
             reason=f"phase={conv.phase} but sandbox is Suspended — reconciling phase to the sandbox"
         )
 
-    # A suspended conversation is never reassigned, and any stale placement (either field) is released.
+    # A suspended conversation is never reassigned, and any stale placement is released.
     if conv.phase == "Suspended":
-        if conv.host_pod is not None or conv.host_ip is not None:
-            return Detach(reason="suspended — release placement (clear hostPod + hostIP)")
+        if conv.host_pod is not None:
+            return Detach(reason="suspended — release placement (clear host_pod)")
         if conv.sandbox_mode == "Running":
             return SuspendSandbox(
                 reason="suspended + unhosted but the Sandbox is RUNNING — zombie (or a revive mid-flight; loop confirms over two ticks)"
@@ -192,7 +192,7 @@ def desired_replicas(
 
 
 # --- orphaned-Sandbox reaper (pure decision) -------------------------------
-# The controller GCs Sandboxes no conversation (row, or CR while writers still create them) references.
+# The controller GCs Sandboxes no conversations row references.
 
 @dataclass(frozen=True)
 class SandboxRef:
