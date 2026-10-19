@@ -37,6 +37,7 @@ import type { SandboxProvisioner } from "./session/manager.js";
 import { createFileConversationStore } from "./session/fileStore.js";
 import { createPgEventStore, withPgEvents } from "./session/eventStore.js";
 import { agentHostDsnFromEnv } from "./db/agentHostDsn.js";
+import { asSchemaMismatch, checkSchemaVersion, isSchemaMismatch } from "./db/schemaGate.js";
 import { createPgAssignmentSource, createPgOwnershipGuard } from "./session/pgOwnershipGuard.js";
 import { createPgPool } from "./db/pgPool.js";
 import { createPgConversationRegistry } from "./session/pgConversationRegistry.js";
@@ -392,6 +393,16 @@ export async function hydrateWithRetry(
       return;
     } catch (err) {
       const elapsed = now() - started;
+      // A schema older than the code will not fix itself by waiting: fail now, and say why.
+      if (isSchemaMismatch(err)) {
+        const mismatch = asSchemaMismatch(err);
+        log.errorWith(
+          "hydrate failed: database schema is behind this build; refusing to serve",
+          mismatch,
+          { attempts: attempt, waited_ms: elapsed, hint: mismatch.hint, ...mismatch.detail },
+        );
+        throw mismatch;
+      }
       // Cap the backoff so the tail of the budget is not spent asleep.
       const delay = Math.min(250 * 2 ** (attempt - 1), 5_000);
       if (elapsed + delay >= budgetMs) {
@@ -1069,7 +1080,27 @@ export async function main(
   // Restore conversations at startup, from the conversations rows when multi-replica; a pod
   // that cannot read the source of truth retries with backoff and then exits rather than
   // serving a stale view.
-  await hydrateWithRetry(() => sessions.hydrate(), hostLog);
+  // With a Postgres source of truth, first confirm its migrations reached this build's: a
+  // database that is behind fails fast with a pointer at the migrate Job, while an
+  // unreachable one is retried like any cold dependency.
+  const schemaPool = agentHostDsn
+    ? createPgPool("schemaGate", { connectionString: agentHostDsn, max: 1 })
+    : undefined;
+  let schemaChecked = false;
+  try {
+    await hydrateWithRetry(async () => {
+      if (schemaPool && !schemaChecked) {
+        const check = await checkSchemaVersion(schemaPool);
+        schemaChecked = true;
+        if (check.status === "unmanaged") {
+          hostLog.warn("agent_host database has no Atlas revision table; skipping schema version check");
+        }
+      }
+      await sessions.hydrate();
+    }, hostLog);
+  } finally {
+    await schemaPool?.end().catch(() => {});
+  }
 
   server.onPrompt(async (sessionId, input) => {
     // sessionId is the AG-UI threadId; a requested model is honored only if it is the
