@@ -1718,7 +1718,11 @@ in
                 # cluster-internal; harmless when shares is off.
                 name = "BROKER_URL";
                 value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080";
-              }] ++ lib.optionals cfg.observability.browserTelemetry.enable [
+              }] ++ lib.optional (cfg.ingress.sandboxDomain != "")
+                # nginx lets /chat/<id> be framed only by that conversation's own sandbox
+                # origin, <label>.<sandboxDomain> (pkgs/ui-image/nginx.nix).
+                { name = "SANDBOX_DOMAIN"; value = cfg.ingress.sandboxDomain; }
+              ++ lib.optionals cfg.observability.browserTelemetry.enable [
                 # Where nginx forwards /telemetry/, asserted rather than defaulted because
                 # a wrong collector URL fails silently.
                 (assert lib.assertMsg (cfg.observability.browserTelemetry.collectorUrl != null)

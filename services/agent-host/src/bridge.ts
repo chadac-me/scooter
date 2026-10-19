@@ -315,6 +315,10 @@ export interface SessionBridge {
 export interface BridgeDeps {
   config: SessionConfig;
   exec: ExecBackend;
+  /** The conversation (thread) this bridge serves. Providers mint the scooter-env token and
+   *  open the BYO tunnel for it, and MCP tools look the conversation up by it, so it must be
+   *  the real thread id, never the bridge's own `sess-` id (unset only in unit tests). */
+  conversationId?: string;
   /** This pod's name, stamped onto RUN_STARTED so a reader can tell a run started here
    *  from one stranded by another host. */
   selfPod?: string;
@@ -388,6 +392,8 @@ const nextId = (prefix: string) => `${prefix}-${randomUUID()}`;
 
 export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   const sessionId = nextId("sess");
+  /** The conversation this bridge serves; distinct from `sessionId`, the bridge's own id. */
+  const conversationId = (deps.conversationId ?? sessionId) as SessionId;
   const listeners = new Set<(event: AguiEvent) => void>();
   let acpSessionId: string | undefined;
   /** The provider serving the current run; provider+session is the true session identity
@@ -548,11 +554,11 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   const recProvider = deps.provider ?? "goose";
   const recordAguiOut = (event: AguiEvent) => {
     if (!recorder?.enabled) return;
-    recorder.record({ layer: "agui-out", provider: recProvider, conversationId: sessionId, runId: currentRun?.runId ?? "no-run", data: event });
+    recorder.record({ layer: "agui-out", provider: recProvider, conversationId, runId: currentRun?.runId ?? "no-run", data: event });
   };
   const recordRawInput = (data: unknown) => {
     if (!recorder?.enabled) return;
-    recorder.record({ layer: recProvider === "claude" ? "sdk-in" : "acp-in", provider: recProvider, conversationId: sessionId, runId: currentRun?.runId ?? "no-run", data });
+    recorder.record({ layer: recProvider === "claude" ? "sdk-in" : "acp-in", provider: recProvider, conversationId, runId: currentRun?.runId ?? "no-run", data });
   };
 
   const emit = (event: AguiEvent) => {
@@ -1197,13 +1203,13 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   // --- ACP client resolution (per-run provider selection) ---------------------------------
   // The RunContext for a run: this conversation, its owner, and the run's trigger source.
   const defaultRunContext = (): RunContext => ({
-    conversationId: sessionId,
+    conversationId,
     owner: deps.owner,
     model: deps.model,
     provider: deps.pickedProvider,
   });
   const runContextFor = (input: PromptInput): RunContext => ({
-    conversationId: sessionId,
+    conversationId,
     owner: deps.owner,
     source: input.source,
     model: deps.model,
@@ -1233,8 +1239,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       // A provider with its own MCP set (the BYO tunnel names) wins; otherwise the per-run
       // resolver, falling back to the static `config.mcpServers`.
       const resolved = provider.mcpServersFor
-        ? provider.mcpServersFor(sessionId)
-        : ((await deps.resolveMcpServers?.(sessionId)) ?? (deps.config.mcpServers as OfferedMcpServer[] | undefined));
+        ? provider.mcpServersFor(conversationId)
+        : ((await deps.resolveMcpServers?.(conversationId)) ?? (deps.config.mcpServers as OfferedMcpServer[] | undefined));
       const mcpServers = resolved;
       // Remember what this session was created with, so a later run can tell whether the
       // sandbox's set changed.
@@ -1285,7 +1291,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           });
           emit({
             type: "RUN_FINISHED",
-            threadId: run?.threadId ?? sessionId,
+            threadId: run?.threadId ?? conversationId,
             runId: run?.runId ?? "run",
             outcome: {
               type: "interrupt",
@@ -1337,17 +1343,17 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     }
     let next: string;
     try {
-      next = fingerprintOffered(await deps.resolveMcpServers(sessionId));
+      next = fingerprintOffered(await deps.resolveMcpServers(conversationId));
     } catch (err) {
       log.warn("could not resolve MCP servers; keeping the current agent session", {
-        conversation_id: sessionId,
+        conversation_id: conversationId,
         error: formatError(err),
       });
       return;
     }
     if (next === settled.mcpFingerprint) return;
     log.info("sandbox MCP servers changed; rebuilding the agent session", {
-      conversation_id: sessionId,
+      conversation_id: conversationId,
       provider: providerId,
     });
     readySessions.delete(providerId);
@@ -1359,7 +1365,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       // A close that keeps failing leaks one agent process per `scooter-rebuild`, so it is
       // logged rather than swallowed.
       log.warn("failed to close the superseded agent client; rebuilding anyway", {
-        conversation_id: sessionId,
+        conversation_id: conversationId,
         provider: providerId,
         error: formatError(err),
       });
@@ -1377,7 +1383,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       return; // readyProvider already dropped it
     }
     if (settled.client.isAlive()) return;
-    log.warn("cached agent client is dead; reconnecting", { conversation_id: sessionId, provider: providerId });
+    log.warn("cached agent client is dead; reconnecting", { conversation_id: conversationId, provider: providerId });
     readySessions.delete(providerId);
     await settled.client.close().catch(() => {});
   };
@@ -1541,11 +1547,10 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         validOptions: new Set(options.map((o) => o.optionId)),
         onExternal: onAnswer,
       });
-      // Emit the interrupt on the conversation stream, not tied to a run; threadId ==
-      // sessionId for a bridge.
+      // Emit the interrupt on the conversation stream, not tied to a run.
       emit({
         type: "RUN_FINISHED",
-        threadId: sessionId,
+        threadId: conversationId,
         runId: `ext-${id}`,
         outcome: {
           type: "interrupt",

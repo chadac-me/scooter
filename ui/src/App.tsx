@@ -14,7 +14,8 @@ import { ToolCallView } from "./ToolCallView.js";
 import { ToolGroupOpen } from "./ToolGroupOpen.js";
 import { SettingsPage } from "./SettingsPage.js";
 import { viewStore, useView } from "./view.js";
-import { useSessions } from "./sessions.js";
+import { currentConversation, useSessions } from "./sessions.js";
+import { chatPath } from "./chatRoute.js";
 import { displayTitle } from "./pageTitle.js";
 import { mobileNav, useDrawer } from "./mobileNav.js";
 import { StartingPodLanding } from "./DeadPodLanding.js";
@@ -24,7 +25,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 /** The Thread in an error boundary keyed to the render tick, so a transient runtime crash recovers on the next frame. */
-function GuardedThread() {
+export function GuardedThread() {
   const { renderTick } = useConversationInterrupts();
   return (
     <ThreadErrorBoundary resetKey={renderTick}>
@@ -34,14 +35,14 @@ function GuardedThread() {
 }
 
 /** The conversation area is always the thread, even when the pod is asleep; the only other state is the spinner while a Sandbox-tab Start is in flight. */
-function ConversationArea() {
+export function ConversationArea() {
   const { starting } = useSandboxStatus();
   if (starting) return <StartingPodLanding />;
   return <GuardedThread />;
 }
 
 /** The conversation's title beside the wordmark; absent when unnamed. */
-function HeaderConversationTitle() {
+export function HeaderConversationTitle() {
   const { sessions, currentId } = useSessions();
   const title = displayTitle(sessions.find((s) => s.id === currentId)?.title);
   if (!title) return null;
@@ -60,7 +61,7 @@ function HeaderConversationTitle() {
 }
 
 /** Header sandbox pill mirroring the Sandbox tab's status. */
-function SandboxStatusPill() {
+export function SandboxStatusPill() {
   const { state, hasConversation } = useSandboxStatus();
   if (!hasConversation) return null;
   return (
@@ -72,6 +73,26 @@ function SandboxStatusPill() {
       <span className={cn("h-1.5 w-1.5 rounded-full", SANDBOX_DOT[state])} />
       <span>sandbox {SANDBOX_LABEL[state].toLowerCase().replace("…", "")}</span>
     </div>
+  );
+}
+
+/** Opens this conversation's `/chat/<id>` subpage in its own window, to sit beside any other tab. */
+function PopOutChatButton() {
+  useSessions(); // re-render when the selection or its server id changes
+  const id = currentConversation()?.serverId();
+  if (id === undefined) return null;
+  return (
+    <Button
+      data-testid="pop-out-chat"
+      variant="ghost"
+      size="icon-sm"
+      aria-label="Pop out chat"
+      title="Pop out chat"
+      onClick={() => window.open(chatPath(id), `scooter-chat-${id}`, "popup,width=480,height=820")}
+      className="text-muted-foreground"
+    >
+      ⧉
+    </Button>
   );
 }
 
@@ -137,6 +158,7 @@ export function App() {
                 ⚑
               </Button>
             )}
+            {view !== "settings" && <PopOutChatButton />}
             {/* Light / dark / system theme toggle. */}
             <ThemePicker />
             {/* Settings toggles the main pane. */}
