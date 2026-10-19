@@ -74,9 +74,28 @@ never `pip install` for one.** None of these reach it.
   ```
 
   It installs into the running kernel and pins the version in the header. Don't edit
-  the header on disk instead: the open kernel ignores it until it restarts.
-- **"restart the kernel to use them":** ask the user before restarting. A restart
-  loses everything the notebook holds in memory.
+  the header on disk while the notebook is open: the kernel ignores it until it restarts.
+- **"restart the kernel to use them":** the header has the change, but the open kernel
+  can't load it until it restarts. A restart loses everything the notebook holds in
+  memory. Restarting from outside also leaves the user's tab showing "kernel not
+  found" until they reload it. So gauge how active the user is first:
+  - **They're working in it now** (messages about it in the last few minutes, or the
+    file saved recently: `stat -c %y nb.py`): ask them to use marimo's own restart,
+    which reloads their tab cleanly.
+  - **They seem to be away:** restart it yourself, and tell them to reload the tab
+    when they're back.
+
+  ```bash
+  M=http://localhost:2718$MARIMO_BASE; F=nb.py   # the notebook's path under /workspace
+  sid=$(curl -s "$M/api/sessions" | jq -r --arg f "/workspace/$F" 'to_entries[] | select(.value.path == $f) | .key')
+  tok=$(curl -s "$M/?file=$F" | grep -o 'data-token="[^"]*"' | cut -d'"' -f2)
+  curl -s -X POST "$M/api/kernel/restart_session?file=$F" -H "Marimo-Session-Id: $sid" \
+    -H "Marimo-Server-Token: $tok" -H 'Content-Type: application/json' -d '{}'
+  ```
+
+  If `/api/sessions` lists no session for the notebook, there is no kernel to
+  restart: the next open builds the environment from the header. A session can
+  outlive its tab for a while, so check rather than assume.
 - **A new notebook nobody has open yet:** write the header when you create the file.
 
   ```python
