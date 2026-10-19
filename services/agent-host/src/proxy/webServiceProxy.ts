@@ -54,6 +54,8 @@ export interface WebServiceDescriptor {
   unit: string;
   /** Strip the `/c/<id>/<name>` prefix before forwarding, for a service that cannot be told its base path (code-server). */
   stripBasePath?: boolean;
+  /** false for a backend another service frames (webServices.<name>.listed): proxied, but not in the Services panel. */
+  listed?: boolean;
   /** What this service declares it needs (webServices.<name>.resources), advisory only. */
   resources?: { cpu?: string; memory?: string; gpu?: number };
 }

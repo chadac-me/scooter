@@ -27,6 +27,8 @@ let
       basePath = s.basePath;
       unit = unitName name;
       stripBasePath = s.stripBasePath;
+    } // lib.optionalAttrs (!s.listed) {
+      listed = false;
     } // lib.optionalAttrs (s.hint != "") {
       inherit (s) hint;
     } // lib.optionalAttrs (s.resources != null) {
@@ -78,7 +80,7 @@ let
         cat >&2 <<'EOF'
       scooter-service — start/stop declared web services (no rebuild needed).
 
-        scooter-service list                 list services + running state
+        scooter-service list                 list services + running state (unlisted ones omitted)
         scooter-service status <name>        show one service's state + URL
         scooter-service start   <name>       start it (systemctl start)
         scooter-service stop    <name>       stop it
@@ -123,7 +125,7 @@ let
           while IFS=$'\t' read -r n u; do
             [ -n "$n" ] || continue
             out="$out"$'\n'"$(printf '%-16s %-9s %s' "$n" "$(state "$u")" "$(url_of "$n")")"
-          done <<< "$(jq -r '.services[] | "\(.name)\t\(.unit)"' "$MANIFEST")"
+          done <<< "$(jq -r '.services[] | select(.listed != false) | "\(.name)\t\(.unit)"' "$MANIFEST")"
           # Tolerate a reader closing the pipe early.
           printf '%s\n' "$out" || true
           ;;
@@ -201,6 +203,18 @@ let
         type = lib.types.str;
         default = name;
         description = "Human label shown in the UI Services panel.";
+      };
+
+      listed = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether the service is shown in the UI Services panel and `scooter-service list`.
+          An unlisted service is still proxied at its URL and still answers
+          `scooter-service start|stop|status <name>`: it is a backend another service
+          frames or calls (marimo's server, behind "marimo + chat"), started with it
+          through `extraConfig` (wants/partOf).
+        '';
       };
 
       hint = lib.mkOption {

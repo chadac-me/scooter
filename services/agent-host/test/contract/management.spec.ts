@@ -655,6 +655,21 @@ describe("management API", () => {
     expect(seen).toEqual([false, true]);
   });
 
+  it("GET web-services leaves out an unlisted service (a backend another one frames)", async () => {
+    const api = createManagementApi({
+      sessions: fakeSessions(), store: fakeStore([]), server: stubServer,
+      answerPermission: async () => {},
+      webServices: fakeWebServices({
+        list: async () => [
+          { name: "marimo", displayName: "marimo + chat", port: 2720, basePath: "/c/c1/marimo", unit: "webservice-marimo" },
+          { name: "marimo-server", displayName: "marimo server", port: 2718, basePath: "/c/c1/marimo-server", unit: "webservice-marimo-server", listed: false },
+        ],
+      }),
+    });
+    const { json } = await call(api, "GET", "/conversations/c1/web-services");
+    expect((json as any).services.map((s: any) => s.name)).toEqual(["marimo"]);
+  });
+
   it("GET web-services returns [] when the registry is unwired (fake/local mode)", async () => {
     const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
     const { json } = await call(api, "GET", "/conversations/c1/web-services");

@@ -357,10 +357,14 @@
               skillTree = lib.head (lib.filter
                 (d: lib.hasSuffix "-sandbox-os-src" (toString d))
                 skillCfg.system.extraDependencies);
-              notebookStart = shipped.nixos.config.systemd.services.webservice-notebook.serviceConfig.ExecStart;
-              notebookPort = shipped.nixos.config.webServices.notebook.port;
-              marimoCfg = shipped.nixos.config.webServices.marimo;
-              marimoStart = shipped.nixos.config.systemd.services.webservice-marimo.serviceConfig.ExecStart;
+              # webServices.marimo is "marimo + chat", the page; marimo-server is the marimo it frames.
+              pageCfg = shipped.nixos.config.webServices.marimo;
+              pageUnit = shipped.nixos.config.systemd.services.webservice-marimo;
+              notebookStart = pageUnit.serviceConfig.ExecStart;
+              notebookPort = pageCfg.port;
+              marimoCfg = shipped.nixos.config.webServices.marimo-server;
+              marimoUnit = shipped.nixos.config.systemd.services.webservice-marimo-server;
+              marimoStart = marimoUnit.serviceConfig.ExecStart;
             in
             assert sandboxWithEcho.nixos.config.environment.etc ? "scooter/contrib-echo";
             assert echoOnly == [ "contrib/echo/sandbox.nix" ];
@@ -368,16 +372,19 @@
               == (derive [ ]).treeRelative ++ [ "skill-dirs/module.nix" ];
             # marimo ships as a contrib: its service, and marimo-pair's directory for the agent's shell.
             assert builtins.elem "contrib/marimo/sandbox.nix" (derive [ ]).treeRelative;
-            assert shipped.nixos.config.webServices.marimo.enable;
+            assert pageCfg.enable && marimoCfg.enable;
             # marimo's settings are on the workspace PVC, beside the agent's own ~/.config.
             assert marimoCfg.environment.XDG_CONFIG_HOME == "/workspace/.config";
             # Its rules are printed whenever the agent starts or checks it (scooter-service).
-            assert lib.hasInfix "ctx.packages.add()" marimoCfg.hint;
-            assert shipped.nixos.config.webServices.notebook.hint == marimoCfg.hint;
+            assert lib.hasInfix "ctx.packages.add()" pageCfg.hint;
             assert shipped.nixos.config.environment.etc ? "scooter/skills/marimo-pair";
-            # "marimo + chat" ships with it, served at root so its ../marimo/ resolves on either base path.
-            assert shipped.nixos.config.webServices.notebook.enable;
-            assert shipped.nixos.config.webServices.notebook.stripBasePath;
+            # "marimo + chat" is the only marimo the user sees: the server is unlisted, starts
+            # with the page and stops or restarts with it. The page is served at root so its
+            # ../marimo-server/ resolves on either base path.
+            assert pageCfg.displayName == "marimo + chat" && pageCfg.listed && pageCfg.stripBasePath;
+            assert !marimoCfg.listed;
+            assert builtins.elem "webservice-marimo-server.service" pageUnit.wants;
+            assert builtins.elem "webservice-marimo.service" marimoUnit.partOf;
             assert shipped.nixos.config.systemd.services ? "scooter-aws-config";
             assert skillCfg.environment.etc ? "scooter/skills/echo-skill";
             assert builtins.elem "skill-dirs/module.nix"
@@ -420,7 +427,7 @@
               for _ in $(seq 50); do ${pkgs.curl}/bin/curl -sf -o $TMPDIR/page.html http://127.0.0.1:${toString notebookPort}/ && break; sleep 0.1; done
               grep -F 'const CHAT_URL = "https://scooter.example.com/chat/5a515e73-860b-49ba-bc3f-6ff8d5fda5ff";' $TMPDIR/page.html
               grep -F 'href="https://scooter.example.com/?thread=5a515e73-860b-49ba-bc3f-6ff8d5fda5ff&x=1"' $TMPDIR/page.html
-              grep -F 'new URL("../marimo/", location.href)' $TMPDIR/page.html
+              grep -F 'new URL("../marimo-server/", location.href)' $TMPDIR/page.html
               if grep -F '@CHAT_URL@' $TMPDIR/page.html; then echo 'FAIL: placeholder left in the page' >&2; exit 1; fi
               # Only the page: conv.env, beside it in the runtime dir, is not served.
               test "$(${pkgs.curl}/bin/curl --path-as-is -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${toString notebookPort}/../conv.env)" != 200

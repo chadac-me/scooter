@@ -23,15 +23,14 @@ shell for that.
 ## 1. Start it and give the user the link
 
 ```bash
-scooter-service start marimo     # prints the notebook's URL
-scooter-service start notebook   # "marimo + chat": this conversation beside the notebook
+scooter-service start marimo     # prints the URL to give the user
 ```
 
-Give the user the **notebook** link (`marimo + chat`) by default. It shows this
-conversation on the left and marimo on the right, so they can ask you for changes
-without leaving the notebook. The marimo link alone is for a full-screen notebook.
-The user can also start either from the **Services panel**. The first start
-materializes marimo, which takes a while. Notebooks live in `/workspace`.
+The `marimo` service is **"marimo + chat"**: this conversation on the left and the
+notebook on the right, so the user can ask you for changes without leaving it. It
+starts the marimo server behind it, `marimo-server`, which isn't listed; don't give
+the user that link. The user can also start it from the **Services panel**. The first
+start materializes marimo, which takes a while. Notebooks live in `/workspace`.
 
 **marimo-pair can only reach a notebook the user has open in the browser.** A
 session exists only while a tab has the notebook open. So ask the user to open
@@ -45,8 +44,8 @@ Read the **marimo-pair** skill and follow it. Two things differ here:
   `discover-servers.sh` won't find it. Use:
 
   ```bash
-  # marimo serves at /marimo on the conversation's own origin, else under /c/<id>/marimo.
-  MARIMO_BASE=${SCOOTER_SERVICES_ORIGIN:+/marimo}; MARIMO_BASE=${MARIMO_BASE:-/c/$CONVERSATION_ID/marimo}
+  # The server is at /marimo-server on the conversation's own origin, else /c/<id>/marimo-server.
+  MARIMO_BASE=${SCOOTER_SERVICES_ORIGIN:+/marimo-server}; MARIMO_BASE=${MARIMO_BASE:-/c/$CONVERSATION_ID/marimo-server}
   bash /etc/scooter/skills/marimo-pair/scripts/execute-code.sh \
     --url "http://localhost:2718$MARIMO_BASE" \
     -c "import marimo._code_mode as cm; help(cm)"
@@ -127,8 +126,9 @@ reads it whenever a notebook opens, so changes need no restart.
 
 ## If something is off
 
-- `scooter-service status marimo` and `journalctl -u webservice-marimo -n 50`
-  show the server's state and log.
+- `scooter-service status marimo-server` and `journalctl -u webservice-marimo-server -n 50`
+  show the server's state and log. `scooter-service restart marimo` restarts both,
+  which ends every open kernel.
 - "Failed to connect": the service isn't running, or the URL lacks marimo's base
   path (`$MARIMO_BASE` above).
 - "No sessions": nobody has the notebook open. Ask the user to open the link.

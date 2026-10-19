@@ -1,5 +1,8 @@
-# marimo's sandbox half: a notebook served as webServices.marimo under
-# /c/<id>/marimo/, with `--base-url` and `--proxy` read from the pod env at start.
+# marimo's sandbox half. The user-facing service is webServices.marimo, "marimo + chat":
+# a static page with this conversation beside the notebook. The marimo server it frames
+# is webServices.marimo-server, unlisted (no Services panel entry), started and stopped
+# with it, and served under /c/<id>/marimo-server/ with `--base-url` and `--proxy`
+# read from the pod env at start.
 # `pkgs.marimo` is a nix-stubs shim (modules/sandbox-os/stubs.nix) that materializes
 # on first start, so declaring the service costs a manifest entry and no running
 # process. curl and jq are here for marimo-pair's scripts
@@ -12,7 +15,8 @@
 
 let
   cfg = config.webServices.marimo;
-  nb = config.webServices.notebook;
+  srv = config.webServices.marimo-server;
+  srvUnit = "webservice-marimo-server.service";
 
   # "marimo + chat": index.html with the conversation's chat URL filled in, served static.
   # On the conversation's own origin the path carries no id, so it is templated at start
@@ -29,7 +33,7 @@ let
     esc() { printf %s "$1" | sed 's/[&|\\]/\\&/g'; }
     sed -e "s|@CHAT_URL@|$(esc "$chat")|g" -e "s|@APP_URL@|$(esc "$app")|g" \
       ${./notebook/index.html} > "$www/index.html"
-    exec ${pkgs.darkhttpd}/bin/darkhttpd "$www" --addr 0.0.0.0 --port ${toString nb.port} --no-listing --no-server-id
+    exec ${pkgs.darkhttpd}/bin/darkhttpd "$www" --addr 0.0.0.0 --port ${toString cfg.port} --no-listing --no-server-id
   '';
 
   # marimo 0.25 opens a notebook with every cell stale (runtime.auto_instantiate
@@ -37,7 +41,7 @@ let
   # bookmark that wakes the sandbox, so it should arrive computed. This is a user-level
   # default: it is written only while marimo has no settings of its own, and anything the
   # user or agent sets afterwards wins.
-  # Printed by `scooter-service start|status marimo` (and notebook), since the skill's body
+  # Printed by `scooter-service start|status marimo`, since the skill's body
   # can drop out of a long session's context. Mirrors scooter-marimo.md.
   hint = ''
     Packages: marimo-pair's ctx.packages.add(), never pip, a venv or a pyproject.toml (each notebook has its own environment).
@@ -60,28 +64,33 @@ in
 {
   # The marimo shim on PATH, so the agent can run it by hand, and what marimo-pair's
   # scripts call: they talk to the running server's HTTP API with curl and jq.
-  environment.systemPackages = lib.mkIf cfg.enable [ pkgs.marimo pkgs.curl pkgs.jq ];
+  environment.systemPackages = lib.mkIf srv.enable [ pkgs.marimo pkgs.curl pkgs.jq ];
 
   # The conversation beside the notebook: a static page framing `/chat/<id>` (left) and
-  # marimo (right), both ingress URLs, so nothing is proxied here. Served at root
-  # (stripBasePath), so its relative `../marimo/` works on either base path.
-  webServices.notebook = {
-    enable = lib.mkDefault cfg.enable;
+  # marimo-server (right), both ingress URLs, so nothing is proxied here. Served at root
+  # (stripBasePath), so its relative `../marimo-server/` works on either base path.
+  webServices.marimo = {
+    enable = lib.mkDefault true;
     port = lib.mkDefault 2720;
     displayName = lib.mkDefault "marimo + chat";
     stripBasePath = lib.mkDefault true;
     command = lib.mkDefault "${notebookServer}";
     hint = lib.mkDefault hint;
+    # Starting the page starts the server it frames.
+    extraConfig.wants = [ srvUnit ];
   };
 
-  webServices.marimo = {
-    enable = lib.mkDefault true;
+  # The marimo server itself: unlisted, so "marimo + chat" is the only way in. It is
+  # PartOf the page's unit, so stopping or restarting `marimo` does the same to it.
+  webServices.marimo-server = {
+    enable = lib.mkDefault cfg.enable;
     port = lib.mkDefault 2718;
-    displayName = lib.mkDefault "marimo";
+    displayName = lib.mkDefault "marimo server";
+    listed = lib.mkDefault false;
+    extraConfig.partOf = [ "webservice-marimo.service" ];
     # Root, like the agent's own exec'd shell, so notebooks land on the /workspace PVC.
     user = lib.mkDefault "root";
     workingDirectory = lib.mkDefault "/workspace";
-    hint = lib.mkDefault hint;
     environment = lib.mkDefault ({
       # marimo's settings live in the agent's own ~/.config on the workspace PVC, not in
       # root's home, which a pod rebuild discards. uv's cache stays out of the PVC.
@@ -105,13 +114,13 @@ in
       # `command` is types.str, so the derivation is interpolated to its store path for the re-converge eval.
       lib.mkDefault "${pkgs.writeShellScript "marimo-web-service" ''
         set -euo pipefail
-        base="''${SCOOTER_SERVICE_PREFIX-/c/''${CONVERSATION_ID:-unknown}}/marimo"
+        base="''${SCOOTER_SERVICE_PREFIX-/c/''${CONVERSATION_ID:-unknown}}/marimo-server"
         proxy_args=()
         if [ -n "''${PUBLIC_HOST:-}" ]; then proxy_args+=(--proxy "''${PUBLIC_HOST}"); fi
         ${seedSettings}
         # --no-token: access is gated by the platform proxy, and marimo-pair needs a token-less server.
         ${runner} \
-          --host 0.0.0.0 --port ${toString cfg.port} \
+          --host 0.0.0.0 --port ${toString srv.port} \
           --base-url "$base" "''${proxy_args[@]}" \
           --headless --no-token
       ''}";

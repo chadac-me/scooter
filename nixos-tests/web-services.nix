@@ -62,7 +62,17 @@ pkgs.testers.runNixOSTest {
       extraConfig = {
         unitConfig.X-Web-Service-Test = "yes";
         serviceConfig.LimitNOFILE = 4242;
+        wants = [ "webservice-backend.service" ];
       };
+    };
+
+    # An unlisted backend the demo starts, as marimo-server is to "marimo + chat".
+    webServices.backend = {
+      enable = true;
+      port = 9912;
+      listed = false;
+      command = "${pkgs.coreutils}/bin/sleep infinity";
+      extraConfig.partOf = [ "webservice-demo.service" ];
     };
   };
 
@@ -118,6 +128,18 @@ pkgs.testers.runNixOSTest {
     assert "url: /c/conv-test/demo/" in out and "note: Reload the demo after editing it." in out, out
     machine.wait_until_succeeds("systemctl is-active --quiet webservice-demo.service", timeout=30)
     machine.fail("scooter-service start nope")
+
+    # 4c. An unlisted service is in the manifest (the proxy needs its port) but not in
+    #     `list`; it starts with the service that wants it, answers status by name, and
+    #     stops with the service it is PartOf.
+    services = { s["name"]: s for s in data["services"] }
+    assert services["backend"].get("listed") is False, services["backend"]
+    assert "listed" not in services["demo"], services["demo"]
+    machine.succeed("! scooter-service list | grep -q backend")
+    machine.wait_until_succeeds("systemctl is-active --quiet webservice-backend.service", timeout=30)
+    machine.succeed("scooter-service status backend | grep -q active")
+    machine.succeed("scooter-service stop demo")
+    machine.wait_until_succeeds("! systemctl is-active --quiet webservice-backend.service", timeout=30)
 
     # 5. The built-in `terminal` is in the manifest and its unit runs ttyd + tmux under the /terminal base path.
     term = { s["name"]: s for s in data["services"] }["terminal"]
