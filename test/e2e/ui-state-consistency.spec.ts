@@ -36,7 +36,8 @@ test.describe("whole-UI consistency through a normal turn", () => {
       .poll(
         async () => {
           const userMessages = page.locator('.aui-user-message-content');
-          const lastText = await userMessages.last().innerText().catch(() => "");
+          // textContent, not innerText: content-visibility:auto bubbles off-screen have an empty innerText.
+          const lastText = (await userMessages.last().textContent().catch(() => "")) ?? "";
           return lastText.includes("!sleep 20");
         },
         { timeout: 10_000 },
@@ -70,15 +71,16 @@ test.describe("whole-UI consistency through a normal turn", () => {
       // sendTurn returns when the reply text lands; wait for the run to actually end before
       // asserting the idle state.
       await chat.waitForIdle();
-      // Poll for the last user message's text before snapshotting, since the element can
-      // exist with an empty innerText mid-render.
+      // Poll for the last user message's text before snapshotting, since the element can mount
+      // before its text; read textContent, since an off-screen content-visibility:auto bubble
+      // (the thread outgrows the viewport by turn ~7) has an empty innerText.
       await expect
         .poll(
           async () => {
             const userMessages = page.locator('.aui-user-message-content');
             const count = await userMessages.count();
             if (count < i) return false;
-            const lastText = await userMessages.nth(count - 1).innerText().catch(() => "");
+            const lastText = (await userMessages.nth(count - 1).textContent().catch(() => "")) ?? "";
             return lastText.includes(`consistency turn ${i}`);
           },
           { timeout: 10_000 },

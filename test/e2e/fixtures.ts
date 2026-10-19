@@ -461,7 +461,8 @@ export async function snapshot(page: Page): Promise<UiSnapshot> {
     userMessages: nUsers,
     assistantMessages: await page.locator(sel.assistantMessage).count(),
     toolCards: await count(sel.toolCall),
-    lastUserText: nUsers ? ((await users.nth(nUsers - 1).innerText().catch(() => "")) || "").trim() : "",
+    // textContent, not innerText: an off-screen content-visibility:auto bubble has an empty innerText.
+    lastUserText: nUsers ? ((await users.nth(nUsers - 1).textContent().catch(() => "")) || "").trim() : "",
     // One evaluate keeps the run-state triple mutually consistent, and the composer's send
     // button is targeted precisely because sidebar row buttons can also match /send/i.
     ...(await page.evaluate(() => {
