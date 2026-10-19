@@ -376,9 +376,9 @@ jobs:
               - 'test/cluster/platform-smoke.spec.ts'
               - 'flake.nix'
               # The agent-host side of the multi-replica contract: it writes the
-              # Conversation CRs the controller assigns, and hydrate() adopts them on boot.
+              # conversations rows the controller assigns, and hydrate() adopts them on boot.
               - 'services/agent-host/src/session/conversationRegistry.ts'
-              - 'services/agent-host/src/session/k8sConversationRegistry.ts'
+              - 'services/agent-host/src/session/pgConversationRegistry.ts'
               # Everything that decides what the e2e-full browser stories run must
               # open the gate too.
               - '.github/workflows/ci.yml'

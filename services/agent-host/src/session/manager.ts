@@ -323,11 +323,11 @@ export interface SessionManagerDeps {
   /** Multi-replica fencing guard consulted before this pod appends to a conversation's log; omitted
    *  = allowAllGuard. */
   ownershipGuard?: OwnershipGuard;
-  /** Multi-replica registry that writes a Conversation CR so the controller can assign a hostPod;
-   *  omitted = noopRegistry. */
+  /** Multi-replica assignment table (the conversations row) that publishes placement hints and
+   *  phase and answers which pod hosts a conversation; omitted = noopRegistry. */
   conversationRegistry?: ConversationRegistry;
   /** This pod's name (POD_NAME); when set with a registry that can list(), hydrate() adopts every
-   *  Conversation CR assigned to this pod. */
+   *  conversation assigned to this pod. */
   selfPod?: string;
   /** How to build a bridge per conversation; omitted in lifecycle-only unit tests. */
   bridgeFactory?: BridgeFactory;
@@ -444,7 +444,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return entry;
   };
 
-  // On-demand hydration of one thread from the store or its Conversation CR; returns undefined when
+  // On-demand hydration of one thread from the store or the registry; returns undefined when
   // neither has it or the store read fails.
   const hydrateByThread = async (threadId: ThreadId): Promise<Entry | undefined> => {
     let metas: ConversationMeta[];
@@ -460,7 +460,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     let m = metas.find((x) => x.threadId === threadId);
     const fromStore = m !== undefined;
     if (!m) {
-      // The CR is authoritative for existence, so adopt from it when the store has no meta yet.
+      // The registry is authoritative for existence, so adopt from it when the store list missed it
+      // (a row inserted after the list was read).
       const c = await conversationRegistry.get(threadId).catch(() => undefined);
       if (!c) return undefined;
       m = {
@@ -663,8 +664,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       entries.set(id, entry);
       await saveMeta(entry);
 
-      // Register the CR before provisioning so the controller can assign a hostPod while the
-      // sandbox spins up; idempotent and non-throwing.
+      // Publish sandbox_ref and creator_pod before provisioning so the router can route and the
+      // controller place it while the sandbox spins up; idempotent and non-throwing.
       await conversationRegistry.register(id, { model, owner, sandboxRef: entry.sandbox.name, creatorPod: deps.selfPod });
 
       // Provision the sandbox and attach the bridge.
@@ -700,7 +701,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       entries.set(id, entry);
       await saveMeta(entry);
 
-      // Register the child CR with parentId so the controller co-locates it on the parent's pod.
+      // Publish the child's sandbox_ref and creator_pod; its parent_id (set by the router's insert)
+      // co-locates it on the parent's pod.
       await conversationRegistry.register(id, {
         model, owner: parent.owner, parentId, sandboxRef: entry.sandbox.name,
         creatorPod: deps.selfPod, // placement hint for the controller
@@ -744,7 +746,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         ? await provisioner.resume(entry.sandbox, entry.threadId)
         : await provisioner.create(shortId(entry.threadId), entry.threadId);
       // end() may have landed during provisioning; destroy the pod just made before any side effect
-      // re-creates the CR.
+      // republishes the conversation.
       if (endedIds.has(id)) {
         await provisioner.destroy(entry.sandbox).catch((err: unknown) => {
           log.errorWith("failed to destroy a pod revived into a deleted conversation", err, {
@@ -755,8 +757,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
       entry.bridge = bridgeFactory?.({ conversationId: id, sandbox: entry.sandbox, model: entry.model, pickedProvider: entry.pickedProvider, owner: entry.owner }) ?? entry.bridge;
       entry.status = "running";
-      // Re-register the CR so a conversation whose CR was never created or was lost becomes
-      // routable again; idempotent, fire-and-forget.
+      // Republish sandbox_ref, and this pod as creator_pod since the run now lives here;
+      // idempotent, fire-and-forget.
       void conversationRegistry.register(id, {
         model: entry.model, owner: entry.owner, parentId: entry.parentId, sandboxRef: entry.sandbox.name,
         creatorPod: deps.selfPod, // placement hint for the controller
@@ -1026,7 +1028,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       await provisioner.suspend(entry.sandbox);
       entry.bridge = undefined;
       entry.status = "suspended";
-      // Publish phase to the CR; owner-fenced, fire-and-forget.
+      // Publish phase to the row; owner-fenced, fire-and-forget.
       if (ownershipGuard.canWrite(id)) void conversationRegistry.setPhase(id, "Suspended");
     },
 
@@ -1051,10 +1053,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // hydrate().
         entries.delete(targetId);
         await store.removeConversation?.(targetId);
-        // The CR is the source of truth for existence, so remove it too; a failure is logged rather
-        // than failing a delete that already succeeded locally.
+        // The registry is the source of truth for existence, so remove it there too; a failure is
+        // logged rather than failing a delete that already succeeded locally.
         await conversationRegistry.remove(targetId).catch((err: unknown) => {
-          log.errorWith("failed to remove the Conversation CR; it may be re-adopted", err, {
+          log.errorWith("failed to remove the conversation from the registry; it may be re-adopted", err, {
             conversation_id: targetId,
           });
         });
@@ -1136,12 +1138,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     async hydrate() {
       const metas = (await store.listConversations?.()) ?? [];
 
-      // The Conversation CR is the source of truth for which conversations this pod serves, and
-      // `metas` is only the local cache; list() throws on failure and is left to propagate so a pod
-      // that cannot read the truth does not serve a stale view.
+      // The registry is the source of truth for which conversations this pod serves; list() throws
+      // on failure and is left to propagate so a pod that cannot read the truth does not serve a
+      // stale view.
       const crs = deps.selfPod ? await conversationRegistry.list() : [];
-      // Adopt only what the controller assigned to us; an unassigned CR is left to the controller,
-      // the single assigner.
+      // Adopt only what is assigned to us; an unassigned conversation is left to the assigners
+      // (router and controller).
       const mine = crs.filter((c) => c.hostPod && c.hostPod === deps.selfPod);
       const metaById = new Map(metas.map((m) => [m.id, m] as const));
 
@@ -1186,12 +1188,6 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (entries.has(m.id)) continue; // a live one already exists
         const name = `conv-${shortId(m.threadId)}`;
         const entry = hydrateEntry(m, live.get(name));
-        // Re-register the CR so every persisted conversation is observable and routable;
-        // idempotent, fire-and-forget.
-        void conversationRegistry.register(entry.id, {
-          model: entry.model, owner: entry.owner, parentId: entry.parentId, sandboxRef: entry.sandbox.name,
-          creatorPod: deps.selfPod, // placement hint for the controller
-        });
         // Re-publish Suspended so a phase that never landed self-heals here, the one place a pod
         // re-observes a suspended conversation; owner-fenced.
         if (entry.status === "suspended" && ownershipGuard.canWrite(entry.id)) {
@@ -1199,11 +1195,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         }
       }
 
-      // Adopt the conversations the CR says are ours but the local cache never had.
+      // Adopt the conversations assigned to us that the meta list missed.
       for (const c of mine) {
         if (entries.has(c.id)) continue; // already live or hydrated from the local cache
-        // A conversation with no meta is adopted from the CR alone, enough to be listed, suspended
-        // and reclaimed.
+        // A conversation with no meta is adopted from the registry record alone, enough to be
+        // listed, suspended and reclaimed.
         const meta = metaById.get(c.id);
         const synthesized: ConversationMeta = meta ?? {
           id: c.id,
@@ -1216,10 +1212,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           owner: c.spec.owner,
           parentId: c.spec.parentId,
         };
-        // The CR's spec is authoritative over a possibly stale local meta.
+        // The record is authoritative over a possibly stale meta.
         if (c.spec.owner) synthesized.owner = c.spec.owner;
         if (c.spec.model) synthesized.model = c.spec.model;
-        // Key the reconcile result by the CR's sandboxRef when it has one.
+        // Key the reconcile result by the record's sandboxRef when it has one.
         const sandboxName = c.spec.sandboxRef ?? `conv-${shortId(synthesized.threadId)}`;
         const entry = hydrateEntry(synthesized, live.get(sandboxName));
         entries.set(c.id, entry);

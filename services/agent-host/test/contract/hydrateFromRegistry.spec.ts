@@ -1,7 +1,7 @@
 /**
- * Contract tests for hydrate() driven by the Conversation CR, the source of truth.
- * LOCAL_STATE_PATH is an emptyDir that a restart wipes, so every test here gives the
- * second manager an empty local store and expects the CR list to populate it.
+ * Contract tests for hydrate() driven by the conversation registry (the conversations row),
+ * the source of truth. LOCAL_STATE_PATH is an emptyDir that a restart wipes, so every test
+ * here gives the second manager an empty local store and expects the registry list to populate it.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -171,8 +171,8 @@ describe("hydrate() adopts from the Conversation CR", () => {
     expect(c?.model).toBe("m1");
   });
 
-  it("a LOCAL meta with no CR still hydrates (self-heal, never lose a conversation)", async () => {
-    // A conversation created while the CR write failed must keep working and get re-registered.
+  it("a LOCAL meta with no assignment still hydrates, and hydrate does not re-register it", async () => {
+    // Re-registering at boot would only stamp this pod as creator_pod on every conversation.
     const root = inMemoryStore();
     const prov1 = fakeProvisioner();
     const reg1 = registryWith([]);
@@ -189,7 +189,7 @@ describe("hydrate() adopts from the Conversation CR", () => {
     } as never);
     await m2.hydrate();
     expect(m2.list().map((c) => c.id)).toContain("orphan-local");
-    expect(reg2.register, "the authority self-heals toward completeness").toHaveBeenCalled();
+    expect(reg2.register, "boot must not rewrite every row's creator_pod").not.toHaveBeenCalled();
   });
 
   it("PROPAGATES a CR list failure — a pod that cannot read the truth must not serve (Q4)", async () => {
