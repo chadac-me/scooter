@@ -20,12 +20,14 @@ shell for that.
 ## 1. Start it and give the user the link
 
 ```bash
-scooter-service start marimo
-ORIGIN=$(echo "$CONVERSATION_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
-echo "$ORIGIN/c/$CONVERSATION_ID/marimo/"
+scooter-service start marimo     # prints the notebook's URL
+scooter-service start notebook   # "marimo + chat": this conversation beside the notebook
 ```
 
-The user can also start it from the **Services panel**. The first start
+Give the user the **notebook** link (`marimo + chat`) by default. It shows this
+conversation on the left and marimo on the right, so they can ask you for changes
+without leaving the notebook. The marimo link alone is for a full-screen notebook.
+The user can also start either from the **Services panel**. The first start
 materializes marimo, which takes a while. Notebooks live in `/workspace`.
 
 **marimo-pair can only reach a notebook the user has open in the browser.** A
@@ -40,8 +42,10 @@ Read the **marimo-pair** skill and follow it. Two things differ here:
   `discover-servers.sh` won't find it. Use:
 
   ```bash
+  # marimo serves at /marimo on the conversation's own origin, else under /c/<id>/marimo.
+  MARIMO_BASE=${SCOOTER_SERVICES_ORIGIN:+/marimo}; MARIMO_BASE=${MARIMO_BASE:-/c/$CONVERSATION_ID/marimo}
   bash /etc/scooter/skills/marimo-pair/scripts/execute-code.sh \
-    --url "http://localhost:2718/c/$CONVERSATION_ID/marimo" \
+    --url "http://localhost:2718$MARIMO_BASE" \
     -c "import marimo._code_mode as cm; help(cm)"
   ```
 
@@ -60,6 +64,6 @@ marimo-pair's rules hold as written:
 
 - `scooter-service status marimo` and `journalctl -u webservice-marimo -n 50`
   show the server's state and log.
-- "Failed to connect": the service isn't running, or the URL lacks the
-  `/c/$CONVERSATION_ID/marimo` base path.
+- "Failed to connect": the service isn't running, or the URL lacks marimo's base
+  path (`$MARIMO_BASE` above).
 - "No sessions": nobody has the notebook open. Ask the user to open the link.

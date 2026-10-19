@@ -12,11 +12,41 @@
 
 let
   cfg = config.webServices.marimo;
+  nb = config.webServices.notebook;
+
+  # "marimo + chat": index.html with the conversation's chat URL filled in, served static.
+  # On the conversation's own origin the path carries no id, so it is templated at start
+  # from conv.env. SCOOTER_CHAT_URL overrides the chat pane (e.g. before /chat/<id> exists).
+  notebookServer = pkgs.writeShellScript "notebook-web-service" ''
+    set -euo pipefail
+    www="''${RUNTIME_DIRECTORY%%:*}/www"
+    mkdir -p "$www"
+    app="''${CONVERSATION_URL:-}"
+    chat="''${SCOOTER_CHAT_URL:-}"
+    if [ -z "$chat" ] && [ -n "$app" ] && [ -n "''${CONVERSATION_ID:-}" ]; then
+      chat="$(printf %s "$app" | sed -n 's|^\(https\{0,1\}://[^/]*\).*|\1|p')/chat/$CONVERSATION_ID"
+    fi
+    esc() { printf %s "$1" | sed 's/[&|\\]/\\&/g'; }
+    sed -e "s|@CHAT_URL@|$(esc "$chat")|g" -e "s|@APP_URL@|$(esc "$app")|g" \
+      ${./notebook/index.html} > "$www/index.html"
+    exec ${pkgs.darkhttpd}/bin/darkhttpd "$www" --addr 0.0.0.0 --port ${toString nb.port} --no-listing --no-server-id
+  '';
 in
 {
   # The marimo shim on PATH, so the agent can run it by hand, and what marimo-pair's
   # scripts call: they talk to the running server's HTTP API with curl and jq.
   environment.systemPackages = lib.mkIf cfg.enable [ pkgs.marimo pkgs.curl pkgs.jq ];
+
+  # The conversation beside the notebook: a static page framing `/chat/<id>` (left) and
+  # marimo (right), both ingress URLs, so nothing is proxied here. Served at root
+  # (stripBasePath), so its relative `../marimo/` works on either base path.
+  webServices.notebook = {
+    enable = lib.mkDefault cfg.enable;
+    port = lib.mkDefault 2720;
+    displayName = lib.mkDefault "marimo + chat";
+    stripBasePath = lib.mkDefault true;
+    command = lib.mkDefault "${notebookServer}";
+  };
 
   webServices.marimo = {
     enable = lib.mkDefault true;

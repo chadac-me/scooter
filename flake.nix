@@ -357,6 +357,8 @@
               skillTree = lib.head (lib.filter
                 (d: lib.hasSuffix "-sandbox-os-src" (toString d))
                 skillCfg.system.extraDependencies);
+              notebookStart = shipped.nixos.config.systemd.services.webservice-notebook.serviceConfig.ExecStart;
+              notebookPort = shipped.nixos.config.webServices.notebook.port;
             in
             assert sandboxWithEcho.nixos.config.environment.etc ? "scooter/contrib-echo";
             assert echoOnly == [ "contrib/echo/sandbox.nix" ];
@@ -366,6 +368,9 @@
             assert builtins.elem "contrib/marimo/sandbox.nix" (derive [ ]).treeRelative;
             assert shipped.nixos.config.webServices.marimo.enable;
             assert shipped.nixos.config.environment.etc ? "scooter/skills/marimo-pair";
+            # "marimo + chat" ships with it, served at root so its ../marimo/ resolves on either base path.
+            assert shipped.nixos.config.webServices.notebook.enable;
+            assert shipped.nixos.config.webServices.notebook.stripBasePath;
             assert shipped.nixos.config.systemd.services ? "scooter-aws-config";
             assert skillCfg.environment.etc ? "scooter/skills/echo-skill";
             assert builtins.elem "skill-dirs/module.nix"
@@ -398,6 +403,21 @@
               diff -r ${skillSrc} ${skillTree}/skill-dirs/echo-skill
               grep -F 'builtins.path { path = ./echo-skill; name = "skill-echo-skill"; }' \
                 ${skillTree}/skill-dirs/module.nix
+
+              # The "marimo + chat" page, from its real ExecStart: the chat pane is the
+              # conversation's /chat/<id> on the app's origin, and the page is served static.
+              export RUNTIME_DIRECTORY=$TMPDIR/nb CONVERSATION_ID=5a515e73-860b-49ba-bc3f-6ff8d5fda5ff
+              export CONVERSATION_URL="https://scooter.example.com/?thread=$CONVERSATION_ID&x=1"
+              mkdir -p $RUNTIME_DIRECTORY && echo SECRET=1 > $RUNTIME_DIRECTORY/conv.env
+              ${notebookStart} &
+              for _ in $(seq 50); do ${pkgs.curl}/bin/curl -sf -o $TMPDIR/page.html http://127.0.0.1:${toString notebookPort}/ && break; sleep 0.1; done
+              grep -F 'const CHAT_URL = "https://scooter.example.com/chat/5a515e73-860b-49ba-bc3f-6ff8d5fda5ff";' $TMPDIR/page.html
+              grep -F 'href="https://scooter.example.com/?thread=5a515e73-860b-49ba-bc3f-6ff8d5fda5ff&x=1"' $TMPDIR/page.html
+              grep -F 'src="../marimo/"' $TMPDIR/page.html
+              if grep -F '@CHAT_URL@' $TMPDIR/page.html; then echo 'FAIL: placeholder left in the page' >&2; exit 1; fi
+              # Only the page: conv.env, beside it in the runtime dir, is not served.
+              test "$(${pkgs.curl}/bin/curl --path-as-is -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${toString notebookPort}/../conv.env)" != 200
+              kill %1
               touch $out
             '';
 
