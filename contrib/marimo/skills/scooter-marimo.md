@@ -3,7 +3,10 @@ name: scooter-marimo
 description: >-
   marimo notebooks in this sandbox: the `marimo` web service and how to pair on it
   with the marimo-pair skill. Use when the user wants a notebook, data exploration,
-  plots or an interactive report, or asks you to work in their open notebook.
+  plots or an interactive report, asks you to work in their open notebook, or a
+  notebook needs a package or a setting changed. Each notebook has its own
+  environment: add packages with ctx.packages.add(), never pip, a venv or a
+  pyproject.toml. Settings go in ~/.config/marimo/marimo.toml.
 ---
 
 # marimo in Scooter
