@@ -371,6 +371,9 @@
             assert shipped.nixos.config.webServices.marimo.enable;
             # marimo's settings are on the workspace PVC, beside the agent's own ~/.config.
             assert marimoCfg.environment.XDG_CONFIG_HOME == "/workspace/.config";
+            # Its rules are printed whenever the agent starts or checks it (scooter-service).
+            assert lib.hasInfix "ctx.packages.add()" marimoCfg.hint;
+            assert shipped.nixos.config.webServices.notebook.hint == marimoCfg.hint;
             assert shipped.nixos.config.environment.etc ? "scooter/skills/marimo-pair";
             # "marimo + chat" ships with it, served at root so its ../marimo/ resolves on either base path.
             assert shipped.nixos.config.webServices.notebook.enable;

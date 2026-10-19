@@ -56,6 +56,7 @@ pkgs.testers.runNixOSTest {
       port = 9911;
       displayName = "Demo";
       command = "${demoServer}";
+      hint = "Reload the demo after editing it.";
       # No environment.CONVERSATION_ID: the module must source it from PID 1's environ.
       # Arbitrary systemd config merged into the unit.
       extraConfig = {
@@ -109,9 +110,12 @@ pkgs.testers.runNixOSTest {
     # Without a services origin the URL is the main-host path.
     machine.succeed("scooter-service list | grep -qF '/c/conv-test/demo/'")
     machine.succeed("scooter-service status demo | grep -q active")
+    # The service's hint reaches the agent on status and start, one `note:` per line.
+    machine.succeed("scooter-service status demo | grep -qx 'note: Reload the demo after editing it.'")
     machine.succeed("scooter-service stop demo")
     machine.succeed("! systemctl is-active --quiet webservice-demo.service")
-    machine.succeed("scooter-service start demo")
+    out = machine.succeed("scooter-service start demo")
+    assert "url: /c/conv-test/demo/" in out and "note: Reload the demo after editing it." in out, out
     machine.wait_until_succeeds("systemctl is-active --quiet webservice-demo.service", timeout=30)
     machine.fail("scooter-service start nope")
 

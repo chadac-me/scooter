@@ -37,6 +37,13 @@ let
   # bookmark that wakes the sandbox, so it should arrive computed. This is a user-level
   # default: it is written only while marimo has no settings of its own, and anything the
   # user or agent sets afterwards wins.
+  # Printed by `scooter-service start|status marimo` (and notebook), since the skill's body
+  # can drop out of a long session's context. Mirrors scooter-marimo.md.
+  hint = ''
+    Packages: marimo-pair's ctx.packages.add(), never pip, a venv or a pyproject.toml (each notebook has its own environment).
+    Settings: ~/.config/marimo/marimo.toml. More in the scooter-marimo skill.
+  '';
+
   defaultSettings = (pkgs.formats.toml { }).generate "marimo-default-settings.toml" {
     runtime.auto_instantiate = true;
   };
@@ -64,6 +71,7 @@ in
     displayName = lib.mkDefault "marimo + chat";
     stripBasePath = lib.mkDefault true;
     command = lib.mkDefault "${notebookServer}";
+    hint = lib.mkDefault hint;
   };
 
   webServices.marimo = {
@@ -73,6 +81,7 @@ in
     # Root, like the agent's own exec'd shell, so notebooks land on the /workspace PVC.
     user = lib.mkDefault "root";
     workingDirectory = lib.mkDefault "/workspace";
+    hint = lib.mkDefault hint;
     environment = lib.mkDefault ({
       # marimo's settings live in the agent's own ~/.config on the workspace PVC, not in
       # root's home, which a pod rebuild discards. uv's cache stays out of the PVC.

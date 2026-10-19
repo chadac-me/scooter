@@ -27,6 +27,8 @@ let
       basePath = s.basePath;
       unit = unitName name;
       stripBasePath = s.stripBasePath;
+    } // lib.optionalAttrs (s.hint != "") {
+      inherit (s) hint;
     } // lib.optionalAttrs (s.resources != null) {
       # Only the declared dimensions are emitted.
       resources = lib.filterAttrs (_: v: v != null) {
@@ -105,6 +107,11 @@ let
         echo "$u"
       }
       state() { systemctl is-active "$1" 2>/dev/null || true; }
+      # The service's reminder for the agent, printed whenever it starts or checks it.
+      hint_of() {
+        jq -r --arg n "$1" '.services[] | select(.name == $n) | .hint // empty' "$MANIFEST" 2>/dev/null \
+          | sed '/^$/d; s/^/note: /' || true
+      }
 
       cmd="''${1:-}"; name="''${2:-}"
       case "$cmd" in
@@ -124,6 +131,7 @@ let
           [ -n "$name" ] || { usage; exit 2; }
           u=$(resolve "$name")
           echo "$name: $(state "$u")  unit=$u  url=$(url_of "$name")" || true  # tolerate an early-closing reader
+          hint_of "$name"
           ;;
         start|stop|restart)
           [ -n "$name" ] || { usage; exit 2; }
@@ -135,7 +143,7 @@ let
             stop)          state_disable "$name" || true ;;
           esac
           echo "$name: $(state "$u")  ($cmd applied)"
-          [ "$cmd" != "stop" ] && echo "url: $(url_of "$name")" || true
+          [ "$cmd" != "stop" ] && { echo "url: $(url_of "$name")"; hint_of "$name"; } || true
           ;;
         restore)
           # Starts every autostart service that still exists in this manifest,
@@ -193,6 +201,18 @@ let
         type = lib.types.str;
         default = name;
         description = "Human label shown in the UI Services panel.";
+      };
+
+      hint = lib.mkOption {
+        type = lib.types.lines;
+        default = "";
+        example = "Add packages with ctx.packages.add(), never pip.";
+        description = ''
+          A reminder for the agent, printed (each line as `note: …`) by
+          `scooter-service start|restart|status <name>`. A skill's body can drop out of
+          a long session's context; this puts the rules an agent must not forget in
+          front of it whenever it starts or checks the service. Keep it to a line or two.
+        '';
       };
 
       basePath = lib.mkOption {
