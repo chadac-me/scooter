@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from conversation_controller.loop import reconcile_once
+from conversation_controller.loop import AutoscaleState, autoscale_once, reap_orphans, reconcile_once
 from conversation_controller.reconcile import Pod, SandboxRef
 from conversation_controller.rows import ConversationRows
 
-from .test_loop import FakeK8s, _cr, _reset_zombie_state  # noqa: F401  (autouse reset)
+from .test_loop import FakeK8s, _Cfg, _cr, _reset_zombie_state  # noqa: F401  (autouse reset)
 
 MIGRATIONS = Path(
     os.environ.get("AGENT_HOST_MIGRATIONS")
@@ -154,3 +154,43 @@ def test_a_zombie_is_still_seen(pg):
     sb = SandboxRef("conv-zombie", age_seconds=999, operating_mode="Running")
     k = FakeK8s(PODS, [_cr("zombie", phase="Suspended", gen=2)], sandboxes=[sb])
     assert ("zombie", "suspend-sandbox-suspect") in reconcile_once(k, cap=10, rows=ConversationRows(pg))
+
+
+def _subagent(dsn, conv_id, parent, phase="Pending"):
+    _row(dsn, conv_id, phase=phase)
+    _sql(dsn, "UPDATE conversations SET parent_id = %s WHERE id = %s", parent, conv_id)
+
+
+def test_list_live_is_the_autoscale_demand(pg):
+    _row(pg, "pending")                                   # phase NULL counts as Pending
+    _row(pg, "assigned", host="pod-a", gen=1, phase="Assigned")
+    _row(pg, "parked", phase="Suspended")
+    _row(pg, "failed", phase="Failed")
+    _row(pg, "suspended-but-hosted", host="pod-a", gen=2, phase="Suspended")
+    _subagent(pg, "child", "assigned")
+    live = {r["id"] for r in ConversationRows(pg).list_live()}
+    assert live == {"pending", "assigned", "suspended-but-hosted", "child"}
+
+    k = FakeK8s(PODS, [], replicas=1)
+    m = autoscale_once(k, _Cfg(pod_cap=1, max_replicas=10), AutoscaleState(), now=1.0, rows=ConversationRows(pg))
+    # The subagent and the parked/failed/suspended rows are not demand.
+    assert m["demand"] == 2
+    assert k.scale_calls == [2]
+
+
+def test_the_reaper_spares_every_sandbox_a_row_references(pg):
+    _row(pg, "c1", phase="Suspended", sandbox_ref="conv-c1")
+    _row(pg, "c2", sandbox_ref="conv-c2")
+    _row(pg, "c3")
+    assert ConversationRows(pg).referenced_sandboxes() == {"conv-c1", "conv-c2"}
+
+    sbs = [SandboxRef(n, age_seconds=1000) for n in ("conv-c1", "conv-c2", "conv-orphan")]
+    k = FakeK8s([], [], sandboxes=sbs)  # no CRs at all
+    assert reap_orphans(k, grace_seconds=600, rows=ConversationRows(pg)) == ["conv-orphan"]
+
+
+def test_the_reaper_skips_when_postgres_is_down(pg):
+    k = FakeK8s([], [], sandboxes=[SandboxRef("conv-x", age_seconds=1000)])
+    rows = ConversationRows("host=/nonexistent user=postgres dbname=postgres connect_timeout=1")
+    assert reap_orphans(k, grace_seconds=600, rows=rows) == []
+    assert k.deleted_trees == []

@@ -14,6 +14,8 @@ import conversation_controller.k8s as k8s_mod
 from conversation_controller.k8s import ControllerK8s
 from conversation_controller.loop import reconcile_once
 
+from .test_loop import FakeRows
+
 NS = "agent-sandbox"
 
 # What a real cluster serves; a request to anything else is a 404.
@@ -173,7 +175,7 @@ def test_a_zombie_is_repaired_by_the_suspend_and_never_escalates(cluster):
     # One suspend lands and the destructive escalation is never reached.
     k8s, core, custom = cluster
     for _ in range(50):
-        reconcile_once(k8s, cap=10)
+        reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
     assert custom.sandboxes["conv-fv25vg"]["spec"]["operatingMode"] == "Suspended"
     assert core.deleted_pods == [], "a sandbox that suspended cleanly needs no pod reclaim"
 
@@ -183,7 +185,7 @@ def test_zombie_escalation_reclaims_the_pod_but_keeps_the_workspace_pvc(cluster)
     # workspace PVC, survives.
     k8s, core, custom = cluster
     for _ in range(50):
-        reconcile_once(k8s, cap=10)
+        reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
         # The resume race, re-armed each tick only while the Sandbox still exists.
         if "conv-fv25vg" in custom.sandboxes:
             custom.sandboxes["conv-fv25vg"]["spec"] = {"operatingMode": "Running"}

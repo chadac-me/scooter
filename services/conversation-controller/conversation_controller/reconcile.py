@@ -192,7 +192,7 @@ def desired_replicas(
 
 
 # --- orphaned-Sandbox reaper (pure decision) -------------------------------
-# The controller, where the Conversation CR is authoritative, GCs Sandboxes no Conversation owns.
+# The controller GCs Sandboxes no conversation (row, or CR while writers still create them) references.
 
 @dataclass(frozen=True)
 class SandboxRef:
@@ -227,7 +227,7 @@ def find_orphans(
     referenced: set[str],
     grace_seconds: float,
 ) -> list[str]:
-    """Names of Sandboxes no Conversation references that are older than `grace_seconds`, which spares a Sandbox whose CR has not been registered yet."""
+    """Names of Sandboxes no Conversation references that are older than `grace_seconds`, which spares a Sandbox whose conversation has not been registered yet."""
 
     return [
         sb.name

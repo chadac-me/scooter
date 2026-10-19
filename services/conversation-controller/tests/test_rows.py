@@ -3,7 +3,6 @@
 import pytest
 
 from conversation_controller.rows import ConversationRows, dsn_from_env, from_env
-from conversation_controller.loop import _mirror_phase
 
 
 class FakeCursor:
@@ -97,11 +96,6 @@ def test_connect_failure_is_swallowed_too():
 
     rows = ConversationRows("dsn", connect=connect)
     assert rows.set_phase("conv-1", "Failed") is False
-
-
-def test_mirror_phase_is_a_noop_without_a_writer():
-    """No DSN configured is a supported deployment."""
-    _mirror_phase(None, "conv-1", "Failed")  # must not raise
 
 
 def test_dsn_from_env_returns_none_when_unconfigured(monkeypatch):

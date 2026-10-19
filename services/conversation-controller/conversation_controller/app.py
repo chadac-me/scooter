@@ -22,8 +22,9 @@ _C = {"component": "app"}
 
 def run(cfg: Config, stop: threading.Event) -> None:
     k8s = ControllerK8s(cfg.namespace)
-    # None when no DSN is configured, in which case nothing is mirrored to the row.
     rows = conversation_rows.from_env()
+    if rows is None:
+        raise SystemExit("conversation-controller: AGENT_HOST_DB_* (or AGENT_HOST_DB_DSN) is required")
     elector = LeaderElector(cfg.namespace, cfg.lease_name, cfg.identity, cfg.lease_seconds)
     autoscale_state = AutoscaleState()
     # /metrics on every replica so a scrape target is always up.
@@ -40,7 +41,7 @@ def run(cfg: Config, stop: threading.Event) -> None:
                 # Guarded separately so a reaper failure does not abort assignment.
                 if cfg.reap_orphans:
                     try:
-                        reap_orphans(k8s, cfg.orphan_grace_seconds)
+                        reap_orphans(k8s, cfg.orphan_grace_seconds, rows)
                     except Exception:  # noqa: BLE001
                         logger.exception(
                             "orphan-reaper pass failed",
@@ -56,7 +57,7 @@ def run(cfg: Config, stop: threading.Event) -> None:
                 # Guarded so a scale failure does not abort the tick.
                 if cfg.autoscale:
                     try:
-                        m = autoscale_once(k8s, cfg, autoscale_state, time.monotonic())
+                        m = autoscale_once(k8s, cfg, autoscale_state, time.monotonic(), rows)
                         metrics.update(m["demand"], m["ready_pods"], m["per_pod"], m["target"])
                     except Exception:  # noqa: BLE001
                         logger.exception(

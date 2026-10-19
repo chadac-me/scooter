@@ -87,6 +87,33 @@ class ConversationRows:
             logger.warning("conversations row read failed", extra={**_C, "error": str(err)})
             return None
 
+    def list_live(self) -> list[dict] | None:
+        """Placement state of every row not parked as Suspended or Failed (the autoscale demand), or None when unreadable."""
+        try:
+            with self._cursor() as cur:
+                cur.execute(
+                    "SELECT id, host_pod, host_generation, phase, sandbox_ref, creator_pod, parent_id "
+                    "FROM conversations "
+                    "WHERE phase IS NULL OR phase NOT IN ('Suspended', 'Failed') OR host_pod IS NOT NULL"
+                )
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except Exception as err:  # noqa: BLE001
+            self._drop()
+            logger.warning("conversations live-row read failed", extra={**_C, "error": str(err)})
+            return None
+
+    def referenced_sandboxes(self) -> set[str] | None:
+        """Every sandbox_ref any row holds, or None when unreadable (the reaper must then skip)."""
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT DISTINCT sandbox_ref FROM conversations WHERE sandbox_ref IS NOT NULL")
+                return {r[0] for r in cur.fetchall()}
+        except Exception as err:  # noqa: BLE001
+            self._drop()
+            logger.warning("conversations sandbox_ref read failed", extra={**_C, "error": str(err)})
+            return None
+
     def set_phase(self, conversation_id: str, phase: str) -> bool:
         """Mirror a phase onto the row, returning True when a row was updated (a miss is not an error)."""
         try:
@@ -154,6 +181,6 @@ def from_env(connect=None) -> ConversationRows | None:
     """Build a writer from the environment, or None when no database is configured."""
     dsn = dsn_from_env()
     if not dsn:
-        logger.info("no agent_host DSN configured — controller will not mirror phases to the row", extra=_C)
+        logger.error("no agent_host DSN configured — the controller cannot run without the conversations rows", extra=_C)
         return None
     return ConversationRows(dsn, connect=connect)
