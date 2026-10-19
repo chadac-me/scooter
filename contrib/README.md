@@ -167,6 +167,35 @@ for the fixture (echo is `enable = false`, so it covers the disabled-contrib pat
 an enabled contrib cannot), and the `dev-env-contrib-sandbox` check for what is
 asserted.
 
+#### Embedding the conversation (`/chat/<id>`)
+
+A web service the sandbox half serves can show the conversation beside itself by
+embedding the UI's conversation subpage in an iframe:
+
+```html
+<iframe src="https://<host>/chat/<conversation-id>"></iframe>
+```
+
+`/chat/<id>` is that one conversation's thread, composer and pending approvals,
+with no sidebar, right panel or settings. It is the real UI, so approvals, queued
+messages and tool cards all work. Its header links to the full app
+(`target=_top`), every other link opens in a new tab, and the page never switches to
+another conversation. The main UI's header has the same page as **Pop out chat**.
+
+Inside the pod, build the URL from `CONVERSATION_URL`'s origin and
+`CONVERSATION_ID`. The browser loads it from the ingress like any other link, so
+the sandbox proxies nothing.
+
+**Only the conversation's own sandbox may frame it.** The UI sends
+`Content-Security-Policy: frame-ancestors <scheme>://<label>.<sandboxDomain>` on
+`/chat/<id>`, where `<label>` is the id's first 8 hex characters, and
+`frame-ancestors 'none'` on every other UI route. A page on conversation A's origin
+can't frame B's chat or the main app, and, being cross-origin, can't read the chat
+it does frame. Without `ingress.sandboxDomain`, services share the UI's origin and
+the subpage allows `'self'`. That is no weaker than before, since a same-origin
+sandbox page can already act as the user. `pkgs/ui-image/check.nix` pins these
+headers against the rendered nginx config.
+
 ### Contributing deployment config (`contrib/<name>/deployment.nix`)
 
 The manifests an integration renders belong to the contrib as well — as a file the

@@ -271,9 +271,18 @@ const adoptServerId = (key: string, serverId: string): void => {
 
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((l) => l());
+/** The conversation a `/chat/<id>` page is pinned to (chatRoute.ts); undefined in the main app. */
+let pinnedId: string | undefined;
+
 const setState = (next: State) => {
+  // A pinned page never leaves its conversation: whatever would move the selection (a delete,
+  // a new-thread action) is held on the pinned one while it is listed.
+  if (pinnedId !== undefined && next.currentId !== pinnedId && next.sessions.some((s) => s.id === pinnedId)) {
+    next = { ...next, currentId: pinnedId };
+  }
   state = next;
-  persist(next);
+  // The pinned page shares localStorage with the main app, so it must not overwrite its list.
+  if (pinnedId === undefined) persist(next);
   emit();
 };
 
@@ -307,6 +316,20 @@ const flushPendingFrames = () => {
 };
 
 export const sessionStore = {
+  /** Pin this page to one conversation (the `/chat/<id>` subpage): start from a clean list rather
+   *  than the main app's saved one, whose local keys could shadow the server id, never persist,
+   *  and keep the selection on `id` once the server lists it. */
+  pin(id: string) {
+    pinnedId = id;
+    state = { ...freshState(), scope: "all" };
+    this.requestSelect(id);
+  },
+
+  /** The conversation this page is pinned to, if any. */
+  pinned(): string | undefined {
+    return pinnedId;
+  },
+
   subscribe(l: () => void) {
     listeners.add(l);
     return () => listeners.delete(l);

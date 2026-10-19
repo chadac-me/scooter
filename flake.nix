@@ -581,6 +581,8 @@
 
           checks = {
             inherit agentHost ui;
+            # Who may frame which UI page, against the rendered nginx config.
+            ui-nginx = import ./pkgs/ui-image/check.nix { inherit pkgs; };
             # Every contrib variant
             contribs-all = contribsAll;
             contrib-echo = contribsWithExamples.packages.echo.broker;
