@@ -51,6 +51,7 @@ function fakeSessions(): SessionManager {
     reviveFromMirror: vi.fn(async () => {}),
     prompt: vi.fn(async () => {}),
     promptByThread: vi.fn(async () => {}),
+    enqueueByThread: vi.fn(async () => {}),
     suspend: vi.fn(async (id) => {
       store.set(id, conv({ id, status: "suspended" }));
     }),
@@ -480,7 +481,7 @@ describe("management API", () => {
     const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
     const { status } = await call(api, "POST", "/conversations/c1/messages", { text: "do it" });
     expect(status).toBe(202);
-    expect(sessions.promptByThread).toHaveBeenCalledWith("c1", "do it");
+    expect(sessions.enqueueByThread).toHaveBeenCalledWith("c1", "do it");
   });
 
   it("GET /conversations/:id/history returns the event log", async () => {

@@ -21,6 +21,7 @@ import type { SandboxRef } from "../types.js";
 import type { SandboxProvisioner } from "./manager.js";
 import { formatError, logger } from "../log.js";
 import { applyOverlay, deepMerge, parseOverlay } from "./sandboxOverlay.js";
+import { sandboxOrigin, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import {
   InvalidResourceError,
   type RenderedResources,
@@ -114,6 +115,9 @@ export interface K8sProvisionerOptions {
   /** Public base URL of the chat UI; when set each sandbox gets CONVERSATION_URL =
    *  <publicUrl>/?thread=<id>, a shareable link to its own conversation. */
   publicUrl?: string;
+  /** Per-conversation service origins; when set each sandbox gets SCOOTER_SERVICES_ORIGIN, and its
+   *  web services serve at /<service> instead of /c/<id>/<service>. */
+  sandboxOrigins?: SandboxOrigins;
   /** RuntimeClass for the systemd sandbox pod (e.g. "crun"): a cgroup-delegating runtime gives
    *  systemd PID 1 a writable cgroup subtree without `privileged`; unset means the cluster default,
    *  and it is ignored for the generic image. */
@@ -332,6 +336,11 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
           // The full threadId, which web services read to serve under /c/$CONVERSATION_ID/<name>;
           // always set.
           { name: "CONVERSATION_ID", value: urlThread },
+          // This conversation's own services origin (https://<label>.<domain>), when configured.
+          ...(() => {
+            const origin = sandboxOrigin(urlThread, opts.sandboxOrigins);
+            return origin ? [{ name: "SCOOTER_SERVICES_ORIGIN", value: origin }] : [];
+          })(),
           ...(opts.extraEnv ?? []),
         ],
         overlayStore: opts.overlayStore ?? false,

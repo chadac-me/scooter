@@ -22,8 +22,15 @@ triggers:
 # Offering web services (marimo, a terminal, VS Code) to the user
 
 You can run a **web service inside your sandbox** and the user opens it in their
-browser at `https://<host>/c/<conversation-id>/<service>/`. The platform reverse-
-proxies (HTTP **and** WebSocket) into your pod — the user needs no port-forward.
+browser. The platform reverse-proxies (HTTP **and** WebSocket) into your pod — the
+user needs no port-forward. Where it lives depends on the deployment:
+
+- **Its own origin** (when `$SCOOTER_SERVICES_ORIGIN` is set, e.g.
+  `https://5a515e73.scooter.example.com`): `$SCOOTER_SERVICES_ORIGIN/<service>/`.
+- **The main host** otherwise: `https://<host>/c/$CONVERSATION_ID/<service>/`.
+
+You rarely need to build it yourself: `scooter-service start <name>` prints the
+URL to give the user.
 Use this when a task is better *shown* than described: exploring data in a
 notebook, giving the user a live terminal, or a browser code editor.
 
@@ -43,7 +50,9 @@ notebook, giving the user a live terminal, or a browser code editor.
 
 Add it in a NixOS module under `/etc/scooter/modules/<name>.nix` and apply it with
 `scooter-rebuild switch` (see the scooter-env skill). The service MUST serve under
-its base path `/c/$CONVERSATION_ID/<name>` — `CONVERSATION_ID` is in the pod env.
+its base path `$SCOOTER_SERVICE_PREFIX/<name>`. The unit gets
+`SCOOTER_SERVICE_PREFIX` in its env: empty on its own origin (so the base path is
+`/<name>`), `/c/<conversation-id>` on the main host.
 A heavy server is built or downloaded during the switch, so `scooter-rebuild
 status` will sit in `building` for a while. `marimo`, `ttyd` and `code-server`
 are exceptions — the image already ships them as stubs, so referencing them is
@@ -61,7 +70,7 @@ free until the service actually starts.
     command = ''
       ${pkgs.bash}/bin/bash -c 'exec marimo edit \
         --host 0.0.0.0 --port 2728 \
-        --base-url "/c/''${CONVERSATION_ID}/notebooks" \
+        --base-url "''${SCOOTER_SERVICE_PREFIX}/notebooks" \
         --headless --no-token'
     '';
     # Escape hatch for extra systemd knobs (hardening, ordering, limits):
@@ -72,7 +81,7 @@ free until the service actually starts.
 
 Key rules for the `command`:
 - Bind `--host 0.0.0.0` (the agent-host reaches the pod IP, not localhost).
-- Serve under `--base-url /c/$CONVERSATION_ID/<name>` (or the equivalent flag:
+- Serve under `--base-url $SCOOTER_SERVICE_PREFIX/<name>` (or the equivalent flag:
   VS Code `--server-base-path`, etc.) — a service hardcoded to `/` breaks behind
   the proxy.
 - `--no-token` / disable the service's own auth: the platform proxy already gates
@@ -94,17 +103,17 @@ After enabling one:
 - Tell the user it's in the **Services panel** — they click **Start**, then
   **Open**. (The panel's Start goes through the same persisted path.)
 - Or start it yourself: `scooter-service start <name>` (once `scooter-rebuild
-  status` reports the switch is `ready`), then share the URL:
-  `https://<host>/c/$CONVERSATION_ID/<name>/`. Use `$CONVERSATION_URL` for the
-  host if you need the full origin.
+  status` reports the switch is `ready`), then share the `url:` it prints. On the
+  main host that is a path; prefix the host from `$CONVERSATION_URL`.
 
 You don't have to pre-start it just to share the link: if the user opens a declared
 service that isn't running yet, the platform **auto-starts it** and shows a loading
 page (a spinner + the service's live log) that loads the app once it's healthy.
 
 Check it's up: `scooter-service status <name>` (or `systemctl is-active
-webservice-<name>`) and `curl -fsS localhost:<port>/c/$CONVERSATION_ID/<name>/
->/dev/null`.
+webservice-<name>`) and `curl -fsS localhost:<port><base path>/ >/dev/null`, where
+the base path is `/<name>` on its own origin and `/c/$CONVERSATION_ID/<name>`
+otherwise.
 
 ## Good candidates to offer
 

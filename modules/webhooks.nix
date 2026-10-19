@@ -48,6 +48,20 @@ in
       description = "Enable the Slack events handler (/webhooks/slack).";
     };
 
+    # A contrib's deployment.nix adds env to the Deployment declared here through
+    # this seam, gated on its own `enable`, so provider-specific flags stay in the
+    # contrib.
+    extraEnv = mkOption {
+      type = types.listOf (types.attrsOf types.anything);
+      default = [ ];
+      example = literalExpression ''[ { name = "JIRA_ENABLED"; value = "true"; } ]'';
+      description = ''
+        Extra env entries appended to the webhooks container. A NAME declared twice
+        is not an error here and k8s silently keeps the last value, so a contrib
+        must own its prefix.
+      '';
+    };
+
     # --- Trigger convention -------------------------------------------------
     mentionPattern = mkOption {
       type = types.str;
@@ -62,7 +76,7 @@ in
     labelTrigger = mkOption {
       type = types.str;
       default = "scooter";
-      description = "Issue/PR label name that triggers a conversation (GitHub/GitLab).";
+      description = "Issue/PR label name that triggers a conversation (GitHub/GitLab/Jira).";
     };
     ignoreUsernames = mkOption {
       type = types.listOf types.str;
@@ -262,7 +276,8 @@ in
                   { name = "DB_NAME"; value = "webhooks"; }
                   { name = "DB_USER"; value = "webhooks"; }
                   { name = "DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-webhooks"; key = "password"; }; }
-                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; };
+                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; }
+                  ++ wcfg.extraEnv;
                 # Provider signing secrets come from a Secret whose keys match the
                 # env var names.
                 envFrom = lib.optionals (wcfg.secretName != "") [

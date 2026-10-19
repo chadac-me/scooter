@@ -224,6 +224,8 @@
 
     # siteUrl only builds the human /browse/{KEY} link.
     jira.siteUrl = "https://example.atlassian.net";
+    # Turns on /webhooks/jira; needs JIRA_WEBHOOK_SECRET in the webhooks Secret.
+    jira.webhooksEnabled = true;
 
     # Mounts only when url and token both resolve.
     grafana = {

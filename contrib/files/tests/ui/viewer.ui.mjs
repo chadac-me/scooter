@@ -296,6 +296,26 @@ Second?
   );
   check("the answer survives the refresh", await until(() => two.getByText("Change", { exact: true }).isVisible(), 3000));
 
+  // Pushed, not polled: both land well inside the old 3s poll interval.
+  let t0 = Date.now();
+  writeFileSync(join(ws, "docs/two.md"), TWO("Decided: ship it.\n\nPushed edit.\n\n"));
+  check(
+    "an edit on disk is pushed to the page",
+    await until(() => page.getByText("Pushed edit.").isVisible(), 2500),
+    `${Date.now() - t0}ms`,
+  );
+  t0 = Date.now();
+  await fetch(`${url}/api/annotations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: "docs/two.md", line: 1, quote: "Decided", text: "From another tab." }),
+  });
+  check(
+    "a comment saved elsewhere is pushed to the page",
+    await until(() => page.getByText("From another tab.").isVisible(), 2500),
+    `${Date.now() - t0}ms`,
+  );
+
   // --- contents ------------------------------------------------------------------
 
   const toc = page.locator('nav[aria-label="Contents"]');

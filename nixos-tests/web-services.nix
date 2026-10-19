@@ -8,10 +8,11 @@
 { pkgs, lib, sandboxModule }:
 
 let
-  # A tiny sub-path-aware server: 200 under /c/<id>/demo/, 404 elsewhere, reading CONVERSATION_ID from the env like the real services.
+  # A tiny sub-path-aware server: 200 under its prefix + /demo/, 404 elsewhere, reading
+  # SCOOTER_SERVICE_PREFIX from the unit env like the real services.
   demoServer = pkgs.writeShellScript "demo-web-service" ''
     set -euo pipefail
-    base="/c/''${CONVERSATION_ID:-unknown}/demo"
+    base="''${SCOOTER_SERVICE_PREFIX-/c/''${CONVERSATION_ID:-unknown}}/demo"
     exec ${pkgs.python3}/bin/python3 - "$base" <<'PY'
     import sys
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -29,6 +30,17 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "dev-env-web-services";
+
+  # `machine` has no sandbox domain (services under /c/<id>/); `origin` has its own
+  # services origin, as the provisioner injects with SANDBOX_DOMAIN set (services at /<name>/).
+  nodes.origin = { lib, ... }: {
+    imports = [ sandboxModule ];
+    boot.kernelParams = [
+      "CONVERSATION_ID=5a515e73-860b-49ba-bc3f-6ff8d5fda5ff"
+      "SCOOTER_SERVICES_ORIGIN=https://5a515e73.scooter.example.com"
+    ];
+    webServices.demo = { enable = true; port = 9911; displayName = "Demo"; command = "${demoServer}"; };
+  };
 
   nodes.machine = { lib, ... }: {
     imports = [ sandboxModule ];
@@ -94,6 +106,8 @@ pkgs.testers.runNixOSTest {
     # 4b. The scooter-service CLI drives the units without a rebuild.
     machine.succeed("command -v scooter-service")
     machine.succeed("scooter-service list | grep -q demo")
+    # Without a services origin the URL is the main-host path.
+    machine.succeed("scooter-service list | grep -qF '/c/conv-test/demo/'")
     machine.succeed("scooter-service status demo | grep -q active")
     machine.succeed("scooter-service stop demo")
     machine.succeed("! systemctl is-active --quiet webservice-demo.service")
@@ -114,5 +128,16 @@ pkgs.testers.runNixOSTest {
     assert "ttyd" in wrapper and "tmux" in wrapper, wrapper
     assert "--base-path" in wrapper and "--writable" in wrapper, wrapper
     machine.fail("systemctl is-active --quiet webservice-terminal.service")
+
+    # 6. On its own services origin a service serves at /<name>/, and the CLI hands out
+    #    the absolute origin URL.
+    origin.wait_for_unit("default.target")
+    origin.succeed("systemctl start webservice-demo.service")
+    origin.wait_for_open_port(9911)
+    origin.succeed("curl -fsS http://localhost:9911/demo/ | grep -q demo-ok")
+    origin.succeed("test $(curl -s -o /dev/null -w '%{http_code}' http://localhost:9911/c/5a515e73-860b-49ba-bc3f-6ff8d5fda5ff/demo/) = 404")
+    origin.succeed("grep -qx 'SCOOTER_SERVICE_PREFIX=' /run/webservice-demo/conv.env")
+    url = origin.succeed("scooter-service start demo | sed -n 's/^url: //p'").strip()
+    assert url == "https://5a515e73.scooter.example.com/demo/", url
   '';
 }

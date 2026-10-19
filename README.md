@@ -5,165 +5,98 @@
 [![Docs](https://github.com/chadac/scooter/actions/workflows/docs.yml/badge.svg?branch=main)](https://chadac.github.io/scooter/)
 [![Container images](https://img.shields.io/badge/ghcr.io-chadac%2Fscooter-blue?logo=docker&logoColor=white)](https://github.com/chadac?tab=packages&repo_name=scooter)
 
-A Nix-powered agent platform layered over the Kubernetes
-[agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller.
+Scooter is a self-hosted, open source, Kubernetes-based, agent chat platform. Scooter agents are superpowered developers with full power over their dev environment while being fully locked down and under your control. Agents can install tools, spawn web services, collaborate via [VS Code in the browser](https://github.com/coder/code-server), check out, build and contribute back to your software projects.
 
-agent-sandbox provides the execution **body** — pods, warm pools, suspend/resume.
-Scooter adds the **brain** (an off-the-shelf ACP agent — [Goose](https://github.com/block/goose) — run
-*outside* the sandbox) and a **conversation UI** (AG-UI + [assistant-ui](https://github.com/assistant-ui/assistant-ui)).
-The agent drives the sandbox through the agent-sandbox API and the Kubernetes exec
-API; nothing runs as an in-pod agent.
+![A Scooter conversation: the agent reports on a pull request it opened, with the sandbox's web services in the side panel](https://raw.githubusercontent.com/chadac/scooter/assets/readme/scooter-browser-sample.png)
 
-> **Status:** implemented and running in production-shaped deployments. Multi-replica
-> agent-hosts with controller-assigned conversations, suspend/resume with history
-> restore, bring-your-own-Claude (device-key auth, concurrent conversations), a
-> provider-aware model catalog, webhooks/scheduler/broker integrations, and a working
-> UI. Enable BYOC with one option: `scooter.byoc.enable = true`.
->
-> **Docs:** <https://chadac.github.io/scooter/> — including the full
-> [configuration reference](https://chadac.github.io/scooter/reference/options/),
-> generated from the kubenix modules.
+The key distinguishing feature of Scooter is that it is designed to be **extensible from the ground up**: You can customize everything Scooter can do, from the skills available to it, the services and tools that each agent has access to, its integrations with other services and permission-controlled access, and any custom Scooter chat UI components that you would ever need.
 
-## Idea
+It is managed through a declarative configuration using the same module system as [NixOS](https://wiki.nixos.org/wiki/NixOS_system_configuration), which means you can override ANY of Scooter's defaults with your own preferences and extend it endlessly.
 
-- **Brain:** an off-the-shelf **ACP** agent (Goose, from nixpkgs), run **outside**
-  the sandbox in an **agent-host**. No agent loop is hand-written.
-- **UI seam:** **AG-UI** over SSE, consumed natively by **assistant-ui**.
-- **Exec:** the agent's actions are serviced by the **Kubernetes exec API**
-  (`pods/exec`) against the conversation's pod — `run`/`spawn` exec directly, file
-  ops go through `cat`/`tee`. There is **no in-pod HTTP server**.
-- **Nix:** a generic NixOS sandbox image (overlay store, lazy tool shims, skills).
-- **kubenix:** modules that render the per-conversation `Sandbox` + the supporting
-  platform resources (agent-host, broker, webhooks, scheduler).
+## Architecture
 
+The core of Scooter is five services:
+
+* **The UI**, where your users can start new conversations, approve tasks, access any agent-hosted services, and view linked pull requests/JIRA issues/Slack threads per agent.
+
+* **The agent host**, where agent conversations are hosted. Each agent (generally) communicates with the user through [goose](https://goose-docs.ai/), although [other ACP-powered integrations are possible](https://chadac.github.io/scooter/features/byoc/). Hosts scale with the number of active conversations, so you can save on costs during off-hours by running fewer (or even zero!) host pods.
+  <!-- TODO: scale-to-zero is untested; verify before publishing. https://github.com/chadac/scooter/issues/817 -->
+
+* **The agent sandbox**, the agent's execution environment. Powered through the [Kubernetes agent-sandbox CRD](https://agent-sandbox.sigs.k8s.io/).
+  * Agents have full power of the sandbox environment with minimal risk of impacting other services on your cluster.
+  * Sandboxes are capable of running web services that the user can interact with while remaining auth-gated: If you want to collaborate with the agent via vscode, [marimo](https://marimo.io/), [Jupyter](https://jupyter.org/), or any other service, the agent can easily set it up.
+  * Sandboxes are automatically suspended after a configurable period of disuse to save on costs -- but they use volumes to ensure that resuming can be near-instantaneous.
+  * Sandboxes are also regular NixOS systems. You can configure them as you would your own operating system.
+
+* **The agent broker**, a bridge service that manages all requests from the agent host and sandbox to the outside world.
+  * It **hides credentials from the agent** so that the agent isn't capable of even *accidentally* leaking them.
+  * Brokers have **an expressive permission system** that is easily auditable and accessible via the UI. You as the platform owner define exactly which actions are allowed to be auto-approved and which require approval from human users or a special set of users.
+
+* **The webhooks service**, which manages forwarding webhooks to the appropriate agents. Scooter's broker and webhooks automatically associates agents with external resources so that interacting with Scooter can be an extremely smooth experience:
+  * Ping `@scooter` in Slack in a conversation to have it create a Jira issue for you;
+  * Ping Scooter on a Jira issue to have it pick up a PR; and
+  * Provide a code review for Scooter's PR and it responds to your comments, all through the same agent that doesn't lose context. 
+
+These core five components provide you with **secure**, **powerful**, and **extensible** agents that can run at scale whenever needed.
+
+## Getting started
+
+You'll need a Kubernetes cluster with the
+[agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller installed,
+[Nix with flakes](https://nixos.wiki/wiki/Flakes), and an ingress controller. A deployment is a small flake of your own
+that imports Scooter and renders Kubernetes manifests with [kubenix](https://kubenix.org/):
+
+```nix
+# flake.nix
+{
+  inputs = {
+    scooter.url = "github:chadac/scooter";
+    flake-parts.follows = "scooter/flake-parts";
+  };
+
+  outputs = inputs@{ flake-parts, scooter, ... }:
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
+      perSystem = { system, ... }: {
+        packages.default =
+          (scooter.lib.evalPlatform {
+            inherit system;
+            module = ./scooter.nix;
+          }).config.kubernetes.result;
+      };
+    };
+}
 ```
-browser  (assistant-ui / AG-UI over SSE)
-   │
-   ▼
-agent-host  ── spawns `goose acp` per conversation ── ACP⇄AG-UI bridge
-   │  ├ SessionManager · ConversationStore (conversation-state PVC = brain)
-   │  ├ MCP tools: slack/github/gitlab/jira · web search/fetch · background jobs ·
-   │  │            model switch · sandbox resize · scheduled tasks
-   │  └ web-service reverse proxy  →  /c/<id>/<service>/…
-   │
-   ├─ Kubernetes exec API (pods/exec) ──► Sandbox pod (body, NixOS · systemd PID 1)
-   │                                        ├ workspace PVC (the agent's files)
-   │                                        ├ web services: marimo · VS Code · xterm
-   │                                        └ scooter-* CLIs (broker, aws, service)
-   │
-   └─ broker (SA-token auth) ──► GitHub · GitLab · Jira · Slack · AWS · Datadog
 
-webhooks   spawn a conversation from a GitHub/GitLab/Jira/Slack thread → agent-host
-scheduler  fire a cron task → a fresh conversation per run → agent-host
-agent-sandbox controller:  warm pools · suspend (drop Pod, keep PVCs) / resume
+```nix
+# scooter.nix
+{
+  scooter = {
+    namespace = "scooter";
+    ui.enable = true;
+    broker.enable = true;
+    ingress = {
+      enable = true;
+      host = "scooter.example.com";
+      className = "nginx";
+    };
+    # Claude via AWS Bedrock, authenticated with an IRSA role.
+    agent.availableModels.goose."us.anthropic.claude-sonnet-4-6".default = true;
+    serviceAccountRoleArn = "arn:aws:iam::123456789012:role/scooter-agent-host";
+  };
+}
 ```
 
-## Key decisions
-
-- **The agent runs outside the pod.** agent-sandbox is execution-as-a-service; the
-  agent-host drives the pod over the exec API. If Goose or the agent-host ends up
-  *inside* the sandbox image, that's the inverted (wrong) model.
-- **One cold `Sandbox` per conversation** (not a warm-pool claim): required for the
-  per-conversation ServiceAccount (the pod's broker identity) and its persistent
-  PVCs. Warm pools are only for generic capacity.
-- **Suspend, don't delete.** The `Sandbox` object is the durable conversation
-  handle. Suspend drops the Pod and keeps the PVCs; resume revives the same SA +
-  PVCs. Two PVCs persist: the **workspace** (the agent's files) and the
-  **conversation-state** (the brain).
-- **Credentials flow through the broker.** The pod authenticates with its projected
-  ServiceAccount token; the agent-host holds no third-party secrets. The typed
-  provider tools (and the raw `$BROKER_URL/<provider>/…` proxy) go through it.
-- **Provider tools gate on attachment.** `slack_respond`, `github_comment`, etc. are
-  registered only when that resource is actually linked to the conversation — so the
-  agent never replies into a channel it has no context for. Errors from upstream are
-  surfaced verbatim (never hidden behind a generic failure).
-
-## Layout
-
-| Path | What |
-|------|------|
-| `flake.nix` | Nix entry: sandbox image, agent-host, ui, broker, webhooks, scheduler, agent (goose), platform manifests |
-| `services/agent-host/` | TypeScript: ACP⇄AG-UI bridge, session manager, K8s-exec backend, web-service proxy, MCP agent tools, auth |
-| `services/broker/` | Python/FastAPI credential broker + provider modules (GitHub, GitLab, Jira, Slack, AWS/IRSA, Datadog) |
-| `services/webhooks/` | Python/FastAPI: spawn conversations from GitHub/GitLab/Jira/Slack threads |
-| `services/scheduler/` | Python/FastAPI: fire cron-scheduled tasks, one fresh conversation per run |
-| `services/claude-sdk-provider/` | Claude Agent SDK provider (an alternative brain to goose) |
-| `pkgs/sandbox-os/` | The NixOS systemd-PID-1 sandbox image (exec via the K8s API) |
-| `pkgs/broker-tools/` | Broker CLIs prebuilt into the sandbox: `agent-broker`, `git-credential-broker` |
-| `contrib/` | Integrations as self-contained packages (entry points into broker/webhooks, UI metadata, sandbox modules, agent skills) — `contrib/aws/` ships the `scooter-aws*` CLIs and `scooter-aws.md` |
-| `modules/` | kubenix: per-conversation cold `Sandbox` (SA + 2 PVCs), agent-host, broker, webhooks, scheduler, warm pool, web-services |
-| `ui/` | assistant-ui frontend + reusable AG-UI client library |
-| `skills/` | Markdown agent skills that document the PLATFORM (`scooter-intro`, `scooter-env`, `agent-tools`, `scooter-web-services`, …) — a skill documenting a contrib lives in that contrib, gated on it |
-| `examples/` | Reference kubenix config + manifest checks |
-| `deploy/` | A separate deployment flake (config + `deploy.sh`) for standing the platform up on a real cluster |
-| `test/` | Tier 2 cluster + Tier 3 e2e fixtures/fakes |
-| `nixos-tests/` | NixOS VM tests for the dev-environment sandbox image |
-| `docs/` | Subsystem docs (the full `DESIGN.md`/`TESTING.md` are kept locally, outside the repo) |
-
-## Subsystems
-
-- **Web services** — declarative in-pod services (marimo, browser VS Code via
-  code-server from contrib/code-server, an xterm terminal via ttyd) that the
-  platform reverse-proxies at `https://<host>/c/<id>/<service>/`. Discovered
-  from an in-pod manifest; started and stopped at runtime with the
-  `scooter-service` CLI (or from the UI).
-- **Broker + provider tools** — a credential vault and transparent proxy. Typed MCP
-  tools (`slack_respond`, `slack_react`, `github_comment`, `gitlab_comment`,
-  `jira_comment`, `brave_web_search`, `web_fetch`) wrap it; anything else uses the raw
-  `$BROKER_URL/<provider>/<api-path>` proxy with a Bearer token from
-  `$BROKER_TOKEN_PATH`.
-- **Webhooks** — turn an inbound GitHub/GitLab/Jira/Slack event into a conversation.
-- **Scheduler** — cron-fire tasks, each spawning a fresh conversation; the agent
-  manages its own schedules through MCP tools.
-- **Skills** — markdown guidance injected into the agent (Nix usage, the broker,
-  web services, AWS, links, formatting). Exposed as `lib.scooterSkills` for external
-  deployers.
-
-## Building & testing
-
-[`just`](https://github.com/casey/just) is the task runner. **The tests are the
-spec** — run them to confirm changes rather than assuming.
+Then create the one required secret, render, and apply:
 
 ```bash
-just test-quick     # Tier 1 contract tests — fast, no cluster. Run constantly.
-just test           # FULL suite: Tier 1 + Tier 2 (cluster) + Tier 3 (E2E).
-just ci             # What CI runs: flake check + typecheck + Tier 1.
+kubectl create namespace scooter
+kubectl -n scooter create secret generic agent-conv-token-secret \
+  --from-literal=secret="$(openssl rand -hex 32)"
+nix build && kubectl apply -f result
 ```
 
-Per tier:
-
-```bash
-just test-unit       # Tier 1  (no cluster, no network)
-just test-cluster    # Tier 2  (real k8s; auto-starts a local k3s cluster)
-just test-e2e        # Tier 3  (Playwright through the UI; fake ACP agent)
-just test-e2e-real   # Tier 3  (one scenario with REAL goose; needs a model key)
-```
-
-Build:
-
-```bash
-just build           # agent-host + UI + sandbox image
-just build-image     # just the sandbox-os image
-just image-sizes     # measure shipped image sizes (JSON)
-```
-
-## Deploying
-
-The [`deploy/`](deploy/) directory is a self-contained flake (config + `deploy.sh`)
-that builds the images, pushes them to a registry, re-locks against your working
-tree, and applies the rendered kubenix manifests to a cluster. See its own README.
-
-## Provenance
-
-Distilled from the `openhands-nix` sibling project (skills, broker, webhooks, image
-patterns), re-targeted from OpenHands' bundled runtime onto agent-sandbox + ACP +
-AG-UI.
-
-## License
-
-Scooter is [MIT-licensed](./LICENSE). Its dependencies are permissive
-(MIT / BSD / Apache-2.0 / MPL-2.0) with **one exception**: the Anthropic Claude
-Agent SDK and the `claude-code` CLI are proprietary and used under Anthropic's
-terms — they are not covered by the MIT license. See [NOTICE.md](./NOTICE.md) for
-the full third-party inventory and how to run a fully open-source (Goose-only)
-deployment.
+Scooter trusts the identity header set by whatever sits in front of it, so put an auth
+proxy (e.g. oauth2-proxy) in front of the UI before exposing it. The
+[getting started guide](https://chadac.github.io/scooter/getting-started/) covers auth,
+models, integrations and the other options you'll likely want.

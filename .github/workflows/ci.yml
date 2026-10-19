@@ -696,6 +696,8 @@ jobs:
           path: |
             test-results/
             /tmp/pf.log
+            /tmp/pf-sandbox.log
+            /tmp/sandbox-edge.log
             /tmp/cluster-sampler.log
             /tmp/rollout-hook.log
             /tmp/platform-logs/
@@ -1579,6 +1581,8 @@ jobs:
             flake-report.json
             flake-baseline.json
             /tmp/pf.log
+            /tmp/pf-sandbox.log
+            /tmp/sandbox-edge.log
             /tmp/cluster-sampler.log
             /tmp/rollout-hook.log
             /tmp/platform-logs/

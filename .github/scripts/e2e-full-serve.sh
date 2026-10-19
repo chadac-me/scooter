@@ -41,7 +41,29 @@ LOGS_PID=$!
 nix shell nixpkgs#kubectl -c python3 test/e2e/support/rolloutHook.py 8898 >/tmp/rollout-hook.log 2>&1 &
 HOOK_PID=$!
 
-trap 'kill "$PF_PID" "$SAMPLER_PID" "$LOGS_PID" "$HOOK_PID" 2>/dev/null || true' EXIT
+# Per-conversation service origins, when the deployed platform has them on: a
+# port-forward of the router's sandbox listener, behind sandboxEdge.mjs playing the
+# wildcard Ingress (TLS, Host intact). The domain is read off the deployment, so a
+# platform without one (e.g. the base branch's control run) gets neither, and
+# playwright.config.ts only maps `*.<domain>` when E2E_SANDBOX_DOMAIN is set.
+SANDBOX_PIDS=()
+E2E_SANDBOX_DOMAIN=$(nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox get deployment/conversation-router \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SANDBOX_DOMAIN")].value}' 2>/dev/null || true)
+if [ -n "$E2E_SANDBOX_DOMAIN" ]; then
+  nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox port-forward svc/agent-host 8896:8081 >/tmp/pf-sandbox.log 2>&1 &
+  SANDBOX_PIDS+=($!)
+  mkdir -p /tmp/sandbox-edge
+  nix shell nixpkgs#openssl -c openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+    -keyout /tmp/sandbox-edge/key.pem -out /tmp/sandbox-edge/cert.pem \
+    -subj "/CN=*.${E2E_SANDBOX_DOMAIN}" >/dev/null 2>&1
+  nix shell nixpkgs#nodejs_22 -c node test/e2e/support/sandboxEdge.mjs 8897 127.0.0.1:8896 \
+    /tmp/sandbox-edge/cert.pem /tmp/sandbox-edge/key.pem >/tmp/sandbox-edge.log 2>&1 &
+  SANDBOX_PIDS+=($!)
+  export E2E_SANDBOX_DOMAIN
+  export E2E_SANDBOX_EDGE=127.0.0.1:8897
+fi
+
+trap 'kill "$PF_PID" "$SAMPLER_PID" "$LOGS_PID" "$HOOK_PID" ${SANDBOX_PIDS[@]+"${SANDBOX_PIDS[@]}"} 2>/dev/null || true' EXIT
 
 # Wait on a real GET, not the port bind — the forward accepts before nginx serves.
 for _ in $(seq 1 60); do
@@ -49,3 +71,15 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 curl -sf -o /dev/null http://127.0.0.1:8899/ || { echo "the UI never served:"; cat /tmp/pf.log; exit 1; }
+
+# The sandbox listener 404s a host with no conversation, so any answer means the
+# forward, the edge and the router are all up.
+if [ -n "${E2E_SANDBOX_DOMAIN:-}" ]; then
+  for _ in $(seq 1 30); do
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve "ffffffff.${E2E_SANDBOX_DOMAIN}:8897:127.0.0.1" \
+      "https://ffffffff.${E2E_SANDBOX_DOMAIN}:8897/x/" || true)
+    [ "$code" = "404" ] && break
+    sleep 2
+  done
+  [ "$code" = "404" ] || { echo "the sandbox edge never served (last: $code):"; cat /tmp/pf-sandbox.log /tmp/sandbox-edge.log; exit 1; }
+fi

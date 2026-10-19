@@ -53,6 +53,7 @@ import { createDeferredConnector } from "./exec/deferredConnect.js";
 import { createLocalSandboxApiClient } from "./exec/localExec.js";
 import { resolvePodTarget } from "./exec/k8sExec.js";
 import { createWake, createWebServiceProxy } from "./proxy/webServiceProxy.js";
+import { sandboxOriginsFromEnv } from "./proxy/sandboxOrigin.js";
 import { createWebServiceRegistry } from "./proxy/webServiceRegistry.js";
 import { createModuleRegistry } from "./proxy/moduleRegistry.js";
 import {
@@ -416,6 +417,8 @@ export async function hydrateWithRetry(
 export async function main(
   config: AgentHostConfig & Partial<AgentHostConfigExtra> = configFromEnv(),
 ): Promise<() => Promise<void>> {
+  // Per-conversation service origins (<label>.<SANDBOX_DOMAIN>); undefined keeps /c/<id>/.
+  const sandboxOrigins = sandboxOriginsFromEnv();
   // The provisioner: noop for a fake sandbox (which has no CR to size), else the k8s
   // provisioner, kept typed because it also exposes the size ops.
   const k8sProvisioner: K8sProvisioner | null = config.fakeSandbox
@@ -460,6 +463,7 @@ export async function main(
         extraEnv: parseScooterEnv(process.env.SCOOTER_ENV),
         // Public chat UI base URL, from which each sandbox gets its own CONVERSATION_URL.
         publicUrl: process.env.PUBLIC_URL || undefined,
+        sandboxOrigins,
         // The deployment's named size catalog and default preset, for the resize tools and
         // the UI picker.
         sizePresetsJson: process.env.SANDBOX_SIZES_JSON || undefined,
@@ -1213,6 +1217,7 @@ export async function main(
       store,
       server,
       webServices,
+      sandboxOrigins,
       moduleRegistry,
       identityStore,
       assets,
@@ -1316,6 +1321,8 @@ export async function main(
         registry: webServices,
         wake: createWake({ sessions, provisioner, registry: webServices }),
         resolveUser,
+        sandboxDomain: sandboxOrigins?.domain,
+        sandboxScheme: sandboxOrigins?.scheme,
         publicHost: (() => {
           try {
             return process.env.PUBLIC_URL ? new URL(process.env.PUBLIC_URL).host : "";

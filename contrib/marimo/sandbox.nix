@@ -44,7 +44,7 @@ in
       # `command` is types.str, so the derivation is interpolated to its store path for the re-converge eval.
       lib.mkDefault "${pkgs.writeShellScript "marimo-web-service" ''
         set -euo pipefail
-        base="/c/''${CONVERSATION_ID:-unknown}/marimo"
+        base="''${SCOOTER_SERVICE_PREFIX-/c/''${CONVERSATION_ID:-unknown}}/marimo"
         proxy_args=()
         if [ -n "''${PUBLIC_HOST:-}" ]; then proxy_args+=(--proxy "''${PUBLIC_HOST}"); fi
         # --no-token: access is gated by the platform proxy, and marimo-pair needs a token-less server.
