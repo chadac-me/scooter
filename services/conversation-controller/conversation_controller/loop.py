@@ -1,8 +1,9 @@
 """The reconcile loop: the imperative shell around reconcile.py.
 
-Lists pods and Conversations, computes per-pod load, decides each conversation's action
-and applies the status patch. The caller leader-gates it, and it takes a ControllerK8s
-(real or fake) so the whole loop is unit-testable against an in-memory fake."""
+Lists pods and the conversations rows (the source of truth), computes per-pod load, decides
+each conversation's action and writes it to the row, mirroring status onto the Conversation
+CR while agent-host still reads it. The caller leader-gates it, and it takes a ControllerK8s
+and a rows handle (real or fake) so the whole loop is unit-testable against in-memory fakes."""
 
 from __future__ import annotations
 
@@ -32,26 +33,6 @@ logger = logging.getLogger(__name__)
 _C = {"component": "loop"}
 
 
-def _state(cr: dict, sandbox_modes: dict[str, str | None] | None = None) -> ConversationState:
-    st = cr.get("status") or {}
-    spec = cr.get("spec") or {}
-    ref = spec.get("sandboxRef")
-    return ConversationState(
-        name=cr["metadata"]["name"],
-        host_pod=st.get("hostPod"),
-        # None when the Sandbox does not exist, which the drift rule treats as no evidence.
-        sandbox_mode=(sandbox_modes or {}).get(ref) if ref else None,
-        sandbox_ref=ref,
-        creator_pod=spec.get("creatorPod"),
-        phase=st.get("phase", "Pending"),
-        # Whether the CR carries a phase at all, as opposed to the "Pending" default above.
-        phase_present=st.get("phase") is not None,
-        generation=int(st.get("generation", 0)),
-        host_ip=st.get("hostIP"),
-        parent_id=spec.get("parentId"),
-    )
-
-
 def _row_state(row: dict, sandbox_modes: dict[str, str | None], ip_of: dict[str, str]) -> ConversationState:
     ref = row.get("sandbox_ref")
     host = row.get("host_pod")
@@ -69,11 +50,8 @@ def _row_state(row: dict, sandbox_modes: dict[str, str | None], ip_of: dict[str,
     )
 
 
-def _patch_cr(k8s, crs: dict | None, name: str, status: dict) -> None:
-    """Mirror status onto the CR; with rows as the source, a missing or failed CR is not fatal."""
-    if crs is None:
-        k8s.patch_status(name, status)
-        return
+def _patch_cr(k8s, crs: dict, name: str, status: dict) -> None:
+    """Mirror status onto the CR; a missing or failed CR is not fatal."""
     if name not in crs:
         return
     try:
@@ -82,9 +60,9 @@ def _patch_cr(k8s, crs: dict | None, name: str, status: dict) -> None:
         logger.warning("CR status mirror failed", extra={**_C, "conversation_id": name}, exc_info=True)
 
 
-def _mirror_noop(k8s, crs: dict | None, c: ConversationState) -> None:
+def _mirror_noop(k8s, crs: dict, c: ConversationState) -> None:
     """Bring a CR's status in line with the row, e.g. after a router claim."""
-    if crs is None or c.name not in crs:
+    if c.name not in crs:
         return
     st = crs[c.name]
     want = {"hostPod": c.host_pod, "hostIP": c.host_ip, "generation": c.generation}
@@ -121,19 +99,16 @@ _zombie_progress: dict[str, _ZombieProgress] = {}
 _prev_gen: dict[str, int] = {}
 
 
-def _mirror_phase(rows, name: str, phase: str) -> None:
-    """Mirror a phase the controller just patched onto the CR to the conversations row, if any."""
-    if rows is not None:
-        rows.set_phase(name, phase)
+def _cr_statuses(k8s) -> dict:
+    """CR statuses for the mirror; best-effort, since nothing here decides from them."""
+    try:
+        return {cr["metadata"]["name"]: (cr.get("status") or {}) for cr in k8s.list_conversations()}
+    except Exception:  # noqa: BLE001
+        logger.warning("list_conversations failed", extra={**_C, "skipped": "cr-mirror"}, exc_info=True)
+        return {}
 
 
-def _mirror_release(rows, name: str, generation: int) -> None:
-    """Mirror a placement release to the row immediately, since a release is a fencing event."""
-    if rows is not None:
-        rows.release_assignment(name, generation)
-
-
-def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
+def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
     """One reconcile pass over all Conversations, returning [(name, action_kind)]; load is tracked as assignments are made so a burst of Pending conversations spreads across pods."""
     pods = k8s.list_host_pods()
     # A terminating pod still reports Ready through its grace period, so exclude it here.
@@ -146,18 +121,14 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
             "list_sandboxes failed", extra={**_C, "skipped": "drift-repair"}, exc_info=True
         )
         sandbox_modes = {}
-    crs: dict | None = None
-    if rows is not None:
-        running = {ref for ref, mode in sandbox_modes.items() if mode != "Suspended"}
-        states = rows.list_states(running, set(_zombie_progress))
-        if states is None:
-            logger.warning("skipping reconcile: conversations rows unreadable", extra=_C)
-            return []
-        ip_of = {p.name: p.ip for p in pods}
-        convs = [_row_state(r, sandbox_modes, ip_of) for r in states]
-        crs = {cr["metadata"]["name"]: (cr.get("status") or {}) for cr in k8s.list_conversations()}
-    else:
-        convs = [_state(cr, sandbox_modes) for cr in k8s.list_conversations()]
+    running = {ref for ref, mode in sandbox_modes.items() if mode != "Suspended"}
+    states = rows.list_states(running, set(_zombie_progress))
+    if states is None:
+        logger.warning("skipping reconcile: conversations rows unreadable", extra=_C)
+        return []
+    ip_of = {p.name: p.ip for p in pods}
+    convs = [_row_state(r, sandbox_modes, ip_of) for r in states]
+    crs = _cr_statuses(k8s)
 
     # Seed load from conversations currently assigned to a still-ready pod.
     load: dict[str, int] = {}
@@ -207,7 +178,7 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
             if prog.suspends >= _ZOMBIE_MAX_SUSPENDS:
                 if c.sandbox_ref:
                     k8s.reclaim_sandbox_pod(c.sandbox_ref)
-                _mirror_phase(rows, c.name, "Failed")
+                rows.set_phase(c.name, "Failed")
                 _patch_cr(k8s, crs, c.name, {"phase": "Failed"})
                 prog.resolved = True
                 logger.error(
@@ -243,12 +214,12 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
         if isinstance(action, Detach):
             # Release stale placement on a suspended conversation, keeping the invariant that
             # hostIP is empty whenever hostPod is empty.
-            _mirror_release(rows, c.name, c.generation)
+            rows.release_assignment(c.name, c.generation)
             _patch_cr(k8s, crs, c.name, {"hostPod": None, "hostIP": None})
             hosts[c.name] = None
             results.append((c.name, "detach"))
             continue
-        if isinstance(action, MarkSuspended) and crs is not None and _prev_gen.get(c.name) != c.generation:
+        if isinstance(action, MarkSuspended) and _prev_gen.get(c.name) != c.generation:
             results.append((c.name, "drift-grace"))
             continue
         if isinstance(action, MarkSuspended):
@@ -261,8 +232,8 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
                 "phase drift repaired",
                 {**_C, "conversation_id": c.name, "reason": action.reason},
             )
-            _mirror_phase(rows, c.name, "Suspended")
-            _mirror_release(rows, c.name, c.generation)
+            rows.set_phase(c.name, "Suspended")
+            rows.release_assignment(c.name, c.generation)
             _patch_cr(k8s, crs, c.name, {"phase": "Suspended", "hostPod": None, "hostIP": None})
             hosts[c.name] = None
             results.append((c.name, "mark-suspended"))
@@ -271,8 +242,8 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
             # Patch unless the CR already says {phase: Pending, hostPod: null}; a status-less CR
             # is patched so its phase materializes.
             if c.host_pod is not None or not c.phase_present or c.phase != "Pending":
-                _mirror_phase(rows, c.name, "Pending")
-                _mirror_release(rows, c.name, c.generation)
+                rows.set_phase(c.name, "Pending")
+                rows.release_assignment(c.name, c.generation)
                 _patch_cr(k8s, crs, c.name, {"phase": "Pending", "hostPod": None})
             hosts[c.name] = None
             results.append((c.name, "pending"))
@@ -280,10 +251,10 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
         # Assign / Reassign.
         assert isinstance(action, Assign)
         # The row claim decides; losing to the router is fine.
-        if rows is not None and not rows.set_assignment(c.name, action.host_pod, action.generation):
+        if not rows.set_assignment(c.name, action.host_pod, action.generation):
             results.append((c.name, "assign-lost"))
             continue
-        _mirror_phase(rows, c.name, action.phase)
+        rows.set_phase(c.name, action.phase)
         _patch_cr(k8s, crs, c.name, {
             "phase": action.phase,
             "hostPod": action.host_pod,
@@ -339,9 +310,8 @@ def reconcile_once(k8s, cap: int, rows=None) -> list[tuple[str, str]]:
         if prog.quiescent >= _ZOMBIE_FORGET_TICKS:
             del _zombie_progress[name]
 
-    if crs is not None:
-        _prev_gen.clear()
-        _prev_gen.update({c.name: c.generation for c in convs})
+    _prev_gen.clear()
+    _prev_gen.update({c.name: c.generation for c in convs})
 
     # Forget conversations that did not drift this pass, so a future drift is logged again.
     forget_warned({f"phase-drift:{n}" for n in drift_flagged})
@@ -356,9 +326,13 @@ class AutoscaleState:
         self.last_scale_down: float = 0.0
 
 
-def autoscale_once(k8s, cfg, state: AutoscaleState, now: float) -> dict:
+def autoscale_once(k8s, cfg, state: AutoscaleState, now: float, rows) -> dict:
     """Scale the agent-host Deployment to fit conversation demand and return {demand, current, target, ready_pods, per_pod}; the controller is the only writer of spec.replicas, so no HPA may run alongside it."""
-    convs = [_state(cr) for cr in k8s.list_conversations()]
+    live = rows.list_live()
+    if live is None:
+        # Scaling on a demand of zero would drain the fleet.
+        raise RuntimeError("conversations rows unreadable; autoscale skipped")
+    convs = [_row_state(r, {}, {}) for r in live]
     # Demand counts top-level Pending and Assigned conversations only.
     demand = demand_of(convs)
     pods = k8s.list_host_pods()
@@ -411,14 +385,32 @@ def reap_overlays(k8s, retention_seconds: float) -> list[str]:
     return reaped
 
 
-def reap_orphans(k8s, grace_seconds: float) -> list[str]:
-    """One reaper pass: delete the whole tree (Sandbox, ServiceAccount, module ConfigMap) of every Sandbox with no owning Conversation that is older than the grace window, and return the reaped names."""
-    referenced: set[str] = {
+def reap_orphans(k8s, grace_seconds: float, rows) -> list[str]:
+    """One reaper pass: delete the whole tree (Sandbox, ServiceAccount, module ConfigMap) of every Sandbox no conversation references that is older than the grace window, and return the reaped names."""
+    sandboxes = k8s.list_sandboxes()
+    row_refs = rows.referenced_sandboxes()
+    # A wrong or empty "referenced" set deletes live sandboxes, so doubt means skip the pass.
+    if row_refs is None:
+        logger.warning("skipping orphan reap: conversations rows unreadable", extra=_C)
+        return []
+    if not row_refs and sandboxes:
+        logger.warning(
+            "skipping orphan reap: no row references a sandbox but sandboxes exist",
+            extra={**_C, "sandboxes": len(sandboxes)},
+        )
+        return []
+    # While writers still create CRs, a CR's reference also spares its Sandbox.
+    cr_refs: set[str] = {
         ref
         for cr in k8s.list_conversations()
         if (ref := (cr.get("spec") or {}).get("sandboxRef"))
     }
-    orphans = find_orphans(k8s.list_sandboxes(), referenced, grace_seconds)
+    if missing := cr_refs - row_refs:
+        logger.warning(
+            "sandboxes referenced by a CR but no row",
+            extra={**_C, "count": len(missing), "sample": sorted(missing)[:5]},
+        )
+    orphans = find_orphans(sandboxes, row_refs | cr_refs, grace_seconds)
     reaped: list[str] = []
     for name in orphans:
         try:

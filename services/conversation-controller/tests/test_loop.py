@@ -102,6 +102,62 @@ class FakeK8s:
         return self._convs[name].get("status", {})
 
 
+class FakeRows:
+    """The conversations rows, stored in the fake's CRs so tests can keep asserting on k.status();
+    the CR mirror then writes the same values, which is harmless."""
+
+    def __init__(self, k8s, fail=False):
+        self._k8s = k8s
+        self.fail = fail                        # simulate Postgres being unreachable
+
+    def _row(self, cr):
+        st, spec = cr.get("status") or {}, cr.get("spec") or {}
+        return {
+            "id": cr["metadata"]["name"],
+            "host_pod": st.get("hostPod"),
+            "host_generation": int(st.get("generation", 0)),
+            "phase": st.get("phase"),
+            "sandbox_ref": spec.get("sandboxRef"),
+            "creator_pod": spec.get("creatorPod"),
+            "parent_id": spec.get("parentId"),
+        }
+
+    def _get(self, name):
+        return next((cr for cr in self._k8s.list_conversations() if cr["metadata"]["name"] == name), None)
+
+    def list_states(self, running_refs, in_repair):
+        return None if self.fail else [self._row(cr) for cr in self._k8s.list_conversations()]
+
+    def list_live(self):
+        if self.fail:
+            return None
+        return [r for r in map(self._row, self._k8s.list_conversations())
+                if r["phase"] not in ("Suspended", "Failed") or r["host_pod"] is not None]
+
+    def referenced_sandboxes(self):
+        return None if self.fail else {r["sandbox_ref"] for r in map(self._row, self._k8s.list_conversations()) if r["sandbox_ref"]}
+
+    def set_phase(self, name, phase):
+        if self._get(name) is None:
+            return False
+        self._k8s.patch_status(name, {"phase": phase})
+        return True
+
+    def set_assignment(self, name, host_pod, generation):
+        cr = self._get(name)
+        if cr is None or generation <= self._row(cr)["host_generation"]:
+            return False
+        self._k8s.patch_status(name, {"hostPod": host_pod, "generation": generation})
+        return True
+
+    def release_assignment(self, name, generation):
+        cr = self._get(name)
+        if cr is None or generation < self._row(cr)["host_generation"] or self._row(cr)["host_pod"] is None:
+            return False
+        self._k8s.patch_status(name, {"hostPod": None})
+        return True
+
+
 def _cr(name, host=None, phase="Pending", gen=0, parent=None, sandbox_ref=None, host_ip=None):
     st = {"phase": phase, "generation": gen}
     if host is not None:
@@ -122,21 +178,64 @@ def test_reap_deletes_unreferenced_sandbox_past_grace():
     convs = [_cr("c1", sandbox_ref="conv-a")]
     sbs = [SandboxRef("conv-a", age_seconds=1000), SandboxRef("conv-orphan", age_seconds=1000)]
     k = FakeK8s([], convs, sandboxes=sbs)
-    reaped = reap_orphans(k, grace_seconds=600)
+    reaped = reap_orphans(k, grace_seconds=600, rows=FakeRows(k))
     assert reaped == ["conv-orphan"]
     assert k.deleted_trees == ["conv-orphan"]
 
 
 def test_reap_spares_young_orphan():
     k = FakeK8s([], [], sandboxes=[SandboxRef("conv-new", age_seconds=10)])
-    assert reap_orphans(k, grace_seconds=600) == []
+    assert reap_orphans(k, grace_seconds=600, rows=FakeRows(k)) == []
     assert k.deleted_trees == []
 
 
 def test_reap_spares_referenced_sandbox():
     convs = [_cr("c1", sandbox_ref="conv-a")]
     k = FakeK8s([], convs, sandboxes=[SandboxRef("conv-a", age_seconds=99999)])
-    assert reap_orphans(k, grace_seconds=600) == []
+    assert reap_orphans(k, grace_seconds=600, rows=FakeRows(k)) == []
+
+
+class RowsWithout(FakeRows):
+    """Rows that lack some of the CRs' sandbox references, as before a writer fans out to the row."""
+
+    def __init__(self, k8s, missing):
+        super().__init__(k8s)
+        self.missing = set(missing)
+
+    def referenced_sandboxes(self):
+        return super().referenced_sandboxes() - self.missing
+
+
+def test_reap_skips_the_pass_when_rows_are_unreadable():
+    k = FakeK8s([], [], sandboxes=[SandboxRef("conv-old", age_seconds=1000)])
+    assert reap_orphans(k, grace_seconds=600, rows=FakeRows(k, fail=True)) == []
+    assert k.deleted_trees == []
+
+
+def test_reap_skips_the_pass_when_no_row_references_any_sandbox():
+    # An empty referenced set while sandboxes exist is the boot/bad-query case that would wipe the fleet.
+    k = FakeK8s([], [], sandboxes=[SandboxRef("conv-a", age_seconds=1000), SandboxRef("conv-b", age_seconds=1000)])
+    assert reap_orphans(k, grace_seconds=600, rows=FakeRows(k)) == []
+    assert k.deleted_trees == []
+
+
+def test_reap_spares_a_sandbox_only_a_cr_references():
+    sbs = [SandboxRef("conv-row", age_seconds=1000), SandboxRef("conv-cr-only", age_seconds=1000),
+           SandboxRef("conv-orphan", age_seconds=1000)]
+    k = FakeK8s([], [_cr("a", sandbox_ref="conv-row"), _cr("b", sandbox_ref="conv-cr-only")], sandboxes=sbs)
+    assert reap_orphans(k, grace_seconds=600, rows=RowsWithout(k, {"conv-cr-only"})) == ["conv-orphan"]
+
+
+def test_reap_spares_a_sandbox_only_a_row_references():
+    class NoCRs(FakeK8s):
+        def list_conversations(self):
+            return []
+
+    k = NoCRs([], [_cr("a", sandbox_ref="conv-row")], sandboxes=[SandboxRef("conv-row", age_seconds=1000),
+                                                                 SandboxRef("conv-orphan", age_seconds=1000)])
+    rows = FakeRows(k)
+    rows.referenced_sandboxes = lambda: {"conv-row"}
+    assert reap_orphans(k, grace_seconds=600, rows=rows) == ["conv-orphan"]
 
 
 def test_reap_one_failure_does_not_abort_the_pass():
@@ -147,8 +246,8 @@ def test_reap_one_failure_does_not_abort_the_pass():
             super().delete_sandbox_tree(name)
 
     sbs = [SandboxRef("conv-bad", age_seconds=1000), SandboxRef("conv-good", age_seconds=1000)]
-    k = Boom([], [], sandboxes=sbs)
-    reaped = reap_orphans(k, grace_seconds=600)
+    k = Boom([], [_cr("live", sandbox_ref="conv-live")], sandboxes=sbs)
+    reaped = reap_orphans(k, grace_seconds=600, rows=FakeRows(k))
     # conv-bad raised; conv-good still reaped.
     assert "conv-good" in k.deleted_trees
     assert reaped == ["conv-good"]
@@ -156,7 +255,7 @@ def test_reap_one_failure_does_not_abort_the_pass():
 
 def test_pending_conversation_gets_a_host():
     k = FakeK8s([Pod("a", True)], [_cr("c1")])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.status("c1")["hostPod"] == "a"
     assert k.status("c1")["phase"] == "Assigned"
     assert k.status("c1")["generation"] == 1
@@ -166,14 +265,14 @@ def test_statusless_cr_unassignable_materializes_pending():
     # An unassignable CR with status: null must still get {phase: Pending} materialized.
     cr = {"metadata": {"name": "cnew"}, "spec": {}, "status": None}
     k = FakeK8s([], [cr])
-    reconcile_once(k, cap=1)
+    reconcile_once(k, cap=1, rows=FakeRows(k))
     assert k.status("cnew").get("phase") == "Pending", "status:null CR must get phase materialized"
 
 
 def test_already_pending_no_host_is_not_rechurned():
     cr = _cr("cp", phase="Pending")
     k = FakeK8s([], [cr])
-    reconcile_once(k, cap=1)
+    reconcile_once(k, cap=1, rows=FakeRows(k))
     assert k.patches == [], "an already-materialized Pending must not be re-patched"
 
 
@@ -191,7 +290,7 @@ def test_notify_revive_returns_immediately_even_if_the_http_hangs():
 
 def test_assign_patches_host_ip_and_pushes_revive():
     k = FakeK8s([Pod("a", True, ip="10.42.0.7")], [_cr("c1")])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.status("c1")["hostIP"] == "10.42.0.7"
     assert k.revives == [("10.42.0.7", "c1", 1)]
 
@@ -199,20 +298,20 @@ def test_assign_patches_host_ip_and_pushes_revive():
 def test_no_revive_push_when_pod_has_no_ip_yet():
     # A pod with no IP yet is assigned but not pushed until the next tick.
     k = FakeK8s([Pod("a", True, ip=None)], [_cr("c1")])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.status("c1")["hostPod"] == "a"
     assert k.revives == []
 
 
 def test_assigned_to_ready_host_is_noop():
     k = FakeK8s([Pod("a", True)], [_cr("c1", host="a", phase="Assigned", gen=1)])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.patches == []
 
 
 def test_host_gone_triggers_reassign_with_gen_bump():
     k = FakeK8s([Pod("b", True)], [_cr("c1", host="a", phase="Assigned", gen=1)])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.status("c1")["hostPod"] == "b"
     assert k.status("c1")["generation"] == 2
 
@@ -221,7 +320,7 @@ def test_suspended_conversation_is_detached_end_to_end():
     # A suspended conversation with stale placement gets both hostPod and hostIP released
     # while its phase stays Suspended.
     k = FakeK8s([Pod("a", True)], [_cr("c1", host="a", phase="Suspended", gen=1, host_ip="10.1.4.35")])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.status("c1")["hostPod"] is None
     assert k.status("c1")["hostIP"] is None
     assert k.status("c1").get("phase") == "Suspended"
@@ -230,7 +329,7 @@ def test_suspended_conversation_is_detached_end_to_end():
 def test_suspended_stale_hostip_without_hostpod_is_repaired():
     # A lingering hostIP with no hostPod is repaired, not left as a NoOp.
     k = FakeK8s([Pod("a", True)], [_cr("c1", phase="Suspended", gen=2, host_ip="10.1.4.35")])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.status("c1")["hostIP"] is None
     assert k.status("c1")["hostPod"] is None
     assert k.status("c1").get("phase") == "Suspended"
@@ -239,27 +338,27 @@ def test_suspended_stale_hostip_without_hostpod_is_repaired():
 def test_suspended_conversation_already_hostless_is_noop():
     cr = _cr("c1", phase="Suspended")
     k = FakeK8s([Pod("a", True)], [cr])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.patches == []
 
 
 def test_two_pending_convs_balance_across_two_pods():
     k = FakeK8s([Pod("a", True), Pod("b", True)], [_cr("c1"), _cr("c2")])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     hosts = {k.status("c1")["hostPod"], k.status("c2")["hostPod"]}
     assert hosts == {"a", "b"}
 
 
 def test_respects_cap_leaves_pending():
     k = FakeK8s([Pod("a", True)], [_cr("c1", host="a", phase="Assigned", gen=1), _cr("c2")])
-    reconcile_once(k, cap=1)
+    reconcile_once(k, cap=1, rows=FakeRows(k))
     assert "hostPod" not in k.status("c2") or k.status("c2").get("hostPod") is None
     assert k.status("c2")["phase"] == "Pending"
 
 
 def test_no_ready_pods_leaves_all_pending():
     k = FakeK8s([Pod("a", False)], [_cr("c1")])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.status("c1").get("hostPod") is None
 
 
@@ -267,13 +366,13 @@ def test_subagent_colocates_with_parent_in_one_pass():
     # The parent is assigned first and the child follows onto the same pod in the same pass,
     # bypassing the cap.
     k = FakeK8s([Pod("a", True), Pod("b", True)], [_cr("p1"), _cr("kid", parent="p1")])
-    reconcile_once(k, cap=1)
+    reconcile_once(k, cap=1, rows=FakeRows(k))
     assert k.status("kid")["hostPod"] == k.status("p1")["hostPod"]
 
 
 def test_subagent_stays_pending_until_parent_ready():
     k = FakeK8s([Pod("a", False)], [_cr("p1", host="a", phase="Assigned", gen=1), _cr("kid", parent="p1")])
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
     assert k.status("kid").get("hostPod") is None
     assert k.status("kid")["phase"] == "Pending"
 
@@ -297,7 +396,7 @@ def test_autoscale_scales_up_immediately():
     convs = [_cr_a(f"c{i}") for i in range(4)]
     k = FakeK8s([Pod("a", True), Pod("b", True)], convs, replicas=2)
     st = AutoscaleState()
-    m = autoscale_once(k, _Cfg(pod_cap=1, max_replicas=10), st, now=1000.0)
+    m = autoscale_once(k, _Cfg(pod_cap=1, max_replicas=10), st, now=1000.0, rows=FakeRows(k))
     assert k.scale_calls == [4]
     assert m["demand"] == 4 and m["target"] == 4
 
@@ -305,7 +404,7 @@ def test_autoscale_scales_up_immediately():
 def test_autoscale_subagents_do_not_count():
     convs = [_cr_a("p1"), _cr_a("kid", parent="p1")]
     k = FakeK8s([Pod("a", True)], convs, replicas=2)
-    m = autoscale_once(k, _Cfg(pod_cap=1), AutoscaleState(), now=1.0)
+    m = autoscale_once(k, _Cfg(pod_cap=1), AutoscaleState(), now=1.0, rows=FakeRows(k))
     assert m["demand"] == 1
 
 
@@ -313,24 +412,49 @@ def test_autoscale_scale_down_waits_for_cooldown():
     # The first scale-down lands; a second one 100s later is held by the cooldown.
     k = FakeK8s([Pod("a", True)], [], replicas=5)
     st = AutoscaleState()
-    autoscale_once(k, _Cfg(pod_cap=1, cooldown=300.0), st, now=1000.0)
+    autoscale_once(k, _Cfg(pod_cap=1, cooldown=300.0), st, now=1000.0, rows=FakeRows(k))
     assert k.scale_calls == [2]
     k._replicas = 4
-    autoscale_once(k, _Cfg(pod_cap=1, cooldown=300.0), st, now=1100.0)
+    autoscale_once(k, _Cfg(pod_cap=1, cooldown=300.0), st, now=1100.0, rows=FakeRows(k))
     assert k.scale_calls == [2]
 
 
 def test_autoscale_noop_when_target_equals_current():
     convs = [_cr_a("c1"), _cr_a("c2")]
     k = FakeK8s([Pod("a", True), Pod("b", True)], convs, replicas=2)
-    autoscale_once(k, _Cfg(pod_cap=1), AutoscaleState(), now=1.0)
+    autoscale_once(k, _Cfg(pod_cap=1), AutoscaleState(), now=1.0, rows=FakeRows(k))
     assert k.scale_calls == []
+
+
+def test_autoscale_raises_rather_than_scale_on_unreadable_rows():
+    k = FakeK8s([Pod("a", True)], [_cr_a("c1")], replicas=3)
+    with pytest.raises(RuntimeError):
+        autoscale_once(k, _Cfg(pod_cap=1), AutoscaleState(), now=1.0, rows=FakeRows(k, fail=True))
+    assert k.scale_calls == []
+
+
+def test_reconcile_skips_the_tick_on_unreadable_rows():
+    k = FakeK8s([Pod("a", True, ip="10.0.0.1")], [_cr("c1")])
+    assert reconcile_once(k, cap=10, rows=FakeRows(k, fail=True)) == []
+    assert k.patches == []
+
+
+def test_a_failed_cr_list_still_reconciles_from_rows():
+    class NoCRList(FakeK8s):
+        def list_conversations(self):
+            raise RuntimeError("apiserver down")
+
+    k = NoCRList([Pod("a", True, ip="10.0.0.1")], [_cr("c1")])
+    rows = FakeRows(k)
+    rows.list_states = lambda running, repair: [rows._row(cr) for cr in k._convs.values()]
+    rows._get = lambda name: k._convs.get(name)
+    assert ("c1", "assign") in reconcile_once(k, cap=10, rows=rows)
 
 
 def test_autoscale_per_pod_metric():
     convs = [_cr_a(f"c{i}") for i in range(6)]
     k = FakeK8s([Pod("a", True), Pod("b", True)], convs, replicas=2)
-    m = autoscale_once(k, _Cfg(pod_cap=5), AutoscaleState(), now=1.0)
+    m = autoscale_once(k, _Cfg(pod_cap=5), AutoscaleState(), now=1.0, rows=FakeRows(k))
     assert m["per_pod"] == 3.0
 
 
@@ -344,7 +468,9 @@ def test_drifted_conversation_is_repaired_and_leaves_demand():
         convs=[_cr("drifted", host="a", phase="Assigned", gen=3, sandbox_ref="conv-x")],
         sandboxes=[SandboxRef(name="conv-x", age_seconds=1000.0, operating_mode="Suspended")],
     )
-    results = reconcile_once(k8s, cap=10)
+    # The first sighting is the grace tick a fresh claim gets.
+    assert ("drifted", "drift-grace") in reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+    results = reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
 
     assert ("drifted", "mark-suspended") in results
     # One patch fixes the phase and releases placement.
@@ -362,7 +488,7 @@ def test_running_sandbox_is_not_repaired():
         convs=[_cr("live", host="a", phase="Assigned", gen=1, sandbox_ref="conv-y")],
         sandboxes=[SandboxRef(name="conv-y", age_seconds=1000.0, operating_mode="Running")],
     )
-    results = reconcile_once(k8s, cap=10)
+    results = reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
     assert ("live", "noop") in results
     assert not any(p[1].get("phase") == "Suspended" for p in k8s.patches)
 
@@ -377,7 +503,7 @@ def test_sandbox_list_failure_must_not_abort_assignment():
         pods=[Pod("a", True, ip="10.0.0.1")],
         convs=[_cr("newborn")],
     )
-    results = reconcile_once(k8s, cap=10)
+    results = reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
     assert ("newborn", "assign") in results
     assert not any(kind == "mark-suspended" for _, kind in results)
 
@@ -396,7 +522,7 @@ def _conv(name, host, phase="Assigned", parent=None):
 def test_hosting_pods_get_their_conversation_count_as_deletion_cost():  # @proves
     pods = [Pod("a", True, "10.0.0.1"), Pod("b", True, "10.0.0.2")]
     k8s = FakeK8s(pods, [_conv("c1", "a"), _conv("c2", "a"), _conv("c3", "b")])
-    autoscale_once(k8s, _Cfg(), AutoscaleState(), now=0.0)
+    autoscale_once(k8s, _Cfg(), AutoscaleState(), now=0.0, rows=FakeRows(k8s))
     assert ("a", 2) in k8s.cost_calls
     assert ("b", 1) in k8s.cost_calls
 
@@ -404,7 +530,7 @@ def test_hosting_pods_get_their_conversation_count_as_deletion_cost():  # @prove
 def test_empty_pods_cost_zero_and_unchanged_costs_are_not_repatched():  # @proves
     pods = [Pod("a", True, "10.0.0.1", deletion_cost=1), Pod("b", True, "10.0.0.2")]
     k8s = FakeK8s(pods, [_conv("c1", "a")])
-    autoscale_once(k8s, _Cfg(), AutoscaleState(), now=0.0)
+    autoscale_once(k8s, _Cfg(), AutoscaleState(), now=0.0, rows=FakeRows(k8s))
     assert ("a", 1) not in k8s.cost_calls, "unchanged cost must not be re-patched"
     assert ("b", 0) in k8s.cost_calls
 
@@ -416,7 +542,7 @@ def test_suspended_and_subagent_conversations_do_not_count():  # @proves
         _conv("c2", "a", parent="c-parent"),
         _conv("c3", "a"),
     ])
-    autoscale_once(k8s, _Cfg(), AutoscaleState(), now=0.0)
+    autoscale_once(k8s, _Cfg(), AutoscaleState(), now=0.0, rows=FakeRows(k8s))
     assert ("a", 1) in k8s.cost_calls
 
 
@@ -424,7 +550,7 @@ def test_terminating_pods_are_not_assignment_targets():  # @proves
     # A scale-down victim stays Ready through its grace period but must not receive work.
     pods = [Pod("dying", True, "10.0.0.1", terminating=True), Pod("alive", True, "10.0.0.2")]
     k8s = FakeK8s(pods, [_conv("c1", None, phase="Pending")])
-    reconcile_once(k8s, cap=10)
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
     assigned = [st for name, st in k8s.patches if name == "c1"]
     assert assigned, "the conversation must be assigned"
     assert all(st.get("hostPod") != "dying" for st in assigned), "never to a terminating pod"
@@ -447,35 +573,35 @@ def _zombie():
 def test_zombie_two_tick_confirmation_no_suspend_on_single_sighting():
     # A single sighting can be a revive mid-flight, so it only marks a suspect.
     k = _zombie()
-    res = dict(reconcile_once(k, cap=10))
+    res = dict(reconcile_once(k, cap=10, rows=FakeRows(k)))
     assert res["z1"] == "suspend-sandbox-suspect"
     assert k.suspends == []
 
 
 def test_zombie_suspect_resets_when_conversation_revives():
     k = _zombie()
-    reconcile_once(k, cap=10)  # t1: suspect
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t1: suspect
     assert k.suspends == []
     k._convs["z1"]["status"].update({"phase": "Assigned", "hostPod": "a"})
-    reconcile_once(k, cap=10)  # t2: no longer a zombie
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t2: no longer a zombie
     assert k.suspends == []
     assert "z1" not in loop_mod._zombie_progress
 
 
 def test_confirmed_zombie_is_not_resuspended_every_tick():
     k = _zombie()
-    reconcile_once(k, cap=10)  # t1: suspect
-    reconcile_once(k, cap=10)  # t2: first suspend
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t1: suspect
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t2: first suspend
     assert k.suspends == ["conv-z1"]
-    reconcile_once(k, cap=10)  # t3: backoff hold
-    reconcile_once(k, cap=10)  # t4: backoff hold
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t3: backoff hold
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t4: backoff hold
     assert k.suspends == ["conv-z1"], "confirmed zombie must back off, not re-suspend every tick"
 
 
 def test_persistent_zombie_is_acted_on_a_bounded_number_of_times_then_terminal():
     k = _zombie()
     for _ in range(50):
-        reconcile_once(k, cap=10)
+        reconcile_once(k, cap=10, rows=FakeRows(k))
     assert 1 <= len(k.suspends) <= 5, f"expected a small bounded number of suspends, got {len(k.suspends)}"
     # The escalation reclaims the pod and leaves the Sandbox CR (and its workspace PVC) in place.
     assert k.reclaimed == ["conv-z1"]
@@ -484,14 +610,14 @@ def test_persistent_zombie_is_acted_on_a_bounded_number_of_times_then_terminal()
     # The terminal state is idempotent.
     at_terminal = len(k.suspends)
     for _ in range(10):
-        reconcile_once(k, cap=10)
+        reconcile_once(k, cap=10, rows=FakeRows(k))
     assert len(k.suspends) == at_terminal
     assert k.reclaimed == ["conv-z1"]
 
 
 def test_failed_conversation_is_never_reassigned():
     k = FakeK8s([Pod("a", True)], [_cr("z1", phase="Failed", gen=9)])
-    res = dict(reconcile_once(k, cap=10))
+    res = dict(reconcile_once(k, cap=10, rows=FakeRows(k)))
     assert res["z1"] == "noop"
     assert k.status("z1").get("hostPod") is None
     assert k.status("z1")["phase"] == "Failed"
@@ -502,7 +628,7 @@ def test_zombie_resolution_is_logged_once(caplog):
     k = _zombie()
     with caplog.at_level(logging.WARNING, logger="conversation_controller.loop"):
         for _ in range(50):
-            reconcile_once(k, cap=10)
+            reconcile_once(k, cap=10, rows=FakeRows(k))
     escalations = [r for r in caplog.records if "escalat" in r.getMessage().lower()]
     assert len(escalations) == 1, f"escalation must be logged once, saw {len(escalations)}"
 
@@ -533,22 +659,24 @@ def _drift(caplog, level):
 def test_THE_SPAM_a_persistent_drift_warns_once_but_is_still_REPAIRED_every_pass(caplog):
     caplog.set_level("DEBUG")
     k8s = _drifting_k8s()
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # grace tick
     for _ in range(5):
-        reconcile_once(k8s, cap=10)
+        reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
         _rearm(k8s)
 
     assert len(_drift(caplog, "WARNING")) == 1
     # Quieting the log must not quiet the fix.
-    assert len([p for p in k8s.patches if p[1].get("phase") == "Suspended"]) == 5
+    assert len([p for p in k8s.patches if p[1] == {"phase": "Suspended", "hostPod": None, "hostIP": None}]) == 5
 
 
 def test_a_drift_that_CLEARS_and_returns_is_loud_again(caplog):
     caplog.set_level("DEBUG")
     k8s = _drifting_k8s()
-    reconcile_once(k8s, cap=10)          # drifted -> warn
-    reconcile_once(k8s, cap=10)          # clean pass -> forgotten
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # grace tick
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # drifted -> warn
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # clean pass -> forgotten
     _rearm(k8s)
-    reconcile_once(k8s, cap=10)          # drifts again -> loud
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # drifts again -> loud
     assert len(_drift(caplog, "WARNING")) == 2
 
 
@@ -592,7 +720,7 @@ def _oscillating_zombie(**kwargs):
 def test_oscillating_zombie_still_reaches_the_terminal_escalation():
     k = _oscillating_zombie()
     for _ in range(120):
-        reconcile_once(k, cap=10)
+        reconcile_once(k, cap=10, rows=FakeRows(k))
 
     assert len(k.suspends) <= 5, (
         f"budget reset by the quiescent tick — {len(k.suspends)} suspends in 120 ticks"
@@ -603,11 +731,11 @@ def test_oscillating_zombie_still_reaches_the_terminal_escalation():
 
 def test_quiescent_tick_keeps_the_budget_but_still_re_confirms():
     k = _oscillating_zombie()
-    reconcile_once(k, cap=10)  # t1: suspect
-    reconcile_once(k, cap=10)  # t2: confirmed -> first suspend
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t1: suspect
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t2: confirmed -> first suspend
     assert len(k.suspends) == 1
 
-    reconcile_once(k, cap=10)  # t3: quiescent, the sandbox reads Suspended
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t3: quiescent, the sandbox reads Suspended
     prog = loop_mod._zombie_progress["z1"]
     assert prog.suspends == 1, "the escalation budget must survive a quiescent tick"
     assert prog.confirms == 0, "the false-positive confirmation must reset"
@@ -617,7 +745,7 @@ def test_a_settled_sandbox_is_eventually_forgotten():
     # A suspend that holds is dropped once quiescence has lasted _ZOMBIE_FORGET_TICKS.
     k = _oscillating_zombie(resume_after=0)
     for _ in range(2 + loop_mod._ZOMBIE_FORGET_TICKS + 1):
-        reconcile_once(k, cap=10)
+        reconcile_once(k, cap=10, rows=FakeRows(k))
 
     assert len(k.suspends) == 1, "a sandbox that stays suspended needs exactly one suspend"
     assert k.reclaimed == [], "a suspend that held must NOT escalate"
@@ -627,11 +755,11 @@ def test_a_settled_sandbox_is_eventually_forgotten():
 def test_a_real_revive_drops_the_record_immediately():
     # A genuine revive drops the record at once rather than waiting out the forget window.
     k = _oscillating_zombie()
-    reconcile_once(k, cap=10)  # t1: suspect
+    reconcile_once(k, cap=10, rows=FakeRows(k))  # t1: suspect
     assert "z1" in loop_mod._zombie_progress
 
     k._convs["z1"]["status"].update({"phase": "Assigned", "hostPod": "a"})
-    reconcile_once(k, cap=10)
+    reconcile_once(k, cap=10, rows=FakeRows(k))
 
     assert "z1" not in loop_mod._zombie_progress
     assert k.suspends == []
