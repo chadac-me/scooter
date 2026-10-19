@@ -295,6 +295,13 @@ export interface SessionManager {
    * Suspend conversations idle longer than idleMs; returns the ids suspended.
    */
   sweepIdle(idleMs: number, now?: number): Promise<SessionId[]>;
+  /**
+   * Whether this pod is the host of `id` per the conversations ROW, the store the append fence
+   * checks; the guard's cache trails it by the CR watch. Sweeps that exec into the sandbox (and so
+   * can resume a missing pod) confirm here first. No row-backed registry: the guard's `owns`.
+   * A failed read is false (skip a cycle) rather than true (risk a zombie).
+   */
+  ownsInStore(id: SessionId): Promise<boolean>;
 
   /**
    * Destructively end top-level conversations inactive longer than maxAgeMs, exempting
@@ -381,6 +388,17 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const ownershipGuard = deps.ownershipGuard ?? allowAllGuard;
   const conversationRegistry = deps.conversationRegistry ?? noopRegistry;
   const entries = new Map<SessionId, Entry>();
+
+  const ownsInCache = (id: SessionId): boolean => ownershipGuard.owns?.(id) ?? ownershipGuard.canWrite(id);
+  const ownsInStore = async (id: SessionId): Promise<boolean> => {
+    if (!ownsInCache(id)) return false;
+    if (!deps.selfPod || !conversationRegistry.rowAssignment) return true;
+    const row = await conversationRegistry.rowAssignment(id).catch((err: unknown) => {
+      log.warn("ownership row read failed; skipping this cycle", { conversation_id: id, error: formatError(err) });
+      return null;
+    });
+    return !!row && row.hostPod === deps.selfPod;
+  };
 
   // Fired when a subagent's bridge emits a terminal RUN_FINISHED/RUN_ERROR.
   const subagentCompleteSubs = new Set<(subagentId: SessionId, parentId: SessionId) => void>();
@@ -1285,6 +1303,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       return resumed;
     },
 
+    ownsInStore,
+
     async sweepIdle(idleMs, now = nowMs()) {
       const suspended: SessionId[] = [];
       // A conversation with any non-terminal descendant must not be swept, since its subagents
@@ -1300,8 +1320,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       for (const entry of entries.values()) {
         if (entry.status !== "running") continue;
         // Positive owner only: the job probe resumes a missing pod, so probing a conversation deleted
-        // elsewhere (canWrite fails open once its CR is gone) recreates its sandbox as a zombie.
-        if (!(ownershipGuard.owns?.(entry.id) ?? ownershipGuard.canWrite(entry.id))) continue;
+        // elsewhere (canWrite fails open once its CR is gone) recreates its sandbox as a zombie. The
+        // cached check is cheap; the row is confirmed just before the probe.
+        if (!ownsInCache(entry.id)) continue;
         if (now - entry.lastActivityAt < idleMs) continue;
         // Another replica may have recorded activity this one never saw (a proxied WebSocket
         // bound to the replica it connected through), so re-check the shared value; a failed
@@ -1316,6 +1337,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (qs && (qs.running || qs.queued > 0)) continue;
         // A running background job is not idle either; the probe fails open so an error cannot pin
         // the pod up forever.
+        // The cache trails the row by the CR watch: a conversation deleted or claimed through
+        // another pod still reads as ours until that event arrives, so confirm before the probe.
+        if (!(await ownsInStore(entry.id))) continue;
         if (deps.hasRunningBackgroundJob) {
           let jobRunning = false;
           try {

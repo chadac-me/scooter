@@ -81,6 +81,7 @@ function fakeSessions(): SessionManager {
       return Promise.resolve();
     }),
     sweepIdle: vi.fn(async () => []),
+    ownsInStore: vi.fn(async () => true),
     sweepRetention: vi.fn(async () => []),
   };
 }

@@ -1257,6 +1257,58 @@ describe("sweepIdle is OWNER-ONLY (the zombie-sandbox bug)", () => {
     expect((provisioner.suspend as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
 
+
+  // The guard caches the CR watch; the conversations row (what the append fence checks) leads it.
+  // A conversation deleted or claimed through another pod still reads as ours in the cache until
+  // the watch event lands, so the sweep confirms against the row before probing.
+  describe("the cache says OWNED but the ROW disagrees (watch lag)", () => {
+    const run = async (rowAssignment: () => Promise<{ hostPod: string | null; generation: number } | undefined>) => {
+      const provisioner = fakeProvisioner();
+      let probes = 0;
+      const sessions = createSessionManager({
+        provisioner,
+        store: inMemoryStore(),
+        selfPod: "host-a",
+        conversationRegistry: { ...noopRegistry, rowAssignment: vi.fn(rowAssignment) },
+        hasRunningBackgroundJob: async () => {
+          probes++;
+          return false;
+        },
+        ownershipGuard: { canWrite: () => true, owns: () => true },
+      });
+      const conv = await sessions.start("thread-lagging-cache");
+      const idleAt = sessions.get(conv.id)!.lastActivityAt + 61_000;
+      const swept = await sessions.sweepIdle(60_000, idleAt);
+      return { swept, probes, conv, sessions, suspends: (provisioner.suspend as ReturnType<typeof vi.fn>).mock.calls.length };
+    };
+
+    it("row DELETED: neither probed nor suspended", async () => {
+      const r = await run(async () => undefined);
+      expect(r.probes).toBe(0);
+      expect(r.suspends).toBe(0);
+      expect(await r.sessions.ownsInStore(r.conv.id)).toBe(false);
+    });
+
+    it("row claimed by ANOTHER pod: neither probed nor suspended", async () => {
+      const r = await run(async () => ({ hostPod: "host-b", generation: 2 }));
+      expect(r.probes).toBe(0);
+      expect(r.suspends).toBe(0);
+    });
+
+    it("row read FAILS: skip this cycle rather than risk a zombie", async () => {
+      const r = await run(async () => {
+        throw new Error("pg down");
+      });
+      expect(r.probes).toBe(0);
+      expect(r.suspends).toBe(0);
+    });
+
+    it("row agrees: swept as normal", async () => {
+      const r = await run(async () => ({ hostPod: "host-a", generation: 1 }));
+      expect(r.probes).toBe(1);
+      expect(r.swept).toContain(r.conv.id);
+    });
+  });
   it("the owner still sweeps normally", async () => {
     const provisioner = fakeProvisioner();
     const sessions = createSessionManager({

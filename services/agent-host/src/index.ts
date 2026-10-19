@@ -1433,7 +1433,11 @@ export async function main(
         // Positive owner only, like sweepIdle: the exec probe would resume (recreate) the sandbox of a
         // conversation that moved away or was deleted through another pod.
         if (ownership && !ownership.guard.owns(c.id)) continue;
-        void jobManager.cleanup(c.id).catch(() => {});
+        void (async () => {
+          // The guard caches the CR watch, which trails the conversations row; confirm there.
+          if (ownership && !(await sessions.ownsInStore(c.id as SessionId))) return;
+          await jobManager.cleanup(c.id);
+        })().catch(() => {});
       }
     }, config.idleSweepIntervalMs);
     jobCleanupTimer.unref?.();
@@ -1452,6 +1456,7 @@ export async function main(
         // Positive owner only, like the cleanup sweep above.
         if (ownership && !ownership.guard.owns(c.id)) continue;
         void (async () => {
+          if (ownership && !(await sessions.ownsInStore(c.id as SessionId))) return;
           const done = await jobManager!.pollCompletions(c.id).catch(() => [] as JobStatus[]);
           for (const st of done) {
             const tail = st.output.trim();
