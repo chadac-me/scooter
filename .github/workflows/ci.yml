@@ -416,6 +416,7 @@ jobs:
               - 'test/e2e/live-real-agent.spec.ts'
               - 'test/e2e/tier.ts'
               - 'test/e2e/multi-user.spec.ts'
+              - 'test/e2e/contrib-api-relay.spec.ts'
               - 'test/e2e/ownership.spec.ts'
               - 'test/e2e/concurrency-divergence.spec.ts'
               - 'test/e2e/conversation.spec.ts'

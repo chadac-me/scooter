@@ -6,6 +6,7 @@
   "cluster-stories.spec.ts",
   "component-coverage.spec.ts",
   "concurrency-divergence.spec.ts",
+  "contrib-api-relay.spec.ts",
   "conversation.spec.ts",
   "first-message.spec.ts",
   "interrupt-queue-recovery.spec.ts",
