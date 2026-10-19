@@ -16,6 +16,7 @@ import {
   type ConversationStore,
 } from "../../src/session/manager.js";
 import { noopRegistry } from "../../src/session/conversationRegistry.js";
+import { OwnershipTracker } from "../../src/session/ownershipGuard.js";
 import { createFileConversationStore } from "../../src/session/fileStore.js";
 import type { AguiEvent } from "../../src/bridge.js";
 import type { SandboxRef, SessionId } from "../../src/types.js";
@@ -126,6 +127,62 @@ describe("SessionManager", () => {
     const conv = await sessions.start("thread-1");
     await sessions.suspend(conv.id);
     expect(setPhase).not.toHaveBeenCalled();
+  });
+
+
+  // A revive in place bumps the row's epoch (router claim) before the CR watch delivers it; the
+  // fence would refuse the revive's first appends (an interrupt raised on revive was lost).
+  describe("revive() adopts the conversations ROW's epoch ahead of the CR watch", () => {
+    const setup = (row: { hostPod: string | null; generation: number } | undefined) => {
+      const tracker = new OwnershipTracker("host-a");
+      tracker.observe("c", { hostPod: "host-a", generation: 1 });
+      const rowAssignment = vi.fn(async () => row);
+      const registry = { ...noopRegistry, rowAssignment };
+      const sessions = createSessionManager({
+        provisioner: fakeProvisioner(), store: inMemoryStore(),
+        conversationRegistry: registry, ownershipGuard: tracker, selfPod: "host-a",
+      });
+      return { tracker, sessions, rowAssignment };
+    };
+
+    it("the row naming THIS pod at a newer epoch is adopted before the bridge writes", async () => {
+      const { tracker, sessions } = setup({ hostPod: "host-a", generation: 2 });
+      const conv = await sessions.start("thread-1");
+      tracker.observe(conv.id, { hostPod: "host-a", generation: 1 });
+      await sessions.suspend(conv.id);
+      await sessions.revive(conv.id);
+      expect(tracker.observedGeneration(conv.id as SessionId)).toBe(2);
+    });
+
+    it("the row naming ANOTHER pod is not adopted", async () => {
+      const { tracker, sessions } = setup({ hostPod: "host-b", generation: 2 });
+      const conv = await sessions.start("thread-1");
+      tracker.observe(conv.id, { hostPod: "host-a", generation: 1 });
+      await sessions.suspend(conv.id);
+      await sessions.revive(conv.id);
+      expect(tracker.observedGeneration(conv.id as SessionId)).toBe(1);
+    });
+
+    it("an epoch at or below the observed one is not adopted (never moves backwards)", async () => {
+      const { tracker, sessions } = setup({ hostPod: "host-a", generation: 3 });
+      const conv = await sessions.start("thread-1");
+      tracker.observe(conv.id, { hostPod: "host-a", generation: 5 });
+      await sessions.suspend(conv.id);
+      await sessions.revive(conv.id);
+      expect(tracker.observedGeneration(conv.id as SessionId)).toBe(5);
+    });
+
+    it("a failed row read does not fail the revive", async () => {
+      const tracker = new OwnershipTracker("host-a");
+      const registry = { ...noopRegistry, rowAssignment: vi.fn(async () => { throw new Error("db down"); }) };
+      const sessions = createSessionManager({
+        provisioner: fakeProvisioner(), store: inMemoryStore(),
+        conversationRegistry: registry, ownershipGuard: tracker, selfPod: "host-a",
+      });
+      const conv = await sessions.start("thread-1");
+      await sessions.suspend(conv.id);
+      await expect(sessions.revive(conv.id)).resolves.toBeDefined();
+    });
   });
 
   it("revive() RE-REGISTERS the CR (self-heals a conversation whose CR was lost/never made)", async () => {

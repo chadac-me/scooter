@@ -88,5 +88,15 @@ export function withConversationRows(
     get(id: string): Promise<ConversationRecord | undefined> {
       return cr.get(id);
     },
+
+    async rowAssignment(id: string) {
+      const rows = await db
+        .select({ hostPod: conversations.hostPod, hostGeneration: conversations.hostGeneration })
+        .from(conversations)
+        .where(eq(conversations.id, id))
+        .limit(1);
+      const row = rows[0];
+      return row ? { hostPod: row.hostPod ?? null, generation: Number(row.hostGeneration) } : undefined;
+    },
   };
 }

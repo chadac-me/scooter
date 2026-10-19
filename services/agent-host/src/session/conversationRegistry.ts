@@ -55,6 +55,12 @@ export interface ConversationRegistry {
    * One CR, or undefined when it does not exist; throws on a real k8s failure.
    */
   get(id: string): Promise<ConversationRecord | undefined>;
+
+  /**
+   * The conversations ROW's assignment (the source of truth the append fence checks), which
+   * leads the CR mirror; undefined when there is no row. Optional: only the row-backed registry has it.
+   */
+  rowAssignment?(id: string): Promise<{ hostPod: string | null; generation: number } | undefined>;
 }
 
 /**

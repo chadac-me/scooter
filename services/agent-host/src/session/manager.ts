@@ -382,6 +382,28 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const conversationRegistry = deps.conversationRegistry ?? noopRegistry;
   const entries = new Map<SessionId, Entry>();
 
+  /** Adopt the row's epoch when the row names this pod at one newer than the guard has observed;
+   *  best-effort, since the watch delivers the same epoch eventually. */
+  const adoptRowEpoch = async (id: SessionId): Promise<void> => {
+    if (!deps.selfPod || !ownershipGuard.adoptAssignment || !conversationRegistry.rowAssignment) return;
+    const row = await conversationRegistry.rowAssignment(id).catch((err: unknown) => {
+      log.warn("revive: reading the conversations row failed; epoch left to the watch", {
+        conversation_id: id,
+        error: formatError(err),
+      });
+      return undefined;
+    });
+    if (!row || row.hostPod !== deps.selfPod) return;
+    const observed = ownershipGuard.observedGeneration?.(id);
+    if (observed !== undefined && row.generation <= observed) return;
+    ownershipGuard.adoptAssignment(id, row.generation);
+    log.info("revive: adopted the row's epoch ahead of the CR watch", {
+      conversation_id: id,
+      observed_generation: observed ?? null,
+      row_generation: row.generation,
+    });
+  };
+
   // Fired when a subagent's bridge emits a terminal RUN_FINISHED/RUN_ERROR.
   const subagentCompleteSubs = new Set<(subagentId: SessionId, parentId: SessionId) => void>();
   const emitSubagentComplete = (subagentId: SessionId, parentId: SessionId): void => {
@@ -753,6 +775,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         });
         throw new Error(`conversation was ended: ${id}`);
       }
+      // A revive in place bumps the row's epoch before the CR watch delivers it, and this fresh
+      // bridge is that epoch's writer: adopt it, or the fence refuses the revive's first events.
+      await adoptRowEpoch(id);
       entry.bridge = bridgeFactory?.({ conversationId: id, sandbox: entry.sandbox, model: entry.model, pickedProvider: entry.pickedProvider, owner: entry.owner }) ?? entry.bridge;
       entry.status = "running";
       // Re-register the CR so a conversation whose CR was never created or was lost becomes
