@@ -106,7 +106,8 @@ never `pip install` for one.** None of these reach it.
   ```
 - **Not a Python package** (a CLI tool, or a C library a wheel needs): it comes from
   Nix. Add it with a module under `/etc/scooter/modules/` (the scooter-env skill).
-- Leave `~/.cache/uv/environments-v2/` alone; marimo owns it.
+- Leave the environments themselves (`/root/.cache/uv/environments-v2/`) alone; marimo
+  owns them.
 
 ## 4. Settings
 
