@@ -37,6 +37,11 @@ uv pip install ...
 
 No `nix profile install` needed for these — they're already on `PATH`.
 
+There is no bare `python` on PATH: run Python through `uv` (`uv run script.py`,
+`uv run --with pandas python -c ...`), never a system `python` or `pip`. This `uv` is
+uv-nix: it takes its Python from nixpkgs rather than downloading one, and patches native
+wheels (numpy, pandas) so they import on NixOS.
+
 ## 2. Installing other tools with Nix
 
 For anything not pre-wired, use Nix (there is **no** apt/brew/yum here):
