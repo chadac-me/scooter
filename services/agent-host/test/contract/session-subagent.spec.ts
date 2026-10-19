@@ -178,3 +178,49 @@ describe("SessionManager subagents", () => {
     expect(fired).toEqual([{ subagentId: "c1", parentId: parent.id }]);
   });
 });
+
+describe("a subagent never owns a sandbox (the 2026-10-19 subagent storm)", () => {
+  it("suspending a subagent leaves its parent's shared sandbox running", async () => {
+    const provisioner = fakeProvisioner();
+    const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
+    const root = await sessions.start("root", undefined, "alice");
+    await sessions.spawnChild(root.id, "c1", { prompt: "a" });
+
+    await sessions.suspend("c1");
+
+    expect(provisioner.suspend).not.toHaveBeenCalled();
+    expect(sessions.get("c1")?.status).toBe("suspended");
+    expect(sessions.get(root.id)?.status).toBe("running");
+  });
+
+  it("THE BUG: reviving a subagent revives its root and reuses the root's sandbox, provisioning nothing @proves", async () => {
+    const provisioner = fakeProvisioner();
+    const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
+    const root = await sessions.start("root", undefined, "alice");
+    await sessions.spawnChild(root.id, "c1", { prompt: "a" });
+    await sessions.suspend("c1");
+    await sessions.suspend(root.id);
+
+    await sessions.revive("c1");
+
+    expect(provisioner.create).toHaveBeenCalledOnce(); // the root's start, nothing since
+    expect(provisioner.resume).toHaveBeenCalledOnce();
+    expect(vi.mocked(provisioner.resume).mock.calls[0][0]).toEqual(root.sandbox);
+    expect(sessions.get(root.id)?.status).toBe("running");
+    expect(sessions.get("c1")?.sandbox).toEqual(root.sandbox);
+  });
+
+  it("reviving a nested subagent walks to the root", async () => {
+    const provisioner = fakeProvisioner();
+    const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
+    const root = await sessions.start("root", undefined, "alice");
+    await sessions.spawnChild(root.id, "c1", { prompt: "a" });
+    await sessions.spawnChild("c1", "gc1", { prompt: "b" });
+    await sessions.suspend("gc1");
+
+    await sessions.revive("gc1");
+
+    expect(provisioner.create).toHaveBeenCalledOnce();
+    expect(sessions.get("gc1")?.sandbox).toEqual(root.sandbox);
+  });
+});

@@ -417,10 +417,28 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     void saveMeta(e);
   };
 
+  /** The Sandbox name a conversation runs in: its root ancestor's, since subagents share it. */
+  const sandboxNameOf = (
+    m: { threadId: ThreadId; parentId?: SessionId },
+    lookup: (id: SessionId) => { threadId: ThreadId; parentId?: SessionId } | undefined,
+  ): string => {
+    let cur = m;
+    for (let depth = 0; cur.parentId && depth < 32; depth++) {
+      const up = entries.get(cur.parentId) ?? lookup(cur.parentId);
+      // Broken chain: revive() refuses, so the name is never provisioned.
+      if (!up) break;
+      cur = up;
+    }
+    return `conv-${shortId(cur.threadId)}`;
+  };
+
   // Build an in-memory Entry from a persisted meta, with no bridge; `onCluster` is the reconcile
   // result for its Sandbox.
-  const hydrateEntry = (m: ConversationMeta, onCluster?: { ref: SandboxRef; running: boolean }): Entry => {
-    const name = `conv-${shortId(m.threadId)}`;
+  const hydrateEntry = (
+    m: ConversationMeta,
+    onCluster?: { ref: SandboxRef; running: boolean },
+    name = `conv-${shortId(m.threadId)}`,
+  ): Entry => {
     const entry: Entry = {
       id: m.id,
       threadId: m.threadId,
@@ -492,8 +510,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // Reconcile this conversation's Sandbox so a still-running pod is tracked; on failure revive()
     // recreates from the placeholder.
     let onCluster: { ref: SandboxRef; running: boolean } | undefined;
+    const metaById = new Map(metas.map((x) => [x.id, x]));
+    const name = sandboxNameOf(m, (pid) => metaById.get(pid));
     try {
-      const name = `conv-${shortId(m.threadId)}`;
       onCluster = (await provisioner.reconcile?.())?.find((s) => s.ref.name === name);
     } catch {
       /* treat as suspended */
@@ -505,7 +524,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const existing = entries.get(m.id);
     if (existing) return existing;
     if (endedIds.has(m.id)) return undefined;
-    const hydrated = hydrateEntry(m, onCluster);
+    const hydrated = hydrateEntry(m, onCluster, name);
     // Settle any stranded run on every adoption path; owner-fenced, fire-and-forget, deduped by the
     // in-flight guard.
     if (hydrated && ownershipGuard.canWrite(hydrated.id)) {
@@ -553,6 +572,28 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const fencedDrops = new Map<SessionId, number>();
   /** Dangling-run reconciliations in flight, so racing callers settle each conversation once. */
   const danglingReconciles = new Set<SessionId>();
+
+  /** Close a suspended conversation's dangling run instead of re-driving it. */
+  const closeIfSuspended = async (
+    id: SessionId,
+    run: { runId: string; threadId: string },
+  ): Promise<boolean> => {
+    const rec = await conversationRegistry.get(id).catch(() => undefined);
+    if (rec?.phase !== "Suspended") return false;
+    // Resuming would revive it, and its Sandbox, behind the suspend.
+    log.info("dangling run on a suspended conversation — closing, not resuming", {
+      conversation_id: id,
+      run_id: run.runId,
+    });
+    await store.appendEvent(id, {
+      type: "RUN_FINISHED",
+      threadId: run.threadId as never,
+      runId: run.runId as never,
+      cancelled: true,
+      ts: Date.now(),
+    });
+    return true;
+  };
   // refreshSandbox throttle: conversation -> last cluster read.
   const REFRESH_SANDBOX_MS = 5_000;
   const lastSandboxRefresh = new Map<SessionId, number>();
@@ -740,14 +781,27 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       // A tombstoned entry may still be held by a caller that raced the delete.
       if (endedIds.has(id)) throw new Error(`conversation was ended: ${id}`);
 
-      // A placeholder ref with no namespace means the Sandbox is absent, so create rather than
-      // resume.
-      entry.sandbox = entry.sandbox.namespace
-        ? await provisioner.resume(entry.sandbox, entry.threadId)
-        : await provisioner.create(shortId(entry.threadId), entry.threadId);
+      if (entry.parentId) {
+        // A subagent never provisions; it rides its root's Sandbox.
+        let root: Entry | undefined = entry;
+        for (let depth = 0; root?.parentId && depth < 32; depth++) root = entries.get(root.parentId);
+        if (!root || root.parentId) {
+          throw new Error(`subagent ${id} has no root conversation on this pod; refusing to provision a sandbox for it`);
+        }
+        if (root.status !== "running") await this.revive(root.id);
+        entry.sandbox = root.sandbox;
+      } else {
+        // A placeholder ref with no namespace means the Sandbox is absent, so create rather than
+        // resume.
+        entry.sandbox = entry.sandbox.namespace
+          ? await provisioner.resume(entry.sandbox, entry.threadId)
+          : await provisioner.create(shortId(entry.threadId), entry.threadId);
+      }
       // end() may have landed during provisioning; destroy the pod just made before any side effect
       // republishes the conversation.
       if (endedIds.has(id)) {
+        // A subagent's Sandbox is its root's; never destroy it here.
+        if (entry.parentId) throw new Error(`conversation was ended: ${id}`);
         await provisioner.destroy(entry.sandbox).catch((err: unknown) => {
           log.errorWith("failed to destroy a pod revived into a deleted conversation", err, {
             conversation_id: id,
@@ -935,6 +989,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             cancelled: true,
             ts: Date.now(),
           });
+        } else if (dangling && !entries.get(id)?.bridge && (await closeIfSuspended(id, dangling))) {
+          // Closed above; a live bridge means it was just revived.
         } else if (dangling) {
           log.info("resuming a dangling run", { conversation_id: id });
           // source "resume" persists as a UI-hidden SYSTEM_MESSAGE.
@@ -1025,7 +1081,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         await saveMeta(entry); // durable before the teardown
       }
       await entry.bridge?.stop();
-      await provisioner.suspend(entry.sandbox);
+      // A subagent's Sandbox is its parent's, which keeps running.
+      if (!entry.parentId) await provisioner.suspend(entry.sandbox);
       entry.bridge = undefined;
       entry.status = "suspended";
       // Publish phase to the row; owner-fenced, fire-and-forget.
@@ -1146,6 +1203,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       // (router and controller).
       const mine = crs.filter((c) => c.hostPod && c.hostPod === deps.selfPod);
       const metaById = new Map(metas.map((m) => [m.id, m] as const));
+      const crById = new Map(crs.map((c) => [c.id, c] as const));
+      // Ancestry from meta, else the record, so adoption order does not matter.
+      const lineage = (pid: SessionId) => {
+        const rec = crById.get(pid);
+        return metaById.get(pid) ?? (rec && { threadId: pid as ThreadId, parentId: rec.spec.parentId as SessionId | undefined });
+      };
 
       // Reconcile which conv-* Sandboxes exist and whether each pod runs, with retry and backoff to
       // ride out a boot-time apiserver blip; on exhaustion assume all suspended.
@@ -1186,8 +1249,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
       for (const m of metas) {
         if (entries.has(m.id)) continue; // a live one already exists
-        const name = `conv-${shortId(m.threadId)}`;
-        const entry = hydrateEntry(m, live.get(name));
+        const name = sandboxNameOf(m, lineage);
+        const entry = hydrateEntry(m, live.get(name), name);
         // Re-publish Suspended so a phase that never landed self-heals here, the one place a pod
         // re-observes a suspended conversation; owner-fenced.
         if (entry.status === "suspended" && ownershipGuard.canWrite(entry.id)) {
@@ -1216,8 +1279,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (c.spec.owner) synthesized.owner = c.spec.owner;
         if (c.spec.model) synthesized.model = c.spec.model;
         // Key the reconcile result by the record's sandboxRef when it has one.
-        const sandboxName = c.spec.sandboxRef ?? `conv-${shortId(synthesized.threadId)}`;
-        const entry = hydrateEntry(synthesized, live.get(sandboxName));
+        const sandboxName = synthesized.parentId
+          ? sandboxNameOf(synthesized, lineage)
+          : (c.spec.sandboxRef ?? `conv-${shortId(synthesized.threadId)}`);
+        const entry = hydrateEntry(synthesized, live.get(sandboxName), sandboxName);
         entries.set(c.id, entry);
       }
     },
@@ -1246,7 +1311,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
               cancelled: true,
               ts: Date.now(),
             });
-          } else if (info) {
+          } else if (info && !(await closeIfSuspended(entry.id, info))) {
             candidates.push(entry.id);
           }
         } catch (err) {

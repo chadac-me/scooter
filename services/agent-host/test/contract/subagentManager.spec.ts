@@ -149,3 +149,74 @@ describe("createSubagentManager", () => {
     });
   });
 });
+
+describe("spawn limits (the 2026-10-19 subagent storm)", () => {
+  /** A live child that is running, queued, or not yet wired. */
+  const busy = (id: string, parentId: string, q: { running?: boolean; queued?: number } | "unwired" = { running: true }) =>
+    ({
+      id,
+      parentId,
+      status: "running",
+      bridge: q === "unwired" ? undefined : { queueState: () => ({ running: q.running ?? false, queued: q.queued ?? 0 }), cancel: vi.fn() },
+    }) as SubagentConversation;
+
+  const top = (id: string) => ({ id, status: "running" }) as SubagentConversation;
+
+  const mgrOver = (convs: SubagentConversation[], limits = { maxDepth: 1, maxRunningPerParent: 2, maxRunningPerHost: 3 }) => {
+    const byId = new Map(convs.map((c) => [c.id, c]));
+    const sessions: SubagentSessions = {
+      get: (id) => byId.get(id),
+      list: () => [...byId.values()],
+      spawnChild: vi.fn(async (parentId, threadId) => {
+        const c = busy(threadId, parentId, { queued: 1 });
+        byId.set(threadId, c);
+        return { id: threadId };
+      }),
+      prompt: vi.fn(async () => {}),
+    };
+    const store: SubagentStore = { async *readEvents() {} };
+    return { sessions, mgr: createSubagentManager(sessions, store, undefined, limits) };
+  };
+
+  it("THE BUG: a subagent cannot spawn its own subagent at the default depth @proves", async () => {
+    const { mgr, sessions } = mgrOver([top("root"), busy("kid", "root")]);
+    await expect(mgr.spawn("kid" as SessionId, { prompt: "x" })).rejects.toThrow(/nest at most 1/);
+    expect(sessions.spawnChild).not.toHaveBeenCalled();
+  });
+
+  it("a top-level conversation can spawn", async () => {
+    const { mgr } = mgrOver([top("root")]);
+    await expect(mgr.spawn("root" as SessionId, { prompt: "x" })).resolves.toMatchObject({ id: expect.any(String) });
+  });
+
+  it("maxDepth 2 allows one nested level, not two", async () => {
+    const limits = { maxDepth: 2, maxRunningPerParent: 9, maxRunningPerHost: 9 };
+    const { mgr } = mgrOver([top("root"), busy("kid", "root"), busy("grandkid", "kid")], limits);
+    await expect(mgr.spawn("kid" as SessionId, { prompt: "x" })).resolves.toBeDefined();
+    await expect(mgr.spawn("grandkid" as SessionId, { prompt: "x" })).rejects.toThrow(/nest at most 2/);
+  });
+
+  it("refuses past the per-parent cap, counting queued and unwired children", async () => {
+    const { mgr } = mgrOver([top("root"), busy("a", "root", { queued: 1 }), busy("b", "root", "unwired")]);
+    await expect(mgr.spawn("root" as SessionId, { prompt: "x" })).rejects.toThrow(/2 running subagents \(limit 2\)/);
+  });
+
+  it("idle and ended children free their slot", async () => {
+    const idle = busy("a", "root", { running: false, queued: 0 });
+    const ended = { ...busy("b", "root"), status: "ended" } as SubagentConversation;
+    const { mgr } = mgrOver([top("root"), idle, ended]);
+    await expect(mgr.spawn("root" as SessionId, { prompt: "x" })).resolves.toBeDefined();
+  });
+
+  it("refuses past the per-host cap across parents", async () => {
+    const { mgr } = mgrOver([top("p1"), top("p2"), top("p3"), busy("a", "p1"), busy("b", "p2"), busy("c", "p3")]);
+    await expect(mgr.spawn("p1" as SessionId, { prompt: "x" })).rejects.toThrow(/this host is running 3 subagents/);
+  });
+
+  it("THE BUG: a parallel burst cannot overshoot the cap while spawns are in flight @proves", async () => {
+    const { mgr, sessions } = mgrOver([top("root")], { maxDepth: 1, maxRunningPerParent: 2, maxRunningPerHost: 9 });
+    const results = await Promise.allSettled(Array.from({ length: 8 }, () => mgr.spawn("root" as SessionId, { prompt: "x" })));
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(2);
+    expect(sessions.spawnChild).toHaveBeenCalledTimes(2);
+  });
+});

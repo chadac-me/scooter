@@ -1,7 +1,7 @@
 /**
  * Subagent MCP tools: the parent-side spawn/monitor/control surface, as pure handlers
- * registered per conversation in buildServer (subagents are multi-level, so a subagent
- * may call them too). There is no subagent-side "report result" tool: a subagent is a
+ * registered per conversation in buildServer (a subagent may call them too, up to the
+ * manager's depth limit). There is no subagent-side "report result" tool: a subagent is a
  * conversation whose final assistant message returns to its parent, captured by the
  * completion watcher.
  */
@@ -46,6 +46,11 @@ export interface SubagentManager {
   searchHistory(parentId: SessionId, subagentId: string, query: string): Promise<SubagentTurn[] | undefined>;
 }
 
+/** A spawn refused by a depth or concurrency limit; the model sees the message. */
+export class SubagentLimitError extends Error {
+  override name = "SubagentLimitError";
+}
+
 const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const err = (text: string): ToolResult => ({ isError: true, content: [{ type: "text", text }] });
 
@@ -58,7 +63,14 @@ export async function handleSpawnSubagent(
   if (!prompt) {
     return err("prompt is empty — describe the task for the subagent to work on.");
   }
-  const { id, title } = await mgr.spawn(conversationId, { prompt, title: args.title, model: args.model });
+  let spawned: { id: string; title?: string };
+  try {
+    spawned = await mgr.spawn(conversationId, { prompt, title: args.title, model: args.model });
+  } catch (e) {
+    if (e instanceof SubagentLimitError) return err(e.message);
+    throw e;
+  }
+  const { id, title } = spawned;
   return ok(
     `Spawned subagent \`${id}\`${title ? ` (${title})` : ""}. It shares this ` +
       `conversation's sandbox (same /workspace + creds) and works in the background. ` +
