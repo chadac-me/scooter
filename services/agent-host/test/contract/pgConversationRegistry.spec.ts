@@ -1,20 +1,20 @@
 /**
- * The registry's writes also land on the conversations row. The CR write goes first with
- * its semantics untouched, a row failure never propagates, and an absent spec field is
- * omitted rather than nulled. Assignment reads still come from the CR, since the
- * controller writes host_pod only there.
+ * The conversation registry on the conversations row: writes are UPDATE/DELETE of the row the
+ * router inserted and never propagate a failure, an absent spec field is omitted rather than
+ * nulled, and reads (list/get) come from the row and throw on failure so hydrate never serves
+ * a blind view.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
-import { withConversationRows } from "../../src/session/pgConversationRegistry.js";
-import type { ConversationRecord, ConversationRegistry } from "../../src/session/conversationRegistry.js";
+import { createPgConversationRegistry } from "../../src/session/pgConversationRegistry.js";
+import { noopRegistry } from "../../src/session/conversationRegistry.js";
 
-/** A fake db capturing the statements issued. */
-function fakeDb(opts: { fail?: boolean } = {}): {
+/** A fake db capturing the statements issued and answering selects with `rows`. */
+function fakeDb(opts: { fail?: boolean; rows?: unknown[][] } = {}): {
   db: NodePgDatabase;
   stmts: { text: string; values: unknown[] }[];
 } {
@@ -25,48 +25,39 @@ function fakeDb(opts: { fail?: boolean } = {}): {
       const values = (typeof cfg === "string" ? params : (cfg.values ?? params)) as unknown[];
       stmts.push({ text, values });
       if (opts.fail) throw new Error("pg is down");
-      return { rows: [], rowCount: 1 };
+      // drizzle selects in array row mode.
+      return { rows: opts.rows ?? [], rowCount: 1 };
     },
   };
   return { db: drizzle(client as never), stmts };
 }
 
-/** A CR registry that records calls, standing in for the apiserver half. */
-function fakeCr(over: Partial<ConversationRegistry> = {}): ConversationRegistry & {
-  calls: string[];
-} {
-  const calls: string[] = [];
-  return {
-    calls,
-    register: vi.fn(async (id: string) => void calls.push(`register:${id}`)),
-    setPhase: vi.fn(async (id: string, phase: string) => void calls.push(`setPhase:${id}:${phase}`)),
-    remove: vi.fn(async (id: string) => void calls.push(`remove:${id}`)),
-    list: vi.fn(async () => [] as ConversationRecord[]),
-    get: vi.fn(async () => undefined),
-    ...over,
-  } as ConversationRegistry & { calls: string[] };
-}
+// Column order of the registry's select: id, model, owner, parent_id, sandbox_ref, creator_pod,
+// phase, host_pod, host_generation.
+const row = (over: Partial<Record<string, unknown>> = {}): unknown[] => {
+  const r = {
+    id: "conv-a", model: "m", owner: "alice", parentId: null, sandboxRef: "conv-xyz",
+    creatorPod: "pod-0", phase: "Assigned", hostPod: "pod-1", hostGeneration: "3", ...over,
+  };
+  return [r.id, r.model, r.owner, r.parentId, r.sandboxRef, r.creatorPod, r.phase, r.hostPod, r.hostGeneration];
+};
 
-describe("the conversations row half of the registry", () => {
-  it("register writes sandbox_ref and creator_pod to the row, and still writes the CR", async () => {
-    const cr = fakeCr();
+describe("the row-backed conversation registry: writes", () => {
+  it("register writes sandbox_ref and creator_pod to the row", async () => {
     const { db, stmts } = fakeDb();
-    const reg = withConversationRows(cr, { db });
-
-    await reg.register("conv-1", { sandboxRef: "conv-abc", creatorPod: "agent-host-0", model: "m", owner: "alice" });
-
-    expect(cr.calls).toEqual(["register:conv-1"]);
+    await createPgConversationRegistry({ db }).register("conv-1", {
+      sandboxRef: "conv-abc", creatorPod: "agent-host-0", model: "m", owner: "alice",
+    });
     expect(stmts).toHaveLength(1);
     expect(stmts[0].text).toMatch(/^update "conversations" set/i);
     expect(stmts[0].values).toEqual(expect.arrayContaining(["conv-abc", "agent-host-0", "conv-1"]));
   });
 
-  it("does NOT duplicate model/owner/parentId onto the row — saveMeta already owns those columns", async () => {
+  it("does NOT write model/owner/parentId — the router's insert and saveMeta own those columns", async () => {
     const { db, stmts } = fakeDb();
-    const reg = withConversationRows(fakeCr(), { db });
-
-    await reg.register("conv-1", { sandboxRef: "conv-abc", model: "claude-opus-4", owner: "alice", parentId: "conv-0" });
-
+    await createPgConversationRegistry({ db }).register("conv-1", {
+      sandboxRef: "conv-abc", model: "claude-opus-4", owner: "alice", parentId: "conv-0",
+    });
     expect(stmts[0].text).not.toMatch(/"model"/);
     expect(stmts[0].text).not.toMatch(/"owner"/);
     expect(stmts[0].text).not.toMatch(/"parent_id"/);
@@ -74,81 +65,90 @@ describe("the conversations row half of the registry", () => {
 
   it("OMITS an absent sandboxRef instead of nulling it — a re-register must not erase the routing ref", async () => {
     const { db, stmts } = fakeDb();
-    const reg = withConversationRows(fakeCr(), { db });
-
-    await reg.register("conv-1", { creatorPod: "agent-host-0" });
-
+    await createPgConversationRegistry({ db }).register("conv-1", { creatorPod: "agent-host-0" });
     expect(stmts[0].text).not.toMatch(/"sandbox_ref"/);
     expect(stmts[0].values).not.toContain(null);
   });
 
   it("issues NO statement when a register carries neither field", async () => {
-    const cr = fakeCr();
     const { db, stmts } = fakeDb();
-    const reg = withConversationRows(cr, { db });
-
-    await reg.register("conv-1", { model: "m" });
-
+    await createPgConversationRegistry({ db }).register("conv-1", { model: "m" });
     expect(stmts).toHaveLength(0);
-    expect(cr.calls).toEqual(["register:conv-1"]);
   });
 
-  it("setPhase writes the phase column and the CR", async () => {
-    const cr = fakeCr();
+  it("never inserts: the router owns creating the row", async () => {
     const { db, stmts } = fakeDb();
-    const reg = withConversationRows(cr, { db });
-
+    const reg = createPgConversationRegistry({ db });
+    await reg.register("conv-1", { sandboxRef: "conv-abc" });
     await reg.setPhase("conv-1", "Suspended");
+    expect(stmts.some((s) => /^insert/i.test(s.text))).toBe(false);
+  });
 
-    expect(cr.calls).toEqual(["setPhase:conv-1:Suspended"]);
+  it("setPhase writes the phase column", async () => {
+    const { db, stmts } = fakeDb();
+    await createPgConversationRegistry({ db }).setPhase("conv-1", "Suspended");
     expect(stmts[0].text).toMatch(/^update "conversations" set "phase"/i);
     expect(stmts[0].values).toEqual(expect.arrayContaining(["Suspended", "conv-1"]));
   });
 
-  it("remove deletes the row as well as the CR", async () => {
-    const cr = fakeCr();
+  it("remove deletes the row", async () => {
     const { db, stmts } = fakeDb();
-    const reg = withConversationRows(cr, { db });
-
-    await reg.remove("conv-1");
-
-    expect(cr.calls).toEqual(["remove:conv-1"]);
+    await createPgConversationRegistry({ db }).remove("conv-1");
     expect(stmts[0].text).toMatch(/^delete from "conversations"/i);
   });
 
-  it("A ROW FAILURE NEVER PROPAGATES — a Postgres blip must not stop a conversation starting", async () => {
-    const cr = fakeCr();
-    const reg = withConversationRows(cr, { db: fakeDb({ fail: true }).db });
-
+  it("A WRITE FAILURE NEVER PROPAGATES — a Postgres blip must not stop a conversation starting", async () => {
+    const reg = createPgConversationRegistry({ db: fakeDb({ fail: true }).db });
     await expect(reg.register("conv-1", { sandboxRef: "conv-abc" })).resolves.toBeUndefined();
     await expect(reg.setPhase("conv-1", "Assigned")).resolves.toBeUndefined();
     await expect(reg.remove("conv-1")).resolves.toBeUndefined();
-    // The CR half still ran every time.
-    expect(cr.calls).toEqual(["register:conv-1", "setPhase:conv-1:Assigned", "remove:conv-1"]);
+  });
+});
+
+describe("the row-backed conversation registry: reads", () => {
+  it("list folds each row into a record with the placement", async () => {
+    const { db } = fakeDb({ rows: [row()] });
+    expect(await createPgConversationRegistry({ db }).list()).toEqual([
+      {
+        id: "conv-a",
+        spec: { model: "m", owner: "alice", sandboxRef: "conv-xyz", creatorPod: "pod-0" },
+        phase: "Assigned",
+        hostPod: "pod-1",
+        generation: 3,
+      },
+    ]);
   });
 
-  it("a CR failure still propagates exactly as before — the row half must not swallow it", async () => {
-    const boom = new Error("apiserver down");
-    const cr = fakeCr({
-      list: vi.fn(async () => {
-        throw boom;
-      }),
-    });
-    const { db, stmts } = fakeDb();
-    const reg = withConversationRows(cr, { db });
-
-    await expect(reg.list()).rejects.toThrow("apiserver down");
-    expect(stmts).toHaveLength(0);
+  it("an unplaced row has no hostPod, and a phase agent-host does not act on is dropped", async () => {
+    const { db } = fakeDb({ rows: [row({ hostPod: null, phase: "Pending", hostGeneration: "0", parentId: "conv-p" })] });
+    const [rec] = await createPgConversationRegistry({ db }).list();
+    expect(rec.hostPod).toBeUndefined();
+    expect(rec.phase).toBeUndefined();
+    expect(rec.spec.parentId).toBe("conv-p");
+    expect(rec.generation).toBe(0);
   });
 
-  it("ASSIGNMENT READS COME FROM THE CR, not the row — the controller has not moved yet", async () => {
-    const record: ConversationRecord = { id: "conv-1", spec: {}, hostPod: "agent-host-2", generation: 7 };
-    const cr = fakeCr({ list: vi.fn(async () => [record]), get: vi.fn(async () => record) });
-    const { db, stmts } = fakeDb();
-    const reg = withConversationRows(cr, { db });
+  it("get returns the one row, or undefined when there is none", async () => {
+    expect((await createPgConversationRegistry({ db: fakeDb({ rows: [row()] }).db }).get("conv-a"))?.hostPod).toBe("pod-1");
+    await expect(createPgConversationRegistry({ db: fakeDb().db }).get("nope")).resolves.toBeUndefined();
+  });
 
-    expect(await reg.list()).toEqual([record]);
-    expect((await reg.get("conv-1"))?.hostPod).toBe("agent-host-2");
-    expect(stmts).toHaveLength(0);
+  it("READS THROW on failure — an empty list would make hydrate serve blind", async () => {
+    const reg = createPgConversationRegistry({ db: fakeDb({ fail: true }).db });
+    await expect(reg.list()).rejects.toThrow(/Failed query/);
+    await expect(reg.get("conv-a")).rejects.toThrow(/Failed query/);
+  });
+});
+
+describe("noopRegistry (single-replica)", () => {
+  it("every write is a no-op that resolves", async () => {
+    await expect(noopRegistry.register("c", { sandboxRef: "conv-c" })).resolves.toBeUndefined();
+    await expect(noopRegistry.setPhase("c", "Suspended")).resolves.toBeUndefined();
+    await expect(noopRegistry.remove("c")).resolves.toBeUndefined();
+  });
+
+  it("list() is [] and get() is undefined", async () => {
+    await expect(noopRegistry.list()).resolves.toEqual([]);
+    await expect(noopRegistry.get("anything")).resolves.toBeUndefined();
   });
 });

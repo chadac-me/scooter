@@ -39,8 +39,7 @@ import { createPgEventStore, withPgEvents } from "./session/eventStore.js";
 import { agentHostDsnFromEnv } from "./db/agentHostDsn.js";
 import { createPgAssignmentSource, createPgOwnershipGuard } from "./session/pgOwnershipGuard.js";
 import { createPgPool } from "./db/pgPool.js";
-import { createK8sConversationRegistry } from "./session/k8sConversationRegistry.js";
-import { withConversationRows } from "./session/pgConversationRegistry.js";
+import { createPgConversationRegistry } from "./session/pgConversationRegistry.js";
 import type { ConversationStore, ConversationLink } from "./session/manager.js";
 import { createPgLinkStore } from "./session/linkStore.js";
 import { createPgMetaStore } from "./session/metaStore.js";
@@ -689,12 +688,10 @@ export async function main(
   // Hand the tracker's cached epoch to the append fence; undefined narrows the fence to pod
   // identity.
   observedGeneration = (id) => ownership?.guard.observedGeneration?.(id);
-  // The write side of the same CRD: register each new conversation as a Conversation CR
-  // (and, with a DSN, an agent_host.conversations row) so the controller assigns it a
-  // hostPod.
-  const crRegistry = podName ? createK8sConversationRegistry(config.namespace) : undefined;
+  // The assignment table: the agent_host.conversations row, the same store the guard and the
+  // append fence read. Multi-replica without a DSN has no assignment table (see the guard above).
   const conversationRegistry =
-    crRegistry && agentHostDsn ? withConversationRows(crRegistry, { dsn: agentHostDsn }) : crRegistry;
+    podName && agentHostDsn ? createPgConversationRegistry({ dsn: agentHostDsn }) : undefined;
 
   const sessions = createSessionManager({
     provisioner,
@@ -1061,7 +1058,7 @@ export async function main(
     });
   }
 
-  // Restore conversations at startup, from the Conversation CRs when multi-replica; a pod
+  // Restore conversations at startup, from the conversations rows when multi-replica; a pod
   // that cannot read the source of truth retries with backoff and then exits rather than
   // serving a stale view.
   await hydrateWithRetry(() => sessions.hydrate(), hostLog);

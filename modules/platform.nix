@@ -1167,23 +1167,6 @@ in
               resources = [ "serviceaccounts" "persistentvolumeclaims" "pods" "configmaps" ];
               verbs = [ "get" "list" "watch" "create" "update" "patch" "delete" ];
             }
-            {
-              # The agent-host watches Conversations for ownership fencing, creates one
-              # per new conversation, and merge-patches spec.sandboxRef onto the CR the
-              # router created without one.
-              apiGroups = [ "scooter.chadac.dev" ];
-              resources = [ "conversations" ];
-              # delete: ending a conversation must remove its CR, or hydrate() re-adopts it.
-              verbs = [ "get" "list" "watch" "create" "patch" "delete" ];
-            }
-            {
-              # The agent-host publishes liveness to status.phase via
-              # conversationRegistry.setPhase; status is its own subresource for RBAC,
-              # hence the separate rule.
-              apiGroups = [ "scooter.chadac.dev" ];
-              resources = [ "conversations/status" ];
-              verbs = [ "get" "patch" "update" ];
-            }
           ];
       };
 

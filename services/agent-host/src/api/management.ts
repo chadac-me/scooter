@@ -478,7 +478,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
 
   // Cluster-internal revive-on-assign: the controller POSTs this on a conversation's new
   // host right after reassigning it so history replays from the shared mirror before user
-  // traffic arrives, hydrating if absent, idempotent, and fenced on the CR generation in `gen`.
+  // traffic arrives, hydrating if absent, idempotent, and fenced on the row generation in `gen`.
   r.post("/internal/revive/:id", async (ctx) => {
     const gen = Number(new URL(ctx.req.url ?? "", "http://x").searchParams.get("gen") ?? "0");
     // 202 rather than 200 so a caller can tell it is an async pre-warm, not a synchronous revive.
