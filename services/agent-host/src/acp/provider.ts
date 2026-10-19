@@ -14,7 +14,7 @@ const log = logger("acp-providers");
 
 /** The per-run context a provider's `eligible()` decides on, assembled by the bridge from the conversation and the incoming prompt. */
 export interface RunContext {
-  /** The conversation id (the bridge sessionId). */
+  /** The conversation (thread) id; never the bridge's own `sess-` id. */
   conversationId: SessionId;
   /** The conversation owner, or undefined for an unowned/anonymous conversation. */
   owner?: string;

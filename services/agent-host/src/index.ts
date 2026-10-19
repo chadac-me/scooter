@@ -1716,6 +1716,7 @@ export async function main(
         });
 
     const bridge = createSessionBridge({
+      conversationId,
       config: { cwd, skillsDir: config.skillsDir, agentName: config.agentName, agent: cfg.agent, sandbox, mcpServers },
       exec,
         // Stamped onto RUN_STARTED so a later reader can tell a run this pod is still
