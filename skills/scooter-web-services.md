@@ -37,7 +37,8 @@ notebook, giving the user a live terminal, or a browser code editor.
 ## The two ways a service appears
 
 1. **Shipped** — declared by the platform's contribs where this deployment enables
-   them: `marimo` (notebooks; see the scooter-marimo skill), `vscode` (browser VS
+   them: `notebook` ("marimo + chat"; see the scooter-marimo skill. Its server is the
+   unlisted `marimo` service, so never hand out a `/marimo/` link), `vscode` (browser VS
    Code) and `files` (the workspace viewer), plus the built-in `terminal`. The user
    starts/opens one from the **Services panel** in the conversation UI, OR you can
    start it (below). Prefer a shipped one when it fits.
@@ -113,11 +114,13 @@ page (a spinner + the service's live log) that loads the app once it's healthy.
 Check it's up: `scooter-service status <name>` (or `systemctl is-active
 webservice-<name>`) and `curl -fsS localhost:<port><base path>/ >/dev/null`, where
 the base path is `/<name>` on its own origin and `/c/$CONVERSATION_ID/<name>`
-otherwise.
+otherwise. `active` only means the unit is running, not that it answers yet. A
+first start can take a minute while a lazy server (marimo, code-server) materializes
+and installs, so poll the `curl` before you tell the user it is ready.
 
 ## Good candidates to offer
 
-- **marimo** — data exploration, a computed report, teaching a concept
+- **marimo** (the `notebook` service) — data exploration, a computed report, teaching a concept
   interactively. The flagship: you pair on it with marimo-pair (scooter-marimo
   skill).
 - **a web terminal** (ttyd/wetty) — when the user wants to poke around the sandbox

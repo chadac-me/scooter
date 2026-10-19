@@ -59,11 +59,26 @@ let
       ${pkgs.coreutils}/bin/install -m 644 ${defaultSettings} "$settings"
     fi
   '';
+
+  # A downloaded CPython cannot exec on NixOS, so uv is pinned to a Nix-provided one.
+  uvPythonEnv = {
+    UV_PYTHON = "${pkgs.python314}/bin/python3.14";
+    UV_PYTHON_DOWNLOADS = "never";
+  };
+
+  # The shell's `uv` is the same uv-nix one the server runs, so `uv run nb.py` works there
+  # too; it outranks the plain-uv stub, and a caller's own UV_PYTHON still wins.
+  uvShell = pkgs.writeShellScriptBin "uv" ''
+    export UV_PYTHON="''${UV_PYTHON:-${uvPythonEnv.UV_PYTHON}}"
+    export UV_PYTHON_DOWNLOADS="''${UV_PYTHON_DOWNLOADS:-${uvPythonEnv.UV_PYTHON_DOWNLOADS}}"
+    exec ${uvNix}/bin/uv "$@"
+  '';
 in
 {
   # The marimo shim on PATH, so the agent can run it by hand, and what marimo-pair's
   # scripts call: they talk to the running server's HTTP API with curl and jq.
-  environment.systemPackages = lib.mkIf cfg.enable [ pkgs.marimo pkgs.curl pkgs.jq ];
+  environment.systemPackages = lib.mkIf cfg.enable ([ pkgs.marimo pkgs.curl pkgs.jq ]
+    ++ lib.optional (uvNix != null) (lib.hiPrio uvShell));
 
   # The conversation beside the notebook: a static page framing `/chat/<id>` (left) and
   # marimo (right), both ingress URLs, so nothing is proxied here. Served at root
@@ -95,11 +110,7 @@ in
       # marimo's settings live in the agent's own ~/.config on the workspace PVC, not in
       # root's home, which a pod rebuild discards. uv's cache stays out of the PVC.
       XDG_CONFIG_HOME = "/workspace/.config";
-    } // lib.optionalAttrs (uvNix != null) {
-      # Pin uv to a Nix-provided Python, since a downloaded CPython cannot exec on NixOS.
-      UV_PYTHON = "${pkgs.python314}/bin/python3.14";
-      UV_PYTHON_DOWNLOADS = "never";
-    });
+    } // lib.optionalAttrs (uvNix != null) uvPythonEnv);
 
     # Under uv-nix each notebook gets a uv-managed venv with patched wheels so native deps import; without it, a bare `marimo edit` still boots.
     command =

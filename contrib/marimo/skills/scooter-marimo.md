@@ -111,6 +111,14 @@ never `pip install` for one.** None of these reach it.
 - Leave the environments themselves (`/root/.cache/uv/environments-v2/`) alone; marimo
   owns them.
 
+### Running a notebook from your shell
+
+There is no `python` on PATH: use `uv`, never `python` or `pip`. `uv run nb.py` runs
+the notebook as a script in the environment its header declares, so it is how you
+check a notebook you wrote before the user opens it. The `uv` on PATH is the uv-nix one
+the server uses, pinned to a Nix Python: a CPython that uv downloads cannot run on
+NixOS (`Could not start dynamically linked executable`).
+
 ## 4. Settings
 
 marimo's settings are in `~/.config/marimo/marimo.toml`, on the workspace volume.
@@ -132,3 +140,7 @@ reads it whenever a notebook opens, so changes need no restart.
 - "Failed to connect": the service isn't running, or the URL lacks marimo's base
   path (`$MARIMO_BASE` above).
 - "No sessions": nobody has the notebook open. Ask the user to open the link.
+- `ImportError: libstdc++.so.6` (or another `.so`) from a wheel: uv-nix did not patch
+  the environment, usually because the `patchelf` it resolved is not in the store
+  (`uv nix patch -v <venv>` shows `Failed to patch ...: No such file or directory`).
+  `nix-store --realise` that patchelf path, then re-run; uv-nix re-patches on the next run.
