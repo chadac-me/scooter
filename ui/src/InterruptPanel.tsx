@@ -169,6 +169,8 @@ export function InterruptList() {
       await submitResume([
         { interruptId: intr.id, status, payload: optionId ? { optionId } : undefined },
       ]);
+    } catch {
+      // The provider shows the failure in the send-error banner, and the card stays pending so the user can answer again.
     } finally {
       setSubmitting(null);
     }

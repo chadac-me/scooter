@@ -146,3 +146,23 @@ describe("ContextFillBar", () => {
   });
 });
 
+
+describe("RunStatusBar send-error banner", () => {
+  it("shows a refused send as an alert even with no run active", () => {
+    const html = render({ isRunning: false, sendError: "Your message was too large to send." });
+    expect(html).toContain('data-testid="send-error-bar"');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Your message was too large to send.");
+    expect(html).toContain('data-testid="send-error-dismiss"');
+  });
+
+  it("shows the banner alongside the running indicator", () => {
+    const html = render({ isRunning: true, sendError: "Your message wasn't sent (HTTP 502). Try again." });
+    expect(html).toContain('data-testid="send-error-bar"');
+    expect(html).toContain('data-testid="run-status-bar"');
+  });
+
+  it("renders no banner when there is no send error", () => {
+    expect(render({ isRunning: true, sendError: null })).not.toContain("send-error-bar");
+  });
+});

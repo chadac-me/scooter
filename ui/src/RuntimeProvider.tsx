@@ -25,6 +25,7 @@ import { AWAITING_ID, hasId, type MaybeConversationId } from "./conversation.js"
 import { currentConversation, sessionStore, setConversationMinter, useSessions } from "./sessions.js";
 import {
   createIntegrityAgent,
+  describeSendError,
   type IntegrityAgent,
   type PendingInterrupt,
   type ResumeEntry,
@@ -139,6 +140,10 @@ export interface InterruptContextValue {
   cancelState: "idle" | "stopping" | "failed";
   /** The last run's RUN_ERROR message, or null, cleared when the next run starts. */
   runError: string | null;
+  /** Why the last send or resume never reached the server (e.g. a 413 for an oversized image), or null; cleared by the next successful one. */
+  sendError: string | null;
+  /** Dismiss the sendError banner. */
+  clearSendError: () => void;
   /** The server's auto-retry progress for a transiently failed run, or null when not retrying. */
   runRetrying: { attempt: number; max: number } | null;
   /** True while the live stream is rejected with 401/403, self-clearing once a reconnect succeeds. */
@@ -164,6 +169,8 @@ export const InterruptContext = createContext<InterruptContextValue>({
   cancel: async () => {},
   cancelState: "idle",
   runError: null,
+  sendError: null,
+  clearSendError: () => {},
   runRetrying: null,
   streamAuthError: false,
   queuedMessages: [],
@@ -236,6 +243,21 @@ function ConversationRuntime({
   const [optimisticSends, setOptimisticSends] = useState<
     ReadonlyArray<{ id: string; text: string; priority: number; source?: string }>
   >([]);
+  // A refused or failed POST /agui starts no run, so nothing on the stream reports it; the banner is the user's only signal.
+  const [sendError, setSendError] = useState<string | null>(null);
+  const clearSendError = useCallback(() => setSendError(null), []);
+  const submitResume = useCallback(
+    async (entries: readonly ResumeEntry[]) => {
+      try {
+        await agent.submitResume(entries);
+        setSendError(null);
+      } catch (e) {
+        setSendError(describeSendError(e));
+        throw e;
+      }
+    },
+    [agent],
+  );
 
   // The composer send: a resume answers a pending interrupt and an ordinary send goes to agent.send(), with the reply re-entering through the render pump.
   const onNew = useCallback(
@@ -243,7 +265,7 @@ function ConversationRuntime({
       // A resume rides on the append message's `resume` extra.
       const resume = (message as unknown as { resume?: ResumeEntry[] }).resume;
       if (resume && resume.length > 0) {
-        await agent.submitResume(resume);
+        await submitResume(resume);
         return;
       }
       // content is a plain string or an array of parts.
@@ -286,14 +308,16 @@ function ConversationRuntime({
             images: images.length ? images : undefined,
             files: files.length ? files : undefined,
           });
+          setSendError(null);
         } catch (e) {
-          // The server will never confirm a send that never landed, so drop the optimistic entry.
+          // The server will never confirm a send that never landed, so drop the optimistic entry and say why.
           if (optId) setOptimisticSends((cur) => cur.filter((o) => o.id !== optId));
+          setSendError(describeSendError(e));
           throw e;
         }
       }
     },
-    [agent, conversationId],
+    [agent, conversationId, submitResume],
   );
 
   const threadListAdapter = useMemo(
@@ -470,7 +494,7 @@ function ConversationRuntime({
   const interruptValue = useMemo<InterruptContextValue>(
     () => ({
       interrupts,
-      submitResume: (entries) => agent.submitResume(entries),
+      submitResume,
       conversationId,
       baseUrl: BASE_URL,
       isRunning,
@@ -483,12 +507,14 @@ function ConversationRuntime({
       cancel: doCancel,
       cancelState,
       runError,
+      sendError,
+      clearSendError,
       runRetrying,
       streamAuthError,
       queuedMessages: renderedQueue,
       renderTick,
     }),
-    [interrupts, agent, conversationId, isRunning, activeTool, runStartedAt, contextFill, contextTokens, hasOlder, loadOlder, doCancel, cancelState, runError, runRetrying, streamAuthError, renderedQueue, renderTick],
+    [interrupts, submitResume, conversationId, isRunning, activeTool, runStartedAt, contextFill, contextTokens, hasOlder, loadOlder, doCancel, cancelState, runError, sendError, clearSendError, runRetrying, streamAuthError, renderedQueue, renderTick],
   );
 
   return (
