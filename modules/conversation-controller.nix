@@ -33,7 +33,7 @@ in
       type = types.bool;
       default = true;
       description = ''
-        Reap orphaned Sandboxes — those with no owning Conversation CR — destroying the whole
+        Reap orphaned Sandboxes — those no conversations row (or Conversation CR) references — destroying the whole
         per-conversation tree (Sandbox + its ServiceAccount + module ConfigMap). Fixes the leak
         where a Sandbox whose Conversation is gone is never cleaned up. See
         todo/docs/ORPHANED_SANDBOX_REAPER.md.
