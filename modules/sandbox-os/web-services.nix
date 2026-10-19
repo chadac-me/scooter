@@ -300,7 +300,6 @@ let
 in
 {
   imports = [
-    ./web-services/marimo.nix
     ./web-services/terminal.nix
   ];
 
