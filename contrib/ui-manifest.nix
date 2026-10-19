@@ -6,6 +6,8 @@
 { lib, writeText }:
 
 let
+  resolveSettingsTabs = import ./settings-tabs.nix { inherit lib; };
+
   # A malformed SVG is an author error, so it throws at eval rather than rendering a broken glyph.
   iconData = name: file:
     let
@@ -47,12 +49,15 @@ let
 
   linkProviders = lib.attrNames (lib.filterAttrs (_: c: c.ui.source.linkProvider) sourced);
 
+  # Keyed by tab id; validated (and thrown on) in settings-tabs.nix.
+  settingsTabs = resolveSettingsTabs contribs;
+
   # The presentation half of each contrib's approval gate, not gated on `ui.enable` because a contrib may raise approvals while contributing no icon.
   approvals = lib.mapAttrs
     (_: c: { inherit (c.approvals) gatedOption blockedTitle blockedHint; })
     (lib.filterAttrs (_: c: c.approvals != null) contribs);
-in
 
-writeText "contrib-manifest.json" (builtins.toJSON {
-  inherit sources toolCards toolTitles linkProviders approvals;
-})
+  data = { inherit sources toolCards toolTitles linkProviders approvals settingsTabs; };
+in
+# `data` rides along so an eval (examples/check.nix) can read the manifest without a build.
+writeText "contrib-manifest.json" (builtins.toJSON data) // { inherit data; }
