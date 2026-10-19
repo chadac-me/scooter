@@ -684,7 +684,9 @@ let
     ++ (if envIn "conversation-router" "SANDBOX_DOMAIN" != "sandbox.example.com" then
     [ "the conversation-router does not get SANDBOX_DOMAIN, so it never routes sandbox hosts" ] else [ ])
     ++ (if envIn "agent-host" "SANDBOX_DOMAIN" != "sandbox.example.com" then
-    [ "the agent-host does not get SANDBOX_DOMAIN, so sandboxes never learn their origin" ] else [ ]);
+    [ "the agent-host does not get SANDBOX_DOMAIN, so sandboxes never learn their origin" ] else [ ])
+    ++ (if envIn "ui" "SANDBOX_DOMAIN" != "sandbox.example.com" then
+    [ "the ui does not get SANDBOX_DOMAIN, so no sandbox can frame its own /chat/<id>" ] else [ ]);
   allWorkloads = builtins.concatMap
     (kind: builtins.attrValues (tlsRes.${kind} or { }))
     [ "deployments" "statefulSets" "jobs" "cronJobs" ];
