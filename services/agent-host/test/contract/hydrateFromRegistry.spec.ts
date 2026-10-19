@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import {
   createSessionManager,
+  shortId,
   type SandboxProvisioner,
   type ConversationStore,
 } from "../../src/session/manager.js";
@@ -300,5 +301,76 @@ describe("on-demand hydration under concurrent first requests", () => {
 
     expect(sessions.get("delta")?.bridge, "the entry Stop reads still holds the live bridge").toBeDefined();
     expect(sessions.get("delta")?.status).toBe("running");
+  });
+});
+
+describe("boot after an OOM storm (2026-10-19)", () => {
+  const sb = (id: string) => `conv-${shortId(id)}`;
+
+  it("THE BUG: an adopted subagent maps to its root's sandbox, even listed before the root and with a stale sandboxRef @proves", async () => {
+    // The storm left each subagent with its own running Sandbox and sandbox_ref.
+    const prov = provisionerWithLive([sb("root"), sb("kid")]);
+    const registry = registryWith([
+      cr("kid", { spec: { owner: "alice", parentId: "root", sandboxRef: sb("kid") } }),
+      cr("root", { spec: { owner: "alice", sandboxRef: sb("root") } }),
+    ]);
+    const sessions = createSessionManager({
+      provisioner: prov, store: inMemoryStore(),
+      conversationRegistry: registry as never, selfPod: SELF,
+    } as never);
+
+    await sessions.hydrate();
+    expect(sessions.get("kid")?.sandbox.name).toBe(sb("root"));
+    expect(sessions.get("kid")?.sandbox).toEqual(sessions.get("root")?.sandbox);
+  });
+
+  /** A store whose `id` log ends mid-run. */
+  const storeWithDangling = (ids: string[]) => {
+    const store = inMemoryStore();
+    for (const id of ids) {
+      void store.appendEvent(id as SessionId, { type: "RUN_STARTED", threadId: id, runId: `run-${id}` } as AguiEvent);
+    }
+    return store;
+  };
+  const eventsOf = async (store: ConversationStore, id: string) => {
+    const out: AguiEvent[] = [];
+    for await (const e of store.readEvents(id as SessionId)) out.push(e);
+    return out;
+  };
+
+  it("THE BUG: resumeInterrupted closes a SUSPENDED conversation's dangling run instead of reviving it @proves", async () => {
+    const store = storeWithDangling(["asleep", "awake"]);
+    const registry = registryWith([cr("asleep", { phase: "Suspended" }), cr("awake")]);
+    const sessions = createSessionManager({
+      provisioner: provisionerWithLive([sb("awake")]), store,
+      conversationRegistry: registry as never, selfPod: SELF,
+    } as never);
+    await sessions.hydrate();
+    const prompt = vi.spyOn(sessions, "prompt").mockResolvedValue(undefined as never);
+
+    const resumed = await sessions.resumeInterrupted();
+
+    expect(resumed).toEqual(["awake"]);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompt.mock.calls[0][0]).toBe("awake");
+    const tail = (await eventsOf(store, "asleep")).at(-1) as { type: string; runId: string; cancelled?: boolean };
+    expect(tail).toMatchObject({ type: "RUN_FINISHED", runId: "run-asleep", cancelled: true });
+  });
+
+  it("a second boot finds nothing dangling on the suspended conversation", async () => {
+    const store = storeWithDangling(["asleep"]);
+    const registry = registryWith([cr("asleep", { phase: "Suspended" })]);
+    const boot = async () => {
+      const s = createSessionManager({
+        provisioner: provisionerWithLive([]), store,
+        conversationRegistry: registry as never, selfPod: SELF,
+      } as never);
+      await s.hydrate();
+      return s;
+    };
+    await (await boot()).resumeInterrupted();
+    const before = (await eventsOf(store, "asleep")).length;
+    await (await boot()).resumeInterrupted();
+    expect((await eventsOf(store, "asleep")).length).toBe(before);
   });
 });

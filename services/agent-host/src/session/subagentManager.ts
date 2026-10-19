@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import type { SessionId } from "../types.js";
 import type { AguiEvent } from "../bridge.js";
-import type { SubagentManager, SubagentStatus } from "../agent/subagentTools.js";
+import { SubagentLimitError, type SubagentManager, type SubagentStatus } from "../agent/subagentTools.js";
 import { foldTurnsWithTools } from "../agent/subagentTranscript.js";
 import { PRIORITY_INTERRUPT } from "../bridge.js";
 import type { SubagentCreator } from "./routerSubagents.js";
@@ -17,7 +17,7 @@ export interface SubagentConversation {
   parentId?: string;
   status?: string;
   bridge?: {
-    queueState(): { running: boolean };
+    queueState(): { running: boolean; queued?: number };
     cancel(): void;
   };
 }
@@ -42,6 +42,14 @@ export function subagentStatusOf(c: SubagentConversation): SubagentStatus["statu
   return c.bridge?.queueState().running ? "running" : "idle";
 }
 
+/** Counts toward the caps: a live child with a turn running, queued, or about to start. */
+export function subagentIsBusy(c: SubagentConversation): boolean {
+  if (c.parentId === undefined || c.status !== "running") return false;
+  if (!c.bridge) return true; // spawnChild has not wired its bridge yet
+  const q = c.bridge.queueState();
+  return q.running || (q.queued ?? 0) > 0;
+}
+
 async function collect(it: AsyncIterable<AguiEvent>): Promise<AguiEvent[]> {
   const out: AguiEvent[] = [];
   try {
@@ -52,10 +60,27 @@ async function collect(it: AsyncIterable<AguiEvent>): Promise<AguiEvent[]> {
   return out;
 }
 
+/** Bounds on spawning, so delegation cannot fork-bomb a host. */
+export interface SubagentLimits {
+  /** Subagent nesting allowed: 1 means a subagent cannot spawn. */
+  maxDepth: number;
+  /** Running children one conversation may have at once. */
+  maxRunningPerParent: number;
+  /** Running subagents across this host at once. */
+  maxRunningPerHost: number;
+}
+
+export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
+  maxDepth: 1,
+  maxRunningPerParent: 4,
+  maxRunningPerHost: 12,
+};
+
 export function createSubagentManager(
   sessions: SubagentSessions,
   store: SubagentStore,
   createChild?: SubagentCreator,
+  limits: SubagentLimits = DEFAULT_SUBAGENT_LIMITS,
 ): SubagentManager {
   /** Resolve a child that belongs to `parentId` (scoping), else undefined. */
   const ownChild = (parentId: string, subagentId: string): SubagentConversation | undefined => {
@@ -63,14 +88,68 @@ export function createSubagentManager(
     return c && c.parentId === parentId ? c : undefined;
   };
 
+  // In-flight spawns, so a parallel burst cannot overshoot: unnamed until the router mints an id.
+  const unnamed = new Map<string, number>();
+  const pending = new Map<string, string>(); // child id -> parent id
+  const bump = (parentId: string, by: number) => {
+    const left = (unnamed.get(parentId) ?? 0) + by;
+    if (left > 0) unnamed.set(parentId, left);
+    else unnamed.delete(parentId);
+  };
+  /** Busy or in-flight children, each counted once. */
+  const inUse = (all: SubagentConversation[], parentId?: string): number => {
+    const ids = new Set<string>();
+    for (const c of all) if (subagentIsBusy(c) && (parentId === undefined || c.parentId === parentId)) ids.add(c.id);
+    for (const [id, p] of pending) if (parentId === undefined || p === parentId) ids.add(id);
+    let anon = 0;
+    for (const [p, n] of unnamed) if (parentId === undefined || p === parentId) anon += n;
+    return ids.size + anon;
+  };
+
   return {
     async spawn(parentId, args) {
-      // The router mints the id, before any event.
-      const childThreadId = createChild
-        ? (await createChild(parentId, { title: args.title, model: args.model })).id
-        : randomUUID();
-      const child = await sessions.spawnChild(parentId as SessionId, childThreadId, args);
-      return { id: child.id, title: child.title };
+      // Checked before the router mints a row, so a refusal leaves nothing behind.
+      let depth = 0;
+      for (let c = sessions.get(parentId); c?.parentId && depth <= limits.maxDepth; depth++) {
+        c = sessions.get(c.parentId as SessionId);
+      }
+      if (depth >= limits.maxDepth) {
+        throw new SubagentLimitError(
+          `Not spawned: subagents nest at most ${limits.maxDepth} level(s) deep, and you are already a ` +
+            `subagent. Do this work yourself in this turn.`,
+        );
+      }
+      const all = sessions.list();
+      const mine = inUse(all, parentId);
+      if (mine >= limits.maxRunningPerParent) {
+        throw new SubagentLimitError(
+          `Not spawned: you already have ${mine} running subagents (limit ${limits.maxRunningPerParent}). ` +
+            `Wait for one to finish, or do this work yourself.`,
+        );
+      }
+      const host = inUse(all);
+      if (host >= limits.maxRunningPerHost) {
+        throw new SubagentLimitError(
+          `Not spawned: this host is running ${host} subagents (limit ${limits.maxRunningPerHost}). ` +
+            `Do this work yourself, or retry after yours finish.`,
+        );
+      }
+      bump(parentId, 1);
+      let childThreadId: string | undefined;
+      try {
+        // The router mints the id, before any event.
+        childThreadId = createChild
+          ? (await createChild(parentId, { title: args.title, model: args.model })).id
+          : randomUUID();
+        bump(parentId, -1);
+        pending.set(childThreadId, parentId);
+        const child = await sessions.spawnChild(parentId as SessionId, childThreadId, args);
+        return { id: child.id, title: child.title };
+      } finally {
+        // Once spawned, the child counts itself via subagentIsBusy.
+        if (childThreadId === undefined) bump(parentId, -1);
+        else pending.delete(childThreadId);
+      }
     },
     async list(parentId) {
       return sessions

@@ -213,7 +213,8 @@ export async function buildServer(
           "AUTOMATICALLY with the subagent's result the moment it finishes. Do NOT sit in a check_subagent " +
           "poll loop (that keeps you busy and delays the result). Use it to fan out independent work (research " +
           "a question, investigate a subsystem) in parallel. Note: subagents share your /workspace — avoid " +
-          "having two edit the same files at once.",
+          "having two edit the same files at once. Spawning is capped (a few running per conversation, and " +
+          "subagents usually cannot spawn their own): prefer doing small lookups yourself.",
         inputSchema: {
           prompt: z.string().describe("The task for the subagent (be specific; it starts fresh with no context)."),
           title: z.string().optional().describe("A short label for the subagent (shown in the UI)."),

@@ -16,6 +16,7 @@ import {
   handleSearchSubagent,
   lastAssistantText,
   subagentDoneNotice,
+  SubagentLimitError,
   type SubagentManager,
 } from "../../src/agent/subagentTools.js";
 import type { AguiEvent } from "../../src/bridge.js";
@@ -49,6 +50,13 @@ describe("subagent tools", () => {
     const text = out.content[0].text;
     expect(text).toContain("sub-res");
     expect(text).toMatch(/check_subagent/i);
+  });
+
+  it("spawn_subagent surfaces a limit refusal as a tool error the model can act on", async () => {
+    const mgr = fakeManager({ spawn: vi.fn(async () => { throw new SubagentLimitError("Not spawned: limit 4"); }) });
+    const out = await handleSpawnSubagent(mgr, PARENT, { prompt: "research the API" });
+    expect(out.isError).toBe(true);
+    expect(out.content[0].text).toBe("Not spawned: limit 4");
   });
 
   it("spawn_subagent errors on an empty prompt (no child started)", async () => {

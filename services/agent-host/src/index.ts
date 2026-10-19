@@ -80,7 +80,7 @@ import {
   type SubagentManager,
   type SubagentStatus,
 } from "./agent/subagentTools.js";
-import { createSubagentManager } from "./session/subagentManager.js";
+import { createSubagentManager, DEFAULT_SUBAGENT_LIMITS } from "./session/subagentManager.js";
 import { createRouterSubagentCreator } from "./session/routerSubagents.js";
 import { lastRunCompleted } from "./session/danglingRun.js";
 import { randomUUID } from "node:crypto";
@@ -992,7 +992,15 @@ export async function main(
   if (!subagentCreator && process.env.AGENT_HOST_DB_DSN) {
     hostLog.warn("CONVERSATION_ROUTER_URL unset with a Postgres store: a spawned subagent will have no conversations row and will not list");
   }
-  const subagentManager: SubagentManager = createSubagentManager(sessions, store, subagentCreator);
+  const envLimit = (name: string, fallback: number): number => {
+    const v = Number(process.env[name]);
+    return Number.isInteger(v) && v > 0 ? v : fallback;
+  };
+  const subagentManager: SubagentManager = createSubagentManager(sessions, store, subagentCreator, {
+    maxDepth: envLimit("SUBAGENT_MAX_DEPTH", DEFAULT_SUBAGENT_LIMITS.maxDepth),
+    maxRunningPerParent: envLimit("SUBAGENT_MAX_RUNNING_PER_PARENT", DEFAULT_SUBAGENT_LIMITS.maxRunningPerParent),
+    maxRunningPerHost: envLimit("SUBAGENT_MAX_RUNNING_PER_HOST", DEFAULT_SUBAGENT_LIMITS.maxRunningPerHost),
+  });
 
   const convTokenSecret = process.env.CONV_TOKEN_SECRET ?? "";
   const brokerTokenPath = process.env.BROKER_TOKEN_PATH ?? "/var/run/secrets/broker/token";
