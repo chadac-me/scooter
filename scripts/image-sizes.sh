@@ -77,9 +77,14 @@ measure_one() {
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 for attr in "${IMAGES[@]}"; do
-  # Skip rather than fail an image this flake does not have: the baseline run
-  # measures origin/main, which may predate a newly added image.
+  # The baseline run measures origin/main, which may predate a newly added image,
+  # so it skips a failed image. IMAGE_SIZES_STRICT=1 (the PR side) fails instead,
+  # since there a failure is a broken build rather than a missing attr.
   if ! measure_one "$attr" >> "$tmp"; then
+    if [ "${IMAGE_SIZES_STRICT:-0}" = 1 ]; then
+      echo "image-sizes: '$attr' failed to build" >&2
+      exit 1
+    fi
     echo "image-sizes: skipping '$attr' (not in this flake — new image?)" >&2
   fi
 done

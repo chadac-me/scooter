@@ -86,12 +86,33 @@ jobs:
           node scripts/ci-report.mjs post --section fast --status "$status" \
             --summary "$summary" --body fast.md --labels "$LABELS"
 
-  # Assembling the nix2container image over the whole system closure is a failure
-  # surface neither the nixosTests nor the path-gated k3d job covers, so every PR
-  # builds it.
+  # Builds every image publish-images.yml ships (without pushing), so an image that
+  # stops building fails its PR instead of the next publish on main. Assembling a
+  # nix2container image over its whole closure is a failure surface neither the
+  # nixosTests nor the path-gated k3d jobs cover; Cachix substitutes unchanged
+  # images. x86_64 only: publish also builds aarch64, but arch-only breakage is rare
+  # enough not to double every PR's image cost. Keep the matrix in sync with
+  # publish-images.yml; `just check-image-coverage` enforces it.
   image-build:
-    name: build sandbox-os images
+    name: build image ${{ matrix.image.attr }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # report every broken image, not just the first
+      matrix:
+        image:
+          - { attr: agent-host-image, unfree: false }
+          - { attr: ui-image, unfree: false }
+          - { attr: broker-image, unfree: false }
+          - { attr: scheduler-image, unfree: false }
+          - { attr: webhooks-image, unfree: false }
+          - { attr: db-migrator-image, unfree: false }
+          - { attr: agent-host-image-claude, unfree: true }
+          - { attr: remote-agent-image, unfree: true }
+          - { attr: byoc-controller-image, unfree: false }
+          - { attr: conversation-controller-image, unfree: false }
+          - { attr: conversation-router-image, unfree: false }
+          - { attr: warm-store-controller-image, unfree: false }
+          - { attr: sandbox-os-image, unfree: false }
     steps:
       - uses: actions/checkout@v5
       - uses: nixbuild/nix-quick-install-action@v30
@@ -99,9 +120,48 @@ jobs:
         with:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      # Building to completion forces every layer derivation over the full system closure.
-      - name: nix build .#sandbox-os-image
-        run: nix build .#sandbox-os-image --print-build-logs
+      # Building to completion forces every layer derivation. The claude-baked
+      # images contain the unfree claude CLI, hence allowUnfree + --impure.
+      - name: nix build .#${{ matrix.image.attr }}
+        env:
+          ATTR: ${{ matrix.image.attr }}
+          UNFREE: ${{ matrix.image.unfree }}
+        run: |
+          set -euo pipefail
+          impure=()
+          if [ "$UNFREE" = "true" ]; then export NIXPKGS_ALLOW_UNFREE=1; impure=(--impure); fi
+          nix build "${impure[@]}" ".#$ATTR" --no-link --print-build-logs
+
+  # Reports the image-build matrix as the `images` gate; always() so a red build
+  # still resolves the gate for `ci-summary`.
+  image-build-report:
+    name: report image builds
+    needs: image-build
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: post image-build section
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          RESULT: ${{ needs.image-build.result }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" = "success" ]; then
+            status=pass; summary="image builds — every published image builds"
+            printf 'Every image in publish-images.yml built (x86_64-linux).\n' > images.md
+          else
+            status=fail; summary="image builds — FAILED ($RESULT)"
+            printf 'At least one published image failed to build; see the failing "build image …" job.\n' > images.md
+          fi
+          node scripts/ci-report.mjs post --section images --status "$status" \
+            --summary "$summary" --body images.md --labels "$LABELS"
 
   # Measures every shipped image on the PR, rebuilds the baseline from origin/main in
   # the same job (Cachix substitutes the unchanged images) and posts the diff as a
@@ -125,7 +185,11 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # 1. Measure the PR's images (JSON to pr-sizes.json; build logs to stderr).
+      #    Strict: a PR image that fails to build fails the job instead of being
+      #    skipped as if it were missing.
       - name: measure PR image sizes
+        env:
+          IMAGE_SIZES_STRICT: "1"
         run: ./scripts/image-sizes.sh > pr-sizes.json
 
       # 2. Measure origin/main from a worktree with the PR's copy of the script, so
@@ -160,6 +224,20 @@ jobs:
           fi
           node scripts/ci-report.mjs post --section size --status "$status" \
             --summary "$summary" --body report.md --labels "$LABELS"
+
+      # A measurement that failed (a PR image did not build) still resolves the
+      # section; the `images` gate is what blocks the merge.
+      - name: post size failure section
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          printf 'Could not measure image sizes: an image failed to build. See the job log.\n' > report.md
+          node scripts/ci-report.mjs post --section size --status fail \
+            --summary 'image size — measurement FAILED' --body report.md --labels "$LABELS"
 
   # Enumerates the dev-env-* nixosTests into a matrix so each VM test runs in its
   # own job; HEAVY_TESTS are excluded per-PR and included nightly or with the
@@ -1635,7 +1713,7 @@ jobs:
   # always() so a red producer still yields a verdict.
   ci-summary:
     name: ci summary (gates)
-    needs: [ci, image-sizes, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
+    needs: [ci, image-build-report, image-sizes, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
