@@ -3,7 +3,10 @@ name: scooter-marimo
 description: >-
   marimo notebooks in this sandbox: the `marimo` web service and how to pair on it
   with the marimo-pair skill. Use when the user wants a notebook, data exploration,
-  plots or an interactive report, or asks you to work in their open notebook.
+  plots or an interactive report, asks you to work in their open notebook, or a
+  notebook needs a package or a setting changed. Each notebook has its own
+  environment: add packages with ctx.packages.add(), never pip, a venv or a
+  pyproject.toml. Settings go in ~/.config/marimo/marimo.toml.
 ---
 
 # marimo in Scooter
@@ -20,12 +23,14 @@ shell for that.
 ## 1. Start it and give the user the link
 
 ```bash
-scooter-service start marimo
-ORIGIN=$(echo "$CONVERSATION_URL" | sed -E 's#^(https?://[^/]+).*#\1#')
-echo "$ORIGIN/c/$CONVERSATION_ID/marimo/"
+scooter-service start marimo     # prints the notebook's URL
+scooter-service start notebook   # "marimo + chat": this conversation beside the notebook
 ```
 
-The user can also start it from the **Services panel**. The first start
+Give the user the **notebook** link (`marimo + chat`) by default. It shows this
+conversation on the left and marimo on the right, so they can ask you for changes
+without leaving the notebook. The marimo link alone is for a full-screen notebook.
+The user can also start either from the **Services panel**. The first start
 materializes marimo, which takes a while. Notebooks live in `/workspace`.
 
 **marimo-pair can only reach a notebook the user has open in the browser.** A
@@ -40,8 +45,10 @@ Read the **marimo-pair** skill and follow it. Two things differ here:
   `discover-servers.sh` won't find it. Use:
 
   ```bash
+  # marimo serves at /marimo on the conversation's own origin, else under /c/<id>/marimo.
+  MARIMO_BASE=${SCOOTER_SERVICES_ORIGIN:+/marimo}; MARIMO_BASE=${MARIMO_BASE:-/c/$CONVERSATION_ID/marimo}
   bash /etc/scooter/skills/marimo-pair/scripts/execute-code.sh \
-    --url "http://localhost:2718/c/$CONVERSATION_ID/marimo" \
+    --url "http://localhost:2718$MARIMO_BASE" \
     -c "import marimo._code_mode as cm; help(cm)"
   ```
 
@@ -52,14 +59,76 @@ Read the **marimo-pair** skill and follow it. Two things differ here:
 marimo-pair's rules hold as written:
 - Don't edit the `.py` file while a session is running.
 - Make notebook changes through `marimo._code_mode`.
-- Add packages with `ctx.packages.add()`, not `pip` or `uv`. Each notebook is a
-  `--sandbox` notebook with its own environment and inline (PEP 723)
-  dependencies.
+- Add packages with `ctx.packages.add()` (next section).
+
+## 3. Packages: each notebook has its own environment
+
+A notebook's dependencies are its inline (PEP 723) header, and marimo builds the
+notebook's own environment from it. That environment is not your shell's Python.
+**Never create a `pyproject.toml`, `requirements.txt` or venv for a notebook, and
+never `pip install` for one.** None of these reach it.
+
+- **The notebook is open:** add packages through marimo-pair, then re-run the cells
+  that need them. Adding a package doesn't re-run anything.
+
+  ```python
+  async with cm.get_context() as ctx:
+      ctx.packages.add("polars", "altair")   # or ctx.packages.remove(...)
+  ```
+
+  It installs into the running kernel and pins the version in the header. Don't edit
+  the header on disk while the notebook is open: the kernel ignores it until it restarts.
+- **"restart the kernel to use them":** the header has the change, but the open kernel
+  can't load it until it restarts. A restart loses everything the notebook holds in
+  memory. Restarting from outside also leaves the user's tab showing "kernel not
+  found" until they reload it. So gauge how active the user is first:
+  - **They're working in it now** (messages about it in the last few minutes, or the
+    file saved recently: `stat -c %y nb.py`): ask them to use marimo's own restart,
+    which reloads their tab cleanly.
+  - **They seem to be away:** restart it yourself, and tell them to reload the tab
+    when they're back.
+
+  ```bash
+  M=http://localhost:2718$MARIMO_BASE; F=nb.py   # the notebook's path under /workspace
+  sid=$(curl -s "$M/api/sessions" | jq -r --arg f "/workspace/$F" 'to_entries[] | select(.value.path == $f) | .key')
+  tok=$(curl -s "$M/?file=$F" | grep -o 'data-token="[^"]*"' | cut -d'"' -f2)
+  curl -s -X POST "$M/api/kernel/restart_session?file=$F" -H "Marimo-Session-Id: $sid" \
+    -H "Marimo-Server-Token: $tok" -H 'Content-Type: application/json' -d '{}'
+  ```
+
+  If `/api/sessions` lists no session for the notebook, there is no kernel to
+  restart: the next open builds the environment from the header. A session can
+  outlive its tab for a while, so check rather than assume.
+- **A new notebook nobody has open yet:** write the header when you create the file.
+
+  ```python
+  # /// script
+  # requires-python = ">=3.12"
+  # dependencies = ["marimo", "polars"]
+  # ///
+  ```
+- **Not a Python package** (a CLI tool, or a C library a wheel needs): it comes from
+  Nix. Add it with a module under `/etc/scooter/modules/` (the scooter-env skill).
+- Leave the environments themselves (`/root/.cache/uv/environments-v2/`) alone; marimo
+  owns them.
+
+## 4. Settings
+
+marimo's settings are in `~/.config/marimo/marimo.toml`, on the workspace volume.
+The marimo settings panel writes the same file, so the user and you share it. marimo
+reads it whenever a notebook opens, so changes need no restart.
+
+- Notebooks **run when opened** (`runtime.auto_instantiate = true`), so a bookmark
+  that wakes the sandbox lands on a computed notebook. Leave that on unless the user
+  asks otherwise.
+- **Never put marimo settings in a `pyproject.toml`.** The server only reads
+  `/workspace/pyproject.toml`, never one beside a notebook, and creating that one
+  makes the whole workspace a uv project.
 
 ## If something is off
 
 - `scooter-service status marimo` and `journalctl -u webservice-marimo -n 50`
   show the server's state and log.
-- "Failed to connect": the service isn't running, or the URL lacks the
-  `/c/$CONVERSATION_ID/marimo` base path.
+- "Failed to connect": the service isn't running, or the URL lacks marimo's base
+  path (`$MARIMO_BASE` above).
 - "No sessions": nobody has the notebook open. Ask the user to open the link.
