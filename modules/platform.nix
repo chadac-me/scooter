@@ -1592,7 +1592,7 @@ in
           selector.app = "conversation-router";  # the front door always fronts the router
           ports = [{ port = 8080; targetPort = "agui"; name = "agui"; }]
             # The router's sandbox-host listener, for the wildcard Ingress only.
-            ++ lib.optional (cfg.ingress.sandboxDomain != "") { port = 8081; targetPort = "sandbox"; name = "sandbox"; };
+            ++ lib.optional (cfg.ingress.sandboxDomain != "") { port = 8082; targetPort = "sandbox"; name = "sandbox"; };
         };
       };
       # ClusterIP Service selecting the agent-host pods directly: the router's fallback

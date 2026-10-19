@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -46,6 +47,8 @@ type config struct {
 	sandboxDomain string
 	// The sandbox listener's address, the only one serving sandbox hosts (see sandboxhost.go).
 	sandboxListenAddr string
+	// The sandbox self-access listener's address (SELF_LISTEN_ADDR); empty disables it.
+	selfListenAddr string
 	// Whether sandbox hosts are proxied straight to the pod (sandboxdirect.go) rather than
 	// through the agent-host. SANDBOX_DIRECT=0 turns it off.
 	sandboxDirect bool
@@ -58,7 +61,8 @@ func configFromEnv() config {
 		listenAddr:        env("LISTEN_ADDR", ":8080"),
 		clusterIPService:  env("AGENT_HOST_SERVICE", "agent-host"),
 		sandboxDomain:     env("SANDBOX_DOMAIN", ""),
-		sandboxListenAddr: env("SANDBOX_LISTEN_ADDR", ":8081"),
+		sandboxListenAddr: env("SANDBOX_LISTEN_ADDR", ":8082"),
+		selfListenAddr:    env("SELF_LISTEN_ADDR", ""),
 		sandboxDirect:     env("SANDBOX_DIRECT", "1") != "0",
 	}
 }
@@ -68,6 +72,10 @@ func main() {
 	log := logger("main")
 
 	cfg := configFromEnv()
+	if err := validateListenAddrs(cfg); err != nil {
+		log.Error("invalid listener config", errAttr(err))
+		os.Exit(1)
+	}
 	// ctx is the process-lifetime context, handed to the proxy layer so a shutdown cancellation can be told apart from a client hanging up (see classifyProxyError).
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -446,7 +454,7 @@ func buildTrustedCaller(kubeCfg *rest.Config, log *slog.Logger) TrustedCaller {
 
 // buildSelfServer returns the sandbox self-access listener (see selfaccess.go), or nil when SELF_LISTEN_ADDR is unset or it cannot verify tokens.
 func buildSelfServer(kubeCfg *rest.Config, cfg config, store *Store, handler http.Handler, log *slog.Logger) *http.Server {
-	addr := env("SELF_LISTEN_ADDR", "")
+	addr := cfg.selfListenAddr
 	if addr == "" {
 		return nil
 	}
@@ -463,6 +471,31 @@ func buildSelfServer(kubeCfg *rest.Config, cfg config, store *Store, handler htt
 	self := newSelfAccess(review, cfg.namespace, store.ConversationByID, identityConfigFromEnv(), atoi(env("SELF_MESSAGES_PER_MINUTE", "10")))
 	log.Info("self-access listener enabled", slog.String("listen_addr", addr), slog.String("audience", audience))
 	return &http.Server{Addr: addr, Handler: self.wrap(handler)}
+}
+
+// validateListenAddrs fails fast when two enabled listeners share a port; otherwise the
+// later bind fails at runtime and exits with a bare "address already in use".
+func validateListenAddrs(cfg config) error {
+	type listener struct{ env, addr string }
+	ls := []listener{{"LISTEN_ADDR", cfg.listenAddr}}
+	if cfg.selfListenAddr != "" {
+		ls = append(ls, listener{"SELF_LISTEN_ADDR", cfg.selfListenAddr})
+	}
+	if cfg.sandboxDomain != "" {
+		ls = append(ls, listener{"SANDBOX_LISTEN_ADDR", cfg.sandboxListenAddr})
+	}
+	seen := map[string]string{}
+	for _, l := range ls {
+		port := l.addr
+		if _, p, err := net.SplitHostPort(l.addr); err == nil {
+			port = p
+		}
+		if prev, ok := seen[port]; ok {
+			return fmt.Errorf("%s and %s must differ: both use port %s", prev, l.env, port)
+		}
+		seen[port] = l.env
+	}
+	return nil
 }
 
 // --- k8s client + unstructured helpers (used by cache.go) -------------------

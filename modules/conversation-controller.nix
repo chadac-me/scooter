@@ -10,6 +10,14 @@
 let
   cfg = config.scooter;
   ccfg = cfg.conversationController;
+  # The router's sandbox-host listener. Must differ from the main (8080) and
+  # self-access listeners, or the second bind fails and the router crash-loops.
+  sandboxPort = 8082;
+  routerPorts =
+    if ccfg.selfAccess.enable && builtins.elem ccfg.selfAccess.port [ 8080 sandboxPort ] then
+      # A `throw`, since kubenix has no `assertions` option.
+      throw "scooter.conversationController.selfAccess.port = ${toString ccfg.selfAccess.port} collides with another conversation-router listener (8080 = main, ${toString sandboxPort} = sandbox hosts); pick a different port."
+    else null;
 in
 {
   options.scooter.conversationController = with lib; {
@@ -454,10 +462,10 @@ in
                 image = ccfg.routerImage;
                 imagePullPolicy = cfg.pullPolicy;
                 command = [ "conversation-router" ];
-                ports = [{ containerPort = 8080; name = "agui"; }]
+                ports = builtins.seq routerPorts [{ containerPort = 8080; name = "agui"; }]
                   ++ lib.optional ccfg.selfAccess.enable { containerPort = ccfg.selfAccess.port; name = "self"; }
                   # The sandbox-host listener: the only port the public wildcard Ingress reaches.
-                  ++ lib.optional (cfg.ingress.sandboxDomain != "") { containerPort = 8081; name = "sandbox"; };
+                  ++ lib.optional (cfg.ingress.sandboxDomain != "") { containerPort = sandboxPort; name = "sandbox"; };
                 env = [
                   { name = "NAMESPACE"; value = cfg.namespace; }
                   # The fallback Service for unassigned requests must select the
@@ -468,7 +476,7 @@ in
                   # Requests to <label>.<sandboxDomain> are a conversation's web services,
                   # served only on SANDBOX_LISTEN_ADDR; the main listener refuses those hosts.
                   { name = "SANDBOX_DOMAIN"; value = cfg.ingress.sandboxDomain; }
-                  { name = "SANDBOX_LISTEN_ADDR"; value = ":8081"; }
+                  { name = "SANDBOX_LISTEN_ADDR"; value = ":${toString sandboxPort}"; }
                   # Read-only handle on the agent_host database via the router's own role.
                   { name = "AGENT_HOST_DB_HOST"; value = cfg.postgres.host; }
                   { name = "AGENT_HOST_DB_PORT"; value = toString cfg.postgres.port; }

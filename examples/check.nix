@@ -721,7 +721,7 @@ let
           [ "the agent-host Service exposes a `sandbox` port with no ingress.sandboxDomain" ] else [ ])
       ++ (if (builtins.head (sbIngress.spec.tls or [ { } ])).secretName or "" != "sandbox-wildcard-tls" then
           [ "sandbox-services Ingress does not use sandboxTlsSecretName" ] else [ ]))
-    ++ (if envIn "conversation-router" "SANDBOX_LISTEN_ADDR" != ":8081" then
+    ++ (if envIn "conversation-router" "SANDBOX_LISTEN_ADDR" != ":8082" then
     [ "the conversation-router does not get SANDBOX_LISTEN_ADDR, so its sandbox listener is not the port the Service targets" ] else [ ])
     ++ (if envIn "conversation-router" "SANDBOX_DOMAIN" != "sandbox.example.com" then
     [ "the conversation-router does not get SANDBOX_DOMAIN, so it never routes sandbox hosts" ] else [ ])
