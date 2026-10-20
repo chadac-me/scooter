@@ -179,6 +179,9 @@ const USER_CACHE_MAX = 1000;
 /** How long a resolved pod address is reused; also dropped on a status change or any upstream connect error. Why: PR #800. */
 export const POD_TARGET_TTL_MS = 15_000;
 
+/** How long the status poll waits for the service's port to accept before calling it not up yet. */
+const LISTEN_PROBE_TIMEOUT_MS = 1000;
+
 /** A proxied request whose time to the pod's first byte is at least this logs at info, below it at debug. */
 export const SLOW_REQUEST_MS = 250;
 
@@ -236,12 +239,20 @@ export function renderLoadingPage(service: string, basePath: string): string {
 <script>
  const STATUS = ${JSON.stringify(statusUrl)};
  const logEl = document.getElementById("log");
+ let shown = false;
  async function tick() {
    try {
      const r = await fetch(STATUS, { cache: "no-store", headers: { accept: "application/json" } });
      const j = await r.json();
-     if (j.logs && j.logs.trim()) logEl.textContent = j.logs;
-     else if (j.phase === "sandbox") logEl.textContent = "(starting the sandbox…)";
+     if (j.logs && j.logs.trim()) {
+       if (logEl.textContent !== j.logs) {
+         // Auto-tail, unless the reader has scrolled up to look at something.
+         const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 24;
+         logEl.textContent = j.logs;
+         if (atBottom || !shown) logEl.scrollTop = logEl.scrollHeight;
+         shown = true;
+       }
+     } else if (!shown && j.phase === "sandbox") logEl.textContent = "(starting the sandbox…)";
      if (j.running) { location.reload(); return; }
    } catch (e) { /* transient; keep polling */ }
    setTimeout(tick, 1200);
@@ -424,6 +435,23 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     return { ok: true, conversationId: conv.id, podIP: resolved.target.podIP, port: desc.port, rest, stripBasePath: desc.stripBasePath ?? false, threadId, service, basePath, podTargetCached: resolved.cached };
   }
 
+  /** Whether the service's port accepts a TCP connection on the conversation's pod. */
+  async function listening(conv: Conversation, port: number): Promise<boolean> {
+    let podIP: string;
+    try {
+      podIP = (await podTargetFor(sessions.get(conv.id) ?? conv)).target.podIP;
+    } catch {
+      return false;
+    }
+    return new Promise((done) => {
+      const sock = connect({ host: podIP, port });
+      const finish = (ok: boolean) => { sock.destroy(); done(ok); };
+      sock.setTimeout(LISTEN_PROBE_TIMEOUT_MS, () => finish(false));
+      sock.once("connect", () => finish(true));
+      sock.once("error", () => finish(false));
+    });
+  }
+
   /** The readiness/log endpoint the loading page polls; returns true if it handled the request. */
   async function handleStatus(pathname: string, label: string | undefined, res: ServerResponse): Promise<boolean> {
     const parsed = parseProxyPath(pathname);
@@ -449,13 +477,15 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       reply({ running: false, logs: "", phase: "sandbox" });
       return true;
     }
-    const [running, logs] = await Promise.all([
+    const [active, logs] = await Promise.all([
       registry.isRunning(conv.id, parsed.service).catch(() => false),
       registry.logs(conv.id, parsed.service).catch(() => ""),
     ]);
-    if (!running && (await registry.get(conv.id, parsed.service).catch(() => null))) {
-      startService(conv.id, parsed.service);
-    }
+    const desc = await registry.get(conv.id, parsed.service).catch(() => null);
+    if (!active && desc) startService(conv.id, parsed.service);
+    // An active unit is not yet a listening one. Reporting running before the port accepts
+    // would reload the page into a refused connection and back onto a fresh loading page.
+    const running = active && !!desc && (await listening(conv, desc.port));
     reply({ running, logs, phase: "service" });
     return true;
   }
