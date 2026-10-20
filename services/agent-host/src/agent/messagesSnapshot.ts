@@ -20,6 +20,8 @@ export interface SnapshotMessage {
   content: string;
   toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
   toolCallId?: string;
+  /** Epoch ms of the event that opened the message (its `ts`); absent when that event is unstamped. */
+  createdAt?: number;
 }
 
 /** Fold `events` into messages in emission order. */
@@ -34,14 +36,18 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
   const emittedCalls = new Map<string, { function: { arguments: string } }>();
   let openAssistant: SnapshotMessage | undefined;
 
+  // The event being folded, so `open` can stamp the message with that event's `ts`.
+  let ts: unknown;
   const open = (id: string, role: SnapshotMessage["role"]) => {
     const m: SnapshotMessage = { id, role, content: "" };
+    if (typeof ts === "number") m.createdAt = ts;
     byId.set(id, m);
     out.push(m);
     return m;
   };
 
   for (const e of events as Iterable<Record<string, string>>) {
+    ts = (e as { ts?: unknown }).ts;
     switch (e.type) {
       case "TEXT_MESSAGE_START": {
         const role = e.role === "user" ? "user" : "assistant";
