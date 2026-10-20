@@ -38,7 +38,7 @@ describe("settings path parsing", () => {
   });
 
   it("ignores extra path segments after the tab", () => {
-    expect(parsePath("/settings/modules/extra/junk")).toEqual({ view: "settings", tab: "modules" });
+    expect(parsePath("/settings/skills/extra/junk")).toEqual({ view: "settings", tab: "skills" });
   });
 
   it("does NOT treat a path merely containing 'settings' as the settings view", () => {
@@ -65,7 +65,7 @@ describe("settings path building", () => {
 
 describe("tab declaration", () => {
   it("declares the expected tabs in sidebar order", () => {
-    expect(SETTINGS_TABS.map((t) => t.id)).toEqual(["tasks", "skills", "claude", "modules", "admin"]);
+    expect(SETTINGS_TABS.map((t) => t.id)).toEqual(["tasks", "skills", "claude", "admin"]);
   });
 
   it("gives every tab a human label", () => {
@@ -86,7 +86,7 @@ describe("tab list and resolution", () => {
       "echo-b": { ...ECHO, order: 15 },
       "echo-a": { ...ECHO, order: 15 },
     }).map((t) => t.id);
-    expect(ids).toEqual(["tasks", "echo-a", "echo-b", "skills", "claude", "modules", "admin", "echo"]);
+    expect(ids).toEqual(["tasks", "echo-a", "echo-b", "skills", "claude", "admin", "echo"]);
   });
 
   it("never lets a contrib row shadow a built-in", () => {

@@ -21,7 +21,6 @@ export const SETTINGS_TABS = [
   { id: "tasks", label: "Scheduled Tasks", order: 10 },
   { id: "skills", label: "Skills", order: 20 },
   { id: "claude", label: "Bring Your Own Claude", order: 30 },
-  { id: "modules", label: "Modules", order: 40 },
   { id: "admin", label: "Admin Area", order: 50 },
 ] as const;
 

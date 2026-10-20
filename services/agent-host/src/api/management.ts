@@ -23,7 +23,6 @@ import {
 
 import type { AguiServer } from "../agui/server.js";
 import type { WebServiceRegistry } from "../proxy/webServiceProxy.js";
-import type { ModuleRegistry } from "../proxy/moduleRegistry.js";
 import type { IdentityStore } from "../auth/identityStore.js";
 import type { AssetStore } from "../session/assetStore.js";
 import type { SchedulerClient } from "../agent/schedulerTools.js";
@@ -107,8 +106,6 @@ export interface ManagementDeps {
   webServices?: WebServiceRegistry;
   /** Per-conversation service origins (SANDBOX_DOMAIN); absent keeps services under /c/<id>/. */
   sandboxOrigins?: SandboxOrigins;
-  /** In-pod module registry (search/attach via scooter-rebuild); absent in fake/local mode. */
-  moduleRegistry?: ModuleRegistry;
   /** Identity store for the email-to-user reverse lookup; absent means the lookup route reports no match. */
   identityStore?: IdentityStore;
   /** Uploaded-image store behind GET /conversations/:id/assets/:assetId; absent means images are off. */
@@ -952,52 +949,6 @@ export function createManagementApi(deps: ManagementDeps): Router {
       return { status: 502, json: { error: `stop failed: ${(e as Error).message}` } };
     }
     return { status: 202, json: { ok: true } };
-  });
-
-  // --- Modules (Sandbox tab search/install + settings list) --------------------
-  // `configured` distinguishes "no module registry wired" from "configured but nothing found".
-  const noModules = { status: 501, json: { configured: false, error: "modules unavailable" } };
-
-  // Search the broker module catalog (caller's own + all public, empty q = all), marking
-  // which are attached.
-  r.get("/conversations/:id/module-registry", async (ctx) => {
-    if (!deps.moduleRegistry) return noModules;
-    const id = await resolveConvId(ctx.params.id);
-    if (!id) return { status: 404, json: { error: "unknown conversation" } };
-    const q = ctx.query.get("q") ?? "";
-    const [modules, attached] = await Promise.all([
-      deps.moduleRegistry.search(id, q),
-      deps.moduleRegistry.attached(id).catch(() => [] as string[]),
-    ]);
-    const attachedSet = new Set(attached);
-    return {
-      json: {
-        configured: true,
-        modules: modules.map((m) => ({ ...m, attached: attachedSet.has(m.name) })),
-      },
-    };
-  });
-
-  // The registry modules currently attached to this conversation (names).
-  r.get("/conversations/:id/modules", async (ctx) => {
-    if (!deps.moduleRegistry) return noModules;
-    const id = await resolveConvId(ctx.params.id);
-    if (!id) return { status: 404, json: { error: "unknown conversation" } };
-    return { json: { configured: true, attached: await deps.moduleRegistry.attached(id) } };
-  });
-
-  // Attach a registry module by name-or-id and re-converge; needs the pod running since
-  // the CLI runs in-pod.
-  r.post("/conversations/:id/modules/:ref/install", async (ctx) => {
-    if (!deps.moduleRegistry) return noModules;
-    const id = await resolveConvId(ctx.params.id);
-    if (!id) return { status: 404, json: { error: "unknown conversation" } };
-    try {
-      const message = await deps.moduleRegistry.install(id, ctx.params.ref);
-      return { status: 202, json: { ok: true, message } };
-    } catch (e) {
-      return { status: 502, json: { error: `install failed: ${(e as Error).message}` } };
-    }
   });
 
   // A contrib's broker half calls this to raise an in-conversation approval interrupt

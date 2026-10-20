@@ -72,7 +72,6 @@ export function classifyRoute(url: string): string {
   if (path.endsWith("/tail")) return "tail";
   if (path.endsWith("/shares")) return "shares";
   if (path.includes("/web-services")) return "web-services";
-  if (path.includes("/module-registry") || path.includes("/modules/")) return "modules";
   if (path.endsWith("/resources") || path.endsWith("/size")) return "sandbox-resources";
   if (path.endsWith("/resume")) return "resume";
   if (path.endsWith("/title") || path.endsWith("/starred")) return "conversation-edit";
