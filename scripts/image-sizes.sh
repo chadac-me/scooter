@@ -56,18 +56,28 @@ measure_one() {
     *-claude|remote-agent-image) export NIXPKGS_ALLOW_UNFREE=1; impure=(--impure) ;;
   esac
   # `--print-out-paths` prints the store path on stdout and build logs on stderr.
+  # Explicit `|| return 1` throughout: the caller runs this as `if ! measure_one`,
+  # which disables `set -e` inside the function, so a failed build would
+  # otherwise fall through and print `"bytes":,` (invalid JSON) instead of
+  # being skipped.
   local out
-  out=$(nix build "${impure[@]}" ".#$attr" --no-link --print-out-paths --print-build-logs)
+  out=$(nix build "${impure[@]}" ".#$attr" --no-link --print-out-paths --print-build-logs) || return 1
 
   local bytes
   case "$kind" in
     tarball)
       # The .tar.gz IS the pushed image — measure the file.
-      bytes=$(stat -c%s "$out")
+      bytes=$(stat -c%s "$out") || return 1
       ;;
     closure)
       # nix2container: the recipe references the layer closure — measure it.
-      bytes=$(nix path-info -S "$out" | awk '{print $2}')
+      bytes=$(nix path-info -S "$out" | awk '{print $2}') || return 1
+      ;;
+  esac
+  case "$bytes" in
+    '' | *[!0-9]*)
+      echo "image-sizes: no size for '$attr' (got '$bytes')" >&2
+      return 1
       ;;
   esac
   printf '{"name":"%s","bytes":%s,"kind":"%s"}\n' "$attr" "$bytes" "$kind"
