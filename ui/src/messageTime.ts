@@ -36,7 +36,7 @@ export function formatMessageTimeFull(ms: number, locale?: string): string {
  */
 export function shouldToggleTimestamp(target: EventTarget | null, selection: Selection | null): boolean {
   if (selection && !selection.isCollapsed && selection.toString().length > 0) return false;
-  const el = target instanceof Element ? target : null;
+  const el = target && typeof (target as Element).closest === "function" ? (target as Element) : null;
   if (el?.closest("a, button, input, textarea, select, summary, label, [role='button'], [contenteditable='true']")) {
     return false;
   }
