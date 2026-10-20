@@ -13,6 +13,7 @@ import {
   createWebServiceProxy,
   POD_TARGET_TTL_MS,
   parseProxyPath,
+  renderLoadingPage,
   type PodTarget,
   type WebServiceDescriptor,
   type WebServiceProxy,
@@ -512,6 +513,21 @@ describe("web-service proxy", () => {
     const proxy = makeProxy(registry);
     await proxyGet(proxy, "/c/conv-1/marimo/__scooter_status");
     expect(registry.execs).toBeGreaterThan(0);
+  });
+
+  it("an active unit whose port is not listening yet is not reported running", async () => {
+    // systemd says active the moment the unit starts; reloading then would hit a refused
+    // connection and land back on a fresh loading page, over and over.
+    const notYet = await proxyGet(makeProxy(fakeRegistry(await deadPort())), "/c/conv-1/marimo/__scooter_status");
+    expect(JSON.parse(notYet.body)).toMatchObject({ running: false, phase: "service" });
+    const up = await proxyGet(makeProxy(fakeRegistry(svc.port)), "/c/conv-1/marimo/__scooter_status");
+    expect(JSON.parse(up.body)).toMatchObject({ running: true });
+  });
+
+  it("the loading page auto-tails the log rather than resetting it", () => {
+    const page = renderLoadingPage("marimo", "/c/conv-1/marimo");
+    expect(page).toContain("logEl.scrollTop = logEl.scrollHeight");
+    expect(page).toContain("!shown && j.phase");
   });
 
   it("the loading page polls the path the browser used, not the manifest's unexpanded basePath", async () => {
