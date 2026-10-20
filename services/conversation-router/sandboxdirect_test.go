@@ -332,6 +332,25 @@ func TestDirectWebSocket(t *testing.T) {
 	if r.URL.Path != "/marimo/ws" || r.Header.Get("Cookie") != "" {
 		t.Errorf("pod saw %s with Cookie %q", r.URL.Path, r.Header.Get("Cookie"))
 	}
+	// code-server's WebSocket origin check compares Origin with the forwarded host.
+	if got := r.Header.Get("X-Forwarded-Host"); got != "5a515e73.scooter.example.com" {
+		t.Errorf("pod saw X-Forwarded-Host %q, want the sandbox host", got)
+	}
+}
+
+func TestDirectForwardsTheSandboxHost(t *testing.T) {
+	pod, seen, mu := fakePod(t)
+	ah := newFakeAgentHost(t, func(*http.Request) (int, directTarget) { return 200, podTargetFor(t, pod) })
+	rec := sandboxGet(t, directHandler(t, ah, newDirectProxy()), "GET", "/vscode/", map[string]string{"X-Forwarded-Host": "evil.example.org"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	mu.Lock()
+	r := (*seen)[0]
+	mu.Unlock()
+	if got := r.Header.Values("X-Forwarded-Host"); len(got) != 1 || got[0] != "5a515e73.scooter.example.com" {
+		t.Errorf("pod saw X-Forwarded-Host %q, want only the sandbox host", got)
+	}
 }
 
 func TestDirectDisabled(t *testing.T) {
