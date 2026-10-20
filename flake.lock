@@ -253,11 +253,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791987456,
-        "narHash": "sha256-NbqbnKw0SG/gyb8skOFM06NkxJQOtIYSh+wmu6rXkxw=",
+        "lastModified": 1792516773,
+        "narHash": "sha256-zmbm+4jhTj3etEvaDFW7NarJzxiizQ8ezaKqt+iSnM8=",
         "owner": "chadac",
         "repo": "uv-nix",
-        "rev": "2bb09ae1d5322f32f31afd5e8d23760aa8906c94",
+        "rev": "97c73b7e7c53b75f0c7d9159623a4e7720c0fc5f",
         "type": "github"
       },
       "original": {

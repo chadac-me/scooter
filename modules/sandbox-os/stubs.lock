@@ -10,11 +10,11 @@
       "type": "github"
     },
     "uv-nix": {
-      "lastModified": 1791987456,
-      "narHash": "sha256-NbqbnKw0SG/gyb8skOFM06NkxJQOtIYSh+wmu6rXkxw=",
+      "lastModified": 1792516773,
+      "narHash": "sha256-zmbm+4jhTj3etEvaDFW7NarJzxiizQ8ezaKqt+iSnM8=",
       "owner": "chadac",
       "repo": "uv-nix",
-      "rev": "2bb09ae1d5322f32f31afd5e8d23760aa8906c94",
+      "rev": "97c73b7e7c53b75f0c7d9159623a4e7720c0fc5f",
       "type": "github"
     }
   },
@@ -77,7 +77,7 @@
       },
       "uv": {
         "attr": "uv",
-        "drv": "/nix/store/4rmhxn1k2sjg32bj84636vgmq9n0c4lp-uv-nix-bin-0.13.1-nix.drv",
+        "drv": "/nix/store/6gli2ncsyi8ydwk7d2xkn7rdiny4sn8r-uv-nix-bin-0.13.1-nix.drv",
         "output": "out",
         "bins": [
           "uv"
@@ -143,7 +143,7 @@
       },
       "uv": {
         "attr": "uv",
-        "drv": "/nix/store/k45jx4s1pyi9m7dyifh4n48010xa57da-uv-nix-bin-0.13.1-nix.drv",
+        "drv": "/nix/store/3axcdi0asn8c41zlqmbhpmlzcnq1n3aj-uv-nix-bin-0.13.1-nix.drv",
         "output": "out",
         "bins": [
           "uv"
