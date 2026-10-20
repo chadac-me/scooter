@@ -58,11 +58,6 @@ class BrokerSettings(ScooterBaseSettings):
     # default modules at GET /modules/default.tar.gz; empty serves an empty tarball.
     sandbox_default_modules_dir: str = ""
 
-    # --- Module registry (broker/registry/) ------------------------------------
-    # The shareable-module catalog, sharing the broker DB.
-    registry_enabled: bool = False
-    registry_db_dsn: str = "sqlite+aiosqlite:////tmp/broker-registry.db"
-
     # --- Static shares (broker/shares/) ----------------------------------------
     # Agents publish static bundles the broker serves at /s/<uuid>/; `shares_public_base_url`
     # is the external origin of the returned share URL, or empty for a relative one.

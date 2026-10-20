@@ -1,6 +1,6 @@
 # programs.scooterModule: re-converge the running sandbox at runtime via
 # switch-to-configuration, rebuilding its own toplevel from the base config plus
-# any mounted, local or registry modules. The image ships the base-config builder
+# any mounted or local modules. The image ships the base-config builder
 # (runtime-converge/base-config.nix), the pinned nixpkgs and the vendored
 # modules/sandbox-os source as store paths so the in-pod build is offline, and the
 # scooter-apply-module / scooter-env-status / scooter-rebuild tools.
@@ -9,10 +9,6 @@
 
 let
   cfg = config.programs.scooterModule;
-
-  # agent-broker, the authenticated broker curl wrapper scooter-rebuild's registry
-  # subcommands use.
-  brokerTools = pkgs.callPackage ../../pkgs/broker-tools { };
 
   # The base-config entrypoint and vendored modules tree, shared with the nixosTest
   # so it pre-builds the re-converged toplevel from identical derivations.
@@ -69,7 +65,7 @@ let
       set -euo pipefail
 
       # The optional extra module; without one the base config alone is rebuilt
-      # (it already imports local and registry modules), with the deployment's
+      # (it already imports local modules), with the deployment's
       # .scooter module as a fallback only when it exists and is non-empty.
       module=""
       cm_module=${lib.escapeShellArg cfg.dir}/module.nix
@@ -135,15 +131,13 @@ let
         module=""
       fi
 
-      # With no extra module and nothing local or attached for the base to pick up,
+      # With no extra module and no local module for the base to pick up,
       # exit idle without building.
       if [ -z "$module" ]; then
         local_mods=""
         # stderr is kept: a probe that cannot run must not read as "no modules".
         [ -d /etc/scooter/modules ] && local_mods=$(find -L /etc/scooter/modules -maxdepth 1 -name '*.nix' -type f | head -1)
-        reg_mods=""
-        [ -s /etc/scooter/registry-modules.json ] && reg_mods=$(tr -d '[]" \n\t' < /etc/scooter/registry-modules.json 2>/dev/null)
-        if [ -z "$local_mods" ] && [ -z "$reg_mods" ]; then
+        if [ -z "$local_mods" ]; then
           echo "scooter-apply-module: no module and nothing to converge — nothing to apply" >&2
           write_status idle
           exit 0
@@ -162,7 +156,7 @@ let
         echo "scooter-apply-module: building toplevel (base + $module)..."
         module_expr="$module"
       else
-        echo "scooter-apply-module: building toplevel (base config + local/registry modules)..."
+        echo "scooter-apply-module: building toplevel (base config + local modules)..."
         module_expr=""
       fi
       # Build the base config plus the optional extra module (--impure to read the
@@ -269,17 +263,15 @@ let
 
   # scooter-rebuild, the agent's nixos-rebuild-like entrypoint: a dispatcher over
   # scooter-apply-module / scooter-env-status, local module editing under
-  # /etc/scooter/modules, and the shared broker registry (see `usage` below).
+  # /etc/scooter/modules (see `usage` below).
   scooterRebuild = pkgs.writeShellApplication {
     name = "scooter-rebuild";
-    runtimeInputs = [ applyModule envStatus pkgs.coreutils pkgs.findutils brokerTools.agent-broker pkgs.jq ];
+    runtimeInputs = [ applyModule envStatus pkgs.coreutils pkgs.findutils ];
     text = ''
       set -euo pipefail
 
-      # modules/ is the agent-editable dir local-modules.nix imports, and the
-      # registry file is the attach list registry-modules.nix fetches from the broker.
+      # modules/ is the agent-editable dir local-modules.nix imports.
       MODULES_DIR=/etc/scooter/modules
-      REGISTRY_IDS_FILE=/etc/scooter/registry-modules.json
 
       usage() {
         cat >&2 <<'EOF'
@@ -294,14 +286,6 @@ let
         scooter-rebuild module edit <name>          edit modules/<name>.nix ($EDITOR)
         scooter-rebuild module show <name>          print modules/<name>.nix
         scooter-rebuild module rm   <name>          delete modules/<name>.nix
-
-      Shared registry (attach modules others published, publish your own):
-        scooter-rebuild module search [query]       search the registry catalog
-        scooter-rebuild module add    <name-or-id>  attach a registry module (+ switch)
-        scooter-rebuild module detach <name-or-id>  detach an attached registry module
-        scooter-rebuild module attached             list your attached registry modules
-        scooter-rebuild publish <name> [--public] [--description D]
-                                                    publish local modules/<name>.nix to the registry
 
       Your modules live in /etc/scooter/modules/*.nix (durable on the workspace PVC).
       Edit them, then `scooter-rebuild switch`. A bad module fails the build (no switch).
@@ -321,7 +305,7 @@ let
       case "$cmd" in
         switch)
           # With no --module, scooter-apply-module rebuilds the base config, which
-          # imports the local and registry modules.
+          # imports the local modules.
           exec scooter-apply-module "$@"
           ;;
         status)
@@ -367,93 +351,9 @@ let
               rm -f "$path"
               echo "removed $name — run: scooter-rebuild switch"
               ;;
-            search|find)
-              # Query the broker catalog (own private plus all public); no query lists all.
-              q="''${1:-}"
-              agent-broker "modules?q=$q" | jq -r '
-                (.modules // []) as $m
-                | if ($m | length) == 0 then "no modules found"
-                  else ($m[] | "\(.name)  (#\(.id), \(.visibility))\(if (.description // "") != "" then "  — \(.description)" else "" end)")
-                  end'
-              ;;
-            add|attach)
-              # Resolve the ref via the broker so the canonical name is stored (the
-              # download endpoint tars under <name>/) and a missing module fails fast.
-              ref="''${1:-}"
-              [ -n "$ref" ] || { echo "scooter-rebuild module add: <name-or-id> required" >&2; exit 2; }
-              name=$(agent-broker "modules/$ref" | jq -er '.name') \
-                || { echo "scooter-rebuild: registry module '$ref' not found (or not visible to you)" >&2; exit 1; }
-              [ -f "$REGISTRY_IDS_FILE" ] || echo '[]' > "$REGISTRY_IDS_FILE"
-              # Idempotent add that keeps the list unique.
-              if jq -e --arg n "$name" 'index($n)' "$REGISTRY_IDS_FILE" >/dev/null; then
-                echo "$name is already attached"
-              else
-                tmp=$(mktemp)
-                jq --arg n "$name" '. + [$n] | unique' "$REGISTRY_IDS_FILE" > "$tmp" && mv "$tmp" "$REGISTRY_IDS_FILE"
-                echo "attached $name — applying..."
-                exec scooter-apply-module "''${@:2}"
-              fi
-              ;;
-            detach)
-              # Accepts the stored name, or resolves an id to its name so `detach <id>`
-              # mirrors `add`.
-              ref="''${1:-}"
-              [ -n "$ref" ] || { echo "scooter-rebuild module detach: <name-or-id> required" >&2; exit 2; }
-              [ -f "$REGISTRY_IDS_FILE" ] || { echo "no attached registry modules"; exit 0; }
-              name="$ref"
-              if ! jq -e --arg n "$name" 'index($n)' "$REGISTRY_IDS_FILE" >/dev/null 2>&1; then
-                # Not a stored name, so ask the broker for the canonical name.
-                name=$(agent-broker "modules/$ref" 2>/dev/null | jq -er '.name' 2>/dev/null || echo "$ref")
-              fi
-              if jq -e --arg n "$name" 'index($n)' "$REGISTRY_IDS_FILE" >/dev/null; then
-                tmp=$(mktemp)
-                jq --arg n "$name" 'map(select(. != $n))' "$REGISTRY_IDS_FILE" > "$tmp" && mv "$tmp" "$REGISTRY_IDS_FILE"
-                echo "detached $name — applying..."
-                exec scooter-apply-module "''${@:2}"
-              else
-                echo "$ref is not attached"
-              fi
-              ;;
-            attached)
-              if [ -f "$REGISTRY_IDS_FILE" ] && [ "$(jq 'length' "$REGISTRY_IDS_FILE")" -gt 0 ]; then
-                jq -r '.[]' "$REGISTRY_IDS_FILE"
-              else
-                echo "no registry modules attached — attach one with: scooter-rebuild module add <name-or-id>"
-              fi
-              ;;
             ""|-h|--help) usage; exit 2 ;;
             *) echo "scooter-rebuild module: unknown subcommand '$sub'" >&2; usage; exit 2 ;;
           esac
-          ;;
-        publish)
-          # Publish a local module under its name as the globally-unique registry
-          # name, sent as { "module.nix": <contents> }.
-          name="''${1:-}"; shift || true
-          [ -n "$name" ] || { echo "scooter-rebuild publish: <name> required" >&2; exit 2; }
-          path=$(module_path "$name")
-          [ -e "$path" ] || { echo "scooter-rebuild: no local module '$name' to publish (see: scooter-rebuild module list)" >&2; exit 1; }
-          visibility=private; description=""
-          while [ "$#" -gt 0 ]; do
-            case "$1" in
-              --public)      visibility=public; shift ;;
-              --private)     visibility=private; shift ;;
-              --description)  description="''${2:-}"; shift 2 ;;
-              *) echo "scooter-rebuild publish: unknown arg '$1'" >&2; exit 2 ;;
-            esac
-          done
-          body=$(jq -n --arg n "$name" --arg v "$visibility" --arg d "$description" \
-                    --rawfile c "$path" \
-                    '{name:$n, visibility:$v, files:{"module.nix":$c}} + (if $d == "" then {} else {description:$d} end)')
-          resp=$(agent-broker modules -X POST -H "Content-Type: application/json" -d "$body") \
-            || { echo "scooter-rebuild: publish failed" >&2; exit 1; }
-          # A non-2xx comes back as JSON {detail:...} without an id.
-          if id=$(printf '%s' "$resp" | jq -er '.id' 2>/dev/null); then
-            ver=$(printf '%s' "$resp" | jq -r '.version')
-            echo "published $name (#$id, $visibility, v$ver) — others attach it with: scooter-rebuild module add $name"
-          else
-            echo "scooter-rebuild: publish rejected: $(printf '%s' "$resp" | jq -r '.detail // .' 2>/dev/null || printf '%s' "$resp")" >&2
-            exit 1
-          fi
           ;;
         ""|-h|--help) usage; exit 2 ;;
         *) echo "scooter-rebuild: unknown command '$cmd'" >&2; usage; exit 2 ;;

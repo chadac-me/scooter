@@ -56,8 +56,6 @@ in
   dev-env-local-modules = runTest ./local-modules.nix;
   # The scooter-rebuild CLI's module subcommands and dispatch, in a real VM boot.
   dev-env-scooter-rebuild = runTest ./scooter-rebuild.nix;
-  # The shared-registry module fetch from the attached-ids file (pure eval, no VM).
-  dev-env-registry-modules = runTest ./registry-modules.nix;
   # The journal on the workspace PVC.
   dev-env-journal-persist = runTest ./journal-persist.nix;
   # The read-only-lower plus writable-upper local-overlay Nix store.

@@ -187,7 +187,6 @@ in
       owner = "broker";
       tables = {
         sandbox_size = { writers = [ "broker" ]; };
-        module_registry = { writers = [ "broker" ]; };
         static_shares = { writers = [ "broker" ]; };
         static_share_versions = { writers = [ "broker" ]; };
       };
