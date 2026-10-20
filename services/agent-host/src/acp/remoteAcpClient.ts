@@ -165,10 +165,11 @@ export function createRemoteAcpClient(deps: RemoteAcpClientDeps): AcpClient {
     async cancel(sessionId) {
       await request("cancel", { sessionId });
     },
-    async killActiveTerminals(_graceForPendingSpawn = false) {
+    async killActiveTerminals(_graceForPendingSpawn = false, sessionId?: string) {
       // A disconnected agent has no terminals to kill.
       if (closed || !transport.isOpen()) return;
-      await request("kill_terminals", {}).catch(() => {});
+      // One container serves all of an owner's conversations, so an unscoped kill interrupts every one of them.
+      await request("kill_terminals", sessionId ? { sessionId } : {}).catch(() => {});
     },
     isAlive() {
       return !closed && transport.isOpen();

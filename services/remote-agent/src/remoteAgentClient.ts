@@ -343,8 +343,12 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
             return ack(frame.id, {});
           }
           case "kill_terminals": {
-            // The cloud does not say which session's terminals, so kill across every client.
-            await Promise.all([sdk, ...[...clients.values()].map((c) => c.sdk)].map((c) => c.killActiveTerminals().catch(() => {})));
+            // Killing terminals interrupts the session's query, so a scoped kill must leave the container's other conversations alone; unscoped is a legacy cloud.
+            const sid = (frame.payload as { sessionId?: string } | undefined)?.sessionId;
+            const targets = sid
+              ? [clients.get(sid)?.sdk].filter((c) => c !== undefined)
+              : [sdk, ...[...clients.values()].map((c) => c.sdk)];
+            await Promise.all(targets.map((c) => c.killActiveTerminals().catch(() => {})));
             return ack(frame.id, {});
           }
           case "ack": {

@@ -1056,8 +1056,17 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         } else {
           outcome = "error";
           const raw = err instanceof Error ? err.message : String(err);
-          emit({ type: "RUN_ERROR", message: clarifyRunError(raw) });
-          st.retryable = true; // the ACP call threw (init/session/stream) — transient; pump retries
+          // Replaying a turn that already ran tools re-sends the user's message on top of work it
+          // may have finished (a commit, a PR edit), so only a turn that never started is retried.
+          const replaySafe = !st.sawActivity;
+          log.warn("acp prompt rejected", { run_id: runId, error: raw, saw_activity: st.sawActivity === true, retry: replaySafe });
+          emit({
+            type: "RUN_ERROR",
+            message: replaySafe
+              ? clarifyRunError(raw)
+              : `${clarifyRunError(raw)} The turn was interrupted after it had started working, so it was not retried automatically; send a message to continue.`,
+          });
+          st.retryable = replaySafe; // the ACP call threw (init/session/stream) before any work — transient; pump retries
           // A dead remote session fails identically on every retry, so drop the cached session
           // and let the next attempt re-initialize (and re-seed history).
           if (/unknown session|not connected|disconnected/i.test(raw) && currentProviderId) {
@@ -1450,7 +1459,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       try {
         // Killing the shell is what makes the prompt return, and only a user Stop gets the
         // pending-spawn grace window.
-        await client.killActiveTerminals(userInitiated);
+        await client.killActiveTerminals(userInitiated, cancelSessionId);
       } catch (e) {
         // Logged rather than swallowed, since a silent failure here presents as a dead Stop
         // button; session/cancel below still stops the agent.

@@ -93,8 +93,9 @@ export interface AcpClient {
   newSession(params: NewSessionParams): Promise<{ sessionId: string }>;
   prompt(params: PromptParams): Promise<{ stopReason: string }>;
   cancel(sessionId: string): Promise<void>;
-  /** Best-effort kill of every live sandbox terminal for this client, stopping a running command rather than only future ones. */
-  killActiveTerminals(graceForPendingSpawn?: boolean): Promise<void>;
+  /** Best-effort kill of every live sandbox terminal for this client, stopping a running command rather than only future ones.
+   *  `sessionId` scopes the kill on a client that multiplexes several conversations (a BYOC container). */
+  killActiveTerminals(graceForPendingSpawn?: boolean, sessionId?: string): Promise<void>;
 
   /** Liveness of the underlying agent process, false once it has exited; the bridge's stall watchdog uses it to tell a dead agent from a long-running tool. */
   isAlive(): boolean;
