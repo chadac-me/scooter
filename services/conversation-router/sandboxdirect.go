@@ -376,6 +376,9 @@ func (d *directProxy) serve(shutdownCtx context.Context, w http.ResponseWriter, 
 				out.URL.Path = podPath
 			}
 			out.Host = podHost
+			// Origin checks (code-server's WebSockets) need the public host, not podHost.
+			// Set, not Add: r.Host routed this request, so a client-sent value must lose.
+			out.Header.Set("X-Forwarded-Host", r.Host)
 			out.Header.Del(SandboxHostHeader)
 			for _, name := range t.DropHeaders {
 				out.Header.Del(name)

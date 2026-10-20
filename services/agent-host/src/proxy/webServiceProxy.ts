@@ -289,11 +289,14 @@ export function upstreamPathFor(r: { stripBasePath: boolean; rest: string }, url
   return (m ? m[1] : url.pathname) + search;
 }
 
-/** Request headers for the pod: the router's routing marker is not the service's business. */
-function podHeaders(headers: IncomingMessage["headers"], host?: string): IncomingMessage["headers"] {
+/** Request headers for the pod: the router's routing marker is not the service's business,
+ *  and Host becomes the pod address, so origin checks (code-server's WebSockets) get the
+ *  browser-facing host as x-forwarded-host — overriding any client-sent value. */
+function podHeaders(headers: IncomingMessage["headers"], host: string): IncomingMessage["headers"] {
   const out = { ...headers };
   delete out[SANDBOX_HOST_HEADER];
-  if (host !== undefined) out.host = host;
+  if (headers.host) out["x-forwarded-host"] = headers.host;
+  out.host = host;
   return out;
 }
 
@@ -640,7 +643,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     // Splice: open a raw TCP connection to the pod, replay the upgrade handshake with
     // the Host rewritten, forward the buffered head, then pipe both ways.
     const upstreamPath = upstreamPathFor(r, url, label !== undefined);
-    const handoff = withHandoffIdentity(podHeaders(req.headers), await userFor(req));
+    const handoff = withHandoffIdentity(podHeaders(req.headers, `${r.podIP}:${r.port}`), await userFor(req));
     const upstream: Socket = connect(r.port, r.podIP, () => {
       const lines = [
         `${req.method ?? "GET"} ${upstreamPath} HTTP/1.1`,

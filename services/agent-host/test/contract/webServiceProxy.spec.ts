@@ -288,6 +288,45 @@ describe("web-service proxy", () => {
       }
     });
 
+    // code-server's WebSocket origin check compares Origin with the forwarded host, so
+    // the pod must learn the browser-facing host now that Host is its own address.
+    const SANDBOX_HOST = "5a515e73.scooter.example.com";
+    async function podSeeing(fn: (port: number, seen: Record<string, unknown>[]) => Promise<void>) {
+      const seen: Record<string, unknown>[] = [];
+      const pod = createServer((req, res) => { seen.push(req.headers); res.end("ok"); });
+      pod.on("upgrade", (req, socket) => {
+        seen.push(req.headers);
+        socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+        socket.on("data", (d) => socket.write(d));
+      });
+      await new Promise<void>((r) => pod.listen(0, "127.0.0.1", () => r()));
+      try {
+        await fn((pod.address() as AddressInfo).port, seen);
+      } finally {
+        pod.close();
+      }
+    }
+
+    it("forwards the browser-facing host as x-forwarded-host, overriding a client's (HTTP)", async () => {
+      await podSeeing(async (port, seen) => {
+        await proxyGet(sandboxProxy(fakeRegistry(port)), `/c/${ID}/marimo/`, {
+          headers: { ...HOST, host: SANDBOX_HOST, "x-forwarded-host": "evil.example.org" },
+        });
+        expect(seen[0]?.["x-forwarded-host"]).toBe(SANDBOX_HOST);
+        expect(seen[0]?.host).toBe(`127.0.0.1:${port}`);
+      });
+    });
+
+    it("forwards the browser-facing host as x-forwarded-host on the UPGRADE handshake", async () => {
+      await podSeeing(async (port, seen) => {
+        const { statusLine } = await proxyUpgrade(sandboxProxy(fakeRegistry(port)), `/c/${ID}/marimo/ws`, "ping", { headers: HOST });
+        expect(statusLine).toContain("101");
+        // proxyUpgrade's handshake sends Host: x.
+        expect(seen[0]?.["x-forwarded-host"]).toBe("x");
+        expect(seen[0]?.host).toBe(`127.0.0.1:${port}`);
+      });
+    });
+
     it("stripBasePath still forwards only the remainder", async () => {
       const desc = { ...MARIMO, port: svc.port, stripBasePath: true };
       const registry = { ...fakeRegistry(svc.port), get: async (_id: string, n: string) => (n === "marimo" ? desc : null) } as WebServiceRegistry;
