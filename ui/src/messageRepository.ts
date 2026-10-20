@@ -49,14 +49,41 @@ export function enrichMessagesWithImages(
   });
 }
 
+/** Where a message's send time (epoch ms) rides on the converted message, read by MessageTimestamp. */
+export const SENT_AT_KEY = "sentAt";
+
+/**
+ * Stamp each converted message with its send time as both `createdAt` and
+ * `metadata.custom.sentAt`. The custom key is what the UI reads, because assistant-ui
+ * defaults a missing `createdAt` to "now", which would show a wrong time.
+ */
+function withSentAt<T>(messages: T[], timeOf?: (messageId: string) => number | undefined): T[] {
+  if (!timeOf) return messages;
+  return messages.map((m) => {
+    const msg = m as { id?: string; metadata?: { custom?: Record<string, unknown> } };
+    if (!msg.id) return m;
+    // An orphan tool result converts to `<id>:assistant`; look up the id it came from.
+    const t = timeOf(msg.id) ?? timeOf(msg.id.replace(/:assistant$/, ""));
+    if (t === undefined) return m;
+    return {
+      ...m,
+      createdAt: new Date(t),
+      metadata: { ...msg.metadata, custom: { ...msg.metadata?.custom, [SENT_AT_KEY]: t } },
+    };
+  });
+}
+
 /**
  * Convert the folded AG-UI message array into an ExportedMessageRepository with a
  * linear parent chain, via `fromBranchableArray` so ids are preserved, returning a
  * new object each call because the external store skips the reconcile when handed
  * the same reference.
  */
-export function toRepositorySnapshot(foldedMessages: readonly unknown[]): RepositorySnapshot {
-  const messages = fromAgUiMessages(foldedMessages as never[]);
+export function toRepositorySnapshot(
+  foldedMessages: readonly unknown[],
+  timeOf?: (messageId: string) => number | undefined,
+): RepositorySnapshot {
+  const messages = withSentAt(fromAgUiMessages(foldedMessages as never[]), timeOf);
   // Dedupe by id: linking the same id twice throws inside fromBranchableArray during
   // render and blanks the whole page.
   const seen = new Set<string>();

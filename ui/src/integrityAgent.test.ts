@@ -1478,6 +1478,37 @@ describe("IntegrityAgent", () => {
     agent.dispose();
   });
 
+  it("records send times from opening events' ts and snapshot createdAt -> getMessageTime", async () => {
+    const frames = [
+      {
+        kind: "event",
+        event: {
+          type: "MESSAGES_SNAPSHOT",
+          messages: [
+            { id: "old1", role: "user", content: "earlier", createdAt: 500 },
+            { id: "old2", role: "assistant", content: "unstamped" },
+          ],
+        },
+      },
+      { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1" } },
+      { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "u1", role: "user", ts: 1000 } },
+      { kind: "event", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "hi", ts: 1100 } },
+      { kind: "event", event: { type: "TEXT_MESSAGE_END", messageId: "u1", ts: 1200 } },
+      { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant", ts: 2000 } },
+      { kind: "event", event: { type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant", ts: 9999 } },
+      { kind: "event", event: { type: "RUN_FINISHED", threadId: "c1", runId: "r1" } },
+      { kind: "synced" },
+    ];
+    const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
+    await foldTo(agent);
+    expect(agent.getMessageTime("old1")).toBe(500);
+    expect(agent.getMessageTime("old2")).toBeUndefined();
+    expect(agent.getMessageTime("u1")).toBe(1000);
+    // First write wins: a repeated start can't move the time.
+    expect(agent.getMessageTime("a1")).toBe(2000);
+    agent.dispose();
+  });
+
   // --- the cluster's out-of-order tool-call shape --------------------------------
   //
   // The bridge surfaces the command as TOOL_CALL_ARGS after TOOL_CALL_END (goose's terminal-handoff shape), and the fold must survive that sequence.

@@ -7,7 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { toRepositorySnapshot, enrichMessagesWithImages, type MessageImageRef } from "./messageRepository.js";
+import { toRepositorySnapshot, enrichMessagesWithImages, SENT_AT_KEY, type MessageImageRef } from "./messageRepository.js";
 
 const msg = (id: string, role: "user" | "assistant", text: string) => ({
   id,
@@ -122,5 +122,19 @@ describe("enrichMessagesWithImages", () => {
   it("leaves messages without images untouched", () => {
     const input = [{ id: "a2", role: "assistant", content: "no imgs" }];
     expect(enrichMessagesWithImages(input, getImages, "")).toEqual(input);
+  });
+});
+
+describe("toRepositorySnapshot send times", () => {
+  it("stamps metadata.custom.sentAt from timeOf, and leaves unknown messages unstamped", () => {
+    const times: Record<string, number> = { u1: 1000 };
+    const snap = toRepositorySnapshot(
+      [{ id: "u1", role: "user", content: "hi" }, { id: "a1", role: "assistant", content: "hey" }],
+      (id) => times[id],
+    );
+    const custom = (i: number) =>
+      (snap.messages[i]!.message as { metadata?: { custom?: Record<string, unknown> } }).metadata?.custom ?? {};
+    expect(custom(0)[SENT_AT_KEY]).toBe(1000);
+    expect(custom(1)).not.toHaveProperty(SENT_AT_KEY);
   });
 });

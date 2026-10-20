@@ -273,6 +273,38 @@ export class IntegrityAgent extends AbstractAgent {
     return true;
   }
 
+  /** messageId -> epoch ms it was sent, from the opening event's `ts` or a snapshot/page message's `createdAt`. */
+  private messageTimes = new Map<string, number>();
+  getMessageTime(messageId: string): number | undefined {
+    return this.messageTimes.get(messageId);
+  }
+
+  /** Record send times from server-folded messages (MESSAGES_SNAPSHOT, older pages); first write wins. */
+  private recordMessageTimes(messages: readonly unknown[] | undefined): boolean {
+    let changed = false;
+    for (const m of messages ?? []) {
+      const { id, createdAt } = (m ?? {}) as { id?: unknown; createdAt?: unknown };
+      if (typeof id === "string" && typeof createdAt === "number" && !this.messageTimes.has(id)) {
+        this.messageTimes.set(id, createdAt);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /** Record a message's send time from the event that opens it; the base applier drops `ts`. */
+  private trackTimes(e: BaseEvent): boolean {
+    const ev = e as unknown as { type?: string; ts?: unknown; messageId?: string; toolCallId?: string; parentMessageId?: string; messages?: unknown[] };
+    if (ev.type === "MESSAGES_SNAPSHOT") return this.recordMessageTimes(ev.messages);
+    if (typeof ev.ts !== "number") return false;
+    let id: string | undefined;
+    if (ev.type === "TEXT_MESSAGE_START" || ev.type === "REASONING_START" || ev.type === "REASONING_MESSAGE_START") id = ev.messageId;
+    else if (ev.type === "TOOL_CALL_START") id = ev.parentMessageId ?? ev.toolCallId;
+    if (!id || this.messageTimes.has(id)) return false;
+    this.messageTimes.set(id, ev.ts);
+    return true;
+  }
+
   /** Update `queued` from a QUEUE_UPDATED snapshot; returns true if it changed. */
   private trackQueue(e: BaseEvent): boolean {
     const ev = e as unknown as { type?: string; items?: Array<{ id: string; text: string; priority: number; source?: string }> };
@@ -319,6 +351,7 @@ export class IntegrityAgent extends AbstractAgent {
         const older = body.messages ?? [];
         this.historyCursor = body.done ? 1 : (body.fromSeq ?? 1);
         if (older.length === 0) return 0;
+        this.recordMessageTimes(older);
         this.setMessages([...older, ...this.messages] as never);
         this.notifyMessages();
         return older.length;
@@ -645,6 +678,7 @@ export class IntegrityAgent extends AbstractAgent {
             changed = this.trackRunError(e) || changed;
             changed = this.trackQueue(e) || changed;
             changed = this.trackImages(e) || changed;
+            changed = this.trackTimes(e) || changed;
             changed = this.trackContext(e) || changed;
             changed = this.trackSystemMessage(e) || changed;
             changed = this.trackHistoryCursor(e) || changed;

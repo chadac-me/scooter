@@ -195,3 +195,23 @@ describe("windowed folds agree with the whole-log fold", () => {
     expect(split.length).toBe(whole.length);
   });
 });
+
+describe("foldToMessages createdAt", () => {
+  it("stamps each message with the ts of the event that opened it", () => {
+    const out = foldToMessages([
+      ev({ type: "TEXT_MESSAGE_START", messageId: "u1", role: "user", ts: 1000 }),
+      ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "hi", ts: 1001 }),
+      ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant", ts: 2000 }),
+      ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "a1", delta: "hey", ts: 2500 }),
+    ]);
+    expect(out.map((m) => [m.id, m.createdAt])).toEqual([["u1", 1000], ["a1", 2000]]);
+  });
+
+  it("omits createdAt when the opening event is unstamped", () => {
+    const out = foldToMessages([
+      ev({ type: "TEXT_MESSAGE_START", messageId: "u1", role: "user" }),
+      ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "hi", ts: 1001 }),
+    ]);
+    expect(out[0]).not.toHaveProperty("createdAt");
+  });
+});

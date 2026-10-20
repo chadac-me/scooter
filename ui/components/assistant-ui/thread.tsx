@@ -12,6 +12,7 @@ import {
   ReasoningTrigger,
 } from "@/components/assistant-ui/reasoning";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import { MessageTimestamp, useTimestampToggle } from "@/components/assistant-ui/message-timestamp";
 import { SystemEventMessage } from "@/components/assistant-ui/system-event-message";
 import {
   ToolGroupContent,
@@ -560,11 +561,13 @@ const AssistantMessage: FC = () => {
   // Reserve space for the action bar and compensate with `-mb` (for pt-[n] use -mb-[n + 6] and min-h-[n + 6]) so hovering it does not shift the layout.
   const ACTION_BAR_PT = "pt-1.5";
   const ACTION_BAR_HEIGHT = `-mb-7.5 min-h-7.5 ${ACTION_BAR_PT}`;
+  const timestamp = useTimestampToggle();
 
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
+      onClick={timestamp.onClick}
       className="fade-in slide-in-from-bottom-1 animate-in relative duration-150"
     >
       <div
@@ -637,6 +640,8 @@ const AssistantMessage: FC = () => {
       >
         {/* No BranchPicker, because the UI renders from a single log timeline and branches are not a real feature. */}
         <AssistantActionBar />
+        {/* In the reserved footer row, so showing it does not shift the layout. */}
+        <MessageTimestamp shown={timestamp.shown} className="ms-1" />
       </div>
     </MessagePrimitive.Root>
   );
@@ -692,9 +697,11 @@ const AssistantActionBar: FC = () => {
 };
 
 const UserMessage: FC = () => {
+  const timestamp = useTimestampToggle();
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
+      onClick={timestamp.onClick}
       className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [contain-intrinsic-size:auto_60px] [content-visibility:auto] [&:where(>*)]:col-start-2"
       data-role="user"
     >
@@ -708,6 +715,7 @@ const UserMessage: FC = () => {
           <UserActionBar />
         </div>
       </div>
+      <MessageTimestamp shown={timestamp.shown} className="col-start-2 -mt-1 justify-self-end px-1" />
     </MessagePrimitive.Root>
   );
 };
