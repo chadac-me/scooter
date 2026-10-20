@@ -129,7 +129,9 @@ export function createRunRelay(config: RunRelayConfig): RunRelay {
       const session = registry.resolveBySession(sessionId);
       const requestId = randomUUID();
       // The ACP session this run drives, the routing key that delivers notifications and tool calls to their run only.
-      const acpSessionId = (payload as { sessionId?: string } | undefined)?.sessionId;
+      // Only a prompt drives a session: a cancel or kill_terminals naming the same session must not receive a copy of the
+      // running prompt's frames, or the agent-host sees every update twice and services each exec request twice.
+      const acpSessionId = type === "prompt" ? (payload as { sessionId?: string } | undefined)?.sessionId : undefined;
       const run: PendingRun = { sessionId, queue: [], done: false, callerId, acpSessionId };
 
       let failure: string | undefined;

@@ -86,6 +86,19 @@ describe("BYOC run relay", () => {
     expect(container.sent[0]).toMatchObject({ ch: "acp", type: "cancel" });
   });
 
+  it("a cancel or kill_terminals naming a session does NOT receive a copy of that session's prompt frames", async () => {
+    const prompt = relay.prompt(sessionId, { sessionId: "acp-1", prompt: [] });
+    const promptId = container.idOf(0);
+    const kill = relay.request(sessionId, "kill_terminals", { sessionId: "acp-1" });
+    const killId = container.idOf(1);
+    expect(container.sent[1]).toMatchObject({ type: "kill_terminals", payload: { sessionId: "acp-1" } });
+    container.push({ ch: "acp", type: "exec_request", id: "x1", sid: "acp-1", payload: { sessionId: "acp-1" } } as WireFrame);
+    container.push({ ch: "acp", type: "ack", id: killId, payload: { result: {} } });
+    container.push({ ch: "acp", type: "ack", id: promptId, payload: { result: { stopReason: "cancelled" } } });
+    expect((await collect(kill)).map((e) => e.type)).toEqual(["ack"]);
+    expect((await collect(prompt)).map((e) => e.type)).toEqual(["exec_request", "ack"]);
+  });
+
   it("a prompt reaches the container as an ACP prompt frame with a correlation id", async () => {
     void relay.prompt(sessionId, { sessionId: "acp-1", prompt: [{ type: "text", text: "hello" }] });
     expect(container.sent).toHaveLength(1);

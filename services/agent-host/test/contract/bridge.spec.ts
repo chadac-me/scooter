@@ -1594,6 +1594,40 @@ describe("bridge auto-retry on transient agent death (exponential backoff)", () 
     await bridge.stop();
   });
 
+  it("does NOT replay a turn that already started working when its prompt rejects (no duplicate user message)", async () => {
+    // A BYOC container interrupting a resumed session mid-turn: replaying the batch would re-send the user's message on top of work the first attempt already did.
+    const agent = createFakeAcpAgent();
+    agent.setScript([{ emit: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "committing…" } } }]);
+    agent.failNext("Claude Code process aborted by user");
+    const bridge = mkBridge(agent);
+    const events = collect(bridge);
+    await bridge.start();
+    await bridge.prompt({ threadId: "t1", text: "From nixpkgs" });
+    await tick(40);
+
+    expect(events.some((e) => e.type === "RUN_RETRYING")).toBe(false);
+    expect(agent.startedCount()).toBe(1); // the message reached the agent exactly once
+    const err = events.find((e) => e.type === "RUN_ERROR") as { message?: string } | undefined;
+    expect(err?.message).toMatch(/not retried automatically/);
+    await bridge.stop();
+  });
+
+  it("still RETRIES a prompt that rejects before any activity (nothing ran, so a replay is safe)", async () => {
+    const agent = createFakeAcpAgent();
+    agent.setScript([]);
+    agent.failNext("Claude Code process aborted by user");
+    const bridge = mkBridge(agent);
+    const events = collect(bridge);
+    await bridge.start();
+    await bridge.prompt({ threadId: "t1", text: "hello" });
+    await tick(60);
+
+    expect(events.some((e) => e.type === "RUN_RETRYING")).toBe(true);
+    expect(agent.startedCount()).toBe(2);
+    expect(events.some((e) => e.type === "RUN_FINISHED")).toBe(true);
+    await bridge.stop();
+  });
+
   it("does NOT retry a genuine model RUN_ERROR ('agent reported an error') — that's a real answer", async () => {
     const agent = createFakeAcpAgent();
     agent.setScript([{ finish: { stopReason: "error" } }]); // the model itself reported an error

@@ -51,7 +51,7 @@ export interface AcpCancelPayload {
   sessionId: string;
 }
 
-/** The reply to an ACP request (`type: "ack"`, same `id`), whose `result` shape follows the request (initialize {protocolVersion}, new_session {sessionId}, prompt {stopReason}, cancel/kill_terminals {}), or `error` when the agent failed the call. */
+/** The reply to an ACP request (`type: "ack"`, same `id`), whose `result` shape follows the request (initialize {protocolVersion}, new_session {sessionId}, prompt {stopReason}, cancel/kill_terminals {}; kill_terminals takes an optional {sessionId}), or `error` when the agent failed the call. */
 export interface AcpAckPayload {
   result?: unknown;
   error?: string;
