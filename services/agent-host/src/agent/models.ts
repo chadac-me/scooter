@@ -17,6 +17,8 @@ export interface ModelInfo {
   providers: string[];
   /** The providers this model is the default for. */
   defaultFor: string[];
+  /** The deployer-declared context window in tokens, overriding goose's own model table. */
+  contextLimit?: number;
 }
 
 export interface ModelCatalog {
@@ -32,6 +34,7 @@ export function catalogFromEnv(env: NodeJS.ProcessEnv = process.env): ModelCatal
     try {
       const parsed = JSON.parse(json) as Array<{
         id?: unknown; hint?: unknown; default?: unknown; providers?: unknown; defaultFor?: unknown;
+        contextLimit?: unknown;
       }>;
       const models: ModelInfo[] = [];
       for (const m of Array.isArray(parsed) ? parsed : []) {
@@ -42,6 +45,7 @@ export function catalogFromEnv(env: NodeJS.ProcessEnv = process.env): ModelCatal
           default: m.default === true,
           providers: Array.isArray(m.providers) ? m.providers.filter((x): x is string => typeof x === "string") : [],
           defaultFor: Array.isArray(m.defaultFor) ? m.defaultFor.filter((x): x is string => typeof x === "string") : [],
+          ...(isPositiveInt(m.contextLimit) ? { contextLimit: m.contextLimit } : {}),
         });
       }
       return withDefault(models);
@@ -58,6 +62,15 @@ export function catalogFromEnv(env: NodeJS.ProcessEnv = process.env): ModelCatal
   if (legacyDefault && !ids.includes(legacyDefault)) ids.unshift(legacyDefault);
   const models: ModelInfo[] = ids.map((id) => ({ id, hint: "", default: id === legacyDefault, providers: [], defaultFor: [] }));
   return withDefault(models, legacyDefault);
+}
+
+function isPositiveInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+}
+
+/** The declared context window of model `id`, or undefined when it declares none or is not offered. */
+export function contextLimitOf(cat: ModelCatalog, id: string | undefined): number | undefined {
+  return id === undefined ? undefined : cat.models.find((m) => m.id === id)?.contextLimit;
 }
 
 /** Ensure exactly one default is marked: an explicit default:true, else `fallback`, else the first model. */
