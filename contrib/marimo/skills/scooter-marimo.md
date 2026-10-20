@@ -26,7 +26,7 @@ shell for that.
 scooter-service start notebook   # prints the URL to give the user
 ```
 
-The `notebook` service is **"marimo + chat"**: this conversation on the left and the
+The `notebook` service ("Notebook" in the Services panel) is **marimo + chat**: this conversation on the left and the
 notebook on the right, so the user can ask you for changes without leaving it. It
 starts the marimo server behind it, the unlisted `marimo` service; don't give the
 user that service's link. The user can also start it from the **Services panel**. The

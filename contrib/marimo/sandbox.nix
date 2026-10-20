@@ -71,7 +71,7 @@ in
   webServices.notebook = {
     enable = lib.mkDefault cfg.enable;
     port = lib.mkDefault 2720;
-    displayName = lib.mkDefault "marimo + chat";
+    displayName = lib.mkDefault "Notebook";
     stripBasePath = lib.mkDefault true;
     command = lib.mkDefault "${notebookServer}";
     hint = lib.mkDefault hint;
