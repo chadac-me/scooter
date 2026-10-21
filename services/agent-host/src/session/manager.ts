@@ -255,8 +255,9 @@ export interface SessionManager {
   promptByThread(threadId: ThreadId, text: string, model?: string, priority?: number, owner?: string, images?: PromptImage[], files?: PromptFile[], source?: string, provider?: string): Promise<void>;
   /** promptByThread, but resolved once the prompt is queued rather than when its run ends, for a
    *  caller that only hands a message over (POST /messages): a caller that timed out waiting for
-   *  the run would resend a message the agent already has. Finding or reviving still throws. */
-  enqueueByThread(threadId: ThreadId, text: string): Promise<void>;
+   *  the run would resend a message the agent already has; `source` tags it as a system event.
+   *  Finding or reviving still throws. */
+  enqueueByThread(threadId: ThreadId, text: string, source?: string): Promise<void>;
   /** Switch a running conversation's model mid-turn for the switch_model tool, cancelling the
    *  in-flight run, rebuilding goose on the new model and re-nudging it to continue; a no-op if
    *  `model` is current, throws on an unknown conversation, and returns whether a switch happened. */
@@ -1048,8 +1049,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       await run;
     },
 
-    async enqueueByThread(threadId, text) {
-      const { run } = await queueByThread(threadId, text);
+    async enqueueByThread(threadId, text, source) {
+      const { run } = await queueByThread(threadId, text, undefined, undefined, undefined, undefined, source);
       // The bridge records a failed run in the conversation itself; nobody awaits this one.
       run?.catch((err: unknown) => log.warn("queued prompt failed", { conversation_id: threadId, error: formatError(err) }));
     },

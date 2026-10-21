@@ -1,18 +1,21 @@
 /**
- * Shared mapping from a linked-resource provider (`ConversationLink.source`) to a
- * brand icon and label, used by the LinkedResources panel and the sidebar
- * per-conversation icons. Built-in icons come from `react-icons/si`, imported per
- * icon so only the ones used are bundled, and render in the provider's brand color.
+ * Shared mapping from a source (a linked-resource provider, a tool card's provider, or
+ * a system event's origin) to a brand icon and label, used by the LinkedResources panel,
+ * the sidebar per-conversation icons and the thread's system-event lines. Built-in icons come from `react-icons` (and
+ * `lucide-react` for the unbranded platform sources), imported per icon so only the ones
+ * used are bundled, and render in the provider's brand color.
  * A contrib adds its own row through the runtime manifest (contribManifest.ts) with
  * its mark as SVG data rather than a component, and BrandMark draws either form.
  */
 
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { SiGithub } from "react-icons/si";
 // Simple Icons dropped the Slack mark (trademark); FontAwesome still ships it.
 import { FaSlack, FaTerminal } from "react-icons/fa";
 // The Scooter mark for the "show the conversation title" option.
 import { MdElectricScooter } from "react-icons/md";
+// Platform event sources have no brand, so they take a neutral glyph.
+import { AlarmClockIcon, BotIcon, CogIcon, KeyRoundIcon } from "lucide-react";
 import type { ContribIcon } from "./contribTypes.js";
 import { contribSources } from "./contribManifest.js";
 
@@ -39,6 +42,11 @@ const BUILTIN_SOURCES: Record<string, SourceRow> = {
   slack: { label: "Slack", mark: FaSlack, color: "#E01E5A" },
   // Not a linked-resource provider — the shell/command tool card (ToolCallView).
   shell: { label: "Shell", mark: FaTerminal, color: "currentColor" },
+  // Platform sources of system events (SystemEventMessage), not linked-resource providers.
+  scheduler: { label: "Scheduler", mark: AlarmClockIcon, color: "currentColor" },
+  "background job": { label: "Background job", mark: CogIcon, color: "currentColor" },
+  broker: { label: "Broker", mark: KeyRoundIcon, color: "currentColor" },
+  subagent: { label: "Subagent", mark: BotIcon, color: "currentColor" },
 };
 
 /** Built-ins plus the deployment's contribs merged on top, resolved per call because
@@ -99,10 +107,18 @@ export function TitleBadge({ size = 15 }: { size?: number }) {
 }
 
 /** A small brand icon for a linked-resource provider. */
-export function SourceBadge({ source, size = 14 }: { source: string; size?: number }) {
+export function SourceBadge({
+  source,
+  size = 14,
+  fallback = "🔗",
+}: {
+  source: string;
+  size?: number;
+  /** What an unknown source shows instead of a mark. */
+  fallback?: ReactNode;
+}) {
   const meta = sources()[source];
   if (!meta) {
-    // Unknown provider — a neutral link glyph + the raw name as a label.
     return (
       <span
         data-testid="source-icon"
@@ -111,7 +127,7 @@ export function SourceBadge({ source, size = 14 }: { source: string; size?: numb
         aria-label={source}
         className="inline-flex items-center text-muted-foreground"
       >
-        🔗
+        {fallback}
       </span>
     );
   }

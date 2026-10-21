@@ -29,6 +29,9 @@
     config = {
       src = ./.;
 
+      # The brand row a review remark's system event wears in the thread.
+      ui.source = { label = "Files"; icon = ./icon.svg; };
+
       # The broker half is the annotation store; the viewer itself runs in the
       # sandbox (./sandbox.nix) on the stdlib and is not packaged.
       services.broker = {

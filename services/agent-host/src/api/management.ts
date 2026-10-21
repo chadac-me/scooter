@@ -34,9 +34,18 @@ import type { AguiEvent, ApproverIdentity, SessionBridge } from "../bridge.js";
 import { logger } from "../log.js";
 import { serviceUrl, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
+import { HUMAN_TRIGGER_SOURCES } from "../acp/remoteAgentRegistry.js";
 
 const log = logger("agent-host");
 const remoteAgentLog = logger("remote-agent");
+
+/** Sources POST /messages refuses, since a sandbox can reach it: a human trigger would let it pass as a person, and `resume` hides the message from the UI. */
+const RESERVED_SOURCES: ReadonlySet<string> = new Set([...HUMAN_TRIGGER_SOURCES, "resume"]);
+
+/** Whether a POST /messages caller may tag its message with this system source. */
+export function isPostableSource(source: unknown): source is string {
+  return typeof source === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(source) && !RESERVED_SOURCES.has(source);
+}
 
 /** Public JSON-safe view of a conversation (omits the in-memory bridge). */
 function view(c: Conversation, now = Date.now()) {
@@ -503,11 +512,15 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   r.post("/conversations/:id/messages", async (ctx) => {
-    const body = await ctx.body<{ text?: string }>();
+    const body = await ctx.body<{ text?: string; source?: string }>();
     if (!body.text) return { status: 400, json: { error: "text required" } };
+    if (body.source !== undefined && !isPostableSource(body.source)) {
+      return { status: 400, json: { error: "source must be a lowercase name, not a human or reserved source" } };
+    }
     // 202 once queued, not once the run ends: a caller that gave up waiting on a long turn
     // would resend a message the agent already has.
-    await sessions.enqueueByThread(ctx.params.id, body.text);
+    if (body.source) await sessions.enqueueByThread(ctx.params.id, body.text, body.source);
+    else await sessions.enqueueByThread(ctx.params.id, body.text);
     return { status: 202, json: { ok: true } };
   });
 
