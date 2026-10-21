@@ -127,46 +127,6 @@ export async function loadWebServices(
   }
 }
 
-/** A Nix module from the broker registry (search result / settings list). */
-export interface RegistryModule {
-  id: number;
-  name: string;
-  description: string;
-  visibility: "public" | "private";
-  owner?: string;
-  /** True if it's already attached to this conversation. */
-  attached?: boolean;
-}
-
-/** Result of a module-registry fetch, where `configured` distinguishes no registry from nothing found. */
-export interface ModuleSearchResult {
-  configured: boolean;
-  modules: RegistryModule[];
-}
-
-/** Search the broker module catalog for a conversation (empty query = all, 501 = not configured). */
-export async function searchModules(
-  config: AgentHostConfig,
-  conversationId: string,
-  query = "",
-): Promise<ModuleSearchResult> {
-  try {
-    const res = await fetch(
-      `${config.baseUrl.replace(/\/$/, "")}/conversations/${encodeURIComponent(conversationId)}/module-registry?q=${encodeURIComponent(query)}`,
-      { headers: config.token ? { Authorization: `Bearer ${config.token}` } : undefined },
-    );
-    if (res.status === 501) return { configured: false, modules: [] };
-    if (!res.ok) {
-      console.warn(`[client] searchModules ${conversationId}: HTTP ${res.status}`);
-      return { configured: true, modules: [] };
-    }
-    return { configured: true, modules: ((await res.json()) as { modules?: RegistryModule[] }).modules ?? [] };
-  } catch (e) {
-    console.warn(`[client] searchModules ${conversationId} failed:`, e);
-    return { configured: true, modules: [] };
-  }
-}
-
 /** Manually compact a conversation, resolving { compacted: false } when it is too short and throwing with the server's message on failure. */
 export async function compactConversation(
   config: AgentHostConfig,
@@ -181,23 +141,6 @@ export async function compactConversation(
     throw new Error(body.error ?? `compaction failed (HTTP ${res.status})`);
   }
   return (await res.json()) as { compacted: boolean; summarizedTurns?: number; keptRuns?: number };
-}
-
-/** Install a registry module by name or id and re-converge, throwing with the server's message on failure. */
-export async function installModule(
-  config: AgentHostConfig,
-  conversationId: string,
-  ref: string,
-): Promise<string> {
-  const res = await fetch(
-    `${config.baseUrl.replace(/\/$/, "")}/conversations/${encodeURIComponent(conversationId)}/modules/${encodeURIComponent(ref)}/install`,
-    { method: "POST", headers: config.token ? { Authorization: `Bearer ${config.token}` } : undefined },
-  );
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `install failed (HTTP ${res.status})`);
-  }
-  return ((await res.json()) as { message?: string }).message ?? `attached ${ref}`;
 }
 
 /** Start a web service, resolving true once the start is issued rather than once healthy. */

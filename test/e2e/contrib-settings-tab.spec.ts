@@ -42,7 +42,7 @@ test.describe("contrib settings tabs", () => {
     await openTabs(page);
 
     // order 15 sits between Scheduled Tasks (10) and Skills (20).
-    expect(await tabIds(page)).toEqual(["tasks", "echo", "skills", "claude", "modules", "admin"]);
+    expect(await tabIds(page)).toEqual(["tasks", "echo", "skills", "claude", "admin"]);
 
     await page.locator('[data-testid="settings-tab-echo"]').click();
     await page.waitForURL((u) => u.pathname === "/settings/echo");

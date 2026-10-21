@@ -56,7 +56,6 @@ import { resolvePodTarget } from "./exec/k8sExec.js";
 import { createWake, createWebServiceProxy } from "./proxy/webServiceProxy.js";
 import { sandboxOriginsFromEnv } from "./proxy/sandboxOrigin.js";
 import { createWebServiceRegistry } from "./proxy/webServiceRegistry.js";
-import { createModuleRegistry } from "./proxy/moduleRegistry.js";
 import {
   writeHints,
   writeSkillDir,
@@ -1256,15 +1255,6 @@ export async function main(
         connect: (ref) => connectSandbox(ref),
       });
 
-  // Module registry: search the broker catalog and install modules into a conversation's
-  // sandbox via the in-pod CLIs.
-  const moduleRegistry = config.fakeSandbox
-    ? undefined
-    : createModuleRegistry({
-        sandboxFor: (id) => sessions.get(id)?.sandbox,
-        connect: (ref) => connectSandbox(ref),
-      });
-
   // Management REST API (conversation CRUD, lifecycle, history), mounted on the same server
   // as /agui.
   server.use(
@@ -1283,7 +1273,6 @@ export async function main(
       server,
       webServices,
       sandboxOrigins,
-      moduleRegistry,
       identityStore,
       assets,
       scheduler: schedulerClient,

@@ -1,12 +1,11 @@
 /**
  * The Sandbox tab: the current conversation's pod lifecycle status with a Start button
- * when down, its resource allotment and size picker, and, while running, its web services
- * and modules. Status is fetched directly for the current conversation rather than read
+ * when down, its resource allotment and size picker, and, while running, its web services. Status is fetched directly for the current conversation rather than read
  * off the sessions store, and services are enumerable only while the pod is running.
  */
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { RotateCw, Plus } from "lucide-react";
+import { RotateCw } from "lucide-react";
 
 import {
   resumeConversation,
@@ -17,10 +16,7 @@ import {
   loadWebServices,
   startWebService,
   stopWebService,
-  searchModules,
-  installModule,
   type WebService,
-  type RegistryModule,
   type SandboxResources,
   type SandboxSizePreset,
 } from "./client.js";
@@ -199,140 +195,6 @@ function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
       {children}
-    </div>
-  );
-}
-
-/** Search and install Nix modules from the broker registry into this sandbox, shown only while the pod is running. */
-export function ModulesSection({ conversationId }: { conversationId: string }) {
-  const [query, setQuery] = useState("");
-  const [modules, setModules] = useState<RegistryModule[]>([]);
-  const [configured, setConfigured] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [installing, setInstalling] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-  // Collapsed by default; the "+ Add module" button expands the search and browse list.
-  const [expanded, setExpanded] = useState(false);
-
-  const runSearch = useCallback(async (q: string) => {
-    setLoading(true);
-    const res = await searchModules(agentHostConfig, conversationId, q);
-    setConfigured(res.configured);
-    setModules(res.modules);
-    setLoading(false);
-  }, [conversationId]);
-
-  useEffect(() => { void runSearch(""); }, [runSearch]);
-
-  const install = async (ref: string) => {
-    setInstalling(ref);
-    setNote(null);
-    try {
-      const msg = await installModule(agentHostConfig, conversationId, ref);
-      setNote(msg);
-      await runSearch(query); // refresh the attached flags
-    } catch (e) {
-      setNote((e as Error).message);
-    } finally {
-      setInstalling(null);
-    }
-  };
-
-  const installedCount = modules.filter((m) => m.attached).length;
-
-  return (
-    <div data-testid="modules-section" className="flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-2">
-        <SectionLabel>Modules</SectionLabel>
-        <span
-          data-testid="modules-installed-count"
-          className="shrink-0 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground"
-        >
-          {installedCount === 0 ? "none installed" : `${installedCount} installed`}
-        </span>
-      </div>
-
-      {!configured ? (
-        <p data-testid="modules-unavailable" className="text-xs text-muted-foreground">
-          The module registry isn’t available.
-        </p>
-      ) : (
-        <>
-          <Button
-            variant="outline"
-            size="sm"
-            data-testid="modules-add-toggle"
-            aria-expanded={expanded}
-            onClick={() => setExpanded((v) => !v)}
-            className="self-start"
-          >
-            <Plus className="size-3.5" aria-hidden />
-            Add module
-          </Button>
-
-          {expanded ? (
-            <div className="flex flex-col gap-2">
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void runSearch(query);
-                }}
-                className="flex gap-1"
-              >
-                <input
-                  data-testid="module-search"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search modules…"
-                  className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-xs"
-                />
-                <Button variant="outline" size="xs" type="submit">
-                  Search
-                </Button>
-              </form>
-
-              {loading ? (
-                <p className="text-xs text-muted-foreground">Loading…</p>
-              ) : modules.length === 0 ? (
-                <p data-testid="modules-empty" className="text-xs text-muted-foreground">No modules found.</p>
-              ) : (
-                <ul data-testid="module-list" className="flex flex-col gap-1">
-                  {modules.map((m) => (
-                    <li key={m.id} data-testid="module-item" className="flex items-start gap-2 rounded-md border p-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="truncate text-xs font-medium">{m.name}</span>
-                          {m.visibility === "private" && (
-                            <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">private</span>
-                          )}
-                        </div>
-                        {m.description && <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{m.description}</p>}
-                      </div>
-                      {m.attached ? (
-                        <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] bg-success/15 text-success">
-                          installed
-                        </span>
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          data-testid="module-install"
-                          disabled={installing === m.name}
-                          onClick={() => void install(m.name)}
-                          className="shrink-0"
-                        >
-                          {installing === m.name ? "Installing…" : "Install"}
-                        </Button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {note && <p data-testid="module-note" className="text-[11px] text-muted-foreground">{note}</p>}
-            </div>
-          ) : null}
-        </>
-      )}
     </div>
   );
 }
@@ -572,7 +434,7 @@ export function SandboxPanelView({
         />
       ) : null}
 
-      {/* Services and modules when running, a hint otherwise. */}
+      {/* Services when running, a hint otherwise. */}
       {state === "running" ? (
         <>
           <section className="flex flex-col gap-2">
@@ -594,13 +456,12 @@ export function SandboxPanelView({
                 data-testid="service-add-hint"
                 className="rounded-md border bg-muted/30 p-2 text-[11px] leading-relaxed text-muted-foreground"
               >
-                Web services are declared inside the sandbox — install a module below, or ask Scooter
+                Web services are declared inside the sandbox — ask Scooter
                 to add one (e.g. a terminal or VS Code) with <span className="font-mono">scooter-rebuild</span>.
                 {onRescanServices ? " Use the ↻ button above to re-scan once it's added." : ""}
               </p>
             ) : null}
           </section>
-          {conversationId && <ModulesSection conversationId={conversationId} />}
         </>
       ) : (
         <p className="text-xs text-muted-foreground">
