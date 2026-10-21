@@ -11,13 +11,14 @@ import pathlib
 import pytest
 
 from scooter_broker_lib.store import StoreConfig
-from broker.registry.store import ModuleRegistryStore
+from scooter_schema.broker import Base as _SchemaBase
+from broker.shares.store import ShareStore
 
 SERVICE_SRC = pathlib.Path(__file__).resolve().parents[1] / "broker"
 
 
 @pytest.mark.parametrize(
-    "store_cls", [ModuleRegistryStore], ids=lambda c: c.__name__
+    "store_cls", [ShareStore], ids=lambda c: c.__name__
 )
 def test_stores_expose_NO_schema_creating_method(store_cls):
     assert not hasattr(store_cls, "init")
@@ -40,18 +41,16 @@ def test_no_service_module_calls_create_all():
 @pytest.mark.asyncio
 async def test_create_schema_REFUSES_a_postgres_engine():
     from conftest import create_schema
-    from broker.registry import store as registry_store
 
-    store = ModuleRegistryStore(StoreConfig(dsn="postgresql+asyncpg://u:p@127.0.0.1:1/nope"))
+    store = ShareStore(StoreConfig(dsn="postgresql+asyncpg://u:p@127.0.0.1:1/nope"))
     with pytest.raises(AssertionError, match="SQLite-only"):
-        await create_schema(store, registry_store._Base)
+        await create_schema(store, _SchemaBase)
 
 
 @pytest.mark.asyncio
 async def test_create_schema_DOES_build_tables_on_sqlite():
     from conftest import create_schema, sqlite_config
-    from broker.registry import store as registry_store
 
-    store = ModuleRegistryStore(sqlite_config())
-    await create_schema(store, registry_store._Base)
-    assert await store.list_visible(viewer="someone") == []
+    store = ShareStore(sqlite_config())
+    await create_schema(store, _SchemaBase)
+    assert await store.list_by_owner("someone") == []

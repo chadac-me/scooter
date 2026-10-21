@@ -30,7 +30,7 @@ def test_env_var_the_module_emits_is_read(monkeypatch):
     assert BrokerSettings().store_config().resolved_dsn().endswith("?ssl=require")
 
 
-@pytest.mark.parametrize("dsn_setting", ["registry_db_dsn", "shares_db_dsn", ""])
+@pytest.mark.parametrize("dsn_setting", ["shares_db_dsn", ""])
 def test_every_store_gets_the_same_components(monkeypatch, dsn_setting):
     """Every store assembles its StoreConfig through one place."""
     monkeypatch.setenv("BROKER_DB_SSLMODE", "require")

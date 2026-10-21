@@ -36,17 +36,6 @@ def create_app() -> FastAPI:
 
     # Sandbox provisioning lives in the agent-host (session/k8sProvisioner.ts), not here.
 
-    # The module registry, mounted top-level when enabled.
-    registry_store = None
-    registry_router = None
-    if settings.registry_enabled:
-        from ..registry.routes import create_registry_router
-        from ..registry.store import ModuleRegistryStore
-
-        registry_store = ModuleRegistryStore(
-            settings.store_config(dsn=settings.registry_db_dsn))
-        registry_router = create_registry_router(registry_store)
-
     # Static shares served at /s/<uuid>/, mounted top-level when enabled.
     shares_store = None
     shares_router = None
@@ -92,9 +81,6 @@ def create_app() -> FastAPI:
                     await p.on_shutdown()
 
     app = FastAPI(title="kubenix-agent-manager broker", lifespan=lifespan)
-
-    if registry_router is not None:
-        app.include_router(registry_router)
 
     if shares_router is not None:
         app.include_router(shares_router)

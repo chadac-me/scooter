@@ -1,4 +1,5 @@
-h1:WNELYapCmIeWzRmhAD+WSrrgSgUt/G+YyqA+PRoQ4YI=
+h1:1MxiVv4Muex5fcT973hVlE+6RPpHbm36+c1kuq5fErc=
 20260827201646_baseline.sql h1:lPrsp/RM2WIUCsvk0KDCUsKkbm1WpLKLHFRG10gYSHM=
 20260831182350_add_static_shares.sql h1:kHIkshhnxHK7YkhUdXa5rj5AeLrnIXa+92qaK1Lnc2E=
 20261015181054_add_annotations.sql h1:2eajdCDCL/98/lurG/guNRIfnIPCSDNgNqO3a/tsIEw=
+20261020200000_drop_module_registry.sql h1:TihFGg6gAiCqySiVFAmG5UGv/LX0e0KKIlGfBkH2E9w=

@@ -20,7 +20,6 @@
     ./runtime-converge.nix
     ./broker-modules.nix
     ./local-modules.nix
-    ./registry-modules.nix
     ./overlay-store.nix
     ./journal-persist.nix
     ./warm-store-seed.nix
