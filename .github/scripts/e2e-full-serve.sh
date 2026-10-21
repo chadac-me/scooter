@@ -50,7 +50,7 @@ SANDBOX_PIDS=()
 E2E_SANDBOX_DOMAIN=$(nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox get deployment/conversation-router \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SANDBOX_DOMAIN")].value}' 2>/dev/null || true)
 if [ -n "$E2E_SANDBOX_DOMAIN" ]; then
-  nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox port-forward svc/agent-host 8896:8081 >/tmp/pf-sandbox.log 2>&1 &
+  nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox port-forward svc/agent-host 8896:8082 >/tmp/pf-sandbox.log 2>&1 &
   SANDBOX_PIDS+=($!)
   mkdir -p /tmp/sandbox-edge
   nix shell nixpkgs#openssl -c openssl req -x509 -newkey rsa:2048 -nodes -days 2 \

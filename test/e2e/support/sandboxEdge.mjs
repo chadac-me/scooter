@@ -2,7 +2,7 @@
 /**
  * The e2e-full stand-in for the wildcard sandbox Ingress: terminates TLS for
  * `*.<sandbox domain>` and forwards HTTP and WebSocket upgrades, Host intact, to the
- * conversation-router's sandbox listener (a port-forward of svc/agent-host:8081).
+ * conversation-router's sandbox listener (a port-forward of svc/agent-host:8082).
  * The browser reaches it through Chromium's --host-resolver-rules (playwright.config.ts),
  * so the specs open the same https://<label>.<domain>/<service>/ URLs as production.
  *
