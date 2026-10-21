@@ -641,7 +641,7 @@ def test_the_self_transport_posts_to_its_own_conversation_with_its_token(tmp_pat
         client = ann.SelfTransport(f"http://127.0.0.1:{httpd.server_address[1]}/", str(token), conv)
         assert client.configured
         client.send("hello")
-        assert seen == [(f"/conversations/{conv}/messages", "Bearer pod-token", {"text": "hello"})]
+        assert seen == [(f"/conversations/{conv}/messages", "Bearer pod-token", {"text": "hello", "source": "files"})]
 
         status["code"] = 429
         with pytest.raises(ann.TransportError) as caught:

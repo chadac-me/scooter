@@ -266,7 +266,8 @@ class SelfTransport:
             raise TransportError(f"no self-access token: {exc}") from exc
         request = urllib.request.Request(
             f"{self.base_url}/conversations/{self.conversation_id}/messages",
-            data=json.dumps({"text": text}).encode(),
+            # Tagged with this contrib's name so the UI shows a review remark as a Files event, not a user turn.
+            data=json.dumps({"text": text, "source": "files"}).encode(),
             method="POST",
             headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
         )

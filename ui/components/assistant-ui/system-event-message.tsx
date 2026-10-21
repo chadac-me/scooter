@@ -7,22 +7,8 @@
  */
 
 import { useState, type FC, type ReactNode } from "react";
-import { Loader2Icon } from "lucide-react";
-
-/** A per-source glyph so the collapsed event line is scannable. */
-export function systemSourceIcon(source: string): string {
-  switch (source) {
-    case "slack": return "💬";
-    case "github": return "🐙";
-    case "gitlab": return "🦊";
-    case "jira": return "📋";
-    case "scheduler": return "⏰";
-    case "background job": return "⚙️";
-    case "broker": return "🔑";
-    case "subagent": return "🤖";
-    default: return "⚙️";
-  }
-}
+import { CogIcon, Loader2Icon } from "lucide-react";
+import { SourceBadge, sourceLabel } from "@/src/sourceIcon";
 
 export const SystemEventMessage: FC<{
   source: string;
@@ -49,8 +35,10 @@ export const SystemEventMessage: FC<{
         aria-expanded={open}
         className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12px] text-muted-foreground hover:bg-muted/40 hover:text-foreground"
       >
-        <span aria-hidden className="shrink-0">{systemSourceIcon(source)}</span>
-        <span className="shrink-0 font-medium capitalize">{source}</span>
+        <span aria-hidden className="shrink-0">
+          <SourceBadge source={source} size={13} fallback={<CogIcon className="size-3.5" />} />
+        </span>
+        <span className="shrink-0 font-medium">{sourceLabel(source)}</span>
         {!open && short && (
           <span className="min-w-0 flex-1 truncate text-muted-foreground">{short}</span>
         )}

@@ -484,6 +484,25 @@ describe("management API", () => {
     expect(sessions.enqueueByThread).toHaveBeenCalledWith("c1", "do it");
   });
 
+  it("POST /conversations/:id/messages with a source queues a system event", async () => {
+    const sessions = fakeSessions();
+    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
+    const { status } = await call(api, "POST", "/conversations/c1/messages", { text: "a remark", source: "files" });
+    expect(status).toBe(202);
+    expect(sessions.enqueueByThread).toHaveBeenCalledWith("c1", "a remark", "files");
+  });
+
+  it.each(["github", "slack", "ui", "resume", "Files", "", "a b"])(
+    "POST /conversations/:id/messages refuses source %j",
+    async (source) => {
+      const sessions = fakeSessions();
+      const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
+      const { status } = await call(api, "POST", "/conversations/c1/messages", { text: "x", source });
+      expect(status).toBe(400);
+      expect(sessions.enqueueByThread).not.toHaveBeenCalled();
+    },
+  );
+
   it("GET /conversations/:id/history returns the event log", async () => {
     const events: AguiEvent[] = [
       { type: "RUN_STARTED", threadId: "c1", runId: "r" },

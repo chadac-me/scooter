@@ -13,7 +13,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { sourceLabel, SourceBadge } from "./sourceIcon.js";
 
-const KNOWN = ["github", "slack", "shell"];
+const KNOWN = ["github", "slack", "shell", "scheduler", "background job", "broker", "subagent"];
 
 describe("sourceIcon", () => {
   it("RENDERS a real icon for every known provider (catches a dropped icon import)", () => {
