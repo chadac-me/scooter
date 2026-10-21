@@ -29,6 +29,9 @@ let
     ''
       [${name}]
       owner = "${db.owner}"
+    '' + lib.optionalString (db.sqlDir != null) ''
+      sql_dir = "${db.sqlDir}"
+    '' + ''
 
       [${name}.tables]
     '' + lib.concatMapStrings (n: renderTable width n db.tables.${n}) names;
@@ -76,12 +79,14 @@ let
 
   # --- atlas.hcl rendering ---------------------------------------------------
   # One env per database, identical apart from the name.
-  atlasEnv = db: ''
+  # Paths are relative to lib/sql, where atlas.hcl lives.
+  sqlPath = name: db: if db.sqlDir == null then name else "../../${db.sqlDir}";
+  atlasEnv = name: let p = sqlPath name cfg.db.${name}; in ''
 
-    env "${db}" {
-      src = "file://${db}/schema.sql"
+    env "${name}" {
+      src = "file://${p}/schema.sql"
       dev = var.dev_url
-      migration { dir = "file://${db}/migrations" }
+      migration { dir = "file://${p}/migrations" }
       format {
         migrate {
           diff = "{{ sql . \"  \" }}"
@@ -135,6 +140,17 @@ in
               owner; the other writers appear in the per-table `writers` lists.
             '';
           };
+          sqlDir = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "contrib/files/sql";
+            description = ''
+              Where this database's `schema.sql` and `migrations/` live, relative to
+              the repo root. `null` means `lib/sql/<database>` (core). A contrib's
+              database lives in the contrib (`contribs.<name>.db`), so its migration
+              history is its own and core's generated bindings skip it.
+            '';
+          };
           tables = mkOption {
             default = { };
             description = "The tables in this database, keyed by table name.";
@@ -157,6 +173,15 @@ in
                     Services granted SELECT only. Table-scoped on purpose: a reader
                     must not gain another table's rows just because it shares a
                     database (notably conversation_events, the full transcripts).
+                  '';
+                };
+                copyFrom = mkOption {
+                  type = types.nullOr types.str;
+                  default = null;
+                  description = ''
+                    A database to copy this table's rows from once, when this table is
+                    empty and the source table exists (see `contribs.<name>.db`). Read by
+                    the migrator; not rendered into owners.toml.
                   '';
                 };
                 note = mkOption {
@@ -182,6 +207,22 @@ in
         type = types.listOf types.str;
         default = checked (lib.attrNames cfg.db);
         description = "Database names in the spec — the atlas envs under lib/sql.";
+      };
+      sqlDirs = mkOption {
+        internal = true;
+        readOnly = true;
+        type = types.attrsOf types.str;
+        default = checked (lib.mapAttrs (n: db: if db.sqlDir == null then "lib/sql/${n}" else db.sqlDir) cfg.db);
+        description = "Database name -> its SQL directory, relative to the repo root.";
+      };
+      copies = mkOption {
+        internal = true;
+        readOnly = true;
+        type = types.listOf (types.attrsOf types.str);
+        default = checked (lib.concatLists (lib.mapAttrsToList (dbName: db:
+          lib.mapAttrsToList (t: tc: { db = dbName; table = t; from = tc.copyFrom; })
+            (lib.filterAttrs (_: tc: tc.copyFrom != null) db.tables)) cfg.db));
+        description = "One-time row copies `{ db; table; from; }` the migrator performs.";
       };
       ownersToml = mkOption {
         internal = true;

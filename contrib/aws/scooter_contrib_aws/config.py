@@ -1,6 +1,6 @@
 """AWS settings, owned by this contrib.
 
-The authorizer, the shared `broker` database and the approver allowlist are the
+The authorizer, this contrib's database connection and the approver allowlist are the
 platform's and arrive through the BrokerContext and core auth, not from here.
 """
 

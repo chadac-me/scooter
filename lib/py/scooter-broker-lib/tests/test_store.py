@@ -50,3 +50,23 @@ def test_sslmode_becomes_asyncpgs_ssl_param():
 
 def test_no_password_keeps_the_sqlite_dev_default():
     assert StoreConfig().resolved_dsn().startswith("sqlite+aiosqlite://")
+
+
+def test_with_database_swaps_only_the_database():
+    cfg = StoreConfig(db_password="pw", db_host="pg.example", db_user="broker", db_name="broker")
+    other = cfg.with_database("contrib_files")
+    assert other.resolved_dsn() == "postgresql+asyncpg://broker:pw@pg.example:5432/contrib_files"
+    assert cfg.db_name == "broker"  # the original is untouched
+
+
+def test_with_database_rewrites_an_explicit_postgres_dsn():
+    cfg = StoreConfig(dsn="postgresql+asyncpg://broker:p%40ss@pg:5432/broker?ssl=require")
+    assert (
+        cfg.with_database("contrib_aws").resolved_dsn()
+        == "postgresql+asyncpg://broker:p%40ss@pg:5432/contrib_aws?ssl=require"
+    )
+
+
+def test_with_database_leaves_a_dev_sqlite_dsn_alone():
+    cfg = StoreConfig(dsn="sqlite+aiosqlite:////tmp/x.db")
+    assert cfg.with_database("contrib_files").resolved_dsn() == "sqlite+aiosqlite:////tmp/x.db"

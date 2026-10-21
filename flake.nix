@@ -226,6 +226,7 @@
               remoteAgent byocController conversationController conversationRouter
               warmStoreController;
             contribManifest = contribs.uiManifest;
+            contribSqlDirs = contribs.sqlDirs;
           };
 
           # `contribs` is at the module root, not under `scooter`.

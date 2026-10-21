@@ -6,27 +6,35 @@ import { describe, expect, it } from "vitest";
 
 import { DATABASES } from "./guard.js";
 
-// lib/ts/scooter-schema/src/ -> repo lib/sql/
+// lib/ts/scooter-schema/src/ -> repo lib/sql/, and the repo root.
 const sqlDir = (p: string) => fileURLToPath(new URL(`../../../sql/${p}`, import.meta.url));
+const repoPath = (p: string) => fileURLToPath(new URL(`../../../../${p}`, import.meta.url));
 
 interface Manifest {
-  [db: string]: { owner: string; tables: Record<string, { writers: string[]; readers: string[] }> };
+  [db: string]: {
+    owner: string;
+    /** Set for a contrib's own database: its SQL lives in the contrib, not lib/sql. */
+    sql_dir?: string;
+    tables: Record<string, { writers: string[]; readers: string[] }>;
+  };
 }
 
 const manifest = parse(readFileSync(sqlDir("owners.toml"), "utf8")) as unknown as Manifest;
 
 /** Table names a schema.sql declares (CREATE TABLE "<name>"). */
 function tablesInSchema(db: string): string[] {
-  const sql = readFileSync(sqlDir(`${db}/schema.sql`), "utf8");
+  const dir = manifest[db]?.sql_dir;
+  const sql = readFileSync(dir ? repoPath(`${dir}/schema.sql`) : sqlDir(`${db}/schema.sql`), "utf8");
   return [...sql.matchAll(/CREATE TABLE "([^"]+)"/g)].map((m) => m[1]).sort();
 }
 
-/** The database list generated from the `scooter.db` module option, whose top-level sections are owners.toml's. */
-const generatedDatabases = Object.keys(manifest);
+/** The CORE databases generated from the `scooter.db` module option. A contrib's own database (`sql_dir`) is private to it, so core's guards never list it. */
+const generatedDatabases = Object.keys(manifest).filter((db) => !manifest[db].sql_dir);
+const contribDatabases = Object.keys(manifest).filter((db) => manifest[db].sql_dir);
 
 describe("ownership manifest (lib/sql/owners.toml)", () => {
-  it("lists exactly the databases that have a schema", () => {
-    expect(Object.keys(manifest).sort()).toEqual([...DATABASES].sort());
+  it("lists exactly the core databases that have a schema", () => {
+    expect([...generatedDatabases].sort()).toEqual([...DATABASES].sort());
   });
 
   // Both guards' DATABASES are hand-written (guard.ts's `as const` gives `Database` its literal union), and the Python guard is checked here because its own nix build cannot read lib/sql.
@@ -45,7 +53,11 @@ describe("ownership manifest (lib/sql/owners.toml)", () => {
     expect(names.sort()).toEqual([...generatedDatabases].sort());
   });
 
-  for (const db of DATABASES) {
+  it("keeps every contrib database's SQL inside its contrib", () => {
+    for (const db of contribDatabases) expect(manifest[db].sql_dir).toMatch(/^contrib\/[a-z0-9-]+\/sql$/);
+  });
+
+  for (const db of [...DATABASES, ...contribDatabases]) {
     it(`[${db}] lists exactly the tables schema.sql defines`, () => {
       const declared = tablesInSchema(db);
       const owned = Object.keys(manifest[db].tables).sort();

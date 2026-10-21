@@ -18,14 +18,17 @@ in
     (lib.mkIf ccfg.enable {
       # Writer is `broker`, since this contrib runs inside the broker image through
       # the broker's own database role, and the owner is modules/broker.nix's.
+      # LEGACY: the table now lives in contrib_files (contrib.nix `db`). The broker
+      # copy stays declared only as the migrator's copy source, until the drop that
+      # removes this row and `copyFrom` together.
       scooter.db.broker.tables.annotations = { writers = [ "broker" ]; };
     })
 
     # The provider's env, gated on the broker being deployed as well as files.
     (lib.mkIf (bcfg.enable && ccfg.enable && ccfg.annotations.enable) {
       scooter.broker.extraEnv = [
-        # Annotations reach the shared `broker` database through the BROKER_DB_*
-        # components the broker already passes every provider, so there is no DSN here.
+        # Annotations reach contrib_files with the broker's own credentials
+        # (ctx.contrib_store_config), so there is no DSN here.
         # The sandbox viewer, not the broker, wakes the conversation.
         { name = "FILES_ANNOTATIONS_ENABLED"; value = "true"; }
       ];

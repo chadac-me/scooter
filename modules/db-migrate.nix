@@ -15,25 +15,40 @@ let
   pcfg = cfg.postgres;
   ns = cfg.namespace;
 
-  # Consumer keys whose database has an Atlas schema; the key names the Secret
-  # while `c.db` names the database, role and lib/sql directory.
-  enabledKeys = lib.attrNames
-    (lib.filterAttrs (_k: c: builtins.elem c.db cfg.dbSpec.databases) pcfg.consumers);
-  # key -> the database/role/sql-dir name.
-  dbOf = k: pcfg.consumers.${k}.db;
-  # The env var the migrator script looks up, mirroring its own
-  # `tr '[:lower:]-' '[:upper:]_'`.
-  pwEnvOf = db: "${lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] db)}_DB_PASSWORD";
-  # A shell reference to that var, since BusyBox ash has no `${"$"}{!var}` indirection.
-  pwRefOf = db: "$" + pwEnvOf db;
+  # Every database with an Atlas schema that this deployment provisions: a
+  # consumer's own database (its role is named after it), or an extra database
+  # owned by an existing consumer's role (a contrib database). `key` names the
+  # agent-pg-<key> Secret holding the role's password.
+  targets =
+    lib.mapAttrsToList (k: c: { inherit (c) db user; key = k; })
+      (lib.filterAttrs (_k: c: builtins.elem c.db cfg.dbSpec.databases) pcfg.consumers)
+    ++ lib.mapAttrsToList (db: d: { inherit db; user = pcfg.consumers.${d.owner}.user; key = d.owner; })
+      (lib.filterAttrs (db: _: builtins.elem db cfg.dbSpec.databases) pcfg.databases);
+  migrated = map (t: t.db) targets;
 
-  # The password env shared by the gate initContainer and the migrator.
+  # One-time row copies, kept only where both databases are migrated here and share
+  # an owner role (the copy connects to both as that one role).
+  userOf = db: (lib.findFirst (t: t.db == db) null targets).user;
+  copies = lib.filter
+    (c: builtins.elem c.db migrated && builtins.elem c.from migrated
+      && (if userOf c.db == userOf c.from then true
+          else throw "scooter.db.${c.db}.tables.${c.table}.copyFrom = ${c.from}: the two databases have different owner roles, so the migrator cannot copy between them."))
+    cfg.dbSpec.copies;
+
+  # The env var the migrator script looks up per ROLE, mirroring its own
+  # `tr '[:lower:]-' '[:upper:]_'`.
+  pwEnvOf = user: "${lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] user)}_DB_PASSWORD";
+  # A shell reference to that var, since BusyBox ash has no `${"$"}{!var}` indirection.
+  pwRefOf = user: "$" + pwEnvOf user;
+
+  # The password env shared by the gate initContainer and the migrator, one per
+  # role however many databases it owns.
   pwEnv = map
-    (k: {
-      name = pwEnvOf (dbOf k);
-      valueFrom.secretKeyRef = { name = "agent-pg-${k}"; key = "password"; };
+    (t: {
+      name = pwEnvOf t.user;
+      valueFrom.secretKeyRef = { name = "agent-pg-${t.key}"; key = "password"; };
     })
-    enabledKeys;
+    (lib.unique (map (t: { inherit (t) user key; }) targets));
 
   # Waits for each database and role to exist with a real connect as the role the
   # migrator itself uses.
@@ -42,12 +57,12 @@ let
   '' + lib.optionalString (pcfg.sslmode != null) ''
     export PGSSLMODE="${pcfg.sslmode}"
   '' + lib.concatMapStrings
-    (k:
-      let db = dbOf k; in ''
+    (t:
+      let inherit (t) db user; in ''
         echo "[${db}] waiting for database + role ..."
         n=0
-        until PGPASSWORD="${pwRefOf db}" psql -h "${pcfg.host}" -p "${toString pcfg.port}" \
-          -U "${db}" -d "${db}" -tAc 'SELECT 1' >/dev/null 2>&1; do
+        until PGPASSWORD="${pwRefOf user}" psql -h "${pcfg.host}" -p "${toString pcfg.port}" \
+          -U "${user}" -d "${db}" -tAc 'SELECT 1' >/dev/null 2>&1; do
           n=$((n + 1))
           if [ "$n" -ge 150 ]; then
             echo "[${db}] still unreachable after $n attempts (~5m) — giving up" >&2
@@ -57,7 +72,7 @@ let
         done
         echo "[${db}] ready"
       '')
-    enabledKeys + ''
+    targets + ''
     echo "all target databases reachable"
   '';
 
@@ -90,9 +105,10 @@ let
           env = [
             { name = "DB_HOST"; value = pcfg.host; }
             { name = "DB_PORT"; value = toString pcfg.port; }
-            { name = "DB_ENVS"; value = lib.concatStringsSep " " (map dbOf enabledKeys); }
+            { name = "DB_ENVS"; value = lib.concatStringsSep " " (map (t: "${t.db}:${t.user}") targets); }
           ]
           ++ lib.optional (pcfg.sslmode != null) { name = "DB_SSLMODE"; value = pcfg.sslmode; }
+          ++ lib.optional (copies != [ ]) { name = "DB_COPIES"; value = lib.concatMapStringsSep " " (c: "${c.db}:${c.table}:${c.from}") copies; }
           # The var name derives from the db name and the Secret from the consumer key.
           ++ pwEnv;
         };
@@ -124,7 +140,7 @@ in
   };
 
   config = lib.mkMerge [
-    (lib.mkIf (mcfg.enable && enabledKeys != [ ]) {
+    (lib.mkIf (mcfg.enable && targets != [ ]) {
     # The Nix attr name stays fixed (it is what other modules would reference);
     # metadata.name is the hashed one that actually lands in the cluster.
     kubernetes.resources.jobs.agent-db-migrate = {
@@ -132,7 +148,7 @@ in
         name = jobName;
         namespace = ns;
         labels = jobLabels;
-        annotations."agent-sandbox/migrates" = lib.concatStringsSep "," (map dbOf enabledKeys);
+        annotations."agent-sandbox/migrates" = lib.concatStringsSep "," (map (t: t.db) targets);
       };
       spec = jobSpec;
     };

@@ -645,6 +645,30 @@ let
                 + " table declaration is not gated on the contrib being built, so the"
                 + " schema describes a writer no image contains") ] else [ ]);
 
+  # aws owns a database (contribs.aws.db): created on the broker's role, migrated as
+  # that role, its rows copied out of `broker` once, and named on the broker pod.
+  migrateEnv = res.jobs.agent-db-migrate.spec.template.spec.containers.migrate.env;
+  contribEnvValue = l: n: let m = builtins.filter (e: e.name == n) l; in if m == [ ] then null else (builtins.head m).value;
+  initScript = let c = res.jobs.agent-postgres-init.spec.template.spec.containers.sql.command; in
+    builtins.elemAt c (builtins.length c - 1);
+  hasWord = w: s: builtins.elem w (builtins.filter builtins.isString (builtins.split "[ \n]+" s));
+  contribDbProblems =
+    (if hasWord "contrib_aws:broker" (toString (contribEnvValue migrateEnv "DB_ENVS")) then [ ]
+     else [ "migrate.env.DB_ENVS lacks contrib_aws:broker — aws's own database is never migrated, or not as the broker's role" ])
+    ++ (if hasWord "contrib_aws:permission_requests:broker" (toString (contribEnvValue migrateEnv "DB_COPIES")) then [ ]
+        else [ "migrate.env.DB_COPIES lacks contrib_aws:permission_requests:broker — the old rows would be left behind in broker" ])
+    ++ (if builtins.match ''.*CREATE DATABASE "contrib_aws" OWNER "broker".*'' initScript != null then [ ]
+        else [ "agent-postgres-init does not create contrib_aws owned by broker" ])
+    ++ (if builtins.match ".*agent-pg-contrib.*" initScript == null then [ ]
+        else [ "agent-postgres-init mints a per-contrib Secret — roles stay per service, and a second Secret for broker would reset its password" ])
+    ++ (if contribEnvValue brokerEnv "CONTRIB_AWS_DB_NAME" == "contrib_aws" then [ ]
+        else [ "broker.env.CONTRIB_AWS_DB_NAME != contrib_aws — the store would connect to the wrong database" ])
+    ++ (if (platform.config.scooter.db.contrib_aws.sqlDir or null) == "contrib/aws/sql" then [ ]
+        else [ "scooter.db.contrib_aws.sqlDir != contrib/aws/sql — its migrations would be looked for in lib/sql" ])
+    # Unshipping aws drops its database entirely.
+    ++ (if (awsOffPlatform.config.scooter.db or { }) ? contrib_aws
+        then [ "aws-off: scooter.db.contrib_aws still declared — a database for a contrib no image contains" ] else [ ]);
+
   # `broker.fga` is a core option, so the render proving it is fga on with aws off.
   fgaNoAwsPlatform = evalPlatform {
     module = { lib, ... }: {
@@ -812,7 +836,7 @@ let
     ++ (if tabsThrow (echoOn [ (echoTab // { id = "echo_Bad"; }) ]) then [ ]
         else [ "a settings tab id that is not a URL slug rendered" ]);
 
-  allProblems = disabledContribProblems ++ settingsTabProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  allProblems = disabledContribProblems ++ settingsTabProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

@@ -1,7 +1,7 @@
 """Annotation persistence: comments and answers anchored to a file location.
 
-Backed by the shared `broker` database through the StoreConfig the broker hands
-this contrib. The table is DECLARED in lib/sql/broker/schema.sql and applied by the
+Backed by this contrib's own `contrib_files` database through the StoreConfig the broker hands
+this contrib. The table is DECLARED in contrib/files/sql/schema.sql and applied by the
 Atlas migration Job — the row model below mirrors it and issues no DDL, the same
 split `contrib/aws`'s permission store uses.
 
@@ -35,7 +35,7 @@ class _Base(DeclarativeBase):
 
 
 class _Row(_Base):
-    """Mirrors `annotations` in lib/sql/broker/schema.sql; that file is the DDL's source of truth."""
+    """Mirrors `annotations` in contrib/files/sql/schema.sql; that file is the DDL's source of truth."""
 
     __tablename__ = "annotations"
 

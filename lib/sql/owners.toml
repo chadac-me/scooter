@@ -60,6 +60,20 @@ remote_agent_devices = { writers = ["byoc-controller"], readers = [] }
 # byoc-controller owns session_id; agent-host writes the status/last_seen badge.
 remote_agents        = { writers = ["byoc-controller", "agent-host"], readers = [] }
 
+[contrib_aws]
+owner = "broker"
+sql_dir = "contrib/aws/sql"
+
+[contrib_aws.tables]
+permission_requests = { writers = ["broker"], readers = [] }
+
+[contrib_files]
+owner = "broker"
+sql_dir = "contrib/files/sql"
+
+[contrib_files.tables]
+annotations = { writers = ["broker"], readers = [] }
+
 [scheduler]
 owner = "scheduler"
 

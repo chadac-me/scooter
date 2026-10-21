@@ -1,7 +1,7 @@
 # The option preset every contrib gets. Lib-only, since only one of the three
 # evals reading the schema has a `pkgs`; what a contrib builds to is derived from
 # this spec by contrib/build.nix.
-{ name, lib, ... }:
+{ name, config, lib, ... }:
 
 let
   inherit (lib) mkOption mkEnableOption types literalExpression;
@@ -9,6 +9,9 @@ let
   # The services a contrib can plug into, as names only; the packages live in
   # contrib/build.nix.
   serviceNames = [ "broker" "webhooks" ];
+
+  # The services this contrib plugs into, in serviceNames order; the first hosts its `db`.
+  hostServices = lib.filter (s: config.services.${s}.enable) serviceNames;
 
   # The UI surface is metadata only: a brand row and tool-card entries.
   sourceModule = {
@@ -262,6 +265,72 @@ in
             image and missing from a `scooter-rebuild switch`. Anything the module
             refers to relatively (`../../pkgs/…`) resolves the same on both sides.
           '';
+        };
+      };
+    };
+
+    db = mkOption {
+      default = { };
+      description = ''
+        This contrib's OWN Postgres database, holding the tables it wholly owns, with
+        its own Atlas migration history under `<src>/sql` (`schema.sql` +
+        `migrations/`). The platform derives the rest from this: the
+        `scooter.db.<db.name>` spec entry, the database itself (owned by the host
+        service's existing role, so no new user or Secret), the migrator env, and
+        `CONTRIB_<NAME>_DB_NAME` on the host pod. A contrib reaches it through
+        `BrokerContext.contrib_store_config("<name>")`.
+
+        Tables a contrib only reads or writes but does not own stay in core.
+      '';
+      type = types.submodule {
+        options = {
+          enable = mkEnableOption "a database owned by this contrib";
+          name = mkOption {
+            type = types.str;
+            default = "contrib_${builtins.replaceStrings [ "-" ] [ "_" ] name}";
+            defaultText = literalExpression ''"contrib_''${name}"'';
+            description = "Database name (also the Atlas env name).";
+          };
+          tables = mkOption {
+            default = { };
+            description = ''
+              The tables in this database, keyed by name. Must match the
+              `CREATE TABLE`s in `<src>/sql/schema.sql` (ownership.spec.ts checks).
+            '';
+            type = types.attrsOf (types.submodule {
+              options = {
+                writers = mkOption {
+                  type = types.listOf types.str;
+                  default = hostServices;
+                  defaultText = literalExpression "the services this contrib plugs into";
+                  description = "Services that write this table (see `scooter.db`).";
+                };
+                readers = mkOption {
+                  type = types.listOf types.str;
+                  default = [ ];
+                  description = "Services granted SELECT only (see `scooter.db`).";
+                };
+                note = mkOption {
+                  type = types.nullOr types.lines;
+                  default = null;
+                  description = "Rendered as a comment above the table in owners.toml.";
+                };
+                copyFrom = mkOption {
+                  type = types.nullOr types.str;
+                  default = null;
+                  example = "broker";
+                  description = ''
+                    A one-time move: the database that held this table before the
+                    contrib had its own. After migrating, the migrator copies the old
+                    rows in when this table is EMPTY and the source table EXISTS, and
+                    skips otherwise, so re-runs and fresh installs are no-ops. Both
+                    databases must share an owner role. Remove it in the same change
+                    that drops the source table.
+                  '';
+                };
+              };
+            });
+          };
         };
       };
     };

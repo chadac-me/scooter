@@ -50,6 +50,28 @@ env "byoc" {
   }
 }
 
+env "contrib_aws" {
+  src = "file://../../contrib/aws/sql/schema.sql"
+  dev = var.dev_url
+  migration { dir = "file://../../contrib/aws/sql/migrations" }
+  format {
+    migrate {
+      diff = "{{ sql . \"  \" }}"
+    }
+  }
+}
+
+env "contrib_files" {
+  src = "file://../../contrib/files/sql/schema.sql"
+  dev = var.dev_url
+  migration { dir = "file://../../contrib/files/sql/migrations" }
+  format {
+    migrate {
+      diff = "{{ sql . \"  \" }}"
+    }
+  }
+}
+
 env "scheduler" {
   src = "file://scheduler/schema.sql"
   dev = var.dev_url

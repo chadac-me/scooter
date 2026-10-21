@@ -9,11 +9,12 @@
 -- is owned by the OpenFGA migrator, not Atlas — it is intentionally not modelled
 -- here. See todo/draft/DECLARATIVE_SCHEMA_ATLAS.md.
 --
--- Two tables here belong to a CONTRIB, not to the broker: `permission_requests`
--- (contrib/aws) and `annotations` (contrib/files). Only their ownership row moves
--- into the contrib (`scooter.db.broker.tables.*` in its deployment.nix); the DDL
--- stays here because one database is one linear Atlas history. Letting a contrib
--- declare its own schema fragment is tracked in #777.
+-- Two tables here belong to a CONTRIB and are LEGACY: `permission_requests`
+-- (contrib/aws) and `annotations` (contrib/files) now live in each contrib's own
+-- database (`contribs.<name>.db`, DDL in contrib/<name>/sql). They stay here only
+-- as the migrator's one-time copy source (`copyFrom = "broker"`), and the next
+-- release drops them, together with their ownership rows and `copyFrom`. Do not
+-- change them here; a contrib's schema changes go in its own sql/ (#777).
 
 -- Per-conversation sandbox size spec (sandbox/store.py).
 CREATE TABLE "sandbox_size" (

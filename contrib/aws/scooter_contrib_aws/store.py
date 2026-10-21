@@ -1,6 +1,7 @@
 """Permission-request store: the durable record of the request lifecycle.
 
-Backed by the shared `broker` database via SQLAlchemy async, with SQLite as the
+Backed by this contrib's own `contrib_aws` database (DDL in contrib/aws/sql) via
+SQLAlchemy async, with SQLite as the
 local default. STS credentials are never stored here; they live in service.py's
 in-memory cache.
 """

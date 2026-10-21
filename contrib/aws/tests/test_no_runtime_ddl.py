@@ -1,4 +1,4 @@
-"""This contrib must never create tables on Postgres: `permission_requests` is declared in lib/sql/broker/schema.sql and applied by the Atlas migration Job."""
+"""This contrib must never create tables on Postgres: `permission_requests` is declared in contrib/aws/sql/schema.sql and applied by the Atlas migration Job."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """Shared helpers for the files contrib's suite.
 
 SQLite has no migrations, so these tests build the annotation store's schema from
-its own row model; on Postgres the Atlas migrations under lib/sql own the schema
+its own row model; on Postgres the Atlas migrations under ../sql own the schema
 and no service issues DDL.
 """
 
@@ -22,7 +22,7 @@ async def create_schema(store, base) -> None:
     engine = store._engine
     assert engine.dialect.name == "sqlite", (
         f"create_schema is SQLite-only; got {engine.dialect.name!r}. "
-        "On Postgres the lib/sql migrations own the schema."
+        "On Postgres the contrib's sql/ migrations own the schema."
     )
     async with engine.begin() as conn:
         await conn.run_sync(base.metadata.create_all)

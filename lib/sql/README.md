@@ -35,6 +35,15 @@ what production already has — tables historically defined via SQLAlchemy `Stri
 are `character varying`; the agent-host raw-DDL stores are `text`. A type change
 here is a real migration; do not "tidy" them apart.
 
+### Contrib databases live outside this directory
+
+A contrib that owns tables declares `contribs.<name>.db` and keeps its DDL and
+migrations in `contrib/<name>/sql/` (see contrib/README.md, "Owning a database").
+Its owners.toml section carries `sql_dir = "contrib/<name>/sql"`, and atlas.hcl
+points that env there, so every `just db-*` recipe covers it unchanged.
+`scripts/db-sql-dir.sh <db>` resolves the directory. Core bindings are generated
+only for the databases in this directory.
+
 ## Workflow
 
 Everything runs against an **ephemeral, per-invocation local Postgres** (Atlas's

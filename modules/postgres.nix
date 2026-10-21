@@ -28,6 +28,8 @@ let
 
   consumers = pcfg.consumers;
   consumerNames = builtins.attrNames consumers;
+  # Extra databases owned by an existing consumer's role (no role or Secret of their own).
+  databases = pcfg.databases;
 
   # Readers are login roles granted SELECT on another consumer's database, pinned
   # read-only at the server.
@@ -89,6 +91,15 @@ let
       echo "[${name}] created database ${c.db}"
     fi
   '') consumerNames
+  # Extra databases come after the consumer loop that creates their owner roles.
+  + lib.concatMapStrings (name:
+    let d = databases.${name}; owner = consumers.${d.owner}.user; in ''
+    # ---- database ${name}: owner=${owner} (consumer ${d.owner}) ----
+    if [ "$(psql -tAc "SELECT 1 FROM pg_database WHERE datname='${name}'")" != "1" ]; then
+      psql -v ON_ERROR_STOP=1 -c 'CREATE DATABASE "${name}" OWNER "${owner}"'
+      echo "[${name}] created database ${name} owned by ${owner}"
+    fi
+  '') (builtins.attrNames databases)
   # Readers grant on databases the consumer loop above creates, so they come after it.
   + lib.concatMapStrings (name:
     let r = readers.${name}; in ''
@@ -222,6 +233,24 @@ in
         options = {
           db = mkOption { type = types.str; };
           user = mkOption { type = types.str; };
+        };
+      });
+    };
+    # Populated by the contrib glue (modules/contrib-db.nix).
+    databases = mkOption {
+      internal = true;
+      default = { };
+      description = ''
+        Extra databases owned by an EXISTING consumer's role, keyed by database name.
+        No role or Secret is created: a `consumers` entry would get its own Secret, and
+        the provisioning Job resets the role's password to it, rotating the owner's
+        password out from under its service. Used for contrib databases, which stay on
+        their host service's role.
+      '';
+      type = types.attrsOf (types.submodule {
+        options.owner = mkOption {
+          type = types.str;
+          description = "The `consumers` key whose role owns this database.";
         };
       });
     };

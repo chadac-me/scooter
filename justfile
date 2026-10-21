@@ -555,8 +555,9 @@ db-migrate-check:
       if ! printf '%s' "$out" | grep -q "no changes to be made"; then
         printf '%s\n' "$out"
         echo "❌ $env: schema.sql has changes with no migration. Run 'nix develop -c just db-migrate <name>' and commit the result."
-        git checkout -- "lib/sql/$env/migrations" 2>/dev/null || true
-        git clean -fq "lib/sql/$env/migrations" 2>/dev/null || true
+        dir="$(scripts/db-sql-dir.sh "$env")/migrations"
+        git checkout -- "$dir" 2>/dev/null || true
+        git clean -fq "$dir" 2>/dev/null || true
         exit 1
       fi
     done
