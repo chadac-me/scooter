@@ -192,7 +192,7 @@ async def deliver_message(
     files: list[dict] | None = None,
     source: str | None = None,
 ) -> SendOutcome:
-    """Send a follow-up into an existing conversation. `priority` (the default) interrupts the running turn at its next tool-call boundary; `priority=False` is for nonintrusive notices that can wait for the run to end. Only a request that was never accepted is retried; retrying after acceptance would duplicate the message."""
+    """Send a follow-up into an existing conversation. `priority` (the default) interrupts the running turn at its next tool-call boundary; `priority=False` waits for the run to end, which lands the message out of order, so no built-in source uses it. Only a request that was never accepted is retried; retrying after acceptance would duplicate the message."""
     payload = {
         "threadId": conversation_id,
         "runId": str(uuid.uuid4()),

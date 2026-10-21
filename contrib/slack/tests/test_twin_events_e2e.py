@@ -195,4 +195,4 @@ def test_existing_conv_plain_followup_still_forwards(env_existing):
     msg["event"]["ts"] = "1720369100.700000"
     _post(client, msg)
     assert len(dispatched) == 1, dispatched
-    assert dispatched[0][0] == "send" and dispatched[0][3] is False, dispatched
+    assert dispatched[0][0] == "send" and dispatched[0][3] is True, dispatched
