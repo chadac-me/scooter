@@ -25,16 +25,36 @@ def _reset_zombie_state():
             state.clear()
 
 
-class FakeK8s:
-    """In-memory Conversations and agent-host pods, where patch_status merges into status."""
+class RowStore:
+    """The conversations rows, kept CR-shaped ({metadata, spec, status}) so tests read
+    placement through status(); every row write is recorded in `patches`."""
+
+    def __init__(self, convs):
+        self._convs = {c["metadata"]["name"]: c for c in convs}
+        self.patches = []                       # [(name, fields)] per row write
+
+    def _write_row(self, name, fields):
+        self.patches.append((name, fields))
+        cur = self._convs[name].get("status")
+        if cur is None:
+            cur = {}
+            self._convs[name]["status"] = cur
+        cur.update(fields)
+
+    def status(self, name):
+        return self._convs[name].get("status", {})
+
+
+class FakeK8s(RowStore):
+    """In-memory agent-host pods and Sandboxes, plus the row store FakeRows reads. It has no
+    Conversation CR surface, so a controller call to one fails the test."""
 
     def __init__(self, pods, convs, sandboxes=None, replicas=2):
+        super().__init__(convs)
         self._pods = pods                       # list[Pod]
-        self._convs = {c["metadata"]["name"]: c for c in convs}
         self._sandboxes = {s.name: s for s in (sandboxes or [])}  # name -> SandboxRef
         self._replicas = replicas               # agent-host Deployment spec.replicas
         self.scale_calls = []                   # [replicas] per set_agent_host_replicas
-        self.patches = []                       # [(name, status)]
         self.revives = []                       # [(host_ip, conv_name, generation)]
         self.deleted_trees = []                 # [sandbox_name] reaped
         self.cost_calls = []                    # [(pod, cost)] per set_pod_deletion_cost
@@ -66,9 +86,6 @@ class FakeK8s:
     def list_host_pods(self):
         return list(self._pods)
 
-    def list_conversations(self):
-        return list(self._convs.values())
-
     def list_sandboxes(self):
         return list(self._sandboxes.values())
 
@@ -85,29 +102,15 @@ class FakeK8s:
         self.deleted_trees.append(name)
         self._sandboxes.pop(name, None)
 
-    def patch_status(self, name, status):
-        self.patches.append((name, status))
-        # Like the apiserver, a null status materializes into an object on first patch.
-        cur = self._convs[name].get("status")
-        if cur is None:
-            cur = {}
-            self._convs[name]["status"] = cur
-        cur.update({k: v for k, v in status.items()})
-
     def notify_revive(self, host_ip, conv_name, generation):
         self.revives.append((host_ip, conv_name, generation))
 
-    # test helpers
-    def status(self, name):
-        return self._convs[name].get("status", {})
-
 
 class FakeRows:
-    """The conversations rows, stored in the fake's CRs so tests can keep asserting on k.status();
-    the CR mirror then writes the same values, which is harmless."""
+    """The rows handle over a RowStore (usually the FakeK8s itself)."""
 
-    def __init__(self, k8s, fail=False):
-        self._k8s = k8s
+    def __init__(self, store, fail=False):
+        self._store = store
         self.fail = fail                        # simulate Postgres being unreachable
 
     def _row(self, cr):
@@ -123,47 +126,46 @@ class FakeRows:
         }
 
     def _get(self, name):
-        return next((cr for cr in self._k8s.list_conversations() if cr["metadata"]["name"] == name), None)
+        return next((cr for cr in self._store._convs.values() if cr["metadata"]["name"] == name), None)
 
     def list_states(self, running_refs, in_repair):
-        return None if self.fail else [self._row(cr) for cr in self._k8s.list_conversations()]
+        return None if self.fail else [self._row(cr) for cr in self._store._convs.values()]
 
     def list_live(self):
         if self.fail:
             return None
-        return [r for r in map(self._row, self._k8s.list_conversations())
+        return [r for r in map(self._row, self._store._convs.values())
                 if r["phase"] not in ("Suspended", "Failed") or r["host_pod"] is not None]
 
     def referenced_sandboxes(self):
-        return None if self.fail else {r["sandbox_ref"] for r in map(self._row, self._k8s.list_conversations()) if r["sandbox_ref"]}
+        return None if self.fail else {r["sandbox_ref"] for r in map(self._row, self._store._convs.values()) if r["sandbox_ref"]}
 
     def set_phase(self, name, phase):
         if self._get(name) is None:
             return False
-        self._k8s.patch_status(name, {"phase": phase})
+        self._store._write_row(name, {"phase": phase})
         return True
 
     def set_assignment(self, name, host_pod, generation):
         cr = self._get(name)
         if cr is None or generation <= self._row(cr)["host_generation"]:
             return False
-        self._k8s.patch_status(name, {"hostPod": host_pod, "generation": generation})
+        self._store._write_row(name, {"hostPod": host_pod, "generation": generation})
         return True
 
     def release_assignment(self, name, generation):
         cr = self._get(name)
         if cr is None or generation < self._row(cr)["host_generation"] or self._row(cr)["host_pod"] is None:
             return False
-        self._k8s.patch_status(name, {"hostPod": None})
+        self._store._write_row(name, {"hostPod": None})
         return True
 
 
-def _cr(name, host=None, phase="Pending", gen=0, parent=None, sandbox_ref=None, host_ip=None):
+def _cr(name, host=None, phase="Pending", gen=0, parent=None, sandbox_ref=None):
+    """A conversations row in the RowStore's CR-like shape."""
     st = {"phase": phase, "generation": gen}
     if host is not None:
         st["hostPod"] = host
-    if host_ip is not None:
-        st["hostIP"] = host_ip
     spec = {}
     if parent is not None:
         spec["parentId"] = parent
@@ -195,17 +197,6 @@ def test_reap_spares_referenced_sandbox():
     assert reap_orphans(k, grace_seconds=600, rows=FakeRows(k)) == []
 
 
-class RowsWithout(FakeRows):
-    """Rows that lack some of the CRs' sandbox references, as before a writer fans out to the row."""
-
-    def __init__(self, k8s, missing):
-        super().__init__(k8s)
-        self.missing = set(missing)
-
-    def referenced_sandboxes(self):
-        return super().referenced_sandboxes() - self.missing
-
-
 def test_reap_skips_the_pass_when_rows_are_unreadable():
     k = FakeK8s([], [], sandboxes=[SandboxRef("conv-old", age_seconds=1000)])
     assert reap_orphans(k, grace_seconds=600, rows=FakeRows(k, fail=True)) == []
@@ -219,22 +210,10 @@ def test_reap_skips_the_pass_when_no_row_references_any_sandbox():
     assert k.deleted_trees == []
 
 
-def test_reap_spares_a_sandbox_only_a_cr_references():
-    sbs = [SandboxRef("conv-row", age_seconds=1000), SandboxRef("conv-cr-only", age_seconds=1000),
-           SandboxRef("conv-orphan", age_seconds=1000)]
-    k = FakeK8s([], [_cr("a", sandbox_ref="conv-row"), _cr("b", sandbox_ref="conv-cr-only")], sandboxes=sbs)
-    assert reap_orphans(k, grace_seconds=600, rows=RowsWithout(k, {"conv-cr-only"})) == ["conv-orphan"]
-
-
-def test_reap_spares_a_sandbox_only_a_row_references():
-    class NoCRs(FakeK8s):
-        def list_conversations(self):
-            return []
-
-    k = NoCRs([], [_cr("a", sandbox_ref="conv-row")], sandboxes=[SandboxRef("conv-row", age_seconds=1000),
-                                                                 SandboxRef("conv-orphan", age_seconds=1000)])
+def test_reap_deletes_only_the_sandbox_no_row_references():
+    k = FakeK8s([], [_cr("a", sandbox_ref="conv-row")], sandboxes=[SandboxRef("conv-row", age_seconds=1000),
+                                                                   SandboxRef("conv-orphan", age_seconds=1000)])
     rows = FakeRows(k)
-    rows.referenced_sandboxes = lambda: {"conv-row"}
     assert reap_orphans(k, grace_seconds=600, rows=rows) == ["conv-orphan"]
 
 
@@ -288,10 +267,10 @@ def test_notify_revive_returns_immediately_even_if_the_http_hangs():
     assert elapsed < 1.0, f"notify_revive blocked {elapsed:.1f}s (must be fire-and-forget)"
 
 
-def test_assign_patches_host_ip_and_pushes_revive():
+def test_assign_pushes_revive_to_the_pod_ip():
     k = FakeK8s([Pod("a", True, ip="10.42.0.7")], [_cr("c1")])
     reconcile_once(k, cap=10, rows=FakeRows(k))
-    assert k.status("c1")["hostIP"] == "10.42.0.7"
+    assert k.status("c1")["hostPod"] == "a"
     assert k.revives == [("10.42.0.7", "c1", 1)]
 
 
@@ -317,20 +296,10 @@ def test_host_gone_triggers_reassign_with_gen_bump():
 
 
 def test_suspended_conversation_is_detached_end_to_end():
-    # A suspended conversation with stale placement gets both hostPod and hostIP released
-    # while its phase stays Suspended.
-    k = FakeK8s([Pod("a", True)], [_cr("c1", host="a", phase="Suspended", gen=1, host_ip="10.1.4.35")])
+    # A suspended conversation with stale placement has it released while its phase stays
+    # Suspended.
+    k = FakeK8s([Pod("a", True)], [_cr("c1", host="a", phase="Suspended", gen=1)])
     reconcile_once(k, cap=10, rows=FakeRows(k))
-    assert k.status("c1")["hostPod"] is None
-    assert k.status("c1")["hostIP"] is None
-    assert k.status("c1").get("phase") == "Suspended"
-
-
-def test_suspended_stale_hostip_without_hostpod_is_repaired():
-    # A lingering hostIP with no hostPod is repaired, not left as a NoOp.
-    k = FakeK8s([Pod("a", True)], [_cr("c1", phase="Suspended", gen=2, host_ip="10.1.4.35")])
-    reconcile_once(k, cap=10, rows=FakeRows(k))
-    assert k.status("c1")["hostIP"] is None
     assert k.status("c1")["hostPod"] is None
     assert k.status("c1").get("phase") == "Suspended"
 
@@ -439,18 +408,6 @@ def test_reconcile_skips_the_tick_on_unreadable_rows():
     assert k.patches == []
 
 
-def test_a_failed_cr_list_still_reconciles_from_rows():
-    class NoCRList(FakeK8s):
-        def list_conversations(self):
-            raise RuntimeError("apiserver down")
-
-    k = NoCRList([Pod("a", True, ip="10.0.0.1")], [_cr("c1")])
-    rows = FakeRows(k)
-    rows.list_states = lambda running, repair: [rows._row(cr) for cr in k._convs.values()]
-    rows._get = lambda name: k._convs.get(name)
-    assert ("c1", "assign") in reconcile_once(k, cap=10, rows=rows)
-
-
 def test_autoscale_per_pod_metric():
     convs = [_cr_a(f"c{i}") for i in range(6)]
     k = FakeK8s([Pod("a", True), Pod("b", True)], convs, replicas=2)
@@ -473,8 +430,9 @@ def test_drifted_conversation_is_repaired_and_leaves_demand():
     results = reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
 
     assert ("drifted", "mark-suspended") in results
-    # One patch fixes the phase and releases placement.
-    assert ("drifted", {"phase": "Suspended", "hostPod": None, "hostIP": None}) in k8s.patches
+    # The phase is fixed and the placement released.
+    assert ("drifted", {"phase": "Suspended"}) in k8s.patches
+    assert ("drifted", {"hostPod": None}) in k8s.patches
     st = k8s._convs["drifted"]["status"]
     assert st["phase"] == "Suspended"
     assert st["hostPod"] is None
@@ -649,7 +607,7 @@ def _drifting_k8s(names=("drifted",)):
 
 
 def _rearm(k8s, name="drifted"):
-    k8s._convs[name]["status"].update({"phase": "Assigned", "hostPod": "a", "hostIP": "10.0.0.1"})
+    k8s._convs[name]["status"].update({"phase": "Assigned", "hostPod": "a"})
 
 
 def _drift(caplog, level):
@@ -666,7 +624,7 @@ def test_THE_SPAM_a_persistent_drift_warns_once_but_is_still_REPAIRED_every_pass
 
     assert len(_drift(caplog, "WARNING")) == 1
     # Quieting the log must not quiet the fix.
-    assert len([p for p in k8s.patches if p[1] == {"phase": "Suspended", "hostPod": None, "hostIP": None}]) == 5
+    assert len([p for p in k8s.patches if p[1] == {"phase": "Suspended"}]) == 5
 
 
 def test_a_drift_that_CLEARS_and_returns_is_loud_again(caplog):

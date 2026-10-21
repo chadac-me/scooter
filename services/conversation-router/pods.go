@@ -15,12 +15,6 @@ import (
 
 var podGVR = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
-var conversationGVR = schema.GroupVersionResource{
-	Group:    "scooter.chadac.dev",
-	Version:  "v1alpha1",
-	Resource: "conversations",
-}
-
 // watchRetryDelay is the backoff after a failed list/watch.
 const watchRetryDelay = 2 * time.Second
 

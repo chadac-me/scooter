@@ -54,9 +54,7 @@ CREATE TABLE "conversations" (
   "user_titled"      boolean NULL,
   "starred"          boolean NULL,
   "pending_queue"    jsonb NULL,
-  -- ASSIGNMENT / FENCING. Mirrors the Conversation CR's status.hostPod + status.generation,
-  -- which these columns are replacing. Why: PR #654. Named
-  -- host_* rather than owner_* because "owner" above is the end USER, not the host pod.
+  -- ASSIGNMENT / FENCING. host_*, not owner_*: "owner" above is the end user.
   --
   -- host_pod is a pod NAME, never an IP: a name is stable identity, an IP is a mutable
   -- fact Kubernetes owns and can reassign silently. The router resolves name -> address at

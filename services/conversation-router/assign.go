@@ -35,9 +35,6 @@ const lockStripes = 256
 type Assigner struct {
 	store AssignStore
 	pods  PodSet
-	// OnClaim mirrors a won claim onto the CR status.
-	OnClaim func(ctx context.Context, as Assignment, ip string)
-
 	// Striped: one conversation's resolves are serialized.
 	stripes [lockStripes]sync.Mutex
 
@@ -115,7 +112,7 @@ func (a *Assigner) Resolve(ctx context.Context, id string) (ip, convID string, f
 	if len(candidates) == 0 {
 		return "", as.ConvID, true, ErrNoPods
 	}
-	won, mine, err := a.store.Claim(ctx, as.ConvID, as.Gen, candidates)
+	won, _, err := a.store.Claim(ctx, as.ConvID, as.Gen, candidates)
 	if err != nil {
 		return "", as.ConvID, true, err
 	}
@@ -123,9 +120,6 @@ func (a *Assigner) Resolve(ctx context.Context, id string) (ip, convID string, f
 	ip, ok := a.pods.IP(won.Pod)
 	if !ok {
 		return "", as.ConvID, true, ErrNoPods
-	}
-	if a.OnClaim != nil && mine {
-		a.OnClaim(ctx, won, ip)
 	}
 	return ip, won.ConvID, true, nil
 }

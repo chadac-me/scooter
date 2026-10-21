@@ -253,33 +253,32 @@ func TestShortIDResolvesToItsConversation(t *testing.T) {
 	}
 }
 
-func TestOnClaimFiresOnlyForTheWinningClaim(t *testing.T) {
+func TestRacingClaimsAgreeOnOneWinner(t *testing.T) {
 	s := newMemStore("c1")
 	s.delay = 2 * time.Millisecond
-	var mirrored atomic.Int32
-	mk := func(p PodSet) *Assigner {
-		a := liveAssigner(s, p)
-		a.OnClaim = func(_ context.Context, as Assignment, ip string) {
-			if as.Pod == "" || ip == "" {
-				t.Errorf("mirror got %+v %q", as, ip)
-			}
-			mirrored.Add(1)
-		}
-		return a
-	}
-	r1 := mk(pods("pod-a", "10.0.0.1", "pod-b", "10.0.0.2"))
-	r2 := mk(pods("pod-b", "10.0.0.2", "pod-a", "10.0.0.1"))
+	// Two routers whose least-loaded pick differs, so a split claim would show as two IPs.
+	r1 := liveAssigner(s, pods("pod-a", "10.0.0.1", "pod-b", "10.0.0.2"))
+	r2 := liveAssigner(s, pods("pod-b", "10.0.0.2", "pod-a", "10.0.0.1"))
+	var mu sync.Mutex
+	ips := map[string]bool{}
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func(r *Assigner) {
 			defer wg.Done()
-			_, _, _, _ = r.Resolve(context.Background(), "c1")
+			ip, _, _, err := r.Resolve(context.Background(), "c1")
+			if err != nil {
+				t.Errorf("resolve: %v", err)
+				return
+			}
+			mu.Lock()
+			ips[ip] = true
+			mu.Unlock()
 		}([]*Assigner{r1, r2}[i%2])
 	}
 	wg.Wait()
-	if n := mirrored.Load(); n != 1 {
-		t.Fatalf("mirrored %d times, want 1", n)
+	if len(ips) != 1 {
+		t.Fatalf("racing claims routed to %d pods, want 1: %v", len(ips), ips)
 	}
 }
 

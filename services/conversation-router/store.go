@@ -208,7 +208,7 @@ func (s *WriteStore) SetUserTitle(ctx context.Context, id, title string) (*Conve
 		id, title))
 }
 
-// CreateConversation inserts the create-time row alongside the CR, so a conversation created but never prompted still lists.
+// CreateConversation inserts the create-time row, which is the conversation: it lists before its first prompt and the controller assigns it from there.
 func (s *WriteStore) CreateConversation(ctx context.Context, c NewConversation) error {
 	_, err := s.pool.Exec(ctx, insertConversationSQL, conversationRowOf(c, time.Now().UnixMilli()).args()...)
 	return err

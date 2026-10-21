@@ -7,7 +7,7 @@ deletes the pod hosting <thread>'s conversation so the controller reassigns it. 
 shells out to kubectl on PATH, plain-text responses.
 """
 
-import json
+import re
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -36,12 +36,17 @@ class Hook(BaseHTTPRequestHandler):
 
         if self.path.startswith("/move/"):
             thread = self.path.removeprefix("/move/")
-            r = sh("kubectl", "-n", NS, "get", f"conversations.scooter.chadac.dev/{thread}", "-o", "json")
+            # The owner is the conversations row's host_pod, read in the shared Postgres pod.
+            if not re.fullmatch(r"[A-Za-z0-9-]+", thread):
+                return self._reply(400, "bad conversation id")
+            r = sh("kubectl", "-n", NS, "exec", "deploy/agent-shared-db", "-c", "postgres", "--",
+                   "psql", "-U", "postgres", "-d", "agent_host", "-tAc",
+                   f"SELECT coalesce(host_pod, '') FROM conversations WHERE id = '{thread}'")
             if r.returncode != 0:
-                return self._reply(404, r.stderr)
-            host = (json.loads(r.stdout).get("status") or {}).get("hostPod")
+                return self._reply(500, r.stderr)
+            host = r.stdout.strip()
             if not host:
-                return self._reply(409, "conversation has no hostPod yet")
+                return self._reply(409, "conversation has no row or no host_pod yet")
             d = sh("kubectl", "-n", NS, "delete", "pod", host, "--wait=false")
             return self._reply(200 if d.returncode == 0 else 500, f"deleted {host}\n" + d.stderr)
 

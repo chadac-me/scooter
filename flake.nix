@@ -150,7 +150,7 @@
 
           # Bring-your-own-Claude remote agent OCI image (ghcr)
 
-          # Conversation CRD controller (Python)
+          # Conversation controller (Python)
           conversationController = pkgs.callPackage ./services/conversation-controller { };
 
           # Conversation router (Go)

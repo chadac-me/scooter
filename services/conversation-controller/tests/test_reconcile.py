@@ -30,18 +30,6 @@ def test_suspended_with_no_host_is_noop():
     assert isinstance(a, NoOp)
 
 
-def test_suspended_with_stale_hostip_but_no_hostpod_is_detached():
-    # A lingering hostIP with no hostPod is a state to repair, since hostIP must be empty
-    # whenever hostPod is.
-    a = reconcile(
-        conv(host=None, phase="Suspended", gen=2, host_ip="10.1.4.35"),
-        [Pod("a", True)],
-        {},
-        cap=10,
-    )
-    assert isinstance(a, Detach)
-
-
 def test_suspended_never_reassigned_even_when_host_gone():
     a = reconcile(conv(host="dead-pod", phase="Suspended", gen=1), [Pod("b", True)], {"b": 0}, cap=10)
     assert isinstance(a, Detach)

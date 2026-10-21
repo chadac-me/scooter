@@ -92,23 +92,18 @@ let
     ++ (if builtins.any (e: e.name == "SANDBOX_SIZES_JSON") hostEnv then [ ]
         else [ "host.env.SANDBOX_SIZES_JSON (the size picker and the agent's resize tools see no presets)" ]);
 
-  # The fields a seamless rollout depends on: surge strategy, an emptyDir state
-  # volume, and the CRD's routing IP field.
+  # The fields a seamless rollout depends on: surge strategy and an emptyDir state
+  # volume.
   ahDep = res.deployments.agent-host.spec or { };
   ahStrategy = ahDep.strategy or { };
   ahRolling = ahStrategy.rollingUpdate or { };
   stateVol = builtins.head (builtins.filter (v: v.name == "state")
     (res.deployments.agent-host.spec.template.spec.volumes or [ ]) ++ [ { } ]);
-  crdVersions = res.customResourceDefinitions.conversations.spec.versions or [ ];
-  crdStatusProps =
-    if crdVersions == [ ] then { }
-    else (builtins.head crdVersions).schema.openAPIV3Schema.properties.status.properties or { };
   rolloutProblems =
     (if (ahStrategy.type or "") == "RollingUpdate" then [ ] else [ "agent-host.strategy.type != RollingUpdate (needs surge, not Recreate/STS)" ])
     ++ (if (ahRolling.maxUnavailable or null) == 0 then [ ] else [ "agent-host.strategy.maxUnavailable != 0 (a rollout would drop capacity)" ])
     ++ (if (ahRolling.maxSurge or null) == 1 then [ ] else [ "agent-host.strategy.maxSurge != 1 (no new-pod-before-old-drains)" ])
-    ++ (if (stateVol ? emptyDir) then [ ] else [ "agent-host `state` volume is not an emptyDir (a per-pod PVC blocks surge via Multi-Attach)" ])
-    ++ (if (crdStatusProps ? hostIP) then [ ] else [ "Conversation CRD status.hostIP missing (the router's routing address)" ]);
+    ++ (if (stateVol ? emptyDir) then [ ] else [ "agent-host `state` volume is not an emptyDir (a per-pod PVC blocks surge via Multi-Attach)" ]);
 
   # The model catalog must render AGENT_MODELS_JSON and a derived GOOSE_MODEL into
   # the agent-host env, which the example's fakeAgent gates off, so render a non-fake

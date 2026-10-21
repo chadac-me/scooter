@@ -2,8 +2,8 @@
 replicas while only one reconciles.
 
 The Lease is best-effort fencing: two brief leaders would at worst double-patch the same
-status idempotently, and the single-writer guarantee for the log is the CR's
-hostPod/generation rather than this Lease."""
+row idempotently, and the single-writer guarantee for the log is the row's
+host_pod/host_generation rather than this Lease."""
 
 from __future__ import annotations
 

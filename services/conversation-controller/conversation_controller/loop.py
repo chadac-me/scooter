@@ -1,8 +1,7 @@
 """The reconcile loop: the imperative shell around reconcile.py.
 
 Lists pods and the conversations rows (the source of truth), computes per-pod load, decides
-each conversation's action and writes it to the row, mirroring status onto the Conversation
-CR while agent-host still reads it. The caller leader-gates it, and it takes a ControllerK8s
+each conversation's action and writes it to the row. The caller leader-gates it, and it takes a ControllerK8s
 and a rows handle (real or fake) so the whole loop is unit-testable against in-memory fakes."""
 
 from __future__ import annotations
@@ -50,28 +49,6 @@ def _row_state(row: dict, sandbox_modes: dict[str, str | None], ip_of: dict[str,
     )
 
 
-def _patch_cr(k8s, crs: dict, name: str, status: dict) -> None:
-    """Mirror status onto the CR; a missing or failed CR is not fatal."""
-    if name not in crs:
-        return
-    try:
-        k8s.patch_status(name, status)
-    except Exception:  # noqa: BLE001
-        logger.warning("CR status mirror failed", extra={**_C, "conversation_id": name}, exc_info=True)
-
-
-def _mirror_noop(k8s, crs: dict, c: ConversationState) -> None:
-    """Bring a CR's status in line with the row, e.g. after a router claim."""
-    if c.name not in crs:
-        return
-    st = crs[c.name]
-    want = {"hostPod": c.host_pod, "hostIP": c.host_ip, "generation": c.generation}
-    if c.phase_present:
-        want["phase"] = c.phase
-    if any(st.get(k) != v for k, v in want.items()):
-        _patch_cr(k8s, crs, c.name, want)
-
-
 # Zombie repair state (one controller process, one loop). A zombie is a Suspended, unhosted
 # conversation whose Sandbox reads Running; a suspend is issued only on the second consecutive
 # sighting, re-issued only after a backoff, and after a bounded number of attempts the leaked
@@ -99,15 +76,6 @@ _zombie_progress: dict[str, _ZombieProgress] = {}
 _prev_gen: dict[str, int] = {}
 
 
-def _cr_statuses(k8s) -> dict:
-    """CR statuses for the mirror; best-effort, since nothing here decides from them."""
-    try:
-        return {cr["metadata"]["name"]: (cr.get("status") or {}) for cr in k8s.list_conversations()}
-    except Exception:  # noqa: BLE001
-        logger.warning("list_conversations failed", extra={**_C, "skipped": "cr-mirror"}, exc_info=True)
-        return {}
-
-
 def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
     """One reconcile pass over all Conversations, returning [(name, action_kind)]; load is tracked as assignments are made so a burst of Pending conversations spreads across pods."""
     pods = k8s.list_host_pods()
@@ -128,7 +96,6 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
         return []
     ip_of = {p.name: p.ip for p in pods}
     convs = [_row_state(r, sandbox_modes, ip_of) for r in states]
-    crs = _cr_statuses(k8s)
 
     # Seed load from conversations currently assigned to a still-ready pod.
     load: dict[str, int] = {}
@@ -147,7 +114,6 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
     for c in convs:
         action = reconcile(c, pods, load, cap, hosts)
         if isinstance(action, NoOp):
-            _mirror_noop(k8s, crs, c)
             results.append((c.name, "noop"))
             continue
         if isinstance(action, SuspendSandbox):
@@ -179,7 +145,6 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
                 if c.sandbox_ref:
                     k8s.reclaim_sandbox_pod(c.sandbox_ref)
                 rows.set_phase(c.name, "Failed")
-                _patch_cr(k8s, crs, c.name, {"phase": "Failed"})
                 prog.resolved = True
                 logger.error(
                     "zombie sandbox unresolved — escalating (reclaim the leaked pod + mark conversation Failed)",
@@ -212,10 +177,8 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
             results.append((c.name, "suspend-sandbox"))
             continue
         if isinstance(action, Detach):
-            # Release stale placement on a suspended conversation, keeping the invariant that
-            # hostIP is empty whenever hostPod is empty.
+            # Release stale placement on a suspended conversation.
             rows.release_assignment(c.name, c.generation)
-            _patch_cr(k8s, crs, c.name, {"hostPod": None, "hostIP": None})
             hosts[c.name] = None
             results.append((c.name, "detach"))
             continue
@@ -223,8 +186,8 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
             results.append((c.name, "drift-grace"))
             continue
         if isinstance(action, MarkSuspended):
-            # The Sandbox is Suspended but the phase is not: fix the phase and release placement
-            # in one patch, de-duplicating only the log.
+            # The Sandbox is Suspended but the phase is not: fix the phase and release placement,
+            # de-duplicating only the log.
             drift_flagged.add(c.name)
             warn_once(
                 logger,
@@ -234,17 +197,15 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
             )
             rows.set_phase(c.name, "Suspended")
             rows.release_assignment(c.name, c.generation)
-            _patch_cr(k8s, crs, c.name, {"phase": "Suspended", "hostPod": None, "hostIP": None})
             hosts[c.name] = None
             results.append((c.name, "mark-suspended"))
             continue
         if isinstance(action, LeavePending):
-            # Patch unless the CR already says {phase: Pending, hostPod: null}; a status-less CR
-            # is patched so its phase materializes.
+            # Write unless the row already says {phase: Pending, host_pod: null}; a row with no
+            # phase is written so its phase materializes.
             if c.host_pod is not None or not c.phase_present or c.phase != "Pending":
                 rows.set_phase(c.name, "Pending")
                 rows.release_assignment(c.name, c.generation)
-                _patch_cr(k8s, crs, c.name, {"phase": "Pending", "hostPod": None})
             hosts[c.name] = None
             results.append((c.name, "pending"))
             continue
@@ -255,12 +216,6 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
             results.append((c.name, "assign-lost"))
             continue
         rows.set_phase(c.name, action.phase)
-        _patch_cr(k8s, crs, c.name, {
-            "phase": action.phase,
-            "hostPod": action.host_pod,
-            "hostIP": action.host_ip,
-            "generation": action.generation,
-        })
         hosts[c.name] = action.host_pod
         # A subagent shares its parent's pod, so it does not count toward pod capacity.
         if c.parent_id is None:
@@ -295,7 +250,6 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
         for c in convs
         if c.phase == "Suspended"
         and c.host_pod is None
-        and c.host_ip is None
         and c.sandbox_mode == "Suspended"
     }
     for name, prog in list(_zombie_progress.items()):
@@ -399,18 +353,7 @@ def reap_orphans(k8s, grace_seconds: float, rows) -> list[str]:
             extra={**_C, "sandboxes": len(sandboxes)},
         )
         return []
-    # While writers still create CRs, a CR's reference also spares its Sandbox.
-    cr_refs: set[str] = {
-        ref
-        for cr in k8s.list_conversations()
-        if (ref := (cr.get("spec") or {}).get("sandboxRef"))
-    }
-    if missing := cr_refs - row_refs:
-        logger.warning(
-            "sandboxes referenced by a CR but no row",
-            extra={**_C, "count": len(missing), "sample": sorted(missing)[:5]},
-        )
-    orphans = find_orphans(sandboxes, row_refs | cr_refs, grace_seconds)
+    orphans = find_orphans(sandboxes, row_refs, grace_seconds)
     reaped: list[str] = []
     for name in orphans:
         try:

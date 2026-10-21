@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,110 +12,47 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/dynamic"
 )
 
 // Creating a conversation is a control-plane write that consults no agent-host, so it
 // succeeds even when the fleet is at capacity and the conversation is Pending until assigned.
 
-// NewConversation is the conversation to persist: the CR spec, plus create-time metadata that is not part of the CR.
+// NewConversation is the conversation to persist: its id, the spec fields (owner, model,
+// parentId, sandboxRef) that become row columns, and the title.
 type NewConversation struct {
-	Name string
-	Spec map[string]interface{}
-	// Title is create-time row metadata, not a CR field, and is dropped in cluster.
+	Name  string
+	Spec  map[string]interface{}
 	Title string
 }
 
-// ConversationCreator creates a Conversation CR.
+// ConversationCreator persists a new conversation as its `conversations` row.
 type ConversationCreator interface {
 	Create(ctx context.Context, c NewConversation) error
 }
 
-// dynamicCreator uses the same dynamic client as the ownership cache.
-type dynamicCreator struct {
-	dyn       dynamic.Interface
-	namespace string
-}
-
-func (d *dynamicCreator) Create(ctx context.Context, c NewConversation) error {
-	// c.Title is not in the CRD schema and is not written.
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": conversationGVR.Group + "/" + conversationGVR.Version,
-		"kind":       "Conversation",
-		"metadata":   map[string]interface{}{"name": c.Name, "namespace": d.namespace},
-		"spec":       c.Spec,
-	}}
-	_, err := d.dyn.Resource(conversationGVR).Namespace(d.namespace).Create(ctx, obj, metav1.CreateOptions{})
-	return err
-}
-
-// Remove rolls the CR back; already-gone is success.
-func (d *dynamicCreator) Remove(ctx context.Context, name string) error {
-	err := d.dyn.Resource(conversationGVR).Namespace(d.namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-// conversationRowWriter is the row half of dualCreator, kept narrow so which failure is fatal is testable without a Postgres.
+// conversationRowWriter inserts the create-time row; *WriteStore is the real one.
 type conversationRowWriter interface {
 	CreateConversation(ctx context.Context, c NewConversation) error
 }
 
-// crRemover rolls back the CR; optional, so some creators cannot.
-type crRemover interface {
-	Remove(ctx context.Context, name string) error
-}
-
-// mirrorClaim copies a claim onto the CR status, best-effort.
-func mirrorClaim(dyn dynamic.Interface, namespace string) func(context.Context, Assignment, string) {
-	return func(ctx context.Context, as Assignment, ip string) {
-		body, _ := json.Marshal(map[string]interface{}{"status": map[string]interface{}{
-			"phase": "Assigned", "hostPod": as.Pod, "hostIP": ip, "generation": as.Gen,
-		}})
-		mctx, cancel := context.WithTimeout(ctx, time.Second)
-		defer cancel()
-		_, err := dyn.Resource(conversationGVR).Namespace(namespace).Patch(
-			mctx, as.ConvID, types.MergePatchType, body, metav1.PatchOptions{}, "status")
-		if err != nil && !apierrors.IsNotFound(err) {
-			logger("assign").Warn("CR status mirror failed", convAttr(as.ConvID), errAttr(err))
-		}
-	}
-}
-
-// dualCreator writes both the Conversation CR and the `conversations` row on create, so the row can be the source of truth for existence.
-type dualCreator struct {
-	cr   ConversationCreator
+// rowCreator is the cluster create path: the row is the conversation, so its insert is the create.
+type rowCreator struct {
 	rows conversationRowWriter
 }
 
-func (d *dualCreator) Create(ctx context.Context, c NewConversation) error {
-	if err := d.cr.Create(ctx, c); err != nil {
-		return err
-	}
-	if err := d.rows.CreateConversation(ctx, c); err != nil {
-		log := logger("create")
-		remover, ok := d.cr.(crRemover)
-		if ok {
-			// Not the request's context, which may itself be the cancellation.
-			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			defer cancel()
-			if rerr := remover.Remove(rctx, c.Name); rerr != nil {
-				log.Error("conversation row insert failed AND the CR rollback failed; a CR with no row is left behind",
-					errAttr(rerr), slog.String("conversation_id", c.Name), slog.String("row_error", err.Error()))
-				return fmt.Errorf("could not write the conversation row: %w", err)
-			}
-		}
-		log.Error("conversation row insert failed; the create is refused",
-			errAttr(err), slog.String("conversation_id", c.Name), slog.Bool("cr_rolled_back", ok))
+func (r rowCreator) Create(ctx context.Context, c NewConversation) error {
+	if err := r.rows.CreateConversation(ctx, c); err != nil {
 		return fmt.Errorf("could not write the conversation row: %w", err)
 	}
 	return nil
+}
+
+// unavailableCreator refuses every create when the cluster path has no write store, since a
+// conversation without its row does not exist.
+type unavailableCreator struct{}
+
+func (unavailableCreator) Create(context.Context, NewConversation) error {
+	return errors.New("no conversations write store: cannot create conversations")
 }
 
 // createRequest is the accepted body; the server mints the id.
@@ -182,7 +120,6 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	// The title rides alongside the spec because the CR has no field for it.
 	if err := creator.Create(ctx, NewConversation{Name: id, Spec: spec, Title: req.Title}); err != nil {
 		logger("create").Error("conversation create failed",
 			convAttr(id),

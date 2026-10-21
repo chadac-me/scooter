@@ -1,6 +1,6 @@
 { pkgs, lib, n2c, conversationController, ... }:
 
-# OCI image for the Conversation CRD controller.
+# OCI image for the conversation controller.
 
 let
   image = n2c.buildImage {

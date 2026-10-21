@@ -12,7 +12,7 @@ from conversation_controller.loop import AutoscaleState, autoscale_once, reap_or
 from conversation_controller.reconcile import Pod, SandboxRef
 from conversation_controller.rows import ConversationRows
 
-from .test_loop import FakeK8s, _Cfg, _cr, _reset_zombie_state  # noqa: F401  (autouse reset)
+from .test_loop import FakeK8s, _Cfg, _reset_zombie_state  # noqa: F401  (autouse reset)
 
 MIGRATIONS = Path(
     os.environ.get("AGENT_HOST_MIGRATIONS")
@@ -64,32 +64,19 @@ def _placement(dsn, conv_id):
 PODS = [Pod("pod-a", True, ip="10.0.0.1"), Pod("pod-b", True, ip="10.0.0.2")]
 
 
-def test_a_router_claim_is_kept_and_mirrored_to_the_cr(pg):
+def test_a_router_claim_is_kept(pg):
     _row(pg, "c1", host="pod-b", gen=1, phase="Assigned")
-    k = FakeK8s(PODS, [_cr("c1")])  # the CR has no placement yet
-    reconcile_once(k, cap=10, rows=ConversationRows(pg))
+    k = FakeK8s(PODS, [])
+    assert ("c1", "noop") in reconcile_once(k, cap=10, rows=ConversationRows(pg))
     assert _placement(pg, "c1") == ("pod-b", 1, "Assigned")
-    assert k.status("c1")["hostPod"] == "pod-b"
-    assert k.status("c1")["generation"] == 1
-    assert k.status("c1")["hostIP"] == "10.0.0.2"
 
 
 def test_an_unassigned_row_is_assigned_in_the_row(pg):
     _row(pg, "c1")
-    k = FakeK8s(PODS, [_cr("c1")])
+    k = FakeK8s(PODS, [])
     reconcile_once(k, cap=10, rows=ConversationRows(pg))
     host, gen, phase = _placement(pg, "c1")
     assert host in ("pod-a", "pod-b") and gen == 1 and phase == "Assigned"
-    assert k.status("c1")["hostPod"] == host
-
-
-def test_the_cr_never_overwrites_the_row(pg):
-    _row(pg, "c1", host="pod-b", gen=3, phase="Assigned")
-    # A stale CR from before the router claimed.
-    k = FakeK8s(PODS, [_cr("c1", host="pod-a", phase="Assigned", gen=2, host_ip="10.0.0.1")])
-    reconcile_once(k, cap=10, rows=ConversationRows(pg))
-    assert _placement(pg, "c1") == ("pod-b", 3, "Assigned")
-    assert k.status("c1")["hostPod"] == "pod-b"
 
 
 def test_losing_to_a_router_claim_leaves_the_winner(pg, monkeypatch):
@@ -99,7 +86,7 @@ def test_losing_to_a_router_claim_leaves_the_winner(pg, monkeypatch):
     # The router claims between the controller's read and its write.
     _sql(pg, "UPDATE conversations SET host_pod = 'pod-b', host_generation = 1 WHERE id = 'c1'")
     monkeypatch.setattr(rows, "list_states", lambda *_: snapshot)
-    k = FakeK8s([Pod("pod-a", True, ip="10.0.0.1")], [_cr("c1")])
+    k = FakeK8s([Pod("pod-a", True, ip="10.0.0.1")], [])
     assert ("c1", "assign-lost") in reconcile_once(k, cap=10, rows=rows)
     assert _placement(pg, "c1")[:2] == ("pod-b", 1)
     assert k.revives == []
@@ -109,7 +96,7 @@ def test_a_claimed_revive_gets_a_tick_to_resume_its_sandbox(pg):
     # A claimed revive whose sandbox has not resumed yet.
     _row(pg, "c1", host="pod-a", gen=4, phase="Assigned", sandbox_ref="conv-c1")
     sb = SandboxRef("conv-c1", age_seconds=999, operating_mode="Suspended")
-    k = FakeK8s(PODS, [_cr("c1", phase="Suspended", gen=3)], sandboxes=[sb])
+    k = FakeK8s(PODS, [], sandboxes=[sb])
     assert ("c1", "drift-grace") in reconcile_once(k, cap=10, rows=ConversationRows(pg))
     assert _placement(pg, "c1") == ("pod-a", 4, "Assigned")
 
@@ -117,7 +104,7 @@ def test_a_claimed_revive_gets_a_tick_to_resume_its_sandbox(pg):
 def test_drift_that_persists_is_still_repaired(pg):
     _row(pg, "c1", host="pod-a", gen=4, phase="Assigned", sandbox_ref="conv-c1")
     sb = SandboxRef("conv-c1", age_seconds=999, operating_mode="Suspended")
-    k = FakeK8s(PODS, [_cr("c1")], sandboxes=[sb])
+    k = FakeK8s(PODS, [], sandboxes=[sb])
     rows = ConversationRows(pg)
     reconcile_once(k, cap=10, rows=rows)
     assert ("c1", "mark-suspended") in reconcile_once(k, cap=10, rows=rows)
@@ -125,10 +112,10 @@ def test_drift_that_persists_is_still_repaired(pg):
 
 
 def test_unreadable_rows_skip_the_tick(pg):
-    k = FakeK8s(PODS, [_cr("c1")])
+    k = FakeK8s(PODS, [])
     rows = ConversationRows("host=/nonexistent user=postgres dbname=postgres")
     assert reconcile_once(k, cap=10, rows=rows) == []
-    assert k.patches == []
+    assert k.revives == []
 
 
 def test_list_states_skips_rows_that_need_nothing(pg):
@@ -145,14 +132,14 @@ def test_list_states_skips_rows_that_need_nothing(pg):
 def test_a_parked_conversation_is_not_even_read(pg):
     _row(pg, "parked", gen=3, phase="Suspended", sandbox_ref="conv-parked")
     sb = SandboxRef("conv-parked", age_seconds=999, operating_mode="Suspended")
-    k = FakeK8s(PODS, [_cr("parked", phase="Suspended", gen=3)], sandboxes=[sb])
+    k = FakeK8s(PODS, [], sandboxes=[sb])
     assert reconcile_once(k, cap=10, rows=ConversationRows(pg)) == []
 
 
 def test_a_zombie_is_still_seen(pg):
     _row(pg, "zombie", gen=2, phase="Suspended", sandbox_ref="conv-zombie")
     sb = SandboxRef("conv-zombie", age_seconds=999, operating_mode="Running")
-    k = FakeK8s(PODS, [_cr("zombie", phase="Suspended", gen=2)], sandboxes=[sb])
+    k = FakeK8s(PODS, [], sandboxes=[sb])
     assert ("zombie", "suspend-sandbox-suspect") in reconcile_once(k, cap=10, rows=ConversationRows(pg))
 
 
@@ -185,7 +172,7 @@ def test_the_reaper_spares_every_sandbox_a_row_references(pg):
     assert ConversationRows(pg).referenced_sandboxes() == {"conv-c1", "conv-c2"}
 
     sbs = [SandboxRef(n, age_seconds=1000) for n in ("conv-c1", "conv-c2", "conv-orphan")]
-    k = FakeK8s([], [], sandboxes=sbs)  # no CRs at all
+    k = FakeK8s([], [], sandboxes=sbs)
     assert reap_orphans(k, grace_seconds=600, rows=ConversationRows(pg)) == ["conv-orphan"]
 
 

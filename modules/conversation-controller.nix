@@ -1,9 +1,9 @@
-# The Conversation CRD, its controller and the router.
+# The conversation controller and the router.
 #
-# The CRD (scooter.chadac.dev/v1alpha1 Conversation) records which agent-host pod
-# owns each conversation; the leader-elected controller assigns and reassigns
-# hostPod, and the router reverse-proxies each request to the owning pod. Both
-# are always on.
+# The `conversations` row (agent_host database) records which agent-host pod owns
+# each conversation; the leader-elected controller assigns and reassigns host_pod,
+# and the router claims unassigned rows and reverse-proxies each request to the
+# owning pod. Both are always on.
 
 { config, lib, ... }:
 
@@ -41,7 +41,7 @@ in
       type = types.bool;
       default = true;
       description = ''
-        Reap orphaned Sandboxes — those no conversations row (or Conversation CR) references — destroying the whole
+        Reap orphaned Sandboxes — those no conversations row references — destroying the whole
         per-conversation tree (Sandbox + its ServiceAccount + module ConfigMap). Fixes the leak
         where a Sandbox whose Conversation is gone is never cleaned up. See
         todo/docs/ORPHANED_SANDBOX_REAPER.md.
@@ -52,8 +52,9 @@ in
       default = 600;
       description = ''
         Only reap a Sandbox with no owning Conversation if it's older than this many seconds —
-        long enough that a normal create has registered its Conversation CR (the provisioner
-        creates the Sandbox a beat before the CR), so only genuine orphans are reaped.
+        long enough that a normal create has recorded its sandbox_ref on the conversations row
+        (the provisioner creates the Sandbox a beat before that write), so only genuine orphans
+        are reaped.
       '';
     };
     overlayRetentionSeconds = mkOption {
@@ -270,63 +271,7 @@ in
   config = lib.mkMerge [
     ({
     kubernetes.resources = {
-      # --- the CRD ---------------------------------------------------------
-      customResourceDefinitions.conversations = {
-        metadata.name = "conversations.scooter.chadac.dev";
-        spec = {
-          group = "scooter.chadac.dev";
-          scope = "Namespaced";
-          names = {
-            plural = "conversations";
-            singular = "conversation";
-            kind = "Conversation";
-            shortNames = [ "conv" ];
-          };
-          versions = [{
-            name = "v1alpha1";
-            served = true;
-            storage = true;
-            subresources.status = { };  # status is a subresource (controller patches it)
-            schema.openAPIV3Schema = {
-              type = "object";
-              properties = {
-                spec = {
-                  type = "object";
-                  # Structural only; title is row metadata and stays out.
-                  properties = {
-                    model = { type = "string"; };
-                    owner = { type = "string"; };
-                    parentId = { type = "string"; };
-                    creatorPod = { type = "string"; };
-                    sandboxRef = { type = "string"; };
-                  };
-                };
-                status = {
-                  type = "object";
-                  properties = {
-                    # Pending | Assigned | Suspended | Orphaned; the controller owns the
-                    # assignment phases and the agent-host publishes Assigned/Suspended.
-                    phase = { type = "string"; };
-                    hostPod = { type = "string"; nullable = true; };  # owner pod name, the fencing identity
-                    # Owner pod IP, the routing address; null when Pending.
-                    hostIP = { type = "string"; nullable = true; };
-                    assignedAt = { type = "string"; };
-                    generation = { type = "integer"; };  # fence epoch, bumps per (re)assignment
-                  };
-                };
-              };
-            };
-            additionalPrinterColumns = [
-              { name = "Phase"; type = "string"; jsonPath = ".status.phase"; }
-              { name = "Host"; type = "string"; jsonPath = ".status.hostPod"; }
-              { name = "IP"; type = "string"; jsonPath = ".status.hostIP"; }
-              { name = "Gen"; type = "integer"; jsonPath = ".status.generation"; }
-            ];
-          }];
-        };
-      };
-
-      # --- SA + RBAC (patch Conversation status, watch pods, hold a Lease) --
+      # --- SA + RBAC (watch pods, hold a Lease, manage Sandboxes) ---------
       serviceAccounts.conversation-controller.metadata = {
         name = "conversation-controller";
         namespace = cfg.namespace;
@@ -334,7 +279,6 @@ in
       roles.conversation-controller = {
         metadata = { name = "conversation-controller"; namespace = cfg.namespace; };
         rules = [
-          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations" "conversations/status" ]; verbs = [ "get" "list" "watch" "patch" "update" ]; }
           # patch for the pod-deletion-cost annotation; delete for reclaiming a
           # leaked sandbox pod, never the Sandbox CR.
           { apiGroups = [ "" ]; resources = [ "pods" ]; verbs = [ "get" "list" "watch" "patch" "delete" ]; }
@@ -407,7 +351,7 @@ in
         };
       };
 
-      # --- the ROUTER: SA + RBAC (watch Conversations for the cache) + Deployment ----
+      # --- the ROUTER: SA + RBAC (watch agent-host pods) + Deployment ----
       serviceAccounts.conversation-router.metadata = {
         name = "conversation-router";
         namespace = cfg.namespace;
@@ -415,9 +359,6 @@ in
       roles.conversation-router = {
         metadata = { name = "conversation-router"; namespace = cfg.namespace; };
         rules = [
-          # Creates CRs, and mirrors its claims onto their status.
-          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations" ]; verbs = [ "create" "delete" ]; }
-          { apiGroups = [ "scooter.chadac.dev" ]; resources = [ "conversations/status" ]; verbs = [ "patch" ]; }
           # Ready agent-host pods, to resolve an assigned pod name.
           { apiGroups = [ "" ]; resources = [ "pods" ]; verbs = [ "get" "list" "watch" ]; }
         ];
