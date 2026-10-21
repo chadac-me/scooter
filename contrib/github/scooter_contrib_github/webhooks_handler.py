@@ -212,7 +212,7 @@ async def _handle_comment(payload: dict):
         forward_msg = _format_forwarded_message(
             comment_text, owner, repo, issue_number, is_pr, has_mention, comment_id,
         )
-        outcome = await deliver_message(existing, forward_msg, priority=has_mention, source="github")
+        outcome = await deliver_message(existing, forward_msg, source="github")
         if outcome is not SendOutcome.NOT_FOUND:
             # The conversation still exists, so a failed run keeps its mapping (issue #802).
             if outcome is not SendOutcome.DELIVERED:

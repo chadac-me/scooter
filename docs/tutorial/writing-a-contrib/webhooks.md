@@ -96,9 +96,10 @@ async def _handle_comment(event: dict) -> None:
     if is_pending(existing):
         return  # a conversation for this issue is being created right now
     if existing:
+        # Interrupts the agent at its next tool-call boundary; pass priority=False
+        # for chatter that can wait until the run ends.
         outcome = await deliver_message(
-            existing, f"{author} commented on {key}:\n\n{text}",
-            priority=policy.mentions_agent(text), source="acme",
+            existing, f"{author} commented on {key}:\n\n{text}", source="acme",
         )
         if outcome is not SendOutcome.NOT_FOUND:
             return

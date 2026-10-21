@@ -13,7 +13,7 @@ import { UserSkillError, type UserSkillStore } from "../../src/session/userSkill
 import { shortId } from "../../src/session/manager.js";
 import type { Conversation, SessionManager, ConversationStore, ConversationLink } from "../../src/session/manager.js";
 import type { AguiServer } from "../../src/agui/server.js";
-import type { AguiEvent } from "../../src/bridge.js";
+import { PRIORITY_INTERRUPT, type AguiEvent } from "../../src/bridge.js";
 
 const conv = (over: Partial<Conversation> = {}): Conversation => ({
   id: "c1",
@@ -481,7 +481,7 @@ describe("management API", () => {
     const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
     const { status } = await call(api, "POST", "/conversations/c1/messages", { text: "do it" });
     expect(status).toBe(202);
-    expect(sessions.enqueueByThread).toHaveBeenCalledWith("c1", "do it");
+    expect(sessions.enqueueByThread).toHaveBeenCalledWith("c1", "do it", undefined, PRIORITY_INTERRUPT);
   });
 
   it("POST /conversations/:id/messages with a source queues a system event", async () => {
@@ -489,7 +489,7 @@ describe("management API", () => {
     const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
     const { status } = await call(api, "POST", "/conversations/c1/messages", { text: "a remark", source: "files" });
     expect(status).toBe(202);
-    expect(sessions.enqueueByThread).toHaveBeenCalledWith("c1", "a remark", "files");
+    expect(sessions.enqueueByThread).toHaveBeenCalledWith("c1", "a remark", "files", PRIORITY_INTERRUPT);
   });
 
   it.each(["github", "slack", "ui", "resume", "Files", "", "a b"])(
