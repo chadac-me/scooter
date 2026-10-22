@@ -39,9 +39,11 @@ here is a real migration; do not "tidy" them apart.
 
 A contrib that owns tables declares `contribs.<name>.db` and keeps its DDL and
 migrations in `contrib/<name>/sql/` (see contrib/README.md, "Owning a database").
-Its owners.toml section carries `sql_dir = "contrib/<name>/sql"`, and atlas.hcl
-points that env there, so every `just db-*` recipe covers it unchanged.
-`scripts/db-sql-dir.sh <db>` resolves the directory. Core bindings are generated
+`just db-generate` renders its owners.toml and atlas.hcl into that directory too, so
+the files here list only core databases. The `just db-*` recipes find contrib
+databases through `scripts/db-sql-dir.sh`, which reads lib/sql/owners.toml and every
+`contrib/*/sql/owners.toml`, and `scripts/atlas-dev.sh` runs Atlas from the
+database's own directory. Core bindings are generated
 only for the databases in this directory.
 
 ## Workflow

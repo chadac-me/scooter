@@ -516,10 +516,11 @@ check-conv-token-vector:
 # The shared Postgres schema is declared in lib/sql/<db>/schema.sql, with Atlas
 # owning the migrations under lib/sql/<db>/migrations and each recipe spinning its
 # own ephemeral Postgres as the dev database (scripts/atlas-dev.sh). The database
-# list is read from the generated owners.toml at parse time, so it has to be a
-# file read rather than `nix eval`.
+# list is read from the generated owners.toml files (lib/sql's, and each contrib
+# database's in contrib/<name>/sql) at parse time, so it has to be a file read
+# rather than `nix eval`.
 
-db_envs := `sed -n 's/^\[\([a-z_][a-z_0-9]*\)\]$/\1/p' lib/sql/owners.toml | tr "\n" " "`
+db_envs := `scripts/db-sql-dir.sh --all`
 
 # Regenerate everything derived from the schema spec (owners.toml, atlas.hcl, and
 # the @scooter/schema and scooter_schema bindings) and commit the result.
@@ -530,8 +531,9 @@ db-generate:
 # differs.
 db-generate-check:
     scripts/db-generate.sh
-    @git diff --exit-code -- lib/ts/scooter-schema/src lib/py/scooter-schema/src \
-      lib/sql/owners.toml lib/sql/atlas.hcl \
+    @test -z "$(git status --porcelain -- lib/ts/scooter-schema/src lib/py/scooter-schema/src \
+      lib/sql/owners.toml lib/sql/atlas.hcl 'contrib/*/sql/owners.toml' 'contrib/*/sql/atlas.hcl')" \
+      || (git status --short -- lib/sql 'contrib/*/sql' && false) \
       || (echo "❌ generated drift: the scooter.db spec or lib/sql changed without regenerating. Run 'nix develop -c just db-generate' and commit the result." && exit 1)
     @echo "✅ generated spec artifacts + ORM bindings are in sync"
 
