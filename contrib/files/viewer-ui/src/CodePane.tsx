@@ -60,13 +60,13 @@ export function CodePane({
         const m = a.metadata;
         if (m.kind === "thread")
           return (
-            <div className="max-w-3xl px-3 py-2">
+            <div className="max-w-4xl px-3 py-2">
               <ThreadCard thread={m.thread} path={path} onChange={onChange} />
             </div>
           );
         const anchor = anchorOf(lines, m.range);
         return (
-          <div className="m-2 max-w-3xl rounded-lg border border-border bg-card p-3 font-sans text-sm shadow-sm">
+          <div className="m-2 max-w-4xl rounded-lg border border-border bg-card p-3 font-sans text-sm shadow-sm">
             <p className="mb-2 text-xs text-muted-foreground">
               Comment on {anchor.line === anchor.end ? `line ${anchor.line}` : `lines ${anchor.line}–${anchor.end}`}
             </p>

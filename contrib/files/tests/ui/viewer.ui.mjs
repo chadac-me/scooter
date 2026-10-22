@@ -39,11 +39,12 @@ const ws = join(root, "workspace");
 mkdirSync(join(ws, "docs"), { recursive: true });
 mkdirSync(join(ws, "src"), { recursive: true });
 
-// Hard-wrapped prose is the selection case that used to anchor nowhere: the
-// rendered paragraph joins its source lines, so the quote must map back across them.
+// Hard-wrapped prose with inline markup is the selection case that used to anchor
+// short: the rendered paragraph joins its source lines and drops the `**`, so the
+// quote must map back across both.
 const DOC = `# Review me
 
-The viewer renders a document from the sandbox so that a reader can select a
+The viewer renders a document from the sandbox so that a **reader** can select a
 passage of it and leave a comment the agent will see on its next turn.
 
 A second paragraph, so that two threads have somewhere different to live.
@@ -119,6 +120,11 @@ const viewer = spawn(python, [join(viewerDir, "server.py")], {
     SCOOTER_FILES_STATE: join(root, "annotations.json"),
     BROKER_URL: `http://127.0.0.1:${broker.address().port}`,
     BROKER_TOKEN_PATH: join(root, "token"),
+    // Run from inside a sandbox, the inherited self route would wake the live
+    // conversation with every test comment; the stub broker is the only sink.
+    SCOOTER_SELF_URL: "",
+    SCOOTER_SELF_TOKEN_PATH: "",
+    CONVERSATION_ID: "",
   },
   stdio: ["ignore", "inherit", "inherit"],
 });
@@ -159,23 +165,39 @@ try {
   await page.goto(`${url}/?path=docs/review.md`);
   await page.locator("article h1").waitFor();
   check("the document renders", (await page.locator("article h1").textContent()) === "Review me");
+  check("the tab is titled by the document's heading", (await page.title()) === "Review me · Files", await page.title());
+  check("the page has a favicon", (await page.locator('link[rel="icon"]').count()) === 1);
   // Shiki highlights after first paint.
   check("code fences are highlighted", await page.locator("article pre.shiki").waitFor({ timeout: 10_000 }).then(() => true, () => false));
 
-  // Select the whole hard-wrapped paragraph and release, as a reader's drag would.
-  const select = async (index) => {
+  // Select a paragraph's text from `from` through `to` and release, as a reader's
+  // drag would. The range may cross element boundaries (the paragraph's <strong>).
+  const select = async (index, from, to) => {
     const para = page.locator("article p").nth(index);
     await para.scrollIntoViewIfNeeded();
-    await para.evaluate((p) => {
+    await para.evaluate((p, [from, to]) => {
+      const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      let all = "";
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push([n, all.length]), (all += n.data);
+      const at = (i) => {
+        const [n, start] = nodes.findLast(([, s]) => s <= i);
+        return [n, i - start];
+      };
+      const a = all.indexOf(from);
+      const b = all.indexOf(to, a) + to.length;
       const r = document.createRange();
-      r.selectNodeContents(p);
+      r.setStart(...at(a));
+      r.setEnd(...at(b - 1));
+      r.setEnd(r.endContainer, r.endOffset + 1);
       getSelection().removeAllRanges();
       getSelection().addRange(r);
       p.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-    });
+    }, [from, to]);
   };
 
-  await select(0);
+  // From mid-line, across the bold word and the hard wrap, to mid-line.
+  await select(0, "so that a", "leave a comment");
   const offer = page.getByRole("button", { name: "Comment", exact: true }).first();
   await offer.waitFor();
   await offer.click();
@@ -195,12 +217,22 @@ try {
   const first = mine[0];
   check(
     "the comment anchors to the paragraph's source line",
-    first?.line === 3 && first.quote.length > 10 && DOC.includes(first.quote),
-    JSON.stringify(first && { line: first.line, quote: first.quote }),
+    first?.line === 3,
+    JSON.stringify(first && { line: first.line }),
   );
   check(
-    "the quoted passage is painted",
-    await page.evaluate(() => "highlights" in CSS && (CSS.highlights.get("comment")?.size ?? 0) === 1),
+    "the quote is the whole selection, as the source spells it",
+    first?.quote === "so that a **reader** can select a\npassage of it and leave a comment",
+    JSON.stringify(first?.quote),
+  );
+  check(
+    "the quoted passage is painted, all of it",
+    await page.evaluate(() => {
+      const h = CSS.highlights.get("comment");
+      if (h?.size !== 1) return false;
+      const [r] = h;
+      return r.toString().replace(/\s+/g, " ") === "so that a reader can select a passage of it and leave a comment";
+    }),
   );
 
   // A reply lands inside its thread, and adds no second mark in the text.
@@ -223,13 +255,73 @@ try {
   check("the sending badge clears with no user action", !(await page.locator("body").innerText()).includes("sending"));
   check("the broker received both", await until(() => store.size === 2), `${store.size} at the broker`);
 
-  // A second thread elsewhere, so a delete can be shown to leave it alone.
-  await select(1);
-  await offer.waitFor();
-  await offer.click();
+  // A second thread elsewhere, on a whole paragraph from its margin button, so a
+  // delete can be shown to leave it alone.
+  const second = page.locator("article p").nth(1);
+  // Travel to the margin button as a pointer does, in steps across the empty margin
+  // between the text and the button: the button must still be there on arrival.
+  const pbox = await second.boundingBox();
+  const gutter = page.getByRole("button", { name: "Comment on this paragraph" });
+  // Coming in from the side, the pointer reaches the margin before any text: the
+  // paragraph level with it already offers its button there.
+  await page.mouse.move(5, pbox.y + pbox.height / 2);
+  await page.mouse.move(pbox.x - 16, pbox.y + pbox.height / 2, { steps: 12 });
+  const fromMargin = await gutter.boundingBox().catch(() => null);
+  check(
+    "the margin alone shows the paragraph's button",
+    !!fromMargin && Math.abs(fromMargin.y - pbox.y) < 2,
+    JSON.stringify({ button: fromMargin?.y, para: pbox.y }),
+  );
+  await page.mouse.move(pbox.x + 40, pbox.y + pbox.height / 2);
+  await gutter.waitFor();
+  const btn = await gutter.boundingBox();
+  await page.mouse.move(btn.x + btn.width / 2, btn.y + btn.height / 2, { steps: 12 });
+  check("the margin button stays while the pointer travels to it", await gutter.isVisible());
+  await page.mouse.down();
+  await page.mouse.up();
+  check("the margin button opens a composer", (await composer.count()) === 1);
   await composer.fill("second thread");
   await submit.click();
   await page.locator("[data-thread]").nth(1).waitFor();
+  const para = (await notes("docs/review.md")).find((a) => a.text === "second thread");
+  check(
+    "a paragraph comment quotes the whole paragraph",
+    para?.line === 6 && para.quote === "A second paragraph, so that two threads have somewhere different to live.",
+    JSON.stringify(para && { line: para.line, quote: para.quote }),
+  );
+  check(
+    "a paragraph comment is marked in the margin, not painted",
+    (await page.locator("[data-mark]").count()) === 2 &&
+      (await page.evaluate(() => CSS.highlights.get("comment")?.size === 1)),
+    `${await page.locator("[data-mark]").count()} marks`,
+  );
+  const markTop = await page.locator("[data-mark]").nth(1).evaluate((m) => m.getBoundingClientRect().top);
+  const paraTop = await second.evaluate((p) => p.getBoundingClientRect().top);
+  check("the marker sits beside its paragraph", Math.abs(markTop - paraTop) < 4, `${markTop} vs ${paraTop}`);
+
+  // Below the first screenful too: in a short window, scrolled to the doc's last
+  // block. The doc column once ended a screen down, so the margin under it was outside
+  // the column and crossing it dropped the button.
+  await page.setViewportSize({ width: 1440, height: 320 });
+  const last = page.locator("article p").last();
+  await last.scrollIntoViewIfNeeded();
+  const lbox = await last.boundingBox();
+  await page.mouse.move(lbox.x + 40, lbox.y + lbox.height / 2);
+  await gutter.waitFor();
+  const lbtn = await gutter.boundingBox();
+  await page.mouse.move(lbtn.x + lbtn.width / 2, lbtn.y + lbtn.height / 2, { steps: 12 });
+  check(
+    "the margin button stays below the first screenful",
+    (await gutter.isVisible()) && Math.abs((await gutter.boundingBox()).y - lbox.y) < 2,
+    JSON.stringify({ scrolledBy: await page.locator("article").evaluate((a) => -a.getBoundingClientRect().top) }),
+  );
+  await page.mouse.move(5, 5);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator("[data-mark]").nth(1).click();
+  check(
+    "the marker opens its thread",
+    (await page.locator(`[data-thread="${para?.thread}"]`).getAttribute("class"))?.includes("border-brand"),
+  );
   const cards = await page.locator("[data-thread]").evaluateAll((els) => els.map((e) => e.getBoundingClientRect()));
   check("the cards do not overlap", cards.length === 2 && cards[0].bottom <= cards[1].top, JSON.stringify(cards));
 
@@ -244,6 +336,46 @@ try {
   const left = await notes("docs/review.md");
   check("deleting one thread leaves the other", left.length === 1 && left[0].text === "second thread", JSON.stringify(left.map((a) => a.text)));
   check("deletes reach the broker", await until(() => store.size === 1), `${store.size} at the broker`);
+
+  // Any thread folds and unfolds; resolving folds it, reopening unfolds it, and a
+  // reopened thread can still be folded.
+  const slot = page.locator(`[id="thread-${left[0].thread}"]`);
+  const folded = slot.locator('button[aria-expanded="false"]');
+  await slot.getByRole("button", { name: "Collapse thread" }).click();
+  await folded.waitFor();
+  check("an open thread collapses", (await slot.locator("[data-thread]").count()) === 0);
+  await folded.click();
+  await slot.locator("[data-thread]").waitFor();
+  // From a fresh load, so the thread isn't the selected one: a click in a card also
+  // selects its thread, and selecting a thread unfolds it, which once undid the fold.
+  await page.reload();
+  await slot.getByRole("button", { name: "Resolve" }).waitFor();
+  // Resolving folds the thread at once, ahead of the server, with a spinner in place
+  // of the check mark until the server takes it. Hold the request to see that.
+  let release;
+  const held = new Promise((r) => (release = r));
+  const route = /\/annotations\/threads\/[^/]+\/resolve$/;
+  await page.route(route, async (r) => { await held; await r.continue(); });
+  await slot.getByRole("button", { name: "Resolve" }).click();
+  check("resolving folds the thread before the server answers", await folded.waitFor({ timeout: 1000 }).then(() => true, () => false));
+  check("a thread being resolved shows a spinner", (await folded.getByLabel("Saving").count()) === 1);
+  release();
+  await folded.getByLabel("Saving").waitFor({ state: "detached" });
+  await page.unroute(route);
+  const tick = await folded.locator("svg").first().evaluate((s) => s.getBoundingClientRect().width);
+  check("a resolved thread folds, with its check mark showing", tick >= 12, `${tick}px`);
+  await page.waitForTimeout(300);
+  check("a resolved thread stays folded", (await slot.locator("[data-thread]").count()) === 0);
+  check("the resolve reached the server", await until(async () => (await notes("docs/review.md"))[0]?.resolved === true));
+  await folded.click();
+  await slot.getByRole("button", { name: "Reopen" }).click();
+  await slot.getByRole("button", { name: "Resolve" }).waitFor();
+  check("reopening unfolds the thread", (await slot.locator("[data-thread]").count()) === 1);
+  await slot.getByRole("button", { name: "Collapse thread" }).click();
+  check("a reopened thread still collapses", await folded.waitFor({ timeout: 3000 }).then(() => true, () => false));
+  // Picking the folded thread from the document, by its margin badge, unfolds it.
+  await page.locator("[data-mark]").first().click();
+  check("picking a folded thread in the document unfolds it", await slot.locator("[data-thread]").waitFor({ timeout: 3000 }).then(() => true, () => false));
 
   // --- questions ------------------------------------------------------------------
 
@@ -357,6 +489,7 @@ Second?
     new URL(page.url()).searchParams.get("path") === "src/sample.py",
     page.url(),
   );
+  check("a non-document is titled by its filename", (await page.title()) === "sample.py · Files", await page.title());
   await page.goBack();
   await page.locator("article h1").waitFor();
   check("back returns to the document", new URL(page.url()).searchParams.get("path") === "docs/review.md", page.url());

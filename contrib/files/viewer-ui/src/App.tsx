@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Code2, Eye, Moon, PanelLeft, RefreshCw, Sun } from "lucide-react";
+import { ChevronRight, Code2, Eye, FileSearch, Moon, PanelLeft, RefreshCw, Sun } from "lucide-react";
 import clsx from "clsx";
 import { api, threadsOf, type Annotation, type FileView, type Question } from "./api";
 import { Tree } from "./Tree";
@@ -23,6 +23,27 @@ function useDark() {
       return !d;
     });
   return [dark, toggle] as const;
+}
+
+/** A markdown document's first `# ` heading as plain text, skipping fenced code. */
+function mdTitle(body: string): string {
+  let fence = "";
+  for (const line of body.split("\n")) {
+    const f = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (f) {
+      if (!fence) fence = f[1][0];
+      else if (f[1][0] === fence) fence = "";
+      continue;
+    }
+    if (fence) continue;
+    const h = /^\s{0,3}#[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/.exec(line);
+    if (h)
+      return h[1]
+        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+        .replace(/[`*_~]/g, "")
+        .trim();
+  }
+  return "";
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -136,27 +157,37 @@ export function App() {
   const open = threads.filter((t) => !t.resolved).length;
   const unanswered = questions.filter((q) => !q.answered).length;
 
+  // The tab names what is open: a document by its title, anything else by its filename.
+  const shownFile = file && file.path === path ? file : null;
+  const docTitle = useMemo(() => (shownFile?.renderer === "markdown" ? mdTitle(shownFile.body) : ""), [shownFile]);
+  useEffect(() => {
+    const name = path.split("/").pop() || "";
+    const label = docTitle || name;
+    document.title = label ? `${label} · Files` : "Files";
+  }, [path, docTitle]);
+
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-header px-3 font-sans text-sm">
         <button className="icon-btn" onClick={() => setTree(!tree)} title="Toggle file tree">
           <PanelLeft className="size-4" />
         </button>
-        <nav className="flex min-w-0 items-center gap-1 truncate text-muted-foreground">
-          {(path || "Files").split("/").map((part, i, all) => (
-            <span key={i} className="flex items-center gap-1">
-              {i > 0 && <span className="opacity-50">/</span>}
-              <span className={clsx(i === all.length - 1 && "font-medium text-foreground")}>{part}</span>
+        <nav aria-label="Path" className="flex min-w-0 items-center gap-0.5 text-muted-foreground">
+          {(path ? path.split("/") : ["Files"]).map((part, i, all) => (
+            <span key={i} className={clsx("flex items-center gap-0.5", i === all.length - 1 ? "min-w-0" : "shrink-0")}>
+              {i > 0 && <ChevronRight className="size-3.5 shrink-0 opacity-50" />}
+              <span className={clsx("truncate", i === all.length - 1 && "font-medium text-foreground")}>{part}</span>
             </span>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
           {unanswered > 0 && (
             <span className="pill bg-brand/15 text-brand">
               {unanswered} question{unanswered > 1 ? "s" : ""}
             </span>
           )}
-          {open > 0 && (
+          {/* The preview's comment rail carries its own count; elsewhere this is the only one. */}
+          {open > 0 && !(md && !source) && (
             <span className="pill bg-warning/15 text-warning">
               {open} open comment{open > 1 ? "s" : ""}
             </span>
@@ -172,6 +203,7 @@ export function App() {
               </button>
             </div>
           )}
+          <span aria-hidden className="mx-0.5 h-5 w-px bg-border" />
           <button
             className={clsx("icon-btn", live && "text-brand")}
             onClick={toggleLive}
@@ -195,7 +227,10 @@ export function App() {
         <main className="flex min-w-0 flex-1 flex-col">
           {error && <p className="m-6 font-sans text-sm text-destructive">{error}</p>}
           {!path && !error && (
-            <div className="m-auto font-sans text-sm text-muted-foreground">Pick a file from the tree.</div>
+            <div className="m-auto flex flex-col items-center gap-2 font-sans text-sm text-muted-foreground">
+              <FileSearch className="size-8 opacity-40" />
+              Pick a file from the tree.
+            </div>
           )}
           {file && file.path === path && (file.renderer === "binary" || file.renderer === "too-large") && (
             <div className="m-auto font-sans text-sm text-muted-foreground">
