@@ -12,7 +12,7 @@
       default = true;
       description = ''
         Mount the annotation store (PUT/GET /files/annotations/*) the viewer syncs
-        a reviewer's comments and answers to, persisted in the shared `broker`
+        a reviewer's comments and answers to, persisted in this contrib's own
         database. Once the broker stores a remark, the viewer prompts its
         conversation through the conversation router's sandbox self-access
         listener, so the agent wakes on it; that needs
@@ -31,6 +31,13 @@
 
       # The brand row a review remark's system event wears in the thread.
       ui.source = { label = "Files"; icon = ./icon.svg; };
+
+      # Its own database (contrib_files), so its Atlas history in ./sql is its own.
+      # copyFrom moves the rows out of `broker` once; it goes with the broker drop.
+      db = {
+        enable = true;
+        tables.annotations.copyFrom = "broker";
+      };
 
       # The broker half is the annotation store; the viewer itself runs in the
       # sandbox (./sandbox.nix) on the stdlib and is not packaged.

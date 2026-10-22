@@ -168,7 +168,7 @@ def aws(ctx: BrokerContext) -> Provider:
         # Mounted but inert: routes return 503 while set_service is unset.
         return Provider(name="aws", transports=[transport], enabled=False)
 
-    store = PermissionStore(ctx.store_config)
+    store = PermissionStore(ctx.contrib_store_config("aws"))
     iam = _iam_override or IamProvisioner(
         region=settings.aws_region,
         external_id=settings.aws_sts_external_id,

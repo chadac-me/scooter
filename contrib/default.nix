@@ -45,6 +45,10 @@ let
 
       # The UI half is metadata only and not per-service, so it sits beside the buckets.
       uiManifest = mkUiManifest contribs;
+      # Database name -> `<src>/sql`, for the contribs that own a database; the
+      # migrator image bundles these beside lib/sql.
+      sqlDirs = lib.mapAttrs' (_: c: lib.nameValuePair c.db.name (c.src + "/sql"))
+        (lib.filterAttrs (_: c: c.db.enable) contribs);
       packages = byName;
       inherit eval;
     };

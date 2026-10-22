@@ -96,6 +96,13 @@ in
     config = {
       src = ./.;
 
+      # Its own database (contrib_aws), so its Atlas history in ./sql is its own.
+      # copyFrom moves the rows out of `broker` once; it goes with the broker drop.
+      db = {
+        enable = true;
+        tables.permission_requests.copyFrom = "broker";
+      };
+
       # The broker service half.
       services.broker = {
         enable = true;

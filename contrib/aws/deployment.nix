@@ -14,8 +14,9 @@ in
   # deployment running it, since `just db-generate` renders from bare defaults.
   config = lib.mkMerge [
     (lib.mkIf ccfg.enable {
-      # Writer is `broker`, since the contrib runs inside the broker image through
-      # the broker's own database role, and the owner is modules/broker.nix's.
+      # LEGACY: the table now lives in contrib_aws (contrib.nix `db`). The broker copy
+      # stays declared only as the migrator's copy source, until the drop that
+      # removes this row and `copyFrom` together.
       scooter.db.broker.tables.permission_requests = { writers = [ "broker" ]; };
     })
 

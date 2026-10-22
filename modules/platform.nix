@@ -203,7 +203,7 @@ in
   # ./testing.nix is absent on purpose (test-only overrides are opted into by a test
   # manifest), and the contribs arrive via `contribModules`, each declaring its own
   # `contribs.<name>` options and manifests with contrib/spec.nix as their schema.
-  imports = [ kubenix.modules.k8s ./images.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./legacy-state-migration.nix ./event-backfill.nix ./skills ]
+  imports = [ kubenix.modules.k8s ./images.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./contrib-db.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./legacy-state-migration.nix ./event-backfill.nix ./skills ]
     ++ contribModules;
 
   # Declared only so a definition on the old root reaches `legacyRoot`'s message; no

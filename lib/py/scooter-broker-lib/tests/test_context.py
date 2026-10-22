@@ -77,3 +77,18 @@ def test_context_wanting_factory_is_absent_rather_than_unauthorized(caplog):
     built = registry.discover_providers([_empty_package("_t_needs2")])
     assert built == []
     assert "FAILED to build" in caplog.text
+
+
+def test_contrib_store_config_targets_the_contribs_own_database(monkeypatch):
+    monkeypatch.delenv("CONTRIB_CODE_SERVER_DB_NAME", raising=False)
+    ctx = BrokerContext(
+        authorizer=NoopAuthorizer(),
+        store_config=StoreConfig(db_password="pw", db_user="broker", db_name="broker"),
+    )
+    assert ctx.contrib_store_config("code-server").db_name == "contrib_code_server"
+    assert ctx.contrib_store_config("code-server").db_user == "broker"  # roles stay per service
+
+
+def test_contrib_store_config_honours_the_rendered_name(monkeypatch):
+    monkeypatch.setenv("CONTRIB_FILES_DB_NAME", "files_db")
+    assert _ctx().contrib_store_config("files").db_name == "files_db"

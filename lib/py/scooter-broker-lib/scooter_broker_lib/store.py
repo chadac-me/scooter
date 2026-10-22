@@ -1,6 +1,6 @@
 """Shared async-DB plumbing: the broker DSN, and the one place an engine is built.
 
-Every broker store reaches the same `broker` database and needs the same reconnect
+Every broker store (and every contrib store, each in its own database) needs the same reconnect
 guards (`pool_pre_ping` and `pool_recycle`, without which a connection Postgres
 already closed is handed out and the service stays broken until restarted), so
 every store opens its engine through `open_sessions`.
@@ -8,8 +8,9 @@ every store opens its engine through `open_sessions`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -44,6 +45,13 @@ class StoreConfig:
                 dsn += f"?ssl={self.db_sslmode}"
             return dsn
         return self.dsn
+
+    def with_database(self, db_name: str) -> "StoreConfig":
+        """The same server and credentials against another database (a contrib's own); a dev SQLite DSN is left as is."""
+        dsn = self.dsn
+        if dsn.startswith("postgresql"):
+            dsn = make_url(dsn).set(database=db_name).render_as_string(hide_password=False)
+        return replace(self, dsn=dsn, db_name=db_name)
 
 
 def open_sessions(

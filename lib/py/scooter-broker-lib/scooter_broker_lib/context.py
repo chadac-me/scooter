@@ -2,15 +2,23 @@
 
 The `authorizer` is the enforcement point and the `store_config` is the shared
 `broker` database's DSN; the app builds both once and passes them to any factory
-that declares a parameter.
+that declares a parameter. A contrib that owns tables reaches its OWN database
+through `contrib_store_config`, with the same credentials.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from .authz import Authorizer
 from .store import StoreConfig
+
+
+def contrib_db_name(contrib: str) -> str:
+    """The database `contribs.<contrib>.db` names: `CONTRIB_<NAME>_DB_NAME` as the platform renders it, else its default."""
+    slug = contrib.replace("-", "_")
+    return os.environ.get(f"CONTRIB_{slug.upper()}_DB_NAME") or f"contrib_{slug}"
 
 
 @dataclass(frozen=True)
@@ -19,3 +27,11 @@ class BrokerContext:
 
     authorizer: Authorizer
     store_config: StoreConfig
+
+    def contrib_store_config(self, contrib: str) -> StoreConfig:
+        """`store_config` pointed at `contrib`'s own database.
+
+        Roles stay per service, so only the database changes: the contrib connects
+        as the broker, to a database whose schema and Atlas history are its own.
+        """
+        return self.store_config.with_database(contrib_db_name(contrib))

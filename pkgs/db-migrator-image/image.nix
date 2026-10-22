@@ -1,21 +1,26 @@
-{ pkgs, lib, n2c, ... }:
+{ pkgs, lib, n2c, contribSqlDirs ? { }, ... }:
 
 # OCI image for the shared-database migration Job (modules/db-migrate.nix): the
-# Atlas CLI, the migrations from lib/sql, and a driver that applies them to each
-# per-service database, adopting a pre-Atlas baseline where needed. Safe to run
-# every deploy.
+# Atlas CLI, the migrations from lib/sql plus each shipped contrib's own `sql/`,
+# and a driver that applies them to each database, adopting a pre-Atlas baseline
+# where needed. Safe to run every deploy.
 
 let
-  # The migration payload, copied so the image carries exactly what is under lib/sql.
-  sqlPayload = pkgs.runCommandNoCC "scooter-sql" { } ''
+  # The migration payload: lib/sql's per-database dirs, plus each contrib database
+  # at $out/<db> so the driver sees one directory per env either way.
+  sqlPayload = pkgs.runCommandNoCC "scooter-sql" { } (''
     mkdir -p "$out"
     cp -r ${../../lib/sql}/. "$out/"
-  '';
+  '' + lib.concatStrings (lib.mapAttrsToList (db: dir: ''
+    if [ -e "$out/${db}" ]; then echo "contrib database ${db} collides with lib/sql/${db}" >&2; exit 1; fi
+    mkdir -p "$out/${db}"
+    cp -r ${dir}/. "$out/${db}/"
+  '') contribSqlDirs));
 
   runScript = pkgs.writeShellApplication {
     name = "agent-db-migrate";
     # apply_env greps for "not clean".
-    runtimeInputs = [ pkgs.atlas pkgs.coreutils pkgs.gnugrep ];
+    runtimeInputs = [ pkgs.atlas pkgs.coreutils pkgs.gnugrep pkgs.postgresql_16 ];
     text = ''
       # SQL_DIR defaults to the baked migrations; overridable for local runs.
       SQL_DIR="''${SQL_DIR:-${sqlPayload}}"
@@ -39,10 +44,47 @@ let
         return 1
       }
 
-      # Each env's database and role share the env's name, and its password arrives
-      # as <ENV>_DB_PASSWORD.
-      for env in $DB_ENVS; do
-        pwvar="$(printf '%s' "$env" | tr '[:lower:]-' '[:upper:]_')_DB_PASSWORD"
+      # One-time row copies (DB_COPIES = "<db>:<table>:<from> ..."), for a table that
+      # moved into a database of its own. Skipped once any of the source's rows is
+      # already in the target (matched on the primary key), so a re-run is a no-op.
+      # Rows the new service wrote before this ran do not block the copy; the INSERT
+      # skips conflicts instead.
+      copy_table() {
+        local db="$1" table="$2" from="$3" user="$4" pw="$5" cols pk
+        export PGHOST="$DB_HOST" PGPORT="$DB_PORT" PGUSER="$user" PGPASSWORD="$pw" PGSSLMODE="$SSL"
+        if [ "$(psql -d "$from" -tAc "SELECT to_regclass('public.\"$table\"') IS NOT NULL")" != "t" ]; then
+          echo "[$db.$table] no $from.$table — nothing to copy"
+          return 0
+        fi
+        cols="$(psql -d "$db" -tAc "SELECT string_agg(quote_ident(attname), ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 'public.\"$table\"'::regclass AND attnum > 0 AND NOT attisdropped")"
+        pk="$(psql -d "$db" -tAc "SELECT string_agg(quote_ident(a.attname), ',') FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = 'public.\"$table\"'::regclass AND i.indisprimary")"
+        if [ -z "$pk" ]; then
+          echo "[$db.$table] has no primary key — refusing to copy (a re-run could not tell copied rows apart)" >&2
+          return 1
+        fi
+        psql -d "$from" -v ON_ERROR_STOP=1 -c "\\copy (SELECT $cols FROM public.\"$table\") TO STDOUT" \
+          | psql -d "$db" -v ON_ERROR_STOP=1 -q \
+              -c "CREATE TEMP TABLE _src AS SELECT $cols FROM public.\"$table\" WITH NO DATA" \
+              -c "\\copy _src ($cols) FROM PSTDIN" \
+              -c "DO \$\$ DECLARE n bigint; BEGIN
+                    IF EXISTS (SELECT 1 FROM public.\"$table\" JOIN _src USING ($pk)) THEN
+                      RAISE NOTICE 'already copied — skipping';
+                    ELSE
+                      INSERT INTO public.\"$table\" ($cols) SELECT $cols FROM _src ON CONFLICT DO NOTHING;
+                      GET DIAGNOSTICS n = ROW_COUNT;
+                      RAISE NOTICE 'copied % row(s)', n;
+                    END IF;
+                  END \$\$"
+        echo "[$db.$table] copy from $from done"
+      }
+
+      # Each token is <db>[:<role>]; the role defaults to the db's own name (a core
+      # service's database) and its password arrives as <ROLE>_DB_PASSWORD.
+      declare -A role_of=()
+      for spec in $DB_ENVS; do
+        env="''${spec%%:*}"; user="''${spec#*:}"
+        role_of[$env]="$user"
+        pwvar="$(printf '%s' "$user" | tr '[:lower:]-' '[:upper:]_')_DB_PASSWORD"
         pw="''${!pwvar:?missing $pwvar}"
         baseline_file=""
         for f in "$SQL_DIR/$env/migrations"/*_baseline.sql; do
@@ -64,7 +106,7 @@ let
           echo "[$env] no baseline — applying migrations directly (repo-created database)"
         fi
         dir="file://$SQL_DIR/$env/migrations"
-        url="postgres://$env:$pw@$DB_HOST:$DB_PORT/$env?sslmode=$SSL"
+        url="postgres://$user:$pw@$DB_HOST:$DB_PORT/$env?sslmode=$SSL"
         echo "[$env] applying migrations"
         # Retry, since the agent-postgres-init Job that creates the database and role
         # has no ordering guarantee relative to this one.
@@ -78,6 +120,12 @@ let
           echo "[$env] not ready (attempt $n) — retrying in 5s"
           sleep 5
         done
+      done
+      for c in ''${DB_COPIES:-}; do
+        IFS=: read -r cdb ctable cfrom <<<"$c"
+        cuser="''${role_of[$cdb]:?$cdb is not in DB_ENVS}"
+        pwvar="$(printf '%s' "$cuser" | tr '[:lower:]-' '[:upper:]_')_DB_PASSWORD"
+        copy_table "$cdb" "$ctable" "$cfrom" "$cuser" "''${!pwvar}"
       done
       echo "all migrations applied"
     '';

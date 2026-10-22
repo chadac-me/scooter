@@ -33,6 +33,7 @@ contrib/<name>/
     __init__.py             # neutral; imports NEITHER broker nor webhooks
     broker_provider.py      # imports broker.*  (only loaded in the broker image)
     webhooks_handler.py     # imports webhooks.* (only loaded in the webhooks image)
+  sql/                      # optional: its OWN database (schema.sql + migrations/; see "Owning a database")
   ui/                       # optional: settings tabs, ui/*.tsx (see "Contributing UI")
   tests/
 ```
@@ -42,7 +43,7 @@ and which eval reads which is the thing most easily got backwards:
 
 | file | eval | declares / contributes |
 |---|---|---|
-| `contrib.nix` | every eval that reads the registry | `contribs.<name>`: `src`, `services.*`, `ui`, `skills`, `approvals`, `sandbox.module`. What the contrib **is**. |
+| `contrib.nix` | every eval that reads the registry | `contribs.<name>`: `src`, `services.*`, `ui`, `skills`, `approvals`, `sandbox.module`, `db`. What the contrib **is**. |
 | `deployment.nix` | kubenix, with `modules/platform.nix` | the manifests/env this deployment's `contribs.<name>.*` config renders |
 | `sandbox.nix` | NixOS, via `pkgs/sandbox-os` (and the baked re-converge list) | packages, systemd units, activation — anything in the agent's sandbox image |
 
@@ -469,6 +470,54 @@ The file itself is a top-level module, so the **parent** config — every other
 contrib — is available as its `config` argument. Bind it with
 `let parent = config; in` if you also take the submodule's own `config`, since
 the inner name shadows the outer one.
+
+### Owning a database (`db`)
+
+A contrib that owns tables gets its **own Postgres database** rather than adding
+tables to its host service's. Its DDL and its Atlas migration history then live in
+the contrib, so a contrib's schema change never adds a migration to a core
+database:
+
+```nix
+contribs.files.config = {
+  db.enable = true;                 # database `contrib_files` (override: db.name)
+  db.tables.annotations = { };      # writers default to the services it plugs into
+};
+```
+
+```
+contrib/files/sql/
+  schema.sql                        # end-state DDL — edit HERE
+  migrations/                       # `just db-migrate <name>` writes these
+```
+
+From that declaration `modules/contrib-db.nix` derives the rest. The contrib's own
+files never write `scooter.db.*` or `scooter.postgres.*`:
+
+- the `scooter.db.contrib_<name>` spec entry (owners.toml, an atlas.hcl env whose
+  paths point into `contrib/<name>/sql`);
+- the database itself, `CREATE DATABASE … OWNER <host>`. **Roles stay per
+  service**: a contrib in the broker connects as `broker`, with no user or Secret
+  of its own;
+- the migrator env (`DB_ENVS` gets `contrib_<name>:<host role>`), with the `sql/`
+  dir bundled into the migrator image;
+- `CONTRIB_<NAME>_DB_NAME` on the host pod.
+
+The store connects with `ctx.contrib_store_config("<name>")`, which is the broker's
+`store_config` pointed at the contrib's database. Core's generated bindings
+(`scooter_schema`, `@scooter/schema`) skip contrib databases, because core must not
+know contribs exist. The contrib keeps its own row model, and a
+`tests/test_schema_matches.py` holds it to `sql/schema.sql`.
+
+**Moving an existing table out of a core database.** Set
+`db.tables.<t>.copyFrom = "<old db>"`. After migrating, the migrator copies the old
+rows in once, matched on the primary key so rows written during the rollout do not
+block it. Leave the old table declared for one release, then drop it and
+`copyFrom` together.
+
+**Another contrib's data.** Go through the owning contrib's Python store (a
+`pythonDeps` dependency, as below), never its SQL. There are no foreign keys
+across databases, and a table read by a second service is not supported yet.
 
 ### Depending on another contrib
 
