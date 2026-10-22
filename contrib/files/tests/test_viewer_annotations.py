@@ -989,6 +989,28 @@ def test_a_viewer_without_a_store_still_streams_file_changes(tmp_path: Path):
             events.close()
 
 
+@pytest.mark.parametrize("with_store", [True, False])
+def test_a_change_right_after_the_stream_opens_is_still_a_file_event(tmp_path: Path, monkeypatch, with_store):
+    # Regression: the baseline was taken after the headers, so a fast client's
+    # change landed before it and was never reported (aarch64 publish, #883).
+    real = server.Handler.end_headers
+
+    def slow_end_headers(self):
+        real(self)
+        if "/api/events" in self.path:
+            self.wfile.flush()
+            time.sleep(0.3)  # the window a slower server leaves open
+
+    monkeypatch.setattr(server.Handler, "end_headers", slow_end_headers)
+    with viewer(tmp_path, with_store=with_store) as (call, _store):
+        events = _Events(call)
+        try:
+            (call.root / "doc.md").unlink()
+            assert events.next() == "file"
+        finally:
+            events.close()
+
+
 def test_shutdown_ends_an_open_stream(tmp_path: Path):
     with viewer(tmp_path) as (call, _store):
         events = _Events(call)

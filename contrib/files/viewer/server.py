@@ -499,6 +499,11 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 return None
 
+        # A viewer without a store still streams file changes.
+        store = getattr(self.server, "store", None)
+        # Baselines before the headers: a client may write once they arrive.
+        seen = stamp()
+        gen = store.generation if store is not None else 0
         self.send_response(HTTPStatus.OK)
         self.send_header("content-type", "text/event-stream")
         self.send_header("cache-control", "no-store")
@@ -508,11 +513,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-        # A viewer without a store still streams file changes.
-        store = getattr(self.server, "store", None)
         closing = self.server.closing
-        seen = stamp()
-        gen = store.generation if store is not None else 0
         quiet = 0.0
         try:
             # The browser reconnects after this long, and the page refetches on reconnect.
