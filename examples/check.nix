@@ -769,6 +769,20 @@ let
           ownerPlatform.config.kubernetes.resources.jobs.agent-db-migrate.spec.template.spec.containers.migrate.env "DB_ENVS")) then [ ]
         else [ "db.owner = agent-host: contrib_aws is not migrated as agent_host" ]);
 
+  # The broker tables are dropped only on a deployment that opts in.
+  retirePlatform = evalPlatform {
+    module = { ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.dbMigrate.retireCopiedTables = true;
+    };
+  };
+  retireEnv = retirePlatform.config.kubernetes.resources.jobs.agent-db-migrate.spec.template.spec.containers.migrate.env;
+  retireProblems =
+    (if contribEnvValue migrateEnv "DB_RETIRE_COPIED" == null then [ ]
+     else [ "migrate.env.DB_RETIRE_COPIED is set by default — every deployment would drop the broker tables on upgrade" ])
+    ++ (if contribEnvValue retireEnv "DB_RETIRE_COPIED" == "1" then [ ]
+        else [ "dbMigrate.retireCopiedTables = true does not set migrate.env.DB_RETIRE_COPIED — the tables would never be dropped" ]);
+
   # `broker.fga` is a core option, so the render proving it is fga on with aws off.
   fgaNoAwsPlatform = evalPlatform {
     module = { lib, ... }: {
@@ -1152,7 +1166,7 @@ let
     ++ (if bodyAnn overrideRes == "1g" then [ ]
         else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
 
-  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"
