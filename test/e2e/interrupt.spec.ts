@@ -9,6 +9,10 @@
  */
 
 import { test, expect } from "./fixtures.js";
+import { isFull } from "./target.js";
+
+// The first interrupt waits for a fresh sandbox to provision on full, which can exceed 30s.
+const PANEL_BUDGET_MS = isFull ? 90_000 : 30_000;
 
 const panel = {
   rightPanel: '[data-testid="right-panel"]',
@@ -29,9 +33,9 @@ test.describe("agent option dropdown (interrupt)", () => {
     await chat.send("?pick a color");
 
     // The right panel appears, auto-focused to the Approvals tab, with the options.
-    await expect(page.locator(panel.rightPanel)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.rightPanel)).toBeVisible({ timeout: PANEL_BUDGET_MS });
     await expect(page.locator(panel.approvalsTab)).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS });
     await expect(page.locator(panel.option)).toHaveCount(3, { timeout: 30_000 });
     await expect(page.locator(panel.option).filter({ hasText: /green/i })).toHaveCount(1);
 
@@ -57,7 +61,7 @@ test.describe("agent option dropdown (interrupt)", () => {
     await chat.open();
     await chat.send("?pick a color");
 
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS });
     // Wait for the Dismiss button itself to be enabled, not merely the panel.
     const cancel = page.locator(panel.cancel);
     await expect(cancel).toBeEnabled({ timeout: 30_000 });

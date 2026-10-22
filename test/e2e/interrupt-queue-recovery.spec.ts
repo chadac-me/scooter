@@ -22,6 +22,8 @@ const panel = {
 // post-answer waits need cluster budgets.
 const CLUSTER_BUDGET_MS = 180_000;
 const ANSWER_BUDGET_MS = 90_000;
+// The first interrupt waits for a fresh sandbox to provision on full, which can exceed 30s.
+const PANEL_BUDGET_MS = isFull ? 90_000 : 30_000;
 
 /**
  * Click an interrupt option (or Dismiss) until the agent's answer actually lands, re-clicking
@@ -50,7 +52,7 @@ test.describe("interrupt + queue coexistence", () => {
   test("messages QUEUE while an approval interrupt is pending (both surfaces populated)", async ({ chat, page }) => {
     await chat.open();
     await chat.send("?pick a color");
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 }); // run paused on the interrupt
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS }); // run paused on the interrupt
 
     // The run is paused awaiting the pick, so a message sent now must queue.
     await chat.sendWhileRunning("queued behind the approval");
@@ -61,7 +63,7 @@ test.describe("interrupt + queue coexistence", () => {
   test("answering the interrupt lets the QUEUE drain (the queued message then runs)", async ({ chat, page }) => {
     await chat.open();
     await chat.send("?pick a color");
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS });
     await chat.sendWhileRunning("run after I approve");
     await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
 
@@ -82,7 +84,7 @@ test.describe("interrupt + queue coexistence", () => {
   test("the interrupt panel + inline queued messages are BOTH visible", async ({ chat, page }) => {
     await chat.open();
     await chat.send("?pick a color");
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS });
     // The approvals badge shows a pending count.
     await expect(page.locator(panel.approvalsBadge)).toBeVisible({ timeout: 15_000 });
     await chat.sendWhileRunning("q1");
@@ -99,11 +101,11 @@ test.describe("interrupt persistence + recovery", () => {
   test("a pending approval SURVIVES a reload (the panel reappears)", async ({ chat, page }) => {
     await chat.open();
     await chat.send("?pick a color");
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS });
 
     await page.reload();
     // The interrupt is persisted on the integrity log, so the panel re-derives after the reload.
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS });
     await expect(page.locator(panel.option)).toHaveCount(3, { timeout: 30_000 });
 
     // Answering after a reload is asserted on the fast target only: on a cluster the
@@ -117,7 +119,7 @@ test.describe("interrupt persistence + recovery", () => {
   test("after answering, the UI returns to a CLEAN sendable state (no stuck panel / working)", async ({ chat, page }) => {
     await chat.open();
     await chat.send("?pick a color");
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS });
     await answerInterrupt(page, /blue/i, /you picked: blue/i);
 
     // Clean state: the interrupt panel is gone, no stuck run-status bar, and a new turn works first-try.
@@ -131,7 +133,7 @@ test.describe("interrupt persistence + recovery", () => {
   test("a dismissed (cancelled) interrupt also returns to a clean state", async ({ chat, page }) => {
     await chat.open();
     await chat.send("?pick a color");
-    await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(panel.root)).toBeVisible({ timeout: PANEL_BUDGET_MS });
     await answerInterrupt(page, null, /you picked: \(cancelled\)/i);
     await expect(page.locator(panel.root)).toHaveCount(0, { timeout: 10_000 });
     // This is the conversation's first completed exec, so it funds the cold sandbox boot.
