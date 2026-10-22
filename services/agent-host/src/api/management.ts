@@ -30,7 +30,7 @@ import { UserSkillError, type UserSkill, type UserSkillStore } from "../session/
 import type { SandboxResources } from "../session/resources.js";
 import { fitAdvice, fitSummary } from "../session/resourceFit.js";
 import type { SandboxSizePreset } from "../session/resources.js";
-import type { AguiEvent, ApproverIdentity, SessionBridge } from "../bridge.js";
+import { PRIORITY_INTERRUPT, type AguiEvent, type ApproverIdentity, type SessionBridge } from "../bridge.js";
 import { logger } from "../log.js";
 import { serviceUrl, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
@@ -517,10 +517,10 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (body.source !== undefined && !isPostableSource(body.source)) {
       return { status: 400, json: { error: "source must be a lowercase name, not a human or reserved source" } };
     }
+    // Interrupts at the next tool-call boundary: queued until the run ends, it would land out of order.
     // 202 once queued, not once the run ends: a caller that gave up waiting on a long turn
     // would resend a message the agent already has.
-    if (body.source) await sessions.enqueueByThread(ctx.params.id, body.text, body.source);
-    else await sessions.enqueueByThread(ctx.params.id, body.text);
+    await sessions.enqueueByThread(ctx.params.id, body.text, body.source || undefined, PRIORITY_INTERRUPT);
     return { status: 202, json: { ok: true } };
   });
 

@@ -187,12 +187,12 @@ async def deliver_message(
     conversation_id: str,
     message: str,
     *,
-    priority: bool = False,
+    priority: bool = True,
     images: list[dict] | None = None,
     files: list[dict] | None = None,
     source: str | None = None,
 ) -> SendOutcome:
-    """Send a follow-up into an existing conversation. Only a request that was never accepted is retried; retrying after acceptance would duplicate the message."""
+    """Send a follow-up into an existing conversation. `priority` (the default) interrupts the running turn at its next tool-call boundary; `priority=False` waits for the run to end, which lands the message out of order, so no built-in source uses it. Only a request that was never accepted is retried; retrying after acceptance would duplicate the message."""
     payload = {
         "threadId": conversation_id,
         "runId": str(uuid.uuid4()),
@@ -239,12 +239,12 @@ async def send_message(
     conversation_id: str,
     message: str,
     *,
-    priority: bool = False,
+    priority: bool = True,
     images: list[dict] | None = None,
     files: list[dict] | None = None,
     source: str | None = None,
 ) -> bool:
-    """Send a follow-up message into an existing conversation, True only when the run finished; `priority=True` lets the agent-host interrupt a stuck turn."""
+    """Send a follow-up message into an existing conversation, True only when the run finished; see deliver_message for `priority`."""
     outcome = await deliver_message(
         conversation_id, message, priority=priority, images=images, files=files, source=source,
     )

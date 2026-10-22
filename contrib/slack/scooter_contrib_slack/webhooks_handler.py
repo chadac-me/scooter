@@ -365,7 +365,8 @@ async def _handle_thread_message(event: dict):
     _record_message_dispatched(channel, ts)
     forward_msg = _format_forwarded_message(comment_text, channel, thread_ts, has_mention=False)
     asyncio.create_task(
-        _background_forward(existing, forward_msg, images=dl.images, files=dl.file_parts)
+        # Unmentioned replies interrupt too: queued until the run ends, they arrive out of order with the thread.
+        _background_forward(existing, forward_msg, priority=True, images=dl.images, files=dl.file_parts)
     )
 
 
@@ -373,11 +374,11 @@ async def _background_forward(
     existing: str,
     forward_msg: str,
     *,
-    priority: bool = False,
+    priority: bool,
     images: list[dict] | None = None,
     files: list[dict] | None = None,
 ) -> None:
-    """Forward a follow-up into an existing conversation off the request path, with `priority=True` for a mention to an active conversation."""
+    """Forward a follow-up into an existing conversation off the request path."""
     ok = await send_message(existing, forward_msg, priority=priority, images=images, files=files, source="slack")
     if not ok:
         logger.warning(

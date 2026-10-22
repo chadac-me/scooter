@@ -157,7 +157,7 @@ async def _handle_comment(payload: dict):
 
     if existing:
         forward_msg = _format_forwarded_message(comment_text, issue_key, has_mention)
-        outcome = await deliver_message(existing, forward_msg, priority=has_mention, source="jira")
+        outcome = await deliver_message(existing, forward_msg, source="jira")
         if outcome is not SendOutcome.NOT_FOUND:
             # The conversation still exists, so a failed run keeps its mapping (issue #802).
             if outcome is not SendOutcome.DELIVERED:
