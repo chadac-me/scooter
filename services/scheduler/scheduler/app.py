@@ -15,7 +15,7 @@ from .cron import InvalidSchedule
 from .logging_config import configure_logging, get_logger
 from .metrics import MetricsSink, create_metrics
 from .models import Run, Task, TaskCreate, TaskPatch
-from .spawn import spawn_conversation
+from .spawn import SpawnResult, spawn
 from .store import Store
 
 configure_logging("scheduler", default_level=settings.log_level)
@@ -28,32 +28,56 @@ def _utcnow() -> datetime:
 
 
 async def _fire(store: Store, task, metrics: MetricsSink) -> None:
-    """Spawn one run for an already-claimed task and record it, without rescheduling since claim_due already advanced next_run_at."""
+    """Spawn one run for an already-claimed task and record it, without rescheduling since claim_due already advanced next_run_at; a run that cannot spawn is recorded as failed, never skipped silently."""
     start_ms = time.perf_counter() * 1000
-    
+
     if hasattr(task, "_claim_lag_ms"):
         metrics.claim_lag(lag_ms=task._claim_lag_ms)
-    
-    run_id = await store.start_run(task.id)
-    conv = await spawn_conversation(task.prompt, title=task.title, owner=task.owner)
-    await store.finish_run(
-        run_id,
-        conversation_id=conv,
-        status="spawned" if conv else "failed",
-        error=None if conv else "spawn returned no conversation",
-    )
+
+    run_id: str | None = None
+    result = SpawnResult(None, "spawn did not run")
+    try:
+        run_id = await store.start_run(task.id)
+        result = await spawn(task.prompt, title=task.title, owner=task.owner)
+    except Exception as e:  # noqa: BLE001 — the claim already consumed this window
+        result = SpawnResult(None, f"spawn errored: {type(e).__name__}: {e}")
+        logger.exception("spawn errored", extra={"task_id": task.id})
+    status = "spawned" if result.conversation_id else "failed"
+    await _record_run(store, task.id, run_id, result, status)
+
     duration_ms = (time.perf_counter() * 1000) - start_ms
-    metrics.fire_completed(status="spawned" if conv else "failed", duration_ms=duration_ms)
+    metrics.fire_completed(status=status, duration_ms=duration_ms)
     logger.info(
         "fired task",
         extra={
             "task_id": task.id,
             "task_title": task.title,
-            "conversation_id": conv,
-            "status": "spawned" if conv else "failed",
+            "conversation_id": result.conversation_id,
+            "status": status,
+            "error": result.error,
             "duration_ms": duration_ms,
         },
     )
+
+
+async def _record_run(store: Store, task_id: str, run_id: str | None, result: SpawnResult, status: str) -> None:
+    """Finish the run row (creating it if start_run never landed), retrying once across a DB blip."""
+    for attempt in (1, 2):
+        try:
+            if run_id is None:
+                run_id = await store.start_run(task_id)
+            await store.finish_run(
+                run_id, conversation_id=result.conversation_id, status=status, error=result.error
+            )
+            return
+        except Exception:  # noqa: BLE001
+            if attempt == 2:
+                logger.exception(
+                    "could not record the run; it is missing from task history",
+                    extra={"task_id": task_id, "run_status": status, "error": result.error},
+                )
+                return
+            await asyncio.sleep(1.0)
 
 
 async def _scheduler_loop(store: Store, metrics: MetricsSink, stop: asyncio.Event) -> None:

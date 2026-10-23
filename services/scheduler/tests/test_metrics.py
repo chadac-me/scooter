@@ -12,6 +12,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from scheduler.metrics import create_metrics
+from scheduler.spawn import SpawnResult
 from scheduler.store import Store
 
 from conftest import sqlite_store
@@ -69,8 +70,8 @@ async def test_successful_fire_increments_spawned(store, metrics_reader, metrics
     )
     await store.reschedule(t.id, last_run_at=past, next_run_at=past)
 
-    with patch("scheduler.app.spawn_conversation", new_callable=AsyncMock) as mock_spawn:
-        mock_spawn.return_value = "conv-123"
+    with patch("scheduler.app.spawn", new_callable=AsyncMock) as mock_spawn:
+        mock_spawn.return_value = SpawnResult("conv-123")
         
         from scheduler.app import _fire
         await _fire(store, t, metrics_sink)
@@ -89,8 +90,8 @@ async def test_failed_spawn_increments_failed(store, metrics_reader, metrics_sin
     )
     await store.reschedule(t.id, last_run_at=past, next_run_at=past)
 
-    with patch("scheduler.app.spawn_conversation", new_callable=AsyncMock) as mock_spawn:
-        mock_spawn.return_value = None
+    with patch("scheduler.app.spawn", new_callable=AsyncMock) as mock_spawn:
+        mock_spawn.return_value = SpawnResult(None, "boom")
         
         from scheduler.app import _fire
         await _fire(store, t, metrics_sink)
@@ -319,8 +320,8 @@ async def test_tick_feeds_the_gauges_before_claiming(store, metrics_reader, metr
 
     from scheduler.app import _scheduler_loop
 
-    with patch("scheduler.app.spawn_conversation", new_callable=AsyncMock) as mock_spawn:
-        mock_spawn.return_value = "conv-1"
+    with patch("scheduler.app.spawn", new_callable=AsyncMock) as mock_spawn:
+        mock_spawn.return_value = SpawnResult("conv-1")
         await asyncio.gather(_scheduler_loop(store, metrics_sink, stop), one_tick())
 
     assert _get_metric_value(metrics_reader, "scheduler_tasks", {"enabled": "true"}) == 1

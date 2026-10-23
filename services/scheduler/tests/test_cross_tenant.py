@@ -1,6 +1,8 @@
 """Tier 1: cross-tenant isolation, where user B must not see or mutate user A's task."""
 
 import httpx
+
+from scheduler.spawn import SpawnResult
 import pytest
 import pytest_asyncio
 
@@ -17,9 +19,9 @@ async def client(monkeypatch):
     appmod.app.state.store = store
 
     async def fake_spawn(prompt, *, title, owner, client=None):
-        return "conv-fake"
+        return SpawnResult("conv-fake")
 
-    monkeypatch.setattr(appmod, "spawn_conversation", fake_spawn)
+    monkeypatch.setattr(appmod, "spawn", fake_spawn)
 
     transport = httpx.ASGITransport(app=appmod.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
