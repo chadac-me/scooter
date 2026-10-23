@@ -204,8 +204,16 @@ export function createAguiServer(): AguiServer {
     }
   };
 
+  // What each POST /agui stream carried, for the "agui stream closed" line.
+  const streamStats = new WeakMap<ServerResponse, { events: number; last?: string }>();
+
   const write = (res: ServerResponse, event: AguiEvent) => {
     res.write(encoder.encodeSSE(toBaseEvent(event)));
+    const st = streamStats.get(res);
+    if (st) {
+      st.events++;
+      st.last = event.type;
+    }
   };
 
   const subscribeSSE = async (sessionId: SessionId, res: ServerResponse): Promise<void> => {
@@ -296,6 +304,33 @@ export function createAguiServer(): AguiServer {
         source?: string;
       };
       const sessionId = input.threadId;
+      // One line per request and one per stream close: a prompt that commits a 200 and then
+      // never runs (the e2e interrupt flakes) shows up as "received" followed by a close with
+      // zero events, on the pod that took it.
+      const kind = input.resume && input.resume.length > 0 ? "resume" : "prompt";
+      const startedAt = Date.now();
+      const stats = { events: 0 } as { events: number; last?: string };
+      streamStats.set(res, stats);
+      withConversation(sessionId, () =>
+        log.info("agui request received", {
+          kind,
+          run_id: input.runId,
+          resume_count: input.resume?.length ?? 0,
+          has_source: input.source !== undefined,
+        }),
+      );
+      res.on("close", () =>
+        withConversation(sessionId, () =>
+          log.info("agui stream closed", {
+            kind,
+            events: stats.events,
+            last_event: stats.last ?? null,
+            // false means the client went away before the server ended the stream.
+            ended_by_server: res.writableEnded,
+            duration_ms: Date.now() - startedAt,
+          }),
+        ),
+      );
       res.writeHead(200, {
         "Content-Type": encoder.getContentType(),
         "Cache-Control": "no-cache",
