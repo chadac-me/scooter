@@ -1,7 +1,7 @@
 { lib, python3Packages, ... }:
 
 # scooter_lib: the shared, service-agnostic library (logging convention, common
-# config/auth primitives) the extension-surface libs and the contribs build on.
+# config/auth primitives, and the Scooter client) the extension-surface libs and the contribs build on.
 
 python3Packages.buildPythonPackage {
   pname = "scooter-lib";
@@ -12,15 +12,15 @@ python3Packages.buildPythonPackage {
   build-system = [ python3Packages.hatchling ];
 
   dependencies = with python3Packages; [
+    httpx # scooter_lib.client
     pydantic
     pydantic-settings
   ];
 
   nativeCheckInputs = with python3Packages; [
     pytestCheckHook
-    httpx # format_error is specified against real httpx exception types
   ];
-  pythonImportsCheck = [ "scooter_lib.logging_config" ];
+  pythonImportsCheck = [ "scooter_lib.logging_config" "scooter_lib.client" ];
 
   meta.description = "Shared library for Scooter's Python services";
 }
