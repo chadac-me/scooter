@@ -196,6 +196,54 @@ describe("management API", () => {
     expect((res.json as { id?: string }).id).not.toBe("attacker-chosen-id");
   });
 
+  // A body `owner` (webhooks' resolved user) is honored only for a caller the ownerVerifier accepts. Why: issue #897.
+  describe("POST /conversations body owner", () => {
+    const mk = (ownerVerifier?: (req: IncomingMessage) => Promise<boolean>) => {
+      const sessions = fakeSessions();
+      const api = createManagementApi({
+        sessions,
+        store: fakeStore([]),
+        server: stubServer,
+        answerPermission: async () => {},
+        ownerVerifier,
+      });
+      return { sessions, api };
+    };
+    const ownerOf = (sessions: SessionManager, res: { json: unknown }) =>
+      sessions.get((res.json as { id: string }).id)?.owner;
+
+    it("a verified caller's body owner owns the conversation", async () => {
+      const verifier = vi.fn(async () => true);
+      const { sessions, api } = mk(verifier);
+      const res = await call(api, "POST", "/conversations", { owner: "chadac" }, { authorization: "Bearer sa" });
+      expect(res.status).toBe(201);
+      expect(verifier).toHaveBeenCalled();
+      expect(ownerOf(sessions, res)).toBe("chadac");
+    });
+
+    it("a rejected caller's body owner is ignored (anonymous stays unowned)", async () => {
+      const { sessions, api } = mk(async () => false);
+      const res = await call(api, "POST", "/conversations", { owner: "chadac" });
+      expect(res.status).toBe(201);
+      expect(ownerOf(sessions, res)).toBeUndefined();
+    });
+
+    it("a verifier that throws counts as a rejection", async () => {
+      const { sessions, api } = mk(async () => {
+        throw new Error("tokenreview down");
+      });
+      const res = await call(api, "POST", "/conversations", { owner: "chadac" });
+      expect(res.status).toBe(201);
+      expect(ownerOf(sessions, res)).toBeUndefined();
+    });
+
+    it("with no verifier wired the header identity still wins over a body owner", async () => {
+      const { sessions, api } = mk();
+      const res = await call(api, "POST", "/conversations", { owner: "mallory" }, { "x-auth-user": "alice" });
+      expect(ownerOf(sessions, res)).toBe("alice");
+    });
+  });
+
   // GET /conversations and the /conversations/events stream are served by the conversation-router and covered in its tests.
 
   // --- user rename + starring ------------------------------------------------

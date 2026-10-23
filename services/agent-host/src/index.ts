@@ -68,7 +68,7 @@ import {
 } from "./agent/skills.js";
 import { createSdkAcpClient } from "@scooter/claude-sdk-provider";
 import { ensureGooseConfig } from "./agent/gooseConfig.js";
-import { catalogFromEnv, availableIds, contextLimitOf, type ModelCatalog } from "./agent/models.js";
+import { catalogFromEnv, availableIds, contextLimitOf, modelAllowedFor, defaultFor, type ModelCatalog } from "./agent/models.js";
 import { createJobManager, type JobStatus, type JobRegistry } from "./session/jobManager.js";
 import { createPgJobStore } from "./session/jobStore.js";
 import { createPgUserSkillStore } from "./session/userSkillStore.js";
@@ -271,6 +271,20 @@ export function resolveModel(
     return requested;
   }
   return config.model;
+}
+
+/** The model the in-pod floor provider (goose / the SDK) launches with: the conversation's
+ *  pick when that provider serves it, else the provider's own default. With no catalog
+ *  hints this is plain resolveModel. Why: issue #897, a BYOC-only id handed to goose. */
+export function resolveFloorModel(
+  requested: string | undefined,
+  config: Pick<AgentHostConfig, "model" | "availableModels" | "modelCatalog">,
+  tag: string,
+): string | undefined {
+  const cat = config.modelCatalog;
+  if (!cat || cat.models.length === 0) return resolveModel(requested, config);
+  if (requested && modelAllowedFor(cat, requested, tag)) return requested;
+  return defaultFor(cat, tag) ?? resolveModel(undefined, config);
 }
 
 /** No-op provisioner for local UI testing (no cluster). */
@@ -621,12 +635,12 @@ export async function main(
   const server = createAguiServer();
   // The privileged /agui `owner` field is honored only for the trusted webhooks caller,
   // whose SA token is verified via k8s TokenReview.
-  server.useOwnerVerifier(
-    createWebhooksCallerVerifier({
-      expectedServiceAccount: process.env.WEBHOOKS_SERVICE_ACCOUNT,
-      audience: process.env.WEBHOOKS_TOKEN_AUDIENCE || "agent-host",
-    }),
-  );
+  // Shared with POST /conversations, which honors the same body `owner`.
+  const ownerVerifier = createWebhooksCallerVerifier({
+    expectedServiceAccount: process.env.WEBHOOKS_SERVICE_ACCOUNT,
+    audience: process.env.WEBHOOKS_TOKEN_AUDIENCE || "agent-host",
+  });
+  server.useOwnerVerifier(ownerVerifier);
 
   // Bring-your-own-Claude is gated on REMOTE_AGENT_JOIN_SECRET; absent means no route and no
   // remote provider.
@@ -1272,6 +1286,7 @@ export async function main(
       sessions,
       store,
       server,
+      ownerVerifier,
       webServices,
       sandboxOrigins,
       identityStore,
@@ -1589,9 +1604,19 @@ export async function main(
         : deferredSandboxApi(sandbox, () => provisioner.resume(sandbox).then(() => {})),
       { commandTimeoutMs: config.commandTimeoutMs },
     );
+    const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
     // Per-conversation model override: GOOSE_MODEL (and its GOOSE_CONTEXT_LIMIT) in the
-    // agent's launch env.
-    const resolved = resolveModel(model, cfg);
+    // agent's launch env, limited to models the floor provider serves.
+    const floorTag = usingClaude ? "claude-code" : "goose";
+    const resolved = resolveFloorModel(model, cfg, floorTag);
+    if (model && resolved !== model) {
+      hostLog.info("substituted the floor provider's model", {
+        conversation_id: conversationId,
+        requested: model,
+        model: resolved ?? null,
+        provider_tag: floorTag,
+      });
+    }
     // GOOSE_MODE=approve enables the per-tool permission gate the ACP client auto-answers
     // for back-pressure, off when SUBAGENT_BACKPRESSURE=0.
     const backpressureOn = process.env.SUBAGENT_BACKPRESSURE !== "0";
@@ -1606,7 +1631,6 @@ export async function main(
     mkdirSync(cwd, { recursive: true });
     // The skills are re-read on every conversation start, so editing the skills ConfigMap
     // takes effect for new conversations with no image rebuild.
-    const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
     // Write the agent's skills once per conversation, answering the owner's personal ones.
     // Memoized and deferred: makeBridge is sync and these come from the database. Why: PR #767.
     let skillsOnce: Promise<readonly Skill[]> | undefined;
@@ -1746,7 +1770,7 @@ export async function main(
       priority: 0,
       // The model namespace this provider serves: goose = Bedrock ids, the in-cluster SDK =
       // API ids under "claude-code".
-      modelTag: usingClaude ? "claude-code" : "goose",
+      modelTag: floorTag,
       eligible: () => true,
       createClient: floorAcpClientFactory,
     };
