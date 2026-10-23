@@ -386,6 +386,24 @@ type ownerResolver interface {
 	Assigned(ctx context.Context, id string) bool
 }
 
+// readResolver resolves without claiming a Suspended conversation.
+type readResolver interface {
+	ResolveRead(ctx context.Context, id string) (ip, convID string, found bool, err error)
+}
+
+// isPassiveRead reports whether r is a plain read under /conversations/<id>/ that never resumes
+// the Sandbox; streams, upgrades and /c/<id>/ web-service traffic (which wakes it) are excluded.
+func isPassiveRead(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if isSSE(r) || r.Header.Get("Upgrade") != "" || r.Header.Get(SandboxHostHeader) != "" {
+		return false
+	}
+	parts := splitPath(r.URL.Path)
+	return len(parts) >= 2 && parts[0] == "conversations"
+}
+
 // resolveTargetFor returns a request's conversation id and upstream.
 func resolveTargetFor(cfg config, resolver ownerResolver, r *http.Request, fallback *url.URL) (string, *url.URL, error) {
 	if IsNonScoped(r.URL.Path) {
@@ -400,7 +418,15 @@ func resolveTargetFor(cfg config, resolver ownerResolver, r *http.Request, fallb
 	if convID == "" || resolver == nil {
 		return convID, fallback, nil
 	}
-	ip, resolved, found, err := resolver.Resolve(r.Context(), convID)
+	resolve := resolver.Resolve
+	if rr, ok := resolver.(readResolver); ok && isPassiveRead(r) {
+		resolve = rr.ResolveRead
+	}
+	ip, resolved, found, err := resolve(r.Context(), convID)
+	if err == nil && found && ip == "" {
+		// A passive read of a Suspended conversation with no live host.
+		return resolved, fallback, nil
+	}
 	if errors.Is(err, ErrNoPods) {
 		return convID, nil, err
 	}

@@ -13,7 +13,7 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { webhooks } from "@scooter/schema";
 
 import { formatError, logger } from "../log.js";
-import { createPgPool } from "../db/pgPool.js";
+import { createPgPool, DbUnavailableError, retryReadOnce } from "../db/pgPool.js";
 import { canonicalResourceType, withDerivedRef } from "../agent/resourceRef.js";
 
 import type { ConversationLink } from "./manager.js";
@@ -142,20 +142,24 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
     async listLinks(id) {
       let rows: ConversationLink[] = [];
       try {
-        const res = await db
-          .select({
-            source: resourceLinks.source,
-            resourceType: resourceLinks.resourceType,
-            url: resourceLinks.url,
-            title: resourceLinks.title,
-            ref: resourceLinks.ref,
-          })
-          .from(resourceLinks)
-          .where(eq(resourceLinks.conversationId, id))
-          .orderBy(asc(resourceLinks.id));
+        const res = await retryReadOnce("listLinks", () =>
+          db
+            .select({
+              source: resourceLinks.source,
+              resourceType: resourceLinks.resourceType,
+              url: resourceLinks.url,
+              title: resourceLinks.title,
+              ref: resourceLinks.ref,
+            })
+            .from(resourceLinks)
+            .where(eq(resourceLinks.conversationId, id))
+            .orderBy(asc(resourceLinks.id)),
+        );
         rows = (res as LinkRow[]).map(rowToLink);
       } catch (e) {
         log.error("listLinks query failed", { conversation_id: id, error: formatError(e) });
+        // An empty list would read as "no links" and backfill into a database that is down.
+        if (e instanceof DbUnavailableError) throw e;
       }
       if (rows.length > 0 || !config.legacy) return rows;
 

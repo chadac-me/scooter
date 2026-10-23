@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import sys
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -214,23 +216,49 @@ def configure_logging(service_name: str = "conversation-controller") -> None:
 
 # --- warn-once ---------------------------------------------------------------
 
-_warned: set[str] = set()
+
+@dataclass
+class _Warned:
+    warned_at: float   # clock reading of the last WARNING
+    seen_at: float     # clock reading of the last occurrence, warned or not
+    suppressed: int = 0
 
 
-def warn_once(logger: logging.Logger, key: str, msg: str, extra: dict[str, Any]) -> None:
-    """Warn the first time `key` is seen and debug after, until `forget_warned` re-arms it."""
-    repeat = key in _warned
-    _warned.add(key)
-    if repeat:
+_warned: dict[str, _Warned] = {}
+_clock = time.monotonic
+
+
+def warn_once(
+    logger: logging.Logger,
+    key: str,
+    msg: str,
+    extra: dict[str, Any],
+    cooldown_s: float | None = None,
+) -> None:
+    """Warn for `key` at most once per `cooldown_s` (once until re-armed when None) and debug in between; the next warning carries the suppressed count."""
+    now = _clock()
+    w = _warned.get(key)
+    if w is not None and (cooldown_s is None or now - w.warned_at < cooldown_s):
+        w.seen_at = now
+        w.suppressed += 1
         logger.debug(msg, extra={**extra, "repeat_suppressed": True})
-    else:
-        logger.warning(msg, extra=extra)
+        return
+    suppressed = w.suppressed if w is not None else 0
+    _warned[key] = _Warned(warned_at=now, seen_at=now)
+    logger.warning(msg, extra={**extra, "suppressed_since_last": suppressed} if suppressed else extra)
+
+
+def expire_warned(idle_s: float) -> None:
+    """Re-arm keys not seen for `idle_s`, so the table stays bounded without re-arming a recurring one."""
+    now = _clock()
+    for key in [k for k, w in _warned.items() if now - w.seen_at >= idle_s]:
+        del _warned[key]
 
 
 def forget_warned(keep: set[str] | None = None) -> None:
     """Re-arm every key not in `keep` (or every key when called without one)."""
-
     if keep is None:
         _warned.clear()
         return
-    _warned.intersection_update(keep)
+    for key in [k for k in _warned if k not in keep]:
+        del _warned[key]

@@ -196,6 +196,14 @@ export interface ConversationShares {
 /** List a conversation's static shares from the broker, keyed by the sandbox short-id
  *  (`shortId(threadId)`) rather than the thread UUID, reporting `configured:false` on
  *  404/501 and an empty list on any other error. */
+/** The broker answered the shares list with 503 even after a retry. */
+export class SharesUnavailableError extends Error {
+  constructor(readonly status: number) {
+    super(`broker /shares unavailable (${status})`);
+    this.name = "SharesUnavailableError";
+  }
+}
+
 export async function fetchConversationShares(
   brokerUrl: string,
   brokerConversationId: string,
@@ -204,10 +212,16 @@ export async function fetchConversationShares(
 ): Promise<ConversationShares> {
   const base = brokerUrl.replace(/\/$/, "");
   if (!base) return { configured: false, shares: [] };
-  const res = await fetch(
-    `${base}/shares?conversation_id=${encodeURIComponent(brokerConversationId)}`,
-    { method: "GET", headers: authHeaders },
-  );
+  const url = `${base}/shares?conversation_id=${encodeURIComponent(brokerConversationId)}`;
+  // The list is an idempotent read, so a network error or a 5xx is retried once.
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "GET", headers: authHeaders });
+  } catch {
+    res = await fetch(url, { method: "GET", headers: authHeaders });
+  }
+  if (res.status >= 500) res = await fetch(url, { method: "GET", headers: authHeaders });
+  if (res.status === 503) throw new SharesUnavailableError(res.status);
   if (!res.ok) {
     // 404/501 means the shares feature is not enabled on the broker.
     if (res.status === 404 || res.status === 501) return { configured: false, shares: [] };
@@ -827,8 +841,13 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.get("/conversations/:id/shares", async (ctx) => {
     if (!deps.listShares) return { json: { configured: false, shares: [] } };
     const id = (await resolveConvId(ctx.params.id)) ?? ctx.params.id;
-    const result = await deps.listShares(id).catch(() => ({ configured: true, shares: [] as ShareSummary[] }));
-    return { json: result };
+    try {
+      return { json: await deps.listShares(id) };
+    } catch {
+      // Unreachable after a retry: a 503 lets the UI keep its last list instead of blanking it.
+      ctx.res.setHeader?.("Retry-After", "5");
+      return { status: 503, json: { error: "shares unavailable", configured: true, shares: [] } };
+    }
   });
 
   r.post("/conversations/:id/links", async (ctx) => {

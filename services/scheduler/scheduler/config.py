@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     agent_host_url: str = "http://agent-host:8080"
     # The projected SA token to present so the agent-host honors `owner`.
     sa_token_path: str = "/var/run/secrets/agent-host/token"
+    # Spawn HTTP timeouts; the prompt reply waits on a revive, which can take a minute.
+    spawn_connect_timeout_seconds: float = 10.0
+    spawn_read_timeout_seconds: float = 120.0
+    # Attempts per spawn call, with exponential backoff from spawn_backoff_seconds.
+    spawn_attempts: int = 3
+    spawn_backoff_seconds: float = 2.0
 
     # --- API auth -----------------------------------------------------------
     # The key gating the /tasks API; empty disables auth.

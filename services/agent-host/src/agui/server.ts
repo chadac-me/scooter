@@ -15,6 +15,7 @@ import type { SessionId, ThreadId } from "../types.js";
 import type { Router } from "../http/router.js";
 import { sandboxLabelOf, type WebServiceProxy } from "../proxy/webServiceProxy.js";
 import { logger, withConversation } from "../log.js";
+import { isDbUnavailable } from "../db/pgPool.js";
 
 const log = logger("agui");
 
@@ -480,7 +481,11 @@ export function createAguiServer(): AguiServer {
               http_method: req.method,
               url: req.url,
             });
-            if (!res.headersSent) {
+            if (!res.headersSent && isDbUnavailable(err)) {
+              // A database outage is transient; tell the caller to retry rather than fail.
+              res.writeHead(503, { "Content-Type": "application/json", "Retry-After": "5" });
+              res.end(JSON.stringify({ error: "database unavailable" }));
+            } else if (!res.headersSent) {
               res.writeHead(500, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: "internal error" }));
             } else {

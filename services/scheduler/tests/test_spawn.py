@@ -5,9 +5,16 @@ import json
 import httpx
 import pytest
 
-from scheduler.spawn import spawn_conversation
+from scheduler.spawn import spawn, spawn_conversation
 
 SERVER_ID = "11111111-2222-3333-4444-555555555555"
+
+
+@pytest.fixture(autouse=True)
+def _no_backoff(monkeypatch):
+    from scheduler.config import settings
+
+    monkeypatch.setattr(settings, "spawn_backoff_seconds", 0.0)
 
 
 class _Agent:
@@ -92,7 +99,7 @@ async def test_spawn_returns_none_when_create_fails():
     agent = _Agent(create_status=502)
     conv = await _spawn(agent)
     assert conv is None
-    assert agent.calls == ["POST /conversations"]
+    assert agent.calls == ["POST /conversations"] * 3  # retried, then given up
 
 
 @pytest.mark.asyncio
@@ -122,3 +129,59 @@ async def test_spawn_omits_optional_fields_when_absent():
     assert "title" not in agent.create_body
     assert "owner" not in agent.create_body
     assert "owner" not in agent.prompt_body
+
+
+class _Flaky(_Agent):
+    """Fails the first `fail` calls to `path` with `exc` (or `status`), then behaves."""
+
+    def __init__(self, path, fail, exc=None, status=None, **kw):
+        super().__init__(**kw)
+        self.path, self.fail, self.exc, self.status = path, fail, exc, status
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(self.path) and self.fail > 0:
+            self.fail -= 1
+            self.calls.append(f"{request.method} {request.url.path}")
+            if self.exc:
+                raise self.exc("boom", request=request)
+            return httpx.Response(self.status)
+        return await super().handler(request)
+
+
+@pytest.mark.asyncio
+async def test_create_read_timeout_is_retried():
+    agent = _Flaky("/conversations", 1, exc=httpx.ReadTimeout)
+    assert await _spawn(agent) == SERVER_ID
+    assert agent.calls == ["POST /conversations", "POST /conversations", "POST /agui"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_no_pod_ready_503_is_retried():
+    agent = _Flaky("/agui", 2, status=503)
+    assert await _spawn(agent) == SERVER_ID
+    assert agent.calls.count("POST /agui") == 3
+
+
+@pytest.mark.asyncio
+async def test_prompt_read_timeout_is_NOT_retried_since_it_may_have_been_delivered():
+    agent = _Flaky("/agui", 1, exc=httpx.ReadTimeout)
+    res = await spawn("p", title="t", owner=None, client=httpx.AsyncClient(transport=httpx.MockTransport(agent.handler)))
+    assert res.conversation_id is None
+    assert res.error and "prompt failed: ReadTimeout" in res.error
+    assert agent.calls.count("POST /agui") == 1
+
+
+@pytest.mark.asyncio
+async def test_prompt_connect_error_is_retried():
+    agent = _Flaky("/agui", 1, exc=httpx.ConnectError)
+    assert await _spawn(agent) == SERVER_ID
+    assert agent.calls.count("POST /agui") == 2
+
+
+def test_default_timeouts_outlast_a_revive():
+    from scheduler.config import settings
+    from scheduler.spawn import _timeout
+
+    t = _timeout()
+    assert t.read == settings.spawn_read_timeout_seconds >= 60
+    assert t.connect == settings.spawn_connect_timeout_seconds

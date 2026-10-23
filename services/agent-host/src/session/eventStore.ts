@@ -186,13 +186,30 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
             const checksum = chainNext(prevChecksum, event);
             // Resolved once, so the predicate and the refusal log agree on the epoch presented.
             const presented = config.fence?.generation(id);
-            // INSERT ... SELECT so the fence rides the statement; no onConflictDoNothing, since a
-            // duplicate (conversation_id, seq) means a second writer.
+            // INSERT ... SELECT so the fence rides the statement. DO NOTHING makes a retry of a write
+            // that committed unseen idempotent; the checksum below tells that from a second writer.
             const res = await db.execute(sql`
               insert into ${conversationEvents} (conversation_id, seq, event, checksum, prev_checksum)
               select ${id}::text, ${seq}::bigint, ${JSON.stringify(event)}::jsonb, ${checksum}::text, ${prevChecksum}::text${fenceClause(id, presented)}
+              on conflict (conversation_id, seq) do nothing
             `);
             if ((res.rowCount ?? 0) === 0) {
+              const existing = await db
+                .select({ checksum: conversationEvents.checksum })
+                .from(conversationEvents)
+                .where(and(eq(conversationEvents.conversationId, id), eq(conversationEvents.seq, seq)))
+                .limit(1);
+              if (existing[0]?.checksum === checksum) {
+                // Our own write, committed on an attempt whose reply was lost.
+                heads.set(id, { seq, checksum });
+                refusals.delete(id);
+                for (const cb of appendListeners) cb(id, { event, prevChecksum, checksum });
+                return;
+              }
+              if (existing[0]) {
+                heads.delete(id);
+                throw new Error(`seq ${seq} already holds a different event (a second writer)`);
+              }
               // Zero rows is only reachable under a fence and is not an error, since the row
               // says this pod is no longer the writer, so neither the head nor the listeners
               // may see an append that was never committed.

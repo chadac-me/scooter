@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { createManagementApi, raiseApprovalInterrupt, fetchPendingApprovals } from "../../src/api/management.js";
+import { createManagementApi, raiseApprovalInterrupt, fetchPendingApprovals, fetchConversationShares } from "../../src/api/management.js";
 import { UserSkillError, type UserSkillStore } from "../../src/session/userSkillStore.js";
 import { parseContribUserApi } from "../../src/api/contribApi.js";
 import { shortId } from "../../src/session/manager.js";
@@ -1414,5 +1414,44 @@ describe("management API", () => {
       expect(parseContribUserApi(JSON.stringify({ a: { brokerPrefix: "nope" }, b: {}, c: { brokerPrefix: "/c" } })))
         .toEqual({ c: { brokerPrefix: "/c" } });
     });
+  });
+});
+
+describe("shares list resilience", () => {
+  it("retries the broker /shares read once on a network error", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ shares: [{ uuid: "u1" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const res = await fetchConversationShares("http://broker", "abc", {});
+      expect(res).toEqual({ configured: true, shares: [{ uuid: "u1" }] });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("GET /conversations/:id/shares answers 503 when the broker stays unavailable", async () => {
+    const api = createManagementApi({
+      sessions: fakeSessions(),
+      store: fakeStore([]),
+      server: stubServer,
+      answerPermission: async () => {},
+      listShares: async () => {
+        throw new Error("broker down");
+      },
+    });
+    const { status, json } = await call(api, "GET", "/conversations/c1/shares");
+    expect(status).toBe(503);
+    expect((json as { error?: string }).error).toBe("shares unavailable");
+  });
+
+  it("GET /conversations/:id/links lets a database outage propagate for the server's 503", async () => {
+    const { DbUnavailableError } = await import("../../src/db/pgPool.js");
+    const store = { ...fakeStore([]), listLinks: async () => { throw new DbUnavailableError("listLinks", new Error("down")); } };
+    const api = createManagementApi({ sessions: fakeSessions(), store, server: stubServer, answerPermission: async () => {} });
+    await expect(call(api, "GET", "/conversations/c1/links")).rejects.toBeInstanceOf(DbUnavailableError);
   });
 });
