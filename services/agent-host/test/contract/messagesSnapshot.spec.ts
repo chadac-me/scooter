@@ -215,3 +215,41 @@ describe("foldToMessages createdAt", () => {
     expect(out[0]).not.toHaveProperty("createdAt");
   });
 });
+
+describe("foldToMessages SYSTEM_MESSAGE anchors", () => {
+  it("maps each system message to the folded message it followed (null before any)", () => {
+    const anchors = new Map<string, string | null>();
+    const out = foldToMessages(
+      [
+        ev({ type: "SYSTEM_MESSAGE", messageId: "s0", source: "scheduler", text: "spawned" }),
+        ev({ type: "TEXT_MESSAGE_START", messageId: "u1", role: "user" }),
+        ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "hi" }),
+        ev({ type: "TEXT_MESSAGE_END", messageId: "u1" }),
+        ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" }),
+        ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "a1", delta: "ok" }),
+        ev({ type: "TOOL_CALL_START", toolCallId: "t1", toolCallName: "bash" }),
+        ev({ type: "TOOL_CALL_END", toolCallId: "t1" }),
+        ev({ type: "TEXT_MESSAGE_END", messageId: "a1" }),
+        ev({ type: "SYSTEM_MESSAGE", messageId: "s1", source: "github", text: "PR labeled" }),
+      ],
+      anchors,
+    );
+    expect(out.map((m) => m.id)).toEqual(["u1", "a1"]);
+    expect([...anchors]).toEqual([["s0", null], ["s1", "a1"]]);
+  });
+
+  it("falls back past a message that folded away as empty", () => {
+    const anchors = new Map<string, string | null>();
+    foldToMessages(
+      [
+        ev({ type: "TEXT_MESSAGE_START", messageId: "u1", role: "user" }),
+        ev({ type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "hi" }),
+        ev({ type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" }),
+        ev({ type: "TEXT_MESSAGE_END", messageId: "a1" }),
+        ev({ type: "SYSTEM_MESSAGE", messageId: "s1", source: "github", text: "x" }),
+      ],
+      anchors,
+    );
+    expect(anchors.get("s1")).toBe("u1");
+  });
+});

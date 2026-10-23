@@ -723,9 +723,16 @@ export function createManagementApi(deps: ManagementDeps): Router {
           event: { type: "MESSAGES_SNAPSHOT", messages, ...(hasOlder ? { fromSeq } : {}) },
         });
       }
+      // A SYSTEM_MESSAGE's position among the folded messages is lost once history is a snapshot, so
+      // stamp each one with the folded message it followed. Folded over the full history (not just
+      // the tail) so the ids match older pages too.
+      const anchors = new Map<string, string | null>();
+      if (history.some((e) => e.type === "SYSTEM_MESSAGE")) foldToMessages(history, anchors);
       // Non-message events replay from the full history because run/queue/context state is cumulative.
       for (const e of history) {
-        if (!MESSAGE_EVENTS.has(e.type)) send({ kind: "event", event: e });
+        if (MESSAGE_EVENTS.has(e.type)) continue;
+        const id = e.type === "SYSTEM_MESSAGE" ? (e as { messageId?: string }).messageId : undefined;
+        send({ kind: "event", event: id && anchors.has(id) ? { ...e, afterMessageId: anchors.get(id) } : e });
       }
     }
     // Flush anything that arrived during replay, then go live.
