@@ -21,6 +21,33 @@ export interface TunnelClientDeps extends Omit<TunnelServiceDeps, "send"> {
   conversationId: string;
   fetchImpl?: typeof fetch;
   idleMs?: number;
+  /** Whether a frame's ACP session (`sid`) belongs to this conversation; the stream carries every conversation's frames. */
+  ownsSession?: (sid: string) => boolean;
+}
+
+/** Streams remembered as served; replays of older ones are past any timeout. */
+const SERVED_MAX = 4096;
+
+/**
+ * Admit only this conversation's frames, and each stream's open once. The controller
+ * fans one session's stream to every reader and replays its queue to a new or
+ * reconnected reader, so serving every frame runs other conversations' tool calls in
+ * this conversation's scope and re-runs old ones.
+ */
+export function createTunnelFrameFilter(ownsSession?: (sid: string) => boolean): (frame: WireFrame) => boolean {
+  const served = new Set<string>();
+  return (frame) => {
+    if (ownsSession) {
+      // An unstamped frame cannot be attributed, so serving it would guess a scope.
+      if (!frame.sid || !ownsSession(frame.sid)) return false;
+    }
+    if (frame.type === "open" && frame.id) {
+      if (served.has(frame.id)) return false;
+      served.add(frame.id);
+      if (served.size > SERVED_MAX) served.delete(served.values().next().value as string);
+    }
+    return true;
+  };
 }
 
 export interface TunnelClient {
@@ -70,6 +97,7 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
   });
 
   const idleMs = deps.idleMs ?? STREAM_IDLE_MS;
+  const admit = createTunnelFrameFilter(deps.ownsSession);
   const follow = async (): Promise<void> => {
     while (!closed) {
       let idle: NodeJS.Timeout | undefined;
@@ -106,6 +134,7 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
               if (!line.startsWith("data:")) continue;
               try {
                 const frame = JSON.parse(line.slice(5).trim()) as WireFrame;
+                if (!admit(frame)) continue;
                 void service.onFrame(deps.conversationId, frame);
               } catch {
                 // One malformed frame must not kill the stream.

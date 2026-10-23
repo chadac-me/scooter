@@ -208,6 +208,8 @@ export function createRemotePersonalizedProvider(deps: {
       // The pod holds no socket: every frame is an HTTP call to the controller, which owns
       // the one duplex WS to the container.
       const transport = createByocTransport({ baseUrl: base, sessionId, fetchImpl: deps.fetchImpl, idleMs: deps.streamIdleMs });
+      // ACP sessions this client opened; the shared stream also carries other conversations'.
+      const acpSessions = new Set<string>();
       // A stream the container opens needs an inbound channel, so hold the controller's
       // dedicated inbound stream open for as long as this client lives, but only when
       // scooter-env is actually offered.
@@ -233,9 +235,16 @@ export function createRemotePersonalizedProvider(deps: {
             brokerMcpUrlFor: deps.brokerMcpUrlFor,
             fetchImpl: deps.fetchImpl,
             idleMs: deps.streamIdleMs,
+            ownsSession: (sid) => acpSessions.has(sid),
           })
         : undefined;
       const client = createRemoteAcpClient({ transport, exec: deps.exec });
+      const origNewSession = client.newSession.bind(client);
+      client.newSession = async (params) => {
+        const res = await origNewSession(params);
+        acpSessions.add(res.sessionId);
+        return res;
+      };
       // Tear the inbound stream down with the client, or a dead session keeps its reader alive forever.
       const origClose = client.close?.bind(client);
       client.close = async () => {
