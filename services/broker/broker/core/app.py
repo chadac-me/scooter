@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from .auth import authenticate, authenticate_mcp
 from .authz import authorizer_from_settings
+from .db_unavailable import install_db_unavailable_handler
 from ..config import refresh_settings, settings
 from scooter_broker_lib.autolink import Link, create_link, list_links
 from scooter_broker_lib.context import BrokerContext
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
                     await p.on_shutdown()
 
     app = FastAPI(title="kubenix-agent-manager broker", lifespan=lifespan)
+    install_db_unavailable_handler(app)
 
     if shares_router is not None:
         app.include_router(shares_router)
