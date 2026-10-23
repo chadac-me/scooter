@@ -25,7 +25,7 @@ function useDark() {
   return [dark, toggle] as const;
 }
 
-/** A markdown document's first `# ` heading as plain text, skipping fenced code. */
+/** A doc's first `# ` heading, outside code fences. */
 function mdTitle(body: string): string {
   let fence = "";
   for (const line of body.split("\n")) {
@@ -157,7 +157,7 @@ export function App() {
   const open = threads.filter((t) => !t.resolved).length;
   const unanswered = questions.filter((q) => !q.answered).length;
 
-  // The tab names what is open: a document by its title, anything else by its filename.
+  // Tab title: the doc's heading, else the filename.
   const shownFile = file && file.path === path ? file : null;
   const docTitle = useMemo(() => (shownFile?.renderer === "markdown" ? mdTitle(shownFile.body) : ""), [shownFile]);
   useEffect(() => {
@@ -186,7 +186,7 @@ export function App() {
               {unanswered} question{unanswered > 1 ? "s" : ""}
             </span>
           )}
-          {/* The preview's comment rail carries its own count; elsewhere this is the only one. */}
+          {/* The preview's rail shows its own count. */}
           {open > 0 && !(md && !source) && (
             <span className="pill bg-warning/15 text-warning">
               {open} open comment{open > 1 ? "s" : ""}

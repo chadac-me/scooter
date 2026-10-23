@@ -96,7 +96,6 @@ export function Composer({
   );
 }
 
-/** The passage a comment is anchored to, set off by an accent rule. */
 export function Quote({ text, className }: { text: string; className?: string }) {
   return (
     <blockquote
@@ -167,13 +166,12 @@ export function ThreadCard({
   onChange: () => void;
   showQuote?: boolean;
   active?: boolean;
-  /** Bumped each time the thread is picked from the document, which unfolds it. */
+  /** Bumped when the thread is picked from the document; unfolds it. */
   reveal?: number;
 }) {
   const [replying, setReplying] = useState(false);
   const [open, setOpen] = useState(!thread.resolved);
-  // Resolve/reopen shows before the server answers. Held until the refetched thread
-  // agrees, not just until the POST returns, or the card flips back in between.
+  // Optimistic until the refetch agrees, or the card flips back after the POST.
   const [pending, setPending] = useState<{ want: boolean; acked: boolean } | null>(null);
   const [failed, setFailed] = useState(false);
   const resolved = pending ? pending.want : thread.resolved;
@@ -196,14 +194,10 @@ export function ThreadCard({
     setPending({ want, acked: true });
     onChange();
   };
-  // Resolving folds a thread away and reopening unfolds it, whoever does it (the
-  // reviewer here, or the agent from its side); in between, the reviewer's own
-  // collapse/expand stands.
-  // Skip our own change (already folded on click): the reviewer may have unfolded it since.
+  // Resolve folds, reopen unfolds, from either side. Our own change is already applied.
   useEffect(() => {
     if (pending?.want !== thread.resolved) setOpen(!thread.resolved);
   }, [thread.resolved]);
-  // Picking a thread's highlight in the document shows the thread.
   useEffect(() => {
     if (reveal) setOpen(true);
   }, [reveal]);

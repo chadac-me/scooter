@@ -124,8 +124,7 @@ const Chunk = memo(function Chunk({ text, offset }: { text: string; offset: numb
 type Draft = { line: number; quote: string };
 type Heading = { id: string; text: string; level: number };
 
-// The doc's 64rem column (max-w-5xl) plus the 14rem contents column (w-56): the
-// contents take their own column only when the doc keeps its full width beside them.
+// Doc column (64rem) plus contents column (14rem).
 const TOC_MIN_WIDTH = (64 + 14) * 16;
 
 /** The document's h1–h3, linking each section and marking the one in view. */
@@ -181,10 +180,9 @@ function Contents({ toc, active, path, inRail }: { toc: Heading[]; active: strin
 }
 type Pop = { top: number; left: number; anchor: Draft };
 
-// The server's cap on a quote; a longer block is quoted by its first line.
+// The server's quote cap; longer blocks quote their first line.
 const MAX_QUOTE = 4000;
 
-/** A paragraph comment's anchor: the block's line and its whole source text. */
 function blockAnchor(body: string, el: HTMLElement): Draft {
   const start = Number(el.dataset.line);
   const end = Number(el.dataset.lineEnd ?? start);
@@ -193,7 +191,6 @@ function blockAnchor(body: string, el: HTMLElement): Draft {
   return { line: start, quote };
 }
 
-/** A margin marker: the block's offset in the doc column and the threads on it. */
 type Mark = { top: number; ids: string[]; open: number };
 type Hover = { top: number; el: HTMLElement };
 
@@ -213,23 +210,18 @@ export function MarkdownPane({
   onChange: () => void;
 }) {
   const doc = useRef<HTMLDivElement>(null);
-  // The doc column (article plus its margins), which the popover and markers sit in.
   const wrap = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<Pop | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [active, setActive] = useState<string | null>(null);
-  // Picking a thread from the document (its highlight, its margin badge) also unfolds
-  // it; a click inside its own card only selects it, or the card's Resolve and
-  // Collapse would fold it and unfold it again in the same click. Counted, so picking
-  // the same thread twice still unfolds it the second time.
+  // Counted, so re-picking a thread unfolds it again. Card clicks don't count.
   const [reveal, setReveal] = useState<{ id: string; n: number }>({ id: "", n: 0 });
   const pick = (id: string) => {
     setActive(id);
     setReveal((r) => ({ id, n: r.n + 1 }));
   };
   const ranges = useRef(new Map<string, Range>());
-  // Threads on a whole block: no standing highlight (a margin marker shows them), and
-  // a click in their text is an ordinary click, not a jump to the thread.
+  // Block threads: no highlight and no click-to-jump; the margin marker shows them.
   const whole = useRef(new Set<string>());
   const [marks, setMarks] = useState<Mark[]>([]);
   const [hover, setHover] = useState<Hover | null>(null);
@@ -268,8 +260,7 @@ export function MarkdownPane({
     el.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [path, hash, segs]);
 
-  // Paint each thread's quote with the CSS Custom Highlight API, so React's DOM is
-  // untouched, and place a marker in the margin beside each commented block.
+  // Custom Highlight API, so React's DOM is untouched.
   useLayoutEffect(() => {
     const root = doc.current;
     const col = wrap.current;
@@ -311,14 +302,12 @@ export function MarkdownPane({
       if (!("highlights" in CSS)) return;
       CSS.highlights.set("comment", new Highlight(...open));
       CSS.highlights.set("comment-resolved", new Highlight(...done));
-      // The thread in focus, or the passage a new comment is being written on.
       const a = (active && ranges.current.get(active)) || (draft && rangeOf(draft.line, draft.quote).r);
       if (a) CSS.highlights.set("comment-active", new Highlight(a));
       else CSS.highlights.delete("comment-active");
     };
     paint();
-    // Code blocks highlight asynchronously and replace their text nodes; repaint then,
-    // and when the column reflows, since the markers follow their blocks.
+    // Repaint after async code highlighting and on reflow.
     const mo = new MutationObserver(paint);
     mo.observe(root, { childList: true, subtree: true, characterData: true });
     const ro = new ResizeObserver(paint);
@@ -329,8 +318,7 @@ export function MarkdownPane({
     };
   }, [threads, active, body, draft]);
 
-  // Pick the block by the pointer's height, not by e.target: the margin the button sits
-  // in, and the gaps between blocks, are inside no block.
+  // By height, not e.target: the margin and gaps between blocks are in no block.
   const onMouseMove = useCallback((e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("[data-gutter]")) return;
     const root = doc.current;
@@ -342,13 +330,13 @@ export function MarkdownPane({
     for (const el of root.querySelectorAll<HTMLElement>(BLOCKS)) {
       if (el.closest("[data-question]")) continue;
       const r = el.getBoundingClientRect();
-      // The innermost block on this row: a loose list item's paragraph, not the item.
+      // Innermost, so a loose list item's <p> beats the <li>.
       if (y >= r.top && y <= r.bottom && r.height < bestH) {
         best = el;
         bestH = r.height;
       }
     }
-    // In a gap between blocks, keep the last one so the button doesn't flicker.
+    // In a gap, keep the last block so the button doesn't flicker.
     if (!best) return;
     const top = best.getBoundingClientRect().top - col.getBoundingClientRect().top;
     setHover((h) => (h?.el === best && h.top === top ? h : { el: best, top }));
@@ -366,7 +354,6 @@ export function MarkdownPane({
     if (!block) return setPop(null);
     const anchor = sourceAnchor(body, Number(block.dataset.line), sel.toString());
     const rect = range.getBoundingClientRect();
-    // Measured against the column the popover is placed in, not the article inside it.
     const box = col.getBoundingClientRect();
     setPop({ top: rect.top - box.top - 40, left: rect.left - box.left + rect.width / 2, anchor });
   }, [body]);

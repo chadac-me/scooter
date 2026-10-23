@@ -3,7 +3,7 @@
 
 import type { Root, Element, ElementContent, RootContent } from "hast";
 
-/** A rehype plugin tagging every element with the source lines it starts and ends on. */
+/** Tags each element with its source start and end lines. */
 export function rehypeSourceLines(opts: { offset: number }) {
   return (tree: Root) => {
     const walk = (node: Root | RootContent | ElementContent) => {
@@ -61,25 +61,16 @@ export function segments(body: string): Segment[] {
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// What may sit between two rendered words in the source: whitespace (a soft wrap is a
-// newline), inline markup, a link's target, a list or quote marker at a line's start.
+// Source between two rendered words: whitespace, inline markup, link targets, line-start markers.
 const GAP = String.raw`(?:\s|[*_~\x60>|#\[\]]|\]\([^)]*\)|(?<=\n[ \t]*)(?:[-+]|\d+[.)])(?=\s))*`;
-// What may sit inside one: a word can butt against markup, as in **bold**, or [link](x).
+// Markup inside a word, as in **bold** or [link](x).
 const INLINE = String.raw`(?:[*_~\x60\[\]]|\]\([^)]*\))*`;
 
-/**
- * The selection as an anchor the server can verify against the source.
- *
- * Rendered text drops markup (`**`, link targets, soft line breaks), so the selection
- * is rarely in the source verbatim. Its words are matched in order with any markup
- * between them, and the quote is the source text that spans them, so a selection
- * across a hard-wrapped paragraph quotes all of it. Failing that, the longest run of
- * words found verbatim stands in, which is still unique enough to re-find.
- */
+/** Words matched in order across markup; else the longest verbatim run. */
 export function sourceAnchor(source: string, blockLine: number, selected: string) {
   const lines = source.split("\n");
   const words = selected.split(/\s+/).filter(Boolean);
-  // The search starts at the selection's block, so a phrase repeated earlier is skipped.
+  // Start at the selection's block, skipping earlier repeats.
   const from = lines.slice(0, Math.max(0, blockLine - 1)).reduce((n, l) => n + l.length + 1, 0);
   let quote = "";
   if (words.length) {
@@ -100,7 +91,7 @@ export function sourceAnchor(source: string, blockLine: number, selected: string
   return { line: quote ? lineOf(source, quote, blockLine) : blockLine, quote };
 }
 
-/** The line a quote starts on: its first occurrence at or after `near`, else anywhere. */
+/** First occurrence at or after `near`, else anywhere. */
 function lineOf(source: string, quote: string, near: number): number {
   const lines = source.split("\n");
   const from = lines.slice(0, Math.max(0, near - 1)).reduce((n, l) => n + l.length + 1, 0);
@@ -109,7 +100,6 @@ function lineOf(source: string, quote: string, near: number): number {
   return at === -1 ? near : source.slice(0, at).split("\n").length;
 }
 
-/** A source block's own text, lines `start` to `end`, as a paragraph comment quotes it. */
 export function blockSource(source: string, start: number, end: number): string {
   return source
     .split("\n")
@@ -118,10 +108,7 @@ export function blockSource(source: string, start: number, end: number): string 
     .trim();
 }
 
-/**
- * A quote as it reads rendered: link targets, inline markup and line-start markers
- * dropped. Underscores and asterisks inside a word (snake_case) are kept.
- */
+/** A quote as rendered: markup dropped, `_` and `*` inside words kept. */
 export function plainOf(quote: string): string {
   return quote
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
@@ -132,12 +119,10 @@ export function plainOf(quote: string): string {
     .trim();
 }
 
-/** The elements a paragraph comment attaches to; inline elements resolve to these. */
 export const BLOCKS = ["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "table", "div[data-code]"]
   .map((s) => `${s}[data-line]`)
   .join(", ");
 
-/** The innermost block whose source lines hold `line`. */
 export function blockAt(root: HTMLElement, line: number): HTMLElement | null {
   let best: HTMLElement | null = null;
   let span = Infinity;
@@ -152,15 +137,11 @@ export function blockAt(root: HTMLElement, line: number): HTMLElement | null {
   return best;
 }
 
-/**
- * A DOM Range over the first occurrence of `quote` in `root`'s text, if any. Runs of
- * whitespace match any run of whitespace, as a soft wrap renders as a newline.
- */
+/** A Range over `quote`'s first occurrence; whitespace runs match any run. */
 export function findText(root: Node, quote: string): Range | null {
   const needle = quote.replace(/\s+/g, " ").trim();
   if (!needle) return null;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  // The root's text with whitespace collapsed, and where each character came from.
   let flat = "";
   const from: [Text, number][] = [];
   for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null)
@@ -180,11 +161,7 @@ export function findText(root: Node, quote: string): Range | null {
   return range;
 }
 
-/**
- * A quote as the comment rail shows it. Prose reads as rendered; a fenced block shows
- * its code untouched (markup stripping would eat a `**` operator); a table shows its
- * cells, without the pipes and the separator row.
- */
+/** A quote as the rail shows it: prose rendered, code untouched, tables as cells. */
 export function previewOf(quote: string): string {
   const lines = quote.split("\n");
   const fence = /^\s*(`{3,}|~{3,})/.exec(lines[0]);

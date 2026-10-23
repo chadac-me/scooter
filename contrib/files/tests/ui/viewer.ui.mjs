@@ -39,9 +39,7 @@ const ws = join(root, "workspace");
 mkdirSync(join(ws, "docs"), { recursive: true });
 mkdirSync(join(ws, "src"), { recursive: true });
 
-// Hard-wrapped prose with inline markup is the selection case that used to anchor
-// short: the rendered paragraph joins its source lines and drops the `**`, so the
-// quote must map back across both.
+// A selection across a hard wrap and inline markup quotes all of it.
 const DOC = `# Review me
 
 The viewer renders a document from the sandbox so that a **reader** can select a
@@ -120,8 +118,7 @@ const viewer = spawn(python, [join(viewerDir, "server.py")], {
     SCOOTER_FILES_STATE: join(root, "annotations.json"),
     BROKER_URL: `http://127.0.0.1:${broker.address().port}`,
     BROKER_TOKEN_PATH: join(root, "token"),
-    // Run from inside a sandbox, the inherited self route would wake the live
-    // conversation with every test comment; the stub broker is the only sink.
+    // The stub broker is the only sink, so test comments don't wake this conversation.
     SCOOTER_SELF_URL: "",
     SCOOTER_SELF_TOKEN_PATH: "",
     CONVERSATION_ID: "",
@@ -170,8 +167,7 @@ try {
   // Shiki highlights after first paint.
   check("code fences are highlighted", await page.locator("article pre.shiki").waitFor({ timeout: 10_000 }).then(() => true, () => false));
 
-  // Select a paragraph's text from `from` through `to` and release, as a reader's
-  // drag would. The range may cross element boundaries (the paragraph's <strong>).
+  // Drag-select from `from` to `to`, across element boundaries.
   const select = async (index, from, to) => {
     const para = page.locator("article p").nth(index);
     await para.scrollIntoViewIfNeeded();
@@ -196,7 +192,6 @@ try {
     }, [from, to]);
   };
 
-  // From mid-line, across the bold word and the hard wrap, to mid-line.
   await select(0, "so that a", "leave a comment");
   const offer = page.getByRole("button", { name: "Comment", exact: true }).first();
   await offer.waitFor();
@@ -255,15 +250,12 @@ try {
   check("the sending badge clears with no user action", !(await page.locator("body").innerText()).includes("sending"));
   check("the broker received both", await until(() => store.size === 2), `${store.size} at the broker`);
 
-  // A second thread elsewhere, on a whole paragraph from its margin button, so a
-  // delete can be shown to leave it alone.
+  // A second thread, to show a delete leaves it alone.
   const second = page.locator("article p").nth(1);
-  // Travel to the margin button as a pointer does, in steps across the empty margin
-  // between the text and the button: the button must still be there on arrival.
+  // Step across the margin: the button must survive the trip.
   const pbox = await second.boundingBox();
   const gutter = page.getByRole("button", { name: "Comment on this paragraph" });
-  // Coming in from the side, the pointer reaches the margin before any text: the
-  // paragraph level with it already offers its button there.
+  // Entering from the side reaches the margin before any text.
   await page.mouse.move(5, pbox.y + pbox.height / 2);
   await page.mouse.move(pbox.x - 16, pbox.y + pbox.height / 2, { steps: 12 });
   const fromMargin = await gutter.boundingBox().catch(() => null);
@@ -299,9 +291,7 @@ try {
   const paraTop = await second.evaluate((p) => p.getBoundingClientRect().top);
   check("the marker sits beside its paragraph", Math.abs(markTop - paraTop) < 4, `${markTop} vs ${paraTop}`);
 
-  // Below the first screenful too: in a short window, scrolled to the doc's last
-  // block. The doc column once ended a screen down, so the margin under it was outside
-  // the column and crossing it dropped the button.
+  // The margin below the first screen keeps the button too.
   await page.setViewportSize({ width: 1440, height: 320 });
   const last = page.locator("article p").last();
   await last.scrollIntoViewIfNeeded();
@@ -337,8 +327,6 @@ try {
   check("deleting one thread leaves the other", left.length === 1 && left[0].text === "second thread", JSON.stringify(left.map((a) => a.text)));
   check("deletes reach the broker", await until(() => store.size === 1), `${store.size} at the broker`);
 
-  // Any thread folds and unfolds; resolving folds it, reopening unfolds it, and a
-  // reopened thread can still be folded.
   const slot = page.locator(`[id="thread-${left[0].thread}"]`);
   const folded = slot.locator('button[aria-expanded="false"]');
   await slot.getByRole("button", { name: "Collapse thread" }).click();
@@ -346,12 +334,10 @@ try {
   check("an open thread collapses", (await slot.locator("[data-thread]").count()) === 0);
   await folded.click();
   await slot.locator("[data-thread]").waitFor();
-  // From a fresh load, so the thread isn't the selected one: a click in a card also
-  // selects its thread, and selecting a thread unfolds it, which once undid the fold.
+  // Fresh load, so Resolve is the card's first click.
   await page.reload();
   await slot.getByRole("button", { name: "Resolve" }).waitFor();
-  // Resolving folds the thread at once, ahead of the server, with a spinner in place
-  // of the check mark until the server takes it. Hold the request to see that.
+  // Hold the request: the fold must not wait for the server.
   let release;
   const held = new Promise((r) => (release = r));
   const route = /\/annotations\/threads\/[^/]+\/resolve$/;
@@ -373,7 +359,6 @@ try {
   check("reopening unfolds the thread", (await slot.locator("[data-thread]").count()) === 1);
   await slot.getByRole("button", { name: "Collapse thread" }).click();
   check("a reopened thread still collapses", await folded.waitFor({ timeout: 3000 }).then(() => true, () => false));
-  // Picking the folded thread from the document, by its margin badge, unfolds it.
   await page.locator("[data-mark]").first().click();
   check("picking a folded thread in the document unfolds it", await slot.locator("[data-thread]").waitFor({ timeout: 3000 }).then(() => true, () => false));
 
