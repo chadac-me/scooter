@@ -111,4 +111,17 @@ describe("resolveFloorModel", () => {
     expect(resolveFloorModel("m2", legacy, "goose")).toBe("m2");
     expect(resolveFloorModel("nope", legacy, "goose")).toBe("m1");
   });
+
+  // The fake e2e stack's shape: no goose group, so the guard has nothing to go on and keeps the pick.
+  it("keeps the pick when the catalog has no group for the floor provider", () => {
+    const noGoose = catalogFromEnv({
+      AGENT_MODELS_JSON: JSON.stringify([
+        { id: "model-default", providers: ["byoc", "claude-code"], defaultFor: ["byoc", "claude-code"] },
+        { id: "model-smart", providers: ["byoc"] },
+      ]),
+    } as NodeJS.ProcessEnv);
+    const c = { model: noGoose.defaultId, availableModels: noGoose.models.map((m) => m.id), modelCatalog: noGoose };
+    expect(resolveFloorModel("model-smart", c, "goose")).toBe("model-smart");
+    expect(resolveFloorModel("nope", c, "goose")).toBe(c.model);
+  });
 });

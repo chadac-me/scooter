@@ -282,7 +282,10 @@ export function resolveFloorModel(
   tag: string,
 ): string | undefined {
   const cat = config.modelCatalog;
-  if (!cat || cat.models.length === 0) return resolveModel(requested, config);
+  // A catalog with no group for this provider says nothing about what it serves, so keep the
+  // pick (the fake e2e stack's catalog tags only byoc/claude-code yet runs the goose path).
+  const listsTag = cat?.models.some((m) => m.providers.includes(tag) || m.defaultFor.includes(tag));
+  if (!cat || !listsTag) return resolveModel(requested, config);
   if (requested && modelAllowedFor(cat, requested, tag)) return requested;
   return defaultFor(cat, tag) ?? resolveModel(undefined, config);
 }
