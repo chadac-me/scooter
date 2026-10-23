@@ -188,7 +188,17 @@ export class IntegrityAgent extends AbstractAgent {
     return this.systemMessages;
   }
   private trackSystemMessage(e: BaseEvent): boolean {
-    const ev = e as unknown as { type?: string; messageId?: string; toolCallId?: string; source?: string; text?: string };
+    const ev = e as unknown as {
+      type?: string; messageId?: string; toolCallId?: string; source?: string; text?: string;
+      messages?: Array<{ id?: unknown }>; afterMessageId?: string | null;
+    };
+    // History arrives folded into the stream's MESSAGES_SNAPSHOT (older pages come over a separate fetch), so no
+    // TEXT_MESSAGE_START flows for it; its last message is the anchor for whatever arrives live next.
+    if (ev.type === "MESSAGES_SNAPSHOT") {
+      const last = ev.messages?.[ev.messages.length - 1]?.id;
+      if (typeof last === "string") this.lastMessageId = last;
+      return false;
+    }
     // The base applier folds each text message and each tool call as a separate top-level message, so the anchor is whichever of those started last.
     if (ev.type === "TEXT_MESSAGE_START" && ev.messageId) {
       this.lastMessageId = ev.messageId;
@@ -202,7 +212,9 @@ export class IntegrityAgent extends AbstractAgent {
     if (this.systemMessages.some((m) => m.id === ev.messageId)) return false; // replay dedupe
     this.systemMessages.push({
       id: ev.messageId, source: ev.source ?? "system", text: ev.text ?? "",
-      afterMessageId: this.lastMessageId,
+      // A replayed system message carries the server's anchor in the snapshot's id space, since its position
+      // inside the folded history can't be recovered here; live ones anchor to the last message seen.
+      afterMessageId: ev.afterMessageId !== undefined ? ev.afterMessageId : this.lastMessageId,
     });
     return true;
   }

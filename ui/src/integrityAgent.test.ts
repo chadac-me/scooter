@@ -545,6 +545,41 @@ describe("IntegrityAgent", () => {
     agent.dispose();
   });
 
+  it("anchors a live SYSTEM_MESSAGE after a reload to the snapshot's last message, not before everything", async () => {
+    // After a reload, history arrives folded into a MESSAGES_SNAPSHOT, so no TEXT_MESSAGE_START
+    // flows; a live system message must still land after the newest message.
+    const frames = [
+      { kind: "event", event: { type: "MESSAGES_SNAPSHOT", messages: [
+        { id: "u1", role: "user", content: "hi" },
+        { id: "a1", role: "assistant", content: "hello" },
+      ] } },
+      { kind: "synced" },
+      { kind: "event", event: { type: "SYSTEM_MESSAGE", messageId: "sys-1", source: "github", text: "PR #4 labeled" } },
+    ];
+    const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
+    await foldTo(agent);
+    expect(agent.getSystemMessages()).toEqual([
+      { id: "sys-1", source: "github", text: "PR #4 labeled", afterMessageId: "a1" },
+    ]);
+    agent.dispose();
+  });
+
+  it("uses the server-stamped afterMessageId on replayed SYSTEM_MESSAGEs", async () => {
+    const frames = [
+      { kind: "event", event: { type: "MESSAGES_SNAPSHOT", messages: [
+        { id: "u1", role: "user", content: "hi" },
+        { id: "a1", role: "assistant", content: "hello" },
+      ] } },
+      { kind: "event", event: { type: "SYSTEM_MESSAGE", messageId: "sys-0", source: "scheduler", text: "spawned", afterMessageId: null } },
+      { kind: "event", event: { type: "SYSTEM_MESSAGE", messageId: "sys-1", source: "github", text: "PR #4 labeled", afterMessageId: "u1" } },
+      { kind: "synced" },
+    ];
+    const agent = createIntegrityAgent({ baseUrl: "http://host", conversationId: "c1", fetchImpl: sseFetch(frames) });
+    await foldTo(agent);
+    expect(agent.getSystemMessages().map((m) => [m.id, m.afterMessageId])).toEqual([["sys-0", null], ["sys-1", "u1"]]);
+    agent.dispose();
+  });
+
   it("clears the active tool on TOOL_CALL_END, and everything on RUN_FINISHED", async () => {
     const frames = [
       { kind: "event", event: { type: "RUN_STARTED", threadId: "c1", runId: "r1", ts: 1000 } },

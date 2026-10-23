@@ -93,6 +93,38 @@ describe("events.integrity — replays an in-flight (unflushed) append", () => {
   });
 });
 
+describe("events.integrity — system messages", () => {
+  it("stamps each replayed SYSTEM_MESSAGE with the snapshot message it followed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "integrity-route-"));
+    try {
+      const store = createFileConversationStore(root);
+      const id = "conv-sys";
+      const api = createManagementApi({ sessions: stubSessions(id), store, server: stubServer, answerPermission: async () => {} });
+      const events = [
+        { type: "TEXT_MESSAGE_START", messageId: "u1", role: "user" },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "u1", delta: "hi" },
+        { type: "TEXT_MESSAGE_END", messageId: "u1" },
+        { type: "SYSTEM_MESSAGE", messageId: "sys-1", source: "github", text: "PR #4 labeled" },
+        { type: "TEXT_MESSAGE_START", messageId: "a1", role: "assistant" },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "a1", delta: "on it" },
+        { type: "TEXT_MESSAGE_END", messageId: "a1" },
+      ] as unknown as AguiEvent[];
+      for (const e of events) await store.appendEvent(id, e);
+
+      const stream = startIntegrity(api, id);
+      await new Promise((r) => setTimeout(r, 50));
+      stream.close();
+      const frames = (await stream.done)
+        .split("\n\n").filter(Boolean)
+        .map((f) => JSON.parse(f.replace(/^data: /, "")) as { event?: { type: string; afterMessageId?: unknown } });
+      const sys = frames.find((f) => f.event?.type === "SYSTEM_MESSAGE");
+      expect(sys?.event?.afterMessageId).toBe("u1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("events.integrity — ownership", () => {
   /** Like startIntegrity, but also reports whether the handler ended the response. */
   function startWithEnd(api: ReturnType<typeof createManagementApi>, id: string) {

@@ -24,8 +24,12 @@ export interface SnapshotMessage {
   createdAt?: number;
 }
 
-/** Fold `events` into messages in emission order. */
-export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
+/** Fold `events` into messages in emission order. When `anchors` is given, each SYSTEM_MESSAGE's id is mapped
+ *  to the id of the folded message it followed (null = before any message), so the client can splice it in place. */
+export function foldToMessages(
+  events: Iterable<AguiEvent>,
+  anchors?: Map<string, string | null>,
+): SnapshotMessage[] {
   const out: SnapshotMessage[] = [];
   const byId = new Map<string, SnapshotMessage>();
   // A tool call belongs to the assistant message open when it started.
@@ -35,6 +39,8 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
   // tool_call_id -> the emitted call object, so args arriving after it was built can still be written into it.
   const emittedCalls = new Map<string, { function: { arguments: string } }>();
   let openAssistant: SnapshotMessage | undefined;
+  // SYSTEM_MESSAGE id -> index into `out` of the message open when it arrived (-1 = none yet).
+  const sysAt: Array<[string, number]> = [];
 
   // The event being folded, so `open` can stamp the message with that event's `ts`.
   let ts: unknown;
@@ -119,12 +125,25 @@ export function foldToMessages(events: Iterable<AguiEvent>): SnapshotMessage[] {
         m.content = e.content ?? "";
         break;
       }
+      case "SYSTEM_MESSAGE":
+        // Not a message; only its position is recorded.
+        if (anchors && e.messageId) sysAt.push([e.messageId, out.length - 1]);
+        break;
       default:
-        break; // RUN_*, QUEUE_UPDATED, CONTEXT_USAGE, SYSTEM_MESSAGE: not messages
+        break; // RUN_*, QUEUE_UPDATED, CONTEXT_USAGE: not messages
     }
   }
   // Drop framing that produced nothing renderable (an opened-but-empty message).
-  return out.filter((m) => m.content !== "" || (m.toolCalls?.length ?? 0) > 0 || m.role === "tool");
+  const kept = (m: SnapshotMessage) => m.content !== "" || (m.toolCalls?.length ?? 0) > 0 || m.role === "tool";
+  if (anchors) {
+    // An anchor that was dropped as empty falls back to the nearest kept message before it.
+    for (const [id, at] of sysAt) {
+      let i = at;
+      while (i >= 0 && !kept(out[i])) i--;
+      anchors.set(id, i >= 0 ? out[i].id : null);
+    }
+  }
+  return out.filter(kept);
 }
 
 /** How many trailing messages the initial snapshot paints; the rest pages in on scroll. */
