@@ -692,6 +692,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     };
   }
 
+  // In-flight revive() per conversation, so concurrent callers share one revive.
+  const reviving = new Map<SessionId, Promise<Conversation>>();
+
   const api: SessionManager = {
     async start(threadId, model, owner) {
       // The conversation id is the thread id; the k8s name is a short hash of it.
@@ -778,118 +781,129 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     },
 
     async revive(id) {
-      const entry = entries.get(id);
-      if (!entry) throw new Error(`unknown conversation: ${id}`);
-      // A tombstoned entry may still be held by a caller that raced the delete.
-      if (endedIds.has(id)) throw new Error(`conversation was ended: ${id}`);
-
-      if (entry.parentId) {
-        // A subagent never provisions; it rides its root's Sandbox.
-        let root: Entry | undefined = entry;
-        for (let depth = 0; root?.parentId && depth < 32; depth++) root = entries.get(root.parentId);
-        if (!root || root.parentId) {
-          throw new Error(`subagent ${id} has no root conversation on this pod; refusing to provision a sandbox for it`);
-        }
-        if (root.status !== "running") await this.revive(root.id);
-        entry.sandbox = root.sandbox;
-      } else {
-        // A placeholder ref with no namespace means the Sandbox is absent, so create rather than
-        // resume.
-        entry.sandbox = entry.sandbox.namespace
-          ? await provisioner.resume(entry.sandbox, entry.threadId)
-          : await provisioner.create(shortId(entry.threadId), entry.threadId);
-      }
-      // end() may have landed during provisioning; destroy the pod just made before any side effect
-      // republishes the conversation.
-      if (endedIds.has(id)) {
-        // A subagent's Sandbox is its root's; never destroy it here.
-        if (entry.parentId) throw new Error(`conversation was ended: ${id}`);
-        await provisioner.destroy(entry.sandbox).catch((err: unknown) => {
-          log.errorWith("failed to destroy a pod revived into a deleted conversation", err, {
-            conversation_id: id,
-          });
-        });
-        throw new Error(`conversation was ended: ${id}`);
-      }
-      entry.bridge = bridgeFactory?.({ conversationId: id, sandbox: entry.sandbox, model: entry.model, pickedProvider: entry.pickedProvider, owner: entry.owner }) ?? entry.bridge;
-      entry.status = "running";
-      // Republish sandbox_ref, and this pod as creator_pod since the run now lives here;
-      // idempotent, fire-and-forget.
-      void conversationRegistry.register(id, {
-        model: entry.model, owner: entry.owner, parentId: entry.parentId, sandboxRef: entry.sandbox.name,
-        creatorPod: deps.selfPod, // placement hint for the controller
-      });
-      // Count the resume as activity so the idle sweep gives the fresh pod a full idle window; set
-      // directly rather than touch() so no fire-and-forget saveMeta races the awaited write below.
-      entry.lastActivityAt = nowMs();
-      wireEventLog(entry);
-      await saveMeta(entry); // awaited so a persist failure propagates
-      await entry.bridge?.start();
-      // Re-raise interrupts the previous pod lost; fire-and-forget.
-      if (entry.bridge) {
-        try {
-          deps.onRevived?.(id);
-        } catch (err) {
-          log.errorWith("onRevived hook failed", err, { conversation_id: id });
-        }
-      }
-      // Re-enqueue the messages suspend() drained; clear and persist the field first so a failure
-      // cannot replay them twice.
-      let pending = entry.pendingQueue ?? [];
-      if (pending.length > 0) {
-        // Skip messages already in the durable log: runPrompt persists the user message before
-        // calling the agent, so an in-flight message would otherwise run twice.
-        try {
-          const tail = (await store.readEventsTail?.(id, 3)) ?? (await collectEvents(store.readEvents(id)));
-          // Match only user turns: TEXT_MESSAGE_CONTENT carries no role, and an assistant reply
-          // quoting the text must not suppress a replay.
-          const userMsgIds = new Set<string>();
-          const loggedUserTexts = new Set<string>();
-          for (const e of tail) {
-            const ev = e as { type?: string; delta?: string; role?: string; messageId?: string };
-            if (ev.type === "TEXT_MESSAGE_START" && ev.role === "user" && ev.messageId) {
-              userMsgIds.add(ev.messageId);
-            } else if (
-              ev.type === "TEXT_MESSAGE_CONTENT" &&
-              typeof ev.delta === "string" &&
-              ev.messageId !== undefined &&
-              userMsgIds.has(ev.messageId)
-            ) {
-              loggedUserTexts.add(ev.delta);
-            }
+      // Single-flight: concurrent callers must share one revive, or each builds its own bridge.
+      const inflight = reviving.get(id);
+      if (inflight) return inflight;
+      const run = (async (): Promise<Conversation> => {
+        const entry = entries.get(id);
+        if (!entry) throw new Error(`unknown conversation: ${id}`);
+        // A tombstoned entry may still be held by a caller that raced the delete.
+        if (endedIds.has(id)) throw new Error(`conversation was ended: ${id}`);
+  
+        if (entry.parentId) {
+          // A subagent never provisions; it rides its root's Sandbox.
+          let root: Entry | undefined = entry;
+          for (let depth = 0; root?.parentId && depth < 32; depth++) root = entries.get(root.parentId);
+          if (!root || root.parentId) {
+            throw new Error(`subagent ${id} has no root conversation on this pod; refusing to provision a sandbox for it`);
           }
-          const before = pending.length;
-          pending = pending.filter((p) => !loggedUserTexts.has(p.text));
-          if (pending.length !== before) {
-            log.warn("revive: skipping already-logged messages (in-flight replay dedupe)", {
+          if (root.status !== "running") await this.revive(root.id);
+          entry.sandbox = root.sandbox;
+        } else {
+          // A placeholder ref with no namespace means the Sandbox is absent, so create rather than
+          // resume.
+          entry.sandbox = entry.sandbox.namespace
+            ? await provisioner.resume(entry.sandbox, entry.threadId)
+            : await provisioner.create(shortId(entry.threadId), entry.threadId);
+        }
+        // end() may have landed during provisioning; destroy the pod just made before any side effect
+        // republishes the conversation.
+        if (endedIds.has(id)) {
+          // A subagent's Sandbox is its root's; never destroy it here.
+          if (entry.parentId) throw new Error(`conversation was ended: ${id}`);
+          await provisioner.destroy(entry.sandbox).catch((err: unknown) => {
+            log.errorWith("failed to destroy a pod revived into a deleted conversation", err, {
               conversation_id: id,
-              skipped: before - pending.length,
             });
+          });
+          throw new Error(`conversation was ended: ${id}`);
+        }
+        entry.bridge = bridgeFactory?.({ conversationId: id, sandbox: entry.sandbox, model: entry.model, pickedProvider: entry.pickedProvider, owner: entry.owner }) ?? entry.bridge;
+        entry.status = "running";
+        // Republish sandbox_ref, and this pod as creator_pod since the run now lives here;
+        // idempotent, fire-and-forget.
+        void conversationRegistry.register(id, {
+          model: entry.model, owner: entry.owner, parentId: entry.parentId, sandboxRef: entry.sandbox.name,
+          creatorPod: deps.selfPod, // placement hint for the controller
+        });
+        // Count the resume as activity so the idle sweep gives the fresh pod a full idle window; set
+        // directly rather than touch() so no fire-and-forget saveMeta races the awaited write below.
+        entry.lastActivityAt = nowMs();
+        wireEventLog(entry);
+        await saveMeta(entry); // awaited so a persist failure propagates
+        await entry.bridge?.start();
+        // Re-raise interrupts the previous pod lost; fire-and-forget.
+        if (entry.bridge) {
+          try {
+            deps.onRevived?.(id);
+          } catch (err) {
+            log.errorWith("onRevived hook failed", err, { conversation_id: id });
           }
-        } catch (err) {
-          // Replaying is the safer default on a read failure: a possible duplicate turn beats
-          // dropping the user's message.
-          log.errorWith("revive: replay dedupe read failed, replaying all", err, { conversation_id: id });
         }
-      }
-      if (pending.length > 0 || (entry.pendingQueue?.length ?? 0) > 0) {
-        entry.pendingQueue = [];
-        await saveMeta(entry);
-        for (const item of pending) {
-          // A queued message that fails to re-run must not fail the revive.
-          void entry.bridge
-            ?.prompt(
-              { threadId: entry.threadId, text: item.text },
-              item.priority ? { priority: item.priority } : undefined,
-            )
-            .catch((err) => {
-              log.errorWith("re-enqueued message failed", err, { conversation_id: id });
-            });
+        // Re-enqueue the messages suspend() drained; clear and persist the field first so a failure
+        // cannot replay them twice.
+        let pending = entry.pendingQueue ?? [];
+        if (pending.length > 0) {
+          // Skip messages already in the durable log: runPrompt persists the user message before
+          // calling the agent, so an in-flight message would otherwise run twice.
+          try {
+            const tail = (await store.readEventsTail?.(id, 3)) ?? (await collectEvents(store.readEvents(id)));
+            // Match only user turns: TEXT_MESSAGE_CONTENT carries no role, and an assistant reply
+            // quoting the text must not suppress a replay.
+            const userMsgIds = new Set<string>();
+            const loggedUserTexts = new Set<string>();
+            for (const e of tail) {
+              const ev = e as { type?: string; delta?: string; role?: string; messageId?: string };
+              if (ev.type === "TEXT_MESSAGE_START" && ev.role === "user" && ev.messageId) {
+                userMsgIds.add(ev.messageId);
+              } else if (
+                ev.type === "TEXT_MESSAGE_CONTENT" &&
+                typeof ev.delta === "string" &&
+                ev.messageId !== undefined &&
+                userMsgIds.has(ev.messageId)
+              ) {
+                loggedUserTexts.add(ev.delta);
+              }
+            }
+            const before = pending.length;
+            pending = pending.filter((p) => !loggedUserTexts.has(p.text));
+            if (pending.length !== before) {
+              log.warn("revive: skipping already-logged messages (in-flight replay dedupe)", {
+                conversation_id: id,
+                skipped: before - pending.length,
+              });
+            }
+          } catch (err) {
+            // Replaying is the safer default on a read failure: a possible duplicate turn beats
+            // dropping the user's message.
+            log.errorWith("revive: replay dedupe read failed, replaying all", err, { conversation_id: id });
+          }
         }
+        if (pending.length > 0 || (entry.pendingQueue?.length ?? 0) > 0) {
+          entry.pendingQueue = [];
+          await saveMeta(entry);
+          for (const item of pending) {
+            // A queued message that fails to re-run must not fail the revive.
+            void entry.bridge
+              ?.prompt(
+                { threadId: entry.threadId, text: item.text },
+                item.priority ? { priority: item.priority } : undefined,
+              )
+              .catch((err) => {
+                log.errorWith("re-enqueued message failed", err, { conversation_id: id });
+              });
+          }
+        }
+        // Publish phase=Assigned; owner-fenced, fire-and-forget.
+        if (ownershipGuard.canWrite(id)) void conversationRegistry.setPhase(id, "Assigned");
+        return toConversation(entry);
+      })();
+      reviving.set(id, run);
+      try {
+        return await run;
+      } finally {
+        if (reviving.get(id) === run) reviving.delete(id);
       }
-      // Publish phase=Assigned; owner-fenced, fire-and-forget.
-      if (ownershipGuard.canWrite(id)) void conversationRegistry.setPhase(id, "Assigned");
-      return toConversation(entry);
     },
 
     async reviveFromMirror(id, expectedGen) {
