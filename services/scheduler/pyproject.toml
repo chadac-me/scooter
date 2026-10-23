@@ -5,6 +5,7 @@ license = "MIT"
 description = "Scheduled Scooter tasks — cron-spawn conversations via the agent-host /agui"
 requires-python = ">=3.11"
 dependencies = [
+    "scooter-lib",  # scooter_lib.client (lib/py/scooter-lib)
     "fastapi",
     "uvicorn",
     "httpx",

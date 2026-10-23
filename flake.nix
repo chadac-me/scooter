@@ -143,8 +143,13 @@
           scooterBrokerLib = pkgs.callPackage ./lib/py/scooter-broker-lib { inherit scooterLib; };
           scooterWebhooksLib = pkgs.callPackage ./lib/py/scooter-webhooks-lib { inherit scooterLib scooterSchema; };
 
+          # System tasks: the Python runtime, the builder, and the built-in prompt task.
+          scooterTask = pkgs.callPackage ./lib/py/scooter-task { inherit scooterLib; };
+          mkScooterTask = pkgs.callPackage ./nix/scooter-task.nix { inherit scooterLib scooterTask; };
+          scooterPrompt = pkgs.callPackage ./pkgs/scooter-prompt { inherit mkScooterTask scooterLib scooterTask; };
+
           # Scheduler (Python/FastAPI)
-          scheduler = pkgs.callPackage ./services/scheduler { };
+          scheduler = pkgs.callPackage ./services/scheduler { inherit scooterLib; };
 
           # Scheduler OCI image.
 
@@ -460,6 +465,8 @@
           # Deprecated alias of `lib.evalPlatform` (which reads it); kept for existing deploys.
           legacyPackages.evalPlatform = evalPlatform;
           legacyPackages.imageModules = imageModules;
+          # Package a Python system task: see nix/scooter-task.nix.
+          legacyPackages.mkScooterTask = mkScooterTask;
 
           packages = {
             # The NixOS systemd-PID-1 sandbox image.
@@ -565,6 +572,10 @@
             scooter-broker-lib = scooterBrokerLib;
             scooter-webhooks-lib = scooterWebhooksLib;
 
+            # nix build .#scooter-task -> the system-task runtime; nix run .#scooter-prompt -- --help
+            scooter-task = scooterTask;
+            scooter-prompt = scooterPrompt;
+
             # nix build .#scooter-schema-js  ->  generated Drizzle schema package (tsc)
             scooter-schema-js = scooterSchemaJs;
 
@@ -663,7 +674,8 @@
             contrib-files = contribs.packages.files.broker;
             contrib-personalization = contribs.packages.personalization.broker;
             # The shared Python libraries.
-            inherit scooterLib scooterBrokerLib scooterWebhooksLib;
+            inherit scooterLib scooterBrokerLib scooterWebhooksLib scooterTask scooterPrompt;
+            scooter-prompt-tests = scooterPrompt.tests;
           } // devEnvTests // contribSandboxChecks;
         };
 

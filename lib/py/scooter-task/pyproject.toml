@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scooter-task"
+version = "0.0.0"
+license = "MIT"
+description = "The runtime for Scooter system tasks: the @task CLI decorator, TaskContext and spawn reporting"
+requires-python = ">=3.11"
+dependencies = [
+  "click",
+  "httpx",
+  "scooter-lib",
+]
+
+# hatchling auto-detects the `scooter_task` package.
+
+[dependency-groups]
+dev = ["pytest"]
