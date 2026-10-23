@@ -36,6 +36,10 @@ type listRow struct {
 	Sandbox        sandboxProjection `json:"sandbox"`
 	Sources        []string          `json:"sources"`
 	Links          []Link            `json:"links"`
+	// Set while a run is in flight (ms epoch); the sidebar shows it as "active".
+	RunStartedAt *int64 `json:"runStartedAt,omitempty"`
+	// When the last run ended (ms epoch); the UI derives "unread" from it.
+	LastReplyAt *int64 `json:"lastReplyAt,omitempty"`
 }
 
 // assembleList applies the visibility filter and enriches with links, preserving the order of metas that Store.Conversations establishes.
@@ -88,9 +92,11 @@ func makeListRow(m ConversationRow, ls []Link, now int64) listRow {
 		UserTitled:     deref(m.UserTitled),
 		Starred:        deref(m.Starred),
 		// The UI list ignores sandbox; the owner pod's GET /conversations/:id carries the live detail.
-		Sandbox: sandboxProjection{Name: derefStr(m.SandboxRef), Namespace: ""},
-		Sources: sourcesOf(ls),
-		Links:   ls,
+		Sandbox:      sandboxProjection{Name: derefStr(m.SandboxRef), Namespace: ""},
+		Sources:      sourcesOf(ls),
+		Links:        ls,
+		RunStartedAt: m.RunStartedAt,
+		LastReplyAt:  m.LastReplyAt,
 	}
 }
 

@@ -17,7 +17,9 @@ import {
   splitSections,
   sessionLabel,
   linkProviders,
+  turnDot,
   type LabelMode,
+  type TurnDot,
 } from "./sessions.js";
 import { LinkedResources } from "./LinkedResources.js";
 import { mobileNav, useDrawer } from "./mobileNav.js";
@@ -26,21 +28,23 @@ import { commitRename as commitRenameAction, isServerBacked, removeSession, togg
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-/** Per-row sandbox status dot; "failed" is a dead sandbox and must look distinct from an idle suspend. */
-function StatusDot({ status }: { status: "running" | "suspended" | "failed" | "ended" }) {
-  const cls =
-    status === "running"
-      ? "bg-status-active"
-      : status === "suspended"
-        ? "bg-warning"
-        : status === "failed"
-          ? "bg-destructive"
-          : "bg-muted-foreground/40";
+/** Per-row turn dot: green while the agent works, blue for an unread reply, yellow for an unread
+ *  reply whose sandbox has gone idle, red for a dead sandbox. */
+const DOT: Record<TurnDot, { cls: string; label: string }> = {
+  active: { cls: "bg-success", label: "Agent working" },
+  unread: { cls: "bg-status-active", label: "Unread reply" },
+  "unread-idle": { cls: "bg-warning", label: "Unread reply (sandbox idle)" },
+  failed: { cls: "bg-destructive", label: "Sandbox failed" },
+};
+
+function StatusDot({ dot }: { dot: TurnDot }) {
+  const { cls, label } = DOT[dot];
   return (
     <span
       data-testid="session-status-dot"
-      aria-label={`Sandbox ${status}`}
-      title={`Sandbox ${status}`}
+      data-dot={dot}
+      aria-label={label}
+      title={label}
       className={cn("h-1 w-1 shrink-0 rounded-full", cls)}
     />
   );
@@ -129,6 +133,8 @@ const SessionRow = memo(function SessionRow({
     void removeSession(s);
   };
 
+  const dot = turnDot(s);
+
   return (
     <div
       data-testid="session-item"
@@ -150,7 +156,7 @@ const SessionRow = memo(function SessionRow({
       {/* Leading status dot in a fixed-width slot so titles align whether or not a row has one. */}
       {!editing && (
         <span className="flex w-1 shrink-0 items-center justify-center">
-          {s.status && <StatusDot status={s.status} />}
+          {dot && <StatusDot dot={dot} />}
         </span>
       )}
 

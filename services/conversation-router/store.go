@@ -29,11 +29,15 @@ type ConversationRow struct {
 	// Columns converged by every phase writer, never a read-time join against the CR; NULL is a legal read.
 	Phase      *string
 	SandboxRef *string
+	// Turn state for the sidebar dot; both NULL until the first run.
+	RunStartedAt *int64
+	LastReplyAt  *int64
 }
 
 // conversationColumns is the one projection list, shared by the SELECTs and the write path's RETURNING so they cannot drift.
 const conversationColumns = `id, thread_id, title, created_at, last_activity_at,
-                             model, owner, parent_id, user_titled, starred, phase, sandbox_ref`
+                             model, owner, parent_id, user_titled, starred, phase, sandbox_ref,
+                             run_started_at, last_reply_at`
 
 // scannable is satisfied by both pgx.Row and pgx.Rows, so one scan helper serves every read.
 type scannable interface {
@@ -42,7 +46,8 @@ type scannable interface {
 
 func scanConversation(s scannable, c *ConversationRow) error {
 	return s.Scan(&c.ID, &c.ThreadID, &c.Title, &c.CreatedAt, &c.LastActivityAt,
-		&c.Model, &c.Owner, &c.ParentID, &c.UserTitled, &c.Starred, &c.Phase, &c.SandboxRef)
+		&c.Model, &c.Owner, &c.ParentID, &c.UserTitled, &c.Starred, &c.Phase, &c.SandboxRef,
+		&c.RunStartedAt, &c.LastReplyAt)
 }
 
 // Store is a read-only handle on the agent_host database, nil when no DSN is configured.

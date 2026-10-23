@@ -1,0 +1,66 @@
+/**
+ * The sidebar's turn dot: green while the agent works, blue for an unread reply, yellow once that
+ * reply's sandbox has gone idle, red for a dead sandbox; and the open conversation is never unread.
+ */
+
+import { describe, it, expect, beforeEach } from "vitest";
+
+import { sessionStore, turnDot, type Session } from "./sessions.js";
+
+const row = (id: string) => sessionStore.get().sessions.find((s) => s.serverId === id)!;
+
+beforeEach(() => {
+  globalThis.localStorage?.clear?.();
+  sessionStore.clearEditing();
+  sessionStore.clearHover();
+  sessionStore.setQuery("");
+});
+
+describe("turnDot", () => {
+  const base: Session = { id: "x", title: "t", createdAt: 1, lastActivityAt: 1, status: "running" };
+
+  it("is green while a run is in flight", () => {
+    expect(turnDot({ ...base, runStartedAt: 5 })).toBe("active");
+  });
+  it("is blue for a reply newer than the last one seen", () => {
+    expect(turnDot({ ...base, lastReplyAt: 10, lastSeenAt: 5 })).toBe("unread");
+  });
+  it("is yellow for an unread reply whose sandbox is suspended", () => {
+    expect(turnDot({ ...base, status: "suspended", lastReplyAt: 10, lastSeenAt: 5 })).toBe("unread-idle");
+  });
+  it("ignores a stale in-flight mark on a sandbox that is not running", () => {
+    expect(turnDot({ ...base, status: "suspended", runStartedAt: 5 })).toBeUndefined();
+  });
+  it("is red for a failed sandbox whatever else holds", () => {
+    expect(turnDot({ ...base, status: "failed", runStartedAt: 5 })).toBe("failed");
+  });
+  it("shows nothing once the reply has been seen", () => {
+    expect(turnDot({ ...base, lastReplyAt: 10, lastSeenAt: 10 })).toBeUndefined();
+  });
+});
+
+describe("unread tracking through the store", () => {
+  it("a conversation first seen with a reply starts read", () => {
+    sessionStore.mergeFromServer([{ id: "a", lastReplyAt: 100 }, { id: "b", lastReplyAt: 100 }]);
+    expect(turnDot(row("b"))).toBeUndefined();
+  });
+
+  it("a reply landing in a background conversation is unread until opened", () => {
+    sessionStore.mergeFromServer([{ id: "fg", lastReplyAt: 1 }, { id: "bg", lastReplyAt: 1 }]);
+    sessionStore.switchTo(row("fg").id);
+    sessionStore.mergeFromServer([{ id: "bg", runStartedAt: 2, lastReplyAt: 1 }], { fullList: false });
+    expect(turnDot(row("bg"))).toBe("active");
+    sessionStore.mergeFromServer([{ id: "bg", lastReplyAt: 3 }], { fullList: false });
+    expect(turnDot(row("bg"))).toBe("unread");
+    sessionStore.switchTo(row("bg").id);
+    expect(turnDot(row("bg"))).toBeUndefined();
+  });
+
+  it("a reply in the open conversation is read as it lands", () => {
+    sessionStore.mergeFromServer([{ id: "open", lastReplyAt: 1 }]);
+    sessionStore.switchTo(row("open").id);
+    sessionStore.mergeFromServer([{ id: "open", lastReplyAt: 9 }], { fullList: false });
+    expect(row("open").lastSeenAt).toBe(9);
+    expect(turnDot(row("open"))).toBeUndefined();
+  });
+});

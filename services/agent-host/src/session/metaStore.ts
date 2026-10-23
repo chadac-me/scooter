@@ -7,7 +7,7 @@
  * intact.
  */
 
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { agent_host } from "@scooter/schema";
 
@@ -26,6 +26,8 @@ export interface MetaStore {
   saveMeta(meta: ConversationMeta): Promise<void>;
   /** Raise a conversation's lastActivityAt to `at` (never lower it), from any replica. */
   touchActivity(id: SessionId, at: number): Promise<void>;
+  /** Record a run starting (`running`) or ending at `at`, for the sidebar's active/unread dot. */
+  setRunState(id: SessionId, running: boolean, at: number): Promise<void>;
   /** The persisted lastActivityAt, or undefined when there is no row. */
   readLastActivity(id: SessionId): Promise<number | undefined>;
   listConversations(): Promise<ConversationMeta[]>;
@@ -142,6 +144,25 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
           .where(eq(conversations.id, id));
       } catch (e) {
         log.error("touchActivity failed (activity not persisted)", { conversation_id: id, error: formatError(e) });
+      }
+    },
+
+    async setRunState(id, running, at) {
+      try {
+        if (running) {
+          // The guard drops a start that lands after its own end; the two UPDATEs race.
+          await db
+            .update(conversations)
+            .set({ runStartedAt: at })
+            .where(and(eq(conversations.id, id), or(isNull(conversations.lastReplyAt), lt(conversations.lastReplyAt, at))));
+        } else {
+          await db
+            .update(conversations)
+            .set({ runStartedAt: null, lastReplyAt: sql`GREATEST(COALESCE(${conversations.lastReplyAt}, 0), ${at})` })
+            .where(eq(conversations.id, id));
+        }
+      } catch (e) {
+        log.error("setRunState failed (sidebar turn state not persisted)", { conversation_id: id, error: formatError(e) });
       }
     },
 

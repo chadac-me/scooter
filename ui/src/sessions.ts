@@ -39,6 +39,12 @@ export interface Session {
   userTitled?: boolean;
   /** The user starred this conversation, server-sourced. */
   starred?: boolean;
+  /** Set while the agent is mid-turn (ms epoch), server-sourced; absent when idle. */
+  runStartedAt?: number;
+  /** When the agent's last turn ended (ms epoch), server-sourced. */
+  lastReplyAt?: number;
+  /** The lastReplyAt this browser has shown the user; local only. A reply newer than it is unread. */
+  lastSeenAt?: number;
 }
 
 /** One conversation as the server describes it — a snapshot row or an upsert frame, whose id is always the SERVER id. */
@@ -55,6 +61,8 @@ export type ServerConversation = {
   parentId?: string;
   userTitled?: boolean;
   starred?: boolean;
+  runStartedAt?: number;
+  lastReplyAt?: number;
 };
 
 /** What a merge may claim beyond the rows themselves: list membership, and per-row link ownership. */
@@ -140,6 +148,9 @@ const sameSession = (a: Session, b: Session): boolean => {
     a.pendingModel !== b.pendingModel ||
     a.owner !== b.owner ||
     a.status !== b.status ||
+    a.runStartedAt !== b.runStartedAt ||
+    a.lastReplyAt !== b.lastReplyAt ||
+    a.lastSeenAt !== b.lastSeenAt ||
     a.parentId !== b.parentId
   ) return false;
   const srcA = a.sources ?? [], srcB = b.sources ?? [];
@@ -277,12 +288,36 @@ const emit = () => listeners.forEach((l) => l());
 /** The conversation a `/chat/<id>` page is pinned to (chatRoute.ts); undefined in the main app. */
 let pinnedId: string | undefined;
 
+/** A reply in the open conversation is read as it lands, and opening one reads its last reply,
+ *  so the sidebar never shows the selected row as unread. */
+const markCurrentSeen = (s: State): State => {
+  const i = s.sessions.findIndex((x) => x.id === s.currentId);
+  const cur = s.sessions[i];
+  if (!cur || cur.lastReplyAt === undefined || (cur.lastSeenAt ?? 0) >= cur.lastReplyAt) return s;
+  const sessions = s.sessions.slice();
+  sessions[i] = { ...cur, lastSeenAt: cur.lastReplyAt };
+  return { ...s, sessions };
+};
+
+/** The sidebar dot for a row, or undefined for none: a dead sandbox first, then a turn in
+ *  flight, then a reply the user has not opened, yellow once its sandbox has gone idle. */
+export type TurnDot = "active" | "unread" | "unread-idle" | "failed";
+export const turnDot = (s: Session): TurnDot | undefined => {
+  if (s.status === "failed") return "failed";
+  // A suspended or ended sandbox cannot be mid-turn, whatever a stale row says.
+  const live = s.status === undefined || s.status === "running";
+  if (s.runStartedAt !== undefined && live) return "active";
+  if (s.lastReplyAt !== undefined && s.lastReplyAt > (s.lastSeenAt ?? 0)) return live ? "unread" : "unread-idle";
+  return undefined;
+};
+
 const setState = (next: State) => {
   // A pinned page never leaves its conversation: whatever would move the selection (a delete,
   // a new-thread action) is held on the pinned one while it is listed.
   if (pinnedId !== undefined && next.currentId !== pinnedId && next.sessions.some((s) => s.id === pinnedId)) {
     next = { ...next, currentId: pinnedId };
   }
+  next = markCurrentSeen(next);
   state = next;
   // The pinned page shares localStorage with the main app, so it must not overwrite its list.
   if (pinnedId === undefined) persist(next);
@@ -450,6 +485,12 @@ export const sessionStore = {
         owner: c.owner ?? existing?.owner,
         status: c.status ?? existing?.status,
         parentId: c.parentId ?? existing?.parentId,
+        // Every server row is a whole row, so an absent runStartedAt means the turn ended.
+        runStartedAt: c.runStartedAt,
+        lastReplyAt: c.lastReplyAt ?? existing?.lastReplyAt,
+        // A row this browser has never seen starts read, so a new device does not light up every
+        // conversation; markCurrentSeen() advances it for the open one.
+        lastSeenAt: existing?.lastSeenAt ?? c.lastReplyAt ?? existing?.lastReplyAt,
       };
       // Keep the existing reference when nothing changed so React.memo skips the row.
       byId.set(c.id, existing && sameSession(existing, merged) ? existing : merged);

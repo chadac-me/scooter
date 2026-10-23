@@ -597,6 +597,16 @@ export async function main(
           },
         })
       : fileStore;
+  // Mirror run boundaries onto the conversations row for the sidebar's active/unread dot. Hooked on
+  // durable appends so synthetic terminals (dangling-run settle, hand-off close) clear it too.
+  if (metaStore) {
+    store.onAppend?.((id, { event }) => {
+      const at = typeof event.ts === "number" ? event.ts : Date.now();
+      if (event.type === "RUN_STARTED") void metaStore.setRunState(id, true, at);
+      // An interrupt (awaiting approval) ends the turn too: the agent is waiting on the user.
+      else if (event.type === "RUN_FINISHED" || event.type === "RUN_ERROR") void metaStore.setRunState(id, false, at);
+    });
+  }
   // Image/media assets: metadata in Postgres and bytes on the assets PVC (ASSETS_PATH, else
   // LOCAL_STATE_PATH), or PVC-only without a DSN.
   const assetsPath = process.env.ASSETS_PATH ?? config.localStatePath;
