@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { Check, CircleAlert, Loader2, MessageSquare, RotateCcw, Trash2, Undo2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, ChevronDown, ChevronUp, CircleAlert, Loader2, MessageSquare, RotateCcw, Trash2, Undo2 } from "lucide-react";
 import clsx from "clsx";
 import { api, type Annotation, type Thread } from "./api";
+import { previewOf } from "./markdown";
 
 function ago(iso: string): string {
   const s = (Date.now() - Date.parse(iso)) / 1000;
@@ -95,6 +96,34 @@ export function Composer({
   );
 }
 
+export function Quote({ text, className }: { text: string; className?: string }) {
+  return (
+    <blockquote
+      title={text}
+      className={clsx(
+        "line-clamp-2 border-l-2 border-warning/60 pl-2 text-xs leading-relaxed text-muted-foreground",
+        className,
+      )}
+    >
+      {text}
+    </blockquote>
+  );
+}
+
+function Avatar({ agent }: { agent: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={clsx(
+        "inline-flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold",
+        agent ? "bg-brand/15 text-brand" : "bg-secondary text-secondary-foreground",
+      )}
+    >
+      {agent ? "S" : "Y"}
+    </span>
+  );
+}
+
 /** Deleting the comment that opened a thread takes its replies with it (the server's rule). */
 function DeleteButton({ a, thread, onChange }: { a: Annotation; thread: Thread; onChange: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -130,27 +159,73 @@ export function ThreadCard({
   onChange,
   showQuote,
   active,
+  reveal = 0,
 }: {
   thread: Thread;
   path: string;
   onChange: () => void;
   showQuote?: boolean;
   active?: boolean;
+  /** Bumped when the thread is picked from the document; unfolds it. */
+  reveal?: number;
 }) {
   const [replying, setReplying] = useState(false);
   const [open, setOpen] = useState(!thread.resolved);
+  // Optimistic until the refetch agrees, or the card flips back after the POST.
+  const [pending, setPending] = useState<{ want: boolean; acked: boolean } | null>(null);
+  const [failed, setFailed] = useState(false);
+  const resolved = pending ? pending.want : thread.resolved;
+  const saving = !!pending && !pending.acked;
+  useEffect(() => {
+    if (pending?.acked && thread.resolved === pending.want) setPending(null);
+  }, [thread.resolved, pending]);
+  const setResolved = async (want: boolean) => {
+    setPending({ want, acked: false });
+    setFailed(false);
+    setOpen(!want);
+    try {
+      await api.resolve(thread.id, want);
+    } catch {
+      setPending(null);
+      setOpen(true);
+      setFailed(true);
+      return;
+    }
+    setPending({ want, acked: true });
+    onChange();
+  };
+  // Resolve folds, reopen unfolds, from either side. Our own change is already applied.
+  useEffect(() => {
+    if (pending?.want !== thread.resolved) setOpen(!thread.resolved);
+  }, [thread.resolved]);
+  useEffect(() => {
+    if (reveal) setOpen(true);
+  }, [reveal]);
 
-  if (!open)
+  if (!open) {
+    const n = thread.comments.length;
     return (
       <button
         onClick={() => setOpen(true)}
+        title="Expand thread"
+        aria-expanded={false}
         className="flex w-full items-center gap-2 rounded-lg border border-border bg-card/60 px-3 py-1.5 text-left font-sans text-xs text-muted-foreground hover:bg-accent"
       >
-        <Check className="size-3.5 text-success" />
-        Resolved · {thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"}
-        <span className="truncate">: {thread.comments[0].text}</span>
+        {saving ? (
+          <Loader2 aria-label="Saving" className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+        ) : resolved ? (
+          <Check className="size-3.5 shrink-0 text-success" />
+        ) : (
+          <MessageSquare className="size-3.5 shrink-0 text-warning" />
+        )}
+        <span className="shrink-0">
+          {resolved ? "Resolved" : "Open"} · {n} comment{n === 1 ? "" : "s"}
+        </span>
+        <span className="min-w-0 truncate">{thread.comments[0].text}</span>
+        <ChevronDown className="ml-auto size-3.5 shrink-0" />
       </button>
     );
+  }
 
   return (
     <div
@@ -160,32 +235,34 @@ export function ThreadCard({
         active ? "border-brand ring-2 ring-brand/30" : "border-border",
       )}
     >
-      {showQuote && thread.quote && (
-        <blockquote className="line-clamp-2 border-b border-border px-3 py-2 text-xs italic text-muted-foreground">
-          “{thread.quote}”
-        </blockquote>
-      )}
+      {showQuote && thread.quote && <Quote text={previewOf(thread.quote)} className="mx-3 mt-3" />}
       {thread.stale && (
-        <p className="flex items-center gap-1.5 border-b border-border bg-warning/10 px-3 py-1.5 text-xs text-warning">
+        <p className="mx-3 mt-2 flex items-center gap-1.5 rounded-md bg-warning/10 px-2 py-1 text-xs text-warning">
           <CircleAlert className="size-3.5" /> The quoted text has changed since this was written.
         </p>
       )}
-      <ul className="divide-y divide-border">
+      <ul>
         {thread.comments.map((c) => (
-          <li key={c.id} className="group px-3 py-2.5">
+          <li key={c.id} className="group px-3 pt-3">
             <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
+              <Avatar agent={c.by === "agent"} />
               <span className="font-medium text-foreground">{c.by === "agent" ? "Scooter" : "You"}</span>
-              <span>{ago(c.created_at)}</span>
+              <span>· {ago(c.created_at)}</span>
               <span className="ml-auto flex items-center gap-2">
                 <SyncBadge a={c} onChange={onChange} />
                 <DeleteButton a={c} thread={thread} onChange={onChange} />
               </span>
             </div>
-            <p className="whitespace-pre-wrap break-words leading-relaxed">{c.text}</p>
+            <p className="whitespace-pre-wrap break-words pl-7 leading-relaxed">{c.text}</p>
           </li>
         ))}
       </ul>
-      <div className="border-t border-border px-3 py-2">
+      {failed && (
+        <p role="alert" className="mx-3 mt-2 flex items-center gap-1.5 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">
+          <CircleAlert className="size-3.5" /> Couldn't {resolved ? "reopen" : "resolve"} this thread. Try again.
+        </p>
+      )}
+      <div className="px-3 pb-2 pt-2">
         {replying ? (
           <Composer
             autoFocus
@@ -199,21 +276,31 @@ export function ThreadCard({
             }}
           />
         ) : (
-          <div className="flex items-center gap-1">
+          <div className="-ml-2 flex items-center gap-1 pl-7">
             <button className="btn-ghost" onClick={() => setReplying(true)}>
               <MessageSquare className="size-3.5" /> Reply
             </button>
             <button
               className="btn-ghost ml-auto"
-              onClick={() =>
-                api.resolve(thread.id, !thread.resolved).then(() => {
-                  setOpen(thread.resolved);
-                  onChange();
-                })
-              }
+              title="Collapse thread"
+              aria-label="Collapse thread"
+              aria-expanded
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+              }}
             >
-              {thread.resolved ? <Undo2 className="size-3.5" /> : <Check className="size-3.5" />}
-              {thread.resolved ? "Reopen" : "Resolve"}
+              <ChevronUp className="size-3.5" />
+            </button>
+            <button className="btn-ghost" disabled={saving} onClick={() => setResolved(!resolved)}>
+              {saving ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : resolved ? (
+                <Undo2 className="size-3.5" />
+              ) : (
+                <Check className="size-3.5" />
+              )}
+              {resolved ? "Reopen" : "Resolve"}
             </button>
           </div>
         )}
