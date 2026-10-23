@@ -10,6 +10,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { createManagementApi, raiseApprovalInterrupt, fetchPendingApprovals } from "../../src/api/management.js";
 import { UserSkillError, type UserSkillStore } from "../../src/session/userSkillStore.js";
+import { parseContribUserApi } from "../../src/api/contribApi.js";
 import { shortId } from "../../src/session/manager.js";
 import type { Conversation, SessionManager, ConversationStore, ConversationLink } from "../../src/session/manager.js";
 import type { AguiServer } from "../../src/agui/server.js";
@@ -1304,4 +1305,114 @@ describe("management API", () => {
     });
   });
 
+
+  // /contrib-api relays a settings tab to its contrib's broker half as the signed-in
+  // user. The user header is set by the relay alone: what the browser sends is dropped.
+  describe("/contrib-api relay", () => {
+    type Seen = { url: string; method: string; headers: Record<string, string>; body?: string };
+    const mk = (opts: { brokerUrl?: string; status?: number; reply?: unknown } = {}) => {
+      const seen: Seen[] = [];
+      const fakeFetch = vi.fn(async (url: string, init: RequestInit) => {
+        seen.push({
+          url,
+          method: String(init.method),
+          headers: init.headers as Record<string, string>,
+          body: init.body ? Buffer.from(init.body as Buffer).toString() : undefined,
+        });
+        return new Response(JSON.stringify(opts.reply ?? { ok: true }), {
+          status: opts.status ?? 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const api = createManagementApi({
+        sessions: fakeSessions(),
+        store: fakeStore([]),
+        server: stubServer,
+        answerPermission: async () => {},
+        contribApi: {
+          contribs: parseContribUserApi(JSON.stringify({ echo: { brokerPrefix: "/echo" } })),
+          brokerUrl: opts.brokerUrl ?? "http://broker:8080/",
+          authHeaders: async () => ({ "Content-Type": "application/json", Authorization: "Bearer host-sa" }),
+          fetch: fakeFetch as unknown as typeof fetch,
+        },
+      });
+      return { api, seen };
+    };
+
+    it("forwards to <brokerPrefix>/user/<rest> as the host SA, naming the user", async () => {
+      const { api, seen } = mk({ reply: { user: "alice" } });
+      const res = await call(api, "GET", "/contrib-api/echo/whoami?x=1", undefined, { "x-auth-user": "alice" });
+      expect(res).toEqual({ status: 200, json: { user: "alice" } });
+      expect(seen).toHaveLength(1);
+      expect(seen[0].url).toBe("http://broker:8080/echo/user/whoami?x=1");
+      expect(seen[0].method).toBe("GET");
+      expect(seen[0].headers.Authorization).toBe("Bearer host-sa");
+      expect(seen[0].headers["X-Scooter-User"]).toBe("alice");
+    });
+
+    it("strips a client-supplied X-Scooter-User", async () => {
+      const { api, seen } = mk();
+      await call(api, "GET", "/contrib-api/echo/whoami", undefined, {
+        "x-auth-user": "alice",
+        "x-scooter-user": "mallory",
+      });
+      const names = Object.keys(seen[0].headers).filter((h) => h.toLowerCase() === "x-scooter-user");
+      expect(names).toEqual(["X-Scooter-User"]);
+      expect(seen[0].headers["X-Scooter-User"]).toBe("alice");
+    });
+
+    it("401s an anonymous caller without calling the broker", async () => {
+      const { api, seen } = mk();
+      const res = await call(api, "GET", "/contrib-api/echo/whoami", undefined, { "x-scooter-user": "mallory" });
+      expect(res.status).toBe(401);
+      expect(seen).toHaveLength(0);
+    });
+
+    it("404s a contrib without a settings API", async () => {
+      const { api, seen } = mk();
+      const res = await call(api, "GET", "/contrib-api/aws/whoami", undefined, { "x-auth-user": "alice" });
+      expect(res.status).toBe(404);
+      expect(seen).toHaveLength(0);
+    });
+
+    it("refuses a path that would climb out of /user/", async () => {
+      const { api, seen } = mk();
+      // An encoded slash would let the broker see `..` after its own decoding.
+      for (const p of ["/contrib-api/echo/a%2F..%2Fx", "/contrib-api/echo/%5C..%5Cx"]) {
+        const res = await call(api, "GET", p, undefined, { "x-auth-user": "alice" });
+        expect(res.status).toBe(400);
+      }
+      // A dot-segment, even percent-encoded, is folded by the URL parser before routing,
+      // so it leaves /contrib-api/echo/ entirely and never reaches the relay.
+      expect(await api.handle(
+        Object.assign(new PassThrough(), { method: "GET", url: "/contrib-api/echo/%2E%2E/%2e%2e/approve", headers: { "x-auth-user": "alice" } }) as unknown as IncomingMessage,
+        {} as ServerResponse,
+      )).toBe(false);
+      expect(seen).toHaveLength(0);
+    });
+
+    it("passes the body, method and the broker's status through", async () => {
+      const { api, seen } = mk({ status: 422, reply: { detail: "bad note" } });
+      const res = await call(api, "PATCH", "/contrib-api/echo/notes/n1", { note: "hi" }, {
+        "x-auth-user": "alice",
+        "content-type": "application/json",
+      });
+      expect(res).toEqual({ status: 422, json: { detail: "bad note" } });
+      expect(seen[0].method).toBe("PATCH");
+      expect(seen[0].url).toBe("http://broker:8080/echo/user/notes/n1");
+      expect(JSON.parse(seen[0].body ?? "")).toEqual({ note: "hi" });
+    });
+
+    it("503s when no broker is configured", async () => {
+      const { api } = mk({ brokerUrl: "" });
+      const res = await call(api, "GET", "/contrib-api/echo/whoami", undefined, { "x-auth-user": "alice" });
+      expect(res.status).toBe(503);
+    });
+
+    it("ignores malformed CONTRIB_USER_API_JSON rows", () => {
+      expect(parseContribUserApi("not json")).toEqual({});
+      expect(parseContribUserApi(JSON.stringify({ a: { brokerPrefix: "nope" }, b: {}, c: { brokerPrefix: "/c" } })))
+        .toEqual({ c: { brokerPrefix: "/c" } });
+    });
+  });
 });

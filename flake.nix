@@ -485,18 +485,22 @@
                 };
               }).optionsJSON;
 
-            # `nix build .#db-spec` -> the lib/sql artifacts rendered from the scooter.db spec.
+            # `nix build .#db-spec` -> the artifacts rendered from the scooter.db spec:
+            # owners.toml + atlas.hcl for lib/sql, and contrib/<name>/sql/{owners.toml,atlas.hcl}
+            # (at those repo-relative paths) for each contrib database.
             db-spec =
               let spec = (mkPlatform { contribs = shippedContribs; }).config.scooter.dbSpec; in
               pkgs.runCommand "db-spec" {
                 ownersToml = spec.ownersToml;
                 atlasHcl = spec.atlasHcl;
                 passAsFile = [ "ownersToml" "atlasHcl" ];
-              } ''
+              } (''
                 mkdir -p $out
                 cp "$ownersTomlPath" $out/owners.toml
                 cp "$atlasHclPath"   $out/atlas.hcl
-              '';
+              '' + pkgs.lib.concatStrings (pkgs.lib.mapAttrsToList (path: text: ''
+                install -D -m 644 ${pkgs.writeText "db-spec-file" text} $out/${path}
+              '') spec.contribFiles));
 
             inherit agentHost ui broker webhooks scheduler;
 
@@ -520,6 +524,7 @@
             # files' broker half is the annotation store; its build carries the whole
             # suite, the sandbox viewer's stdlib tests included, as check inputs.
             contrib-files = contribs.packages.files.broker;
+            contrib-personalization = contribs.packages.personalization.broker;
 
             # nix build .#contribs-all -> every variant of every contrib
             contribs-all = contribsAll;
@@ -656,6 +661,7 @@
             contrib-slack = contribs.packages.slack.broker;
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
             contrib-files = contribs.packages.files.broker;
+            contrib-personalization = contribs.packages.personalization.broker;
             # The shared Python libraries.
             inherit scooterLib scooterBrokerLib scooterWebhooksLib;
           } // devEnvTests // contribSandboxChecks;

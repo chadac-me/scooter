@@ -11,6 +11,8 @@
 // diffs — NOT the shared/production database and NOT a long-lived one.
 // `just db-migrate` spins an ephemeral local Postgres per env and passes its URL
 // as ATLAS_DEV_URL, so nothing is shared and concurrent runs cannot interfere.
+//
+// Core databases only: a contrib's database has its own atlas.hcl in its sql dir.
 
 variable "dev_url" {
   type    = string
@@ -43,28 +45,6 @@ env "byoc" {
   src = "file://byoc/schema.sql"
   dev = var.dev_url
   migration { dir = "file://byoc/migrations" }
-  format {
-    migrate {
-      diff = "{{ sql . \"  \" }}"
-    }
-  }
-}
-
-env "contrib_aws" {
-  src = "file://../../contrib/aws/sql/schema.sql"
-  dev = var.dev_url
-  migration { dir = "file://../../contrib/aws/sql/migrations" }
-  format {
-    migrate {
-      diff = "{{ sql . \"  \" }}"
-    }
-  }
-}
-
-env "contrib_files" {
-  src = "file://../../contrib/files/sql/schema.sql"
-  dev = var.dev_url
-  migration { dir = "file://../../contrib/files/sql/migrations" }
   format {
     migrate {
       diff = "{{ sql . \"  \" }}"

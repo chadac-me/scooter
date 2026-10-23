@@ -114,6 +114,17 @@ let
           would pull the .tsx into every eval that reads the registry.
         '';
       };
+      api = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Open `/contrib-api//<rest>` for this tab: the agent-host relays it to
+          this contrib's broker routes at `//user/<rest>`, naming the signed-in
+          user. A broker route reads that user with `scooter_broker_lib.user.user_identity`
+          and must scope every query to it. Needs `services.broker.enable`. The tab calls
+          it with `contribFetch` from `@/src/contrib/sdk`.
+        '';
+      };
     };
   };
 

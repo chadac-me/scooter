@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { parse } from "smol-toml";
@@ -13,26 +13,42 @@ const repoPath = (p: string) => fileURLToPath(new URL(`../../../../${p}`, import
 interface Manifest {
   [db: string]: {
     owner: string;
-    /** Set for a contrib's own database: its SQL lives in the contrib, not lib/sql. */
-    sql_dir?: string;
     tables: Record<string, { writers: string[]; readers: string[] }>;
   };
 }
 
-const manifest = parse(readFileSync(sqlDir("owners.toml"), "utf8")) as unknown as Manifest;
+const load = (path: string) => parse(readFileSync(path, "utf8")) as unknown as Manifest;
+
+/** lib/sql/owners.toml: the CORE databases only. */
+const core = load(sqlDir("owners.toml"));
+
+/** Each contrib database's own manifest, contrib/<name>/sql/owners.toml, keyed by contrib. */
+const contribManifests: Record<string, Manifest> = Object.fromEntries(
+  readdirSync(repoPath("contrib"))
+    .filter((c) => existsSync(repoPath(`contrib/${c}/sql/owners.toml`)))
+    .map((c) => [c, load(repoPath(`contrib/${c}/sql/owners.toml`))]),
+);
+
+/** Database -> its SQL dir: lib/sql/<db> for core, the declaring contrib's sql/ otherwise. */
+const dirOf: Record<string, string> = {
+  ...Object.fromEntries(Object.keys(core).map((db) => [db, `lib/sql/${db}`])),
+  ...Object.fromEntries(
+    Object.entries(contribManifests).flatMap(([c, m]) => Object.keys(m).map((db) => [db, `contrib/${c}/sql`])),
+  ),
+};
+const manifest: Manifest = Object.assign({}, core, ...Object.values(contribManifests));
 
 /** Table names a schema.sql declares (CREATE TABLE "<name>"). */
 function tablesInSchema(db: string): string[] {
-  const dir = manifest[db]?.sql_dir;
-  const sql = readFileSync(dir ? repoPath(`${dir}/schema.sql`) : sqlDir(`${db}/schema.sql`), "utf8");
+  const sql = readFileSync(repoPath(`${dirOf[db]}/schema.sql`), "utf8");
   return [...sql.matchAll(/CREATE TABLE "([^"]+)"/g)].map((m) => m[1]).sort();
 }
 
-/** The CORE databases generated from the `scooter.db` module option. A contrib's own database (`sql_dir`) is private to it, so core's guards never list it. */
-const generatedDatabases = Object.keys(manifest).filter((db) => !manifest[db].sql_dir);
-const contribDatabases = Object.keys(manifest).filter((db) => manifest[db].sql_dir);
+/** The CORE databases generated from the `scooter.db` module option. A contrib's own database is private to it, so core's guards never list it. */
+const generatedDatabases = Object.keys(core);
+const contribDatabases = Object.values(contribManifests).flatMap((m) => Object.keys(m));
 
-describe("ownership manifest (lib/sql/owners.toml)", () => {
+describe("ownership manifests (lib/sql/owners.toml + contrib/*/sql/owners.toml)", () => {
   it("lists exactly the core databases that have a schema", () => {
     expect([...generatedDatabases].sort()).toEqual([...DATABASES].sort());
   });
@@ -53,8 +69,10 @@ describe("ownership manifest (lib/sql/owners.toml)", () => {
     expect(names.sort()).toEqual([...generatedDatabases].sort());
   });
 
-  it("keeps every contrib database's SQL inside its contrib", () => {
-    for (const db of contribDatabases) expect(manifest[db].sql_dir).toMatch(/^contrib\/[a-z0-9-]+\/sql$/);
+  it("keeps every contrib database inside its contrib: one per contrib, none in lib/sql", () => {
+    for (const [c, m] of Object.entries(contribManifests)) expect(Object.keys(m), `contrib/${c}/sql/owners.toml`).toHaveLength(1);
+    for (const db of contribDatabases) expect(Object.keys(core)).not.toContain(db);
+    expect(readFileSync(sqlDir("atlas.hcl"), "utf8")).not.toMatch(/env "contrib_|contrib\//);
   });
 
   for (const db of [...DATABASES, ...contribDatabases]) {

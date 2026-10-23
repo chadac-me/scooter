@@ -3,7 +3,8 @@
 #
 # Two sources, in order: the `scooter.db` module option (the topology: which
 # databases exist, which tables are in each, who writes and who reads) renders
-# lib/sql/owners.toml and lib/sql/atlas.hcl, and then lib/sql/<db>/schema.sql
+# lib/sql/owners.toml and lib/sql/atlas.hcl (core databases) plus each contrib
+# database's contrib/<name>/sql/{owners.toml,atlas.hcl}, and then lib/sql/<db>/schema.sql
 # renders lib/ts/scooter-schema/src/<db>.ts (Drizzle, via drizzle-kit pull) and
 # lib/py/scooter-schema/src/scooter_schema/<db>.py (SQLAlchemy, via sqlacodegen).
 # owners.toml's top-level `[<database>]` sections are the database list that step
@@ -21,12 +22,16 @@ cd "$ROOT"
 # --- step 1: render the spec artifacts from the module system ----------------
 # Built rather than `nix eval`ed, so both files come from one derivation and
 # cannot disagree.
-echo "rendering lib/sql spec artifacts from scooter.db ..."
+echo "rendering the spec artifacts from scooter.db ..."
 spec="$(nix build --no-link --print-out-paths "$ROOT#db-spec")"
 install -m 644 "$spec/owners.toml"    lib/sql/owners.toml
 install -m 644 "$spec/atlas.hcl"      lib/sql/atlas.hcl
+# Each contrib database's owners.toml + atlas.hcl, into its own contrib/<name>/sql.
+if [ -d "$spec/contrib" ]; then
+  (cd "$spec" && find contrib -type f) | while read -r f; do install -D -m 644 "$spec/$f" "$f"; done
+fi
 
-# Bindings are core-only: a contrib database (`sql_dir` in owners.toml) is private to
+# Bindings are core-only: a contrib database (its own contrib/<name>/sql) is private to
 # its contrib, which keeps its own row model, so core never learns it exists.
 CORE_ENVS="$(scripts/db-sql-dir.sh --core)"
 TS_OUT="lib/ts/scooter-schema/src"

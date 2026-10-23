@@ -1,5 +1,5 @@
 /**
- * Tiny method+path router over node:http. Routes use `:param` segments; a handler
+ * Tiny method+path router over node:http. Routes use `:param` segments and an optional trailing `*`; a handler
  * gets parsed params and a lazy JSON body, and returns a JsonResult to send JSON or
  * handles the response itself (e.g. SSE) and returns undefined.
  */
@@ -61,9 +61,14 @@ export function createRouter(resolveUser: ResolveUser = defaultResolveUser()): R
     });
 
   const match = (route: Route, parts: string[]): Record<string, string> | null => {
-    if (route.segments.length !== parts.length) return null;
+    // A trailing `*` segment matches one or more remaining segments, kept encoded and
+    // joined as params["*"], so a relay can forward the rest of the path verbatim.
+    const rest = route.segments[route.segments.length - 1] === "*";
+    const fixed = rest ? route.segments.length - 1 : route.segments.length;
+    if (rest ? parts.length <= fixed : parts.length !== fixed) return null;
     const params: Record<string, string> = {};
-    for (let i = 0; i < parts.length; i++) {
+    if (rest) params["*"] = parts.slice(fixed).join("/");
+    for (let i = 0; i < fixed; i++) {
       const seg = route.segments[i];
       if (seg.startsWith(":")) params[seg.slice(1)] = decodeURIComponent(parts[i]);
       else if (seg !== parts[i]) return null;

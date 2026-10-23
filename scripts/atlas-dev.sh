@@ -9,6 +9,8 @@
 #   scripts/atlas-dev.sh migrate diff my_change --env webhooks
 #   scripts/atlas-dev.sh migrate validate --env broker
 # ATLAS_DEV_URL is exported into the atlas invocation; atlas.hcl reads it as `dev`.
+# Atlas runs where the `--env` database's atlas.hcl is: lib/sql for a core
+# database, contrib/<name>/sql for a contrib's (scripts/db-sql-dir.sh).
 set -euo pipefail
 
 # The guard var stops an infinite re-exec.
@@ -46,5 +48,16 @@ createdb -h 127.0.0.1 -p "$port" -U postgres atlasdev
 
 export ATLAS_DEV_URL="postgres://postgres@127.0.0.1:$port/atlasdev?sslmode=disable&search_path=public"
 
-cd "$here/lib/sql"
+# Find the --env database's atlas.hcl; with no --env, lib/sql's.
+confdir="lib/sql"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--env" ]; then
+    case "$("$here/scripts/db-sql-dir.sh" "$a")" in
+      contrib/*) confdir="$("$here/scripts/db-sql-dir.sh" "$a")" ;;
+    esac
+  fi
+  prev="$a"
+done
+cd "$here/$confdir"
 atlas "$@"

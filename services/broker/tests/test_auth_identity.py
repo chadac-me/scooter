@@ -61,3 +61,51 @@ async def test_a_stranger_is_rejected(_as):
     with pytest.raises(HTTPException) as e:
         await auth_mod.authenticate(_request())
     assert e.value.status_code == 403
+
+
+# --- The /contrib-api relay: X-Scooter-User is trusted only from a relay account -----
+
+HOST = "system:serviceaccount:agent-sandbox:agent-host"
+
+
+def _relayed(user: str) -> Request:
+    return Request({
+        "type": "http", "method": "GET", "path": "/",
+        "headers": [(b"authorization", b"Bearer t"), (b"x-scooter-user", user.encode())],
+    })
+
+
+async def test_the_relay_account_names_the_user(_as, monkeypatch):
+    monkeypatch.setattr(auth_mod.settings, "approver_service_accounts", HOST)
+    monkeypatch.setattr(auth_mod.settings, "user_relay_service_accounts", HOST)
+    _as(HOST)
+    identity = await auth_mod.authenticate(_relayed("alice"))
+    assert identity.relayed_user == "alice"
+    assert identity.conversation_id == ""
+
+
+async def test_a_relay_account_need_not_be_an_approver(_as, monkeypatch):
+    monkeypatch.setattr(auth_mod.settings, "approver_service_accounts", "")
+    monkeypatch.setattr(auth_mod.settings, "user_relay_service_accounts", HOST)
+    _as(HOST)
+    identity = await auth_mod.authenticate(_relayed("alice"))
+    assert identity.relayed_user == "alice"
+    assert not identity.is_approver
+
+
+async def test_a_sandbox_cannot_name_a_user(_as, monkeypatch):
+    monkeypatch.setattr(auth_mod.settings, "sandbox_namespace", "agent-sandbox")
+    monkeypatch.setattr(auth_mod.settings, "user_relay_service_accounts", HOST)
+    _as("system:serviceaccount:agent-sandbox:sandbox-conv-1")
+    identity = await auth_mod.authenticate(_relayed("alice"))
+    assert identity.conversation_id == "conv-1"
+    assert identity.relayed_user is None
+
+
+async def test_an_approver_that_is_not_a_relay_cannot_name_a_user(_as, monkeypatch):
+    monkeypatch.setattr(auth_mod.settings, "approver_service_accounts", HOST)
+    monkeypatch.setattr(auth_mod.settings, "user_relay_service_accounts", "")
+    _as(HOST)
+    identity = await auth_mod.authenticate(_relayed("alice"))
+    assert identity.is_approver
+    assert identity.relayed_user is None

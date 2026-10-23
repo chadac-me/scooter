@@ -18,12 +18,13 @@
       blockedHint = "You can't approve this echo request — ask a reviewer.";
     };
 
-    # The fixture for contrib settings tabs: a static page in PR 1. Echo is
+    # The fixture for contrib settings tabs, with one /contrib-api round-trip. Echo is
     # disabled, so it also covers "a disabled contrib has no tab".
     ui.settingsTabs = [{
       label = "Echo";
       order = 60;
       entry = "ui/SettingsTab.tsx";
+      api = true;
     }];
 
     # Never ship, since echo's factory returns enabled=true unconditionally.

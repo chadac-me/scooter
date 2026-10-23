@@ -836,7 +836,36 @@ let
     ++ (if tabsThrow (echoOn [ (echoTab // { id = "echo_Bad"; }) ]) then [ ]
         else [ "a settings tab id that is not a URL slug rendered" ]);
 
-  allProblems = disabledContribProblems ++ settingsTabProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  # The /contrib-api relay: a tab's `api = true` reaches the agent-host as a row in
+  # CONTRIB_USER_API_JSON, only while its contrib is enabled, and the broker trusts the
+  # relayed user header from the agent-host alone.
+  hostEnvOf = extra:
+    let
+      e = evalPlatform {
+        module = { ... }: {
+          imports = [ ./kubenix-config.nix ];
+          config = extra;
+        };
+      };
+      ctrs = builtins.attrValues (e.config.kubernetes.resources.deployments.agent-host.spec.template.spec.containers or { });
+    in builtins.concatMap (c: c.env or [ ]) ctrs;
+  userApiOf = env:
+    let m = builtins.filter (e: e.name == "CONTRIB_USER_API_JSON") env;
+    in if m == [ ] then { } else builtins.fromJSON (builtins.head m).value;
+  relayAccounts =
+    let m = builtins.filter (e: e.name == "USER_RELAY_SERVICE_ACCOUNTS") brokerEnv;
+    in if m == [ ] then "" else (builtins.head m).value or "";
+  contribApiProblems =
+    (if userApiOf hostEnv ? echo
+     then [ "host.env.CONTRIB_USER_API_JSON has an echo row while echo is disabled — the relay is not gated on the contrib's `enable`" ] else [ ])
+    ++ (if ((userApiOf (hostEnvOf { contribs.echo.enable = nixpkgsLib.mkForce true; })).echo.brokerPrefix or null) == "/echo" then [ ]
+        else [ "enabling echo (whose tab sets api = true) did not put { echo = { brokerPrefix = \"/echo\"; }; } in host.env.CONTRIB_USER_API_JSON" ])
+    ++ (if builtins.match ".*:agent-host" relayAccounts != null then [ ]
+        else [ "broker.env.USER_RELAY_SERVICE_ACCOUNTS does not name the agent-host ('${relayAccounts}') — every /contrib-api call would 403" ])
+    ++ (if tabsThrow (nixpkgsLib.recursiveUpdate (echoOn [ (echoTab // { api = true; }) ]) { contribs.echo.services.broker.enable = nixpkgsLib.mkForce false; }) then [ ]
+        else [ "a settings tab with api = true rendered for a contrib without a broker half — its relay would 404 at the broker" ]);
+
+  allProblems = disabledContribProblems ++ settingsTabProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

@@ -165,6 +165,12 @@ let
   # verbs; each contrib's deployment.nix sets its own row inside its own `mkIf`.
   approvalContribsJson =
     if cfg.approvals == { } then null else builtins.toJSON cfg.approvals;
+
+  # The contribs whose settings tab opened the /contrib-api relay (`api = true`), and
+  # where the agent-host reaches their broker routes. Read off the declarations, so a
+  # disabled contrib contributes no row and its relay answers 404.
+  contribUserApi = lib.mapAttrs (name: _: { brokerPrefix = "/${name}"; })
+    (lib.filterAttrs (_: c: c.enable && c.ui.enable && lib.any (t: t.api) c.ui.settingsTabs) config.contribs);
   # Skill DIRECTORIES ship SKILL.md to the agent as `<name>.md`, with a note naming
   # the sandbox copy (modules/skills/sandbox.nix) after the frontmatter,
   # since a skill resolves its scripts/ against "the directory it was loaded from"
@@ -1464,6 +1470,10 @@ in
                   # The contribs that raise human approvals, name -> where its verbs live
                   # on the broker, so the agent-host can relay a user's Approve/Deny.
                   { name = "APPROVAL_CONTRIBS_JSON"; value = approvalContribsJson; }
+                ++ lib.optional (cfg.broker.enable && contribUserApi != { })
+                  # Contribs whose settings tab reaches its broker half as the signed-in
+                  # user through /contrib-api, name -> broker prefix.
+                  { name = "CONTRIB_USER_API_JSON"; value = builtins.toJSON contribUserApi; }
                 ++ lib.optionals cfg.broker.enable [
                   # BROKER_URL and the projected broker token for the approve/deny relay
                   # and the shares/links queries the agent-host makes on a conversation's

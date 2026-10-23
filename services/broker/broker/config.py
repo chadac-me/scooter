@@ -21,6 +21,12 @@ class BrokerSettings(ScooterBaseSettings):
     # system:serviceaccount:{ns}:{name}), which sets Identity.is_approver.
     approver_service_accounts: str = ""
 
+    # SA usernames trusted to name a user in X-Scooter-User (CSV of
+    # system:serviceaccount:{ns}:{name}): the agent-host, relaying a contrib settings
+    # tab's /contrib-api call. Sets Identity.relayed_user; any other caller's header is
+    # ignored.
+    user_relay_service_accounts: str = ""
+
     # --- The agent-facing MCP server (broker/mcp/) --------------------------
     # Contrib-contributed agent tools served at POST /mcp to one conversation at a time.
     mcp_enabled: bool = True
