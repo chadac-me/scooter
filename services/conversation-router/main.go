@@ -298,6 +298,12 @@ func newRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, 
 		}
 		// Retry only when the primary target is an owner IP rather than the fallback.
 		canRetry := target.Host != fallback.Host
+		if IsAguiPost(r.Method, r.URL.Path) {
+			serveAguiLogged(func(ww http.ResponseWriter) {
+				serveVia(shutdownCtx, ww, r, target, fallback, canRetry, convID)
+			}, w, convID, target, fallback)
+			return
+		}
 		serveVia(shutdownCtx, w, r, target, fallback, canRetry, convID)
 	})
 }
