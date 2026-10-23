@@ -109,3 +109,32 @@ async def test_an_approver_that_is_not_a_relay_cannot_name_a_user(_as, monkeypat
     identity = await auth_mod.authenticate(_relayed("alice"))
     assert identity.is_approver
     assert identity.relayed_user is None
+
+
+# --- System tasks: the scheduler's account calls /system routes -------------------------
+
+SCHEDULER = "system:serviceaccount:agent-sandbox:agent-scheduler"
+
+
+async def test_the_scheduler_authenticates_as_a_system_task(_as, monkeypatch):
+    monkeypatch.setattr(auth_mod.settings, "system_task_service_accounts", SCHEDULER)
+    monkeypatch.setattr(auth_mod.settings, "user_relay_service_accounts", HOST)
+    _as(SCHEDULER)
+    identity = await auth_mod.authenticate(_relayed("alice"))
+    assert identity.is_system_task
+    assert not identity.is_approver and identity.relayed_user is None and identity.conversation_id == ""
+
+
+async def test_the_scheduler_is_a_stranger_when_not_listed(_as, monkeypatch):
+    monkeypatch.setattr(auth_mod.settings, "system_task_service_accounts", "")
+    _as(SCHEDULER)
+    with pytest.raises(HTTPException) as e:
+        await auth_mod.authenticate(_request())
+    assert e.value.status_code == 403
+
+
+async def test_a_sandbox_is_never_a_system_task(_as, monkeypatch):
+    monkeypatch.setattr(auth_mod.settings, "sandbox_namespace", "agent-sandbox")
+    monkeypatch.setattr(auth_mod.settings, "system_task_service_accounts", SCHEDULER)
+    _as("system:serviceaccount:agent-sandbox:sandbox-conv-1")
+    assert not (await auth_mod.authenticate(_request())).is_system_task

@@ -40,6 +40,7 @@ def _client(fake: _Fake, tmp_path, token: str | None = "tok-1") -> ScooterClient
         broker_url="http://broker:8080",
         scheduler_url="http://scheduler:8080",
         token_path=str(path),
+        run_token="run-secret",
         transport=httpx.MockTransport(fake.handler),
         backoff_seconds=0.0,
     )
@@ -140,6 +141,8 @@ def test_list_users_broker_and_report_spawn(tmp_path):
     assert fake.calls[1][3] == "Bearer tok-1"
     assert urls[2] == "http://scheduler:8080/runs/run-7/conversations"
     assert fake.calls[2][2] == {"conversation_id": "conv-1", "owner": "alice"}
+    # A spawn is recorded with the run's own secret, not the pod's SA token.
+    assert fake.calls[2][3] == "Bearer run-secret"
 
 
 def test_from_env_reads_the_task_environment(tmp_path, monkeypatch):
@@ -147,10 +150,13 @@ def test_from_env_reads_the_task_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("BROKER_URL", "http://br")
     monkeypatch.setenv("SCHEDULER_URL", "http://sc/")
     monkeypatch.setenv("SCOOTER_TOKEN_PATH", str(tmp_path / "tok"))
+    monkeypatch.setenv("SCOOTER_BROKER_TOKEN_PATH", str(tmp_path / "broker-tok"))
+    monkeypatch.setenv("SCOOTER_TASK_RUN_TOKEN", "rt")
     c = ScooterClient.from_env()
     try:
         assert (c.agent_host_url, c.scheduler_url, str(c.broker.base_url)) == ("http://ah", "http://sc", "http://br")
         assert c.auth.path == str(tmp_path / "tok")
+        assert c.broker_auth.path == str(tmp_path / "broker-tok") and c.run_token == "rt"
     finally:
         run(c.aclose())
 
@@ -244,3 +250,29 @@ def test_a_passed_http_client_is_used_and_left_open(tmp_path):
 
     run(go())
     assert _paths(fake) == ["/conversations", "/agui"]
+
+
+def test_the_broker_uses_its_own_token_when_given(tmp_path):
+    fake = _Fake()
+    (tmp_path / "agent-host").write_text("ah")
+    (tmp_path / "broker").write_text("br")
+
+    async def go():
+        async with ScooterClient(
+            agent_host_url="http://h", broker_url="http://b", token_path=str(tmp_path / "agent-host"),
+            broker_token_path=str(tmp_path / "broker"), transport=httpx.MockTransport(fake.handler),
+        ) as c:
+            await c.list_users()
+            await c.broker.get("/x/system/y")
+
+    run(go())
+    assert [a for *_, a in fake.calls] == ["Bearer ah", "Bearer br"]
+
+
+def test_report_spawn_without_a_run_token_fails_clearly(tmp_path):
+    async def go():
+        async with ScooterClient(agent_host_url="http://h", scheduler_url="http://s", token_path=str(tmp_path / "t")) as c:
+            await c.report_spawn("run-1", "conv-1", "alice")
+
+    with pytest.raises(RuntimeError, match="SCOOTER_TASK_RUN_TOKEN"):
+        run(go())

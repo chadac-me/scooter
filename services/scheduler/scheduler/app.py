@@ -1,4 +1,8 @@
-"""Scheduler service: a REST API for scheduled tasks plus a background loop that fires due tasks by spawning a fresh conversation per run."""
+"""Scheduler service: a REST API for scheduled tasks plus a background loop that fires due tasks.
+
+A due user task spawns a fresh conversation; a due system task (scooter.systemTasks) runs
+as a subprocess through systasks.Runner.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +12,17 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import require_relay_key, settings
 from .cron import InvalidSchedule
 from .logging_config import configure_logging, get_logger
 from .metrics import MetricsSink, create_metrics
-from .models import Run, Task, TaskCreate, TaskPatch
+from .models import Run, RunConversation, Task, TaskCreate, TaskPatch
 from .spawn import SpawnResult, spawn
 from .store import Store
+from .systasks import Runner, load as load_system_tasks
 
 configure_logging("scheduler", default_level=settings.log_level)
 
@@ -80,7 +86,7 @@ async def _record_run(store: Store, task_id: str, run_id: str | None, result: Sp
             await asyncio.sleep(1.0)
 
 
-async def _scheduler_loop(store: Store, metrics: MetricsSink, stop: asyncio.Event) -> None:
+async def _scheduler_loop(store: Store, metrics: MetricsSink, stop: asyncio.Event, runner: Runner | None = None) -> None:
     """Every tick, fire all due tasks; a missed window fires once on recovery, with no backfill storm."""
     tick_count = 0
     while not stop.is_set():
@@ -101,6 +107,11 @@ async def _scheduler_loop(store: Store, metrics: MetricsSink, stop: asyncio.Even
             
             for task in due:
                 try:
+                    if task.kind == "system":
+                        # In the background, so a long run never delays the tick.
+                        if runner is not None:
+                            runner.launch(task)
+                        continue
                     await _fire(store, task, metrics)
                 except Exception:  # one bad task must not stall the loop
                     logger.exception("failed firing task", extra={"task_id": task.id})
@@ -142,8 +153,17 @@ async def lifespan(app: FastAPI):
     metrics = create_metrics(enabled=settings.otel_metrics_enabled)
     app.state.metrics = metrics
     
+    # A list that does not parse fails startup; a task whose command is missing is skipped.
+    await store.sync_system_tasks(load_system_tasks(settings.system_tasks_path))
+    runner = Runner(
+        store, metrics,
+        concurrency=settings.system_task_concurrency,
+        kill_grace_seconds=settings.system_task_kill_grace_seconds,
+    )
+    app.state.runner = runner
+
     stop = asyncio.Event()
-    loop = asyncio.create_task(_scheduler_loop(store, metrics, stop))
+    loop = asyncio.create_task(_scheduler_loop(store, metrics, stop, runner))
     try:
         yield
     finally:
@@ -151,6 +171,7 @@ async def lifespan(app: FastAPI):
         loop.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await loop
+        await runner.shutdown()
         await metrics.shutdown()
         await store.dispose()
 
@@ -232,6 +253,25 @@ async def run_now(task_id: str, owner: str = Depends(_owner)) -> Run:
     await _fire(app.state.store, row, app.state.metrics)
     runs = await app.state.store.list_runs(task_id, owner, limit=1)
     return Run.of(runs[0])
+
+
+_run_token = HTTPBearer(auto_error=False)
+
+
+# The task contract's spawn report. It is authorised by the run's own secret
+# (SCOOTER_TASK_RUN_TOKEN, stored hashed), not the relay key: only the process the
+# scheduler started for this run holds it, and only while the run is going.
+@app.post("/runs/{run_id}/conversations", status_code=204)
+async def record_run_conversation(
+    run_id: str,
+    body: RunConversation,
+    creds: HTTPAuthorizationCredentials | None = Security(_run_token),
+) -> None:
+    if creds is None or not await app.state.store.record_run_conversation(
+        run_id, creds.credentials, conversation_id=body.conversation_id, owner=body.owner
+    ):
+        # One answer for a wrong token, an unknown run and a finished one.
+        raise HTTPException(status_code=403, detail="not a running system-task run, or the wrong run token")
 
 
 def main() -> None:

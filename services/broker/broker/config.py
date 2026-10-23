@@ -27,6 +27,10 @@ class BrokerSettings(ScooterBaseSettings):
     # ignored.
     user_relay_service_accounts: str = ""
 
+    # SA usernames that run system tasks (CSV of system:serviceaccount:{ns}:{name}): the
+    # scheduler, whose tasks call a contrib's /system routes. Sets Identity.is_system_task.
+    system_task_service_accounts: str = ""
+
     # --- The agent-facing MCP server (broker/mcp/) --------------------------
     # Contrib-contributed agent tools served at POST /mcp to one conversation at a time.
     mcp_enabled: bool = True

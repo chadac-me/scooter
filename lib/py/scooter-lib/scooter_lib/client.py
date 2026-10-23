@@ -10,8 +10,9 @@ can open a conversation as any user::
         users = await scooter.list_users()
         due = await scooter.broker.get("/personalization/system/eligible")
 
-`from_env` reads AGENT_HOST_URL, BROKER_URL, SCHEDULER_URL and SCOOTER_TOKEN_PATH, the
-variables the scheduler sets for a system task.
+`from_env` reads AGENT_HOST_URL, BROKER_URL, SCHEDULER_URL, SCOOTER_TOKEN_PATH (audience
+agent-host), SCOOTER_BROKER_TOKEN_PATH (audience agent-broker) and SCOOTER_TASK_RUN_TOKEN,
+the variables the scheduler sets for a system task.
 """
 
 from __future__ import annotations
@@ -77,6 +78,8 @@ class ScooterClient:
         broker_url: str = "",
         scheduler_url: str = "",
         token_path: str = DEFAULT_TOKEN_PATH,
+        broker_token_path: str | None = None,
+        run_token: str | None = None,
         timeout: httpx.Timeout | float = httpx.Timeout(120.0, connect=10.0),
         attempts: int = 3,
         backoff_seconds: float = 2.0,
@@ -86,6 +89,10 @@ class ScooterClient:
         self.agent_host_url = agent_host_url.rstrip("/")
         self.scheduler_url = scheduler_url.rstrip("/")
         self.auth = _TokenAuth(token_path)
+        # The broker verifies its own audience, so a pod mounts a second token for it.
+        self.broker_auth = _TokenAuth(broker_token_path or token_path)
+        # The scheduler's per-run secret, which is what records a spawn on a run.
+        self.run_token = run_token
         self.attempts = max(1, attempts)
         self.backoff_seconds = backoff_seconds
         # `transport` (httpx.MockTransport) and `http` are for tests; the caller owns an `http` it passes.
@@ -94,7 +101,7 @@ class ScooterClient:
         # Paths are relative to BROKER_URL: `await scooter.broker.get("/<contrib>/system/...")`.
         self.broker = httpx.AsyncClient(
             base_url=broker_url.rstrip("/") or "http://broker.invalid",
-            auth=self.auth,
+            auth=self.broker_auth,
             timeout=timeout,
             transport=transport,
         )
@@ -108,6 +115,8 @@ class ScooterClient:
             broker_url=env.get("BROKER_URL", ""),
             scheduler_url=env.get("SCHEDULER_URL", ""),
             token_path=env.get("SCOOTER_TOKEN_PATH") or env.get("SA_TOKEN_PATH") or DEFAULT_TOKEN_PATH,
+            broker_token_path=env.get("SCOOTER_BROKER_TOKEN_PATH") or None,
+            run_token=env.get("SCOOTER_TASK_RUN_TOKEN") or None,
             **kw,
         )
 
@@ -225,9 +234,11 @@ class ScooterClient:
         """Record a conversation on a scheduler run (POST /runs/{run_id}/conversations)."""
         if not self.scheduler_url:
             raise RuntimeError("SCHEDULER_URL is not set, so the spawn cannot be recorded")
+        if not self.run_token:
+            raise RuntimeError("SCOOTER_TASK_RUN_TOKEN is not set, so the spawn cannot be recorded")
         resp = await self.http.post(
             f"{self.scheduler_url}/runs/{run_id}/conversations",
             json={"conversation_id": conversation_id, "owner": owner},
-            auth=self.auth,
+            headers={"authorization": f"Bearer {self.run_token}"},
         )
         resp.raise_for_status()
