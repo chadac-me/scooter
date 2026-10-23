@@ -41,6 +41,67 @@ function exitCodeFromStatus(status: V1Status | undefined): number {
   return 1;
 }
 
+/** A k8s exec failure as an Error whose message carries the Status, so no caller prints `[object Object]`. */
+export class K8sExecError extends Error {
+  constructor(
+    message: string,
+    readonly status?: V1Status,
+    readonly wsClose?: { code: number; reason: string },
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = "K8sExecError";
+  }
+}
+
+const isStatus = (v: unknown): v is V1Status =>
+  !!v && typeof v === "object" && ((v as V1Status).kind === "Status" || ("status" in v && "reason" in v));
+
+/** One line for a k8s Status: `reason: message (code N) [cause; cause]`. */
+export function describeStatus(s: V1Status): string {
+  const causes = (s.details?.causes ?? [])
+    .map((c) => [c.reason, c.field, c.message].filter(Boolean).join(" "))
+    .filter(Boolean);
+  return [
+    [s.reason, s.message].filter(Boolean).join(": ") || s.status || "Failure",
+    s.code !== undefined ? `(code ${s.code})` : "",
+    causes.length ? `[${causes.join("; ")}]` : "",
+  ].filter(Boolean).join(" ");
+}
+
+/** Normalize whatever exec() / the WebSocket rejected with into a K8sExecError. */
+export function toExecError(e: unknown, wsClose?: { code: number; reason: string }): K8sExecError {
+  if (e instanceof K8sExecError) return e;
+  const closeNote = wsClose ? ` (ws close ${wsClose.code}${wsClose.reason ? ` ${wsClose.reason}` : ""})` : "";
+  // ApiException-style errors carry the Status as `body` (possibly as JSON text).
+  let body: unknown = (e as { body?: unknown } | undefined)?.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      /* not JSON */
+    }
+  }
+  const status = isStatus(e) ? e : isStatus(body) ? body : undefined;
+  if (status) return new K8sExecError(`k8s exec failed: ${describeStatus(status)}${closeNote}`, status, wsClose, { cause: e });
+  // A ws ErrorEvent wraps the real error.
+  const inner = (e as { error?: unknown } | undefined)?.error;
+  if (inner instanceof Error) return new K8sExecError(`k8s exec failed: ${inner.message}${closeNote}`, undefined, wsClose, { cause: inner });
+  if (e instanceof Error) return new K8sExecError(`k8s exec failed: ${e.message}${closeNote}`, undefined, wsClose, { cause: e });
+  const msg = (e as { message?: unknown } | undefined)?.message;
+  let text: string;
+  if (typeof msg === "string" && msg) text = msg;
+  else {
+    try {
+      text = JSON.stringify(e) ?? String(e);
+    } catch {
+      text = String(e);
+    }
+  }
+  if (!text || text === "{}") text = "no error detail";
+  return new K8sExecError(`k8s exec failed: ${text}${closeNote}`, undefined, wsClose, { cause: e });
+}
+
 export interface K8sExecOptions {
   kubeConfig?: KubeConfig;
   container?: string;
@@ -330,14 +391,16 @@ export function createK8sSandboxApiClient(
           });
           ws.on("error", (e: unknown) => {
             settle();
-            log.errorWith("ws error", e, lastClose ? { ws_close: lastClose } : {});
-            reject(e);
+            const err = toExecError(e, lastClose);
+            log.errorWith("ws error", err, { status: err.status ?? null, ws_close: lastClose ?? null });
+            reject(err);
           });
         })
         .catch((e: unknown) => {
           settle();
-          log.errorWith("exec() rejected", e, lastClose ? { ws_close: lastClose } : {});
-          reject(e);
+          const err = toExecError(e, lastClose);
+          log.errorWith("exec() rejected", err, { status: err.status ?? null, ws_close: lastClose ?? null });
+          reject(err);
         });
     });
 

@@ -89,6 +89,11 @@ function fakeDb(): {
           .filter((r) => r.conversation_id === conversation_id)
           .sort((a, b) => (a.seq as number) - (b.seq as number));
 
+        // The conflict check: the checksum at one exact seq.
+        if (/^SELECT\s+"?CHECKSUM"?\s+FROM/i.test(head)) {
+          const hit = mine.find((r) => r.seq === Number(values[1]));
+          return { rows: hit ? [[hit.checksum]] : [], rowCount: hit ? 1 : 0 };
+        }
         // tail-by-count selects only "event", which is what tells it apart from head().
         if (/ORDER BY .*"?SEQ"? DESC/i.test(text) && /^SELECT\s+"?EVENT"?\s+FROM/i.test(head)) {
           // DESC as Postgres returns it; the store reverses to chronological order.
@@ -160,6 +165,25 @@ describe("eventStore — ordering", () => {
 
     expect(rows.filter((r) => r.conversation_id === "conv-1").map((r) => r.seq)).toEqual([1]);
     expect(rows.filter((r) => r.conversation_id === "conv-2").map((r) => r.seq)).toEqual([1]);
+  });
+
+  it("re-appending the SAME event at the same seq is idempotent, not a collision", async () => {
+    // A retry after an insert committed but its reply was lost presents the identical row.
+    const { db, rows } = fakeDb();
+    const a = store(db);
+    const b = store(db);
+    const errors: unknown[] = [];
+    a.onAppendError((_id, e) => errors.push(e));
+    b.onAppendError((_id, e) => errors.push(e));
+    const ev = run(1)[0];
+
+    await Promise.all([a.appendEvent(CONV, ev), b.appendEvent(CONV, ev)]);
+
+    expect(errors).toEqual([]);
+    expect(rows.map((r) => r.seq)).toEqual([1]);
+    // The head advanced past the existing row, so the next append continues the chain.
+    await b.appendEvent(CONV, run(1)[1]);
+    expect(rows.map((r) => r.seq)).toEqual([1, 2]);
   });
 
   it("a PK collision SURFACES — it must never be swallowed as ON CONFLICT DO NOTHING", async () => {
