@@ -112,6 +112,8 @@ export interface ManagementDeps {
   brokerMcpHandler?: (req: IncomingMessage, res: ServerResponse, body: unknown) => Promise<void>;
   /** Resolves the caller's identity per request; defaults to the env-configured resolver. */
   resolveUser?: ResolveUser;
+  /** Whether a request is a trusted in-cluster caller (webhooks/scheduler) allowed to set a body `owner`; absent means a body owner is never honored. */
+  ownerVerifier?: (req: IncomingMessage) => Promise<boolean>;
   /** In-pod web-service registry powering the UI Services panel; absent in fake/local mode. */
   webServices?: WebServiceRegistry;
   /** Per-conversation service origins (SANDBOX_DOMAIN); absent keeps services under /c/<id>/. */
@@ -407,13 +409,21 @@ export function createManagementApi(deps: ManagementDeps): Router {
   // event-log key and a k8s resource name); in multi-replica the conversation-router serves
   // this path itself, so this route serves single-replica deployments and e2e.
   r.post("/conversations", async (ctx) => {
-    const body = await ctx.body<{ title?: string; model?: string }>();
+    const body = await ctx.body<{ title?: string; model?: string; owner?: string }>();
     // Reject an unknown model rather than silently falling back.
     if (body.model && body.model !== models.default && !models.available.includes(body.model)) {
       return { status: 400, json: { error: `unknown model: ${body.model}` } };
     }
-    // Stamp the creating user as the owner.
-    const owner = ctx.user.anonymous ? undefined : ctx.user.id;
+    // Stamp the creating user as the owner; a body `owner` wins only for a verified in-cluster caller.
+    let owner = ctx.user.anonymous ? undefined : ctx.user.id;
+    const bodyOwner = typeof body.owner === "string" ? body.owner.trim() : "";
+    if (bodyOwner && bodyOwner !== owner) {
+      if (deps.ownerVerifier && (await deps.ownerVerifier(ctx.req).catch(() => false))) {
+        owner = bodyOwner;
+      } else {
+        log.warn("ignored a body owner from an unverified caller", { had_header_owner: owner !== undefined });
+      }
+    }
     const conv = await sessions.start(randomUUID(), body.model, owner);
     if (body.title) sessions.setTitle(conv.id, body.title);
     return { status: 201, json: view(sessions.get(conv.id)!) };

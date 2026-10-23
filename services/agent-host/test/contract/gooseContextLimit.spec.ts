@@ -7,7 +7,7 @@
 import { describe, it, expect } from "vitest";
 
 import { catalogFromEnv, contextLimitOf } from "../../src/agent/models.js";
-import { bedrockEnv, gooseLaunchEnv } from "../../src/index.js";
+import { bedrockEnv, gooseLaunchEnv, resolveFloorModel } from "../../src/index.js";
 
 const catalog = catalogFromEnv({
   AGENT_MODELS_JSON: JSON.stringify([
@@ -79,5 +79,49 @@ describe("bedrockEnv", () => {
       GOOSE_TOOLSHIM: "1",
       GOOSE_AUTO_COMPACT_THRESHOLD: "0.8",
     });
+  });
+});
+
+// The floor provider only launches with a model it serves. Why: issue #897, goose given a BYOC-only id.
+describe("resolveFloorModel", () => {
+  const cat = catalogFromEnv({
+    AGENT_MODELS_JSON: JSON.stringify([
+      { id: "us.anthropic.claude-opus-4-8", providers: ["goose"], defaultFor: ["goose"] },
+      { id: "us.anthropic.claude-sonnet-4-6", providers: ["goose", "claude-code"] },
+      { id: "claude-opus-5", providers: ["byoc"], defaultFor: ["byoc"] },
+      { id: "claude-opus-5-5", providers: ["byoc"] },
+    ]),
+  } as NodeJS.ProcessEnv);
+  const cfg = { model: cat.defaultId, availableModels: cat.models.map((m) => m.id), modelCatalog: cat };
+
+  it("substitutes the goose default for a BYOC-only model", () => {
+    expect(resolveFloorModel("claude-opus-5-5", cfg, "goose")).toBe("us.anthropic.claude-opus-4-8");
+  });
+
+  it("keeps a model goose serves", () => {
+    expect(resolveFloorModel("us.anthropic.claude-sonnet-4-6", cfg, "goose")).toBe("us.anthropic.claude-sonnet-4-6");
+  });
+
+  it("falls back to the provider default with no pick", () => {
+    expect(resolveFloorModel(undefined, cfg, "goose")).toBe("us.anthropic.claude-opus-4-8");
+  });
+
+  it("with an empty catalog behaves like resolveModel", () => {
+    const legacy = { model: "m1", availableModels: ["m1", "m2"], modelCatalog: { models: [], defaultId: undefined } as never };
+    expect(resolveFloorModel("m2", legacy, "goose")).toBe("m2");
+    expect(resolveFloorModel("nope", legacy, "goose")).toBe("m1");
+  });
+
+  // The fake e2e stack's shape: no goose group, so the guard has nothing to go on and keeps the pick.
+  it("keeps the pick when the catalog has no group for the floor provider", () => {
+    const noGoose = catalogFromEnv({
+      AGENT_MODELS_JSON: JSON.stringify([
+        { id: "model-default", providers: ["byoc", "claude-code"], defaultFor: ["byoc", "claude-code"] },
+        { id: "model-smart", providers: ["byoc"] },
+      ]),
+    } as NodeJS.ProcessEnv);
+    const c = { model: noGoose.defaultId, availableModels: noGoose.models.map((m) => m.id), modelCatalog: noGoose };
+    expect(resolveFloorModel("model-smart", c, "goose")).toBe("model-smart");
+    expect(resolveFloorModel("nope", c, "goose")).toBe(c.model);
   });
 });
