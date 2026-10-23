@@ -86,6 +86,17 @@ func (a *Assigner) remember(id string, as Assignment, seen uint64) {
 
 // Resolve returns id's pod IP, claiming if unassigned or gone.
 func (a *Assigner) Resolve(ctx context.Context, id string) (ip, convID string, found bool, err error) {
+	return a.resolve(ctx, id, true)
+}
+
+// ResolveRead is Resolve for a passive read: a Suspended conversation is never claimed, since a
+// read does not resume its Sandbox and the claim would only drift the phase back to Assigned.
+// ip is "" when the read belongs on the fallback Service.
+func (a *Assigner) ResolveRead(ctx context.Context, id string) (ip, convID string, found bool, err error) {
+	return a.resolve(ctx, id, false)
+}
+
+func (a *Assigner) resolve(ctx context.Context, id string, claimSuspended bool) (ip, convID string, found bool, err error) {
 	l := a.stripe(id)
 	l.Lock()
 	defer l.Unlock()
@@ -104,6 +115,9 @@ func (a *Assigner) Resolve(ctx context.Context, id string) (ip, convID string, f
 	if live && !as.Suspended {
 		a.remember(id, as, seen)
 		return ip, as.ConvID, true, nil
+	}
+	if as.Suspended && !claimSuspended {
+		return ip, as.ConvID, true, nil // ip is "" when the pod is gone
 	}
 	candidates := a.pods.Ready()
 	if live {

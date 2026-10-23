@@ -63,3 +63,54 @@ func TestResolveTarget(t *testing.T) {
 		t.Errorf("agui assigned -> %q", u)
 	}
 }
+
+func TestResolveTargetPassiveReadLeavesSuspendedUnclaimed(t *testing.T) {
+	cfg := config{namespace: "agent-sandbox", upstreamPort: 8080, clusterIPService: "agent-host"}
+	fallback := FallbackURL(cfg.clusterIPService, cfg.namespace, cfg.upstreamPort)
+	s := newMemStore("conv-s")
+	s.suspend("conv-s")
+	res := liveAssigner(s, pods("pod-a", "10.42.0.2"))
+
+	for _, path := range []string{"/conversations/conv-s/links", "/conversations/conv-s/shares", "/conversations/conv-s"} {
+		_, u, err := resolveTargetFor(cfg, res, httptest.NewRequest("GET", path, nil), fallback)
+		if err != nil || u.String() != fallback.String() {
+			t.Fatalf("GET %s -> %v %v, want the fallback", path, u, err)
+		}
+	}
+	if s.claims.Load() != 0 {
+		t.Fatalf("passive reads claimed a suspended conversation %d times", s.claims.Load())
+	}
+
+	// A stream or a write still claims, so the run and its live events share one pod.
+	sse := httptest.NewRequest("GET", "/conversations/conv-s/events", nil)
+	if _, u, _ := resolveTargetFor(cfg, res, sse, fallback); u.String() != "http://10.42.0.2:8080" {
+		t.Fatalf("event stream -> %v, want a claimed pod", u)
+	}
+	if s.claims.Load() != 1 {
+		t.Fatalf("claims = %d, want 1 from the event stream", s.claims.Load())
+	}
+}
+
+func TestIsPassiveRead(t *testing.T) {
+	cases := []struct {
+		method, path, hdr, val string
+		want                   bool
+	}{
+		{"GET", "/conversations/c1/links", "", "", true},
+		{"HEAD", "/conversations/c1/ready", "", "", true},
+		{"POST", "/conversations/c1/resume", "", "", false},
+		{"GET", "/conversations/c1/events", "", "", false},
+		{"GET", "/conversations/c1/history", "Accept", "text/event-stream", false},
+		{"GET", "/conversations/c1/terminal", "Upgrade", "websocket", false},
+		{"GET", "/c/c1/marimo/", "", "", false},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest(c.method, c.path, nil)
+		if c.hdr != "" {
+			r.Header.Set(c.hdr, c.val)
+		}
+		if got := isPassiveRead(r); got != c.want {
+			t.Errorf("%s %s (%s=%s) = %v, want %v", c.method, c.path, c.hdr, c.val, got, c.want)
+		}
+	}
+}

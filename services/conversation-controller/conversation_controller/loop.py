@@ -10,7 +10,7 @@ import logging
 
 from dataclasses import dataclass
 
-from .logging_config import forget_warned, warn_once
+from .logging_config import expire_warned, warn_once
 
 from .reconcile import (
     ConversationState,
@@ -59,6 +59,9 @@ _ZOMBIE_CONFIRM_TICKS = 2          # consecutive sightings before the first susp
 _ZOMBIE_SUSPEND_BACKOFF_TICKS = 3  # ticks to wait between suspends
 _ZOMBIE_MAX_SUSPENDS = 3           # suspend attempts before the terminal escalation
 _ZOMBIE_FORGET_TICKS = 12          # consecutive quiescent ticks before the attempt budget is forgotten
+
+# A drift that keeps recurring (an alternating ping-pong included) warns at most this often.
+_DRIFT_WARN_COOLDOWN_S = 600.0
 
 
 @dataclass
@@ -110,7 +113,6 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
 
     results: list[tuple[str, str]] = []
     zombie_flagged: set[str] = set()
-    drift_flagged: set[str] = set()
     for c in convs:
         action = reconcile(c, pods, load, cap, hosts)
         if isinstance(action, NoOp):
@@ -188,12 +190,12 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
         if isinstance(action, MarkSuspended):
             # The Sandbox is Suspended but the phase is not: fix the phase and release placement,
             # de-duplicating only the log.
-            drift_flagged.add(c.name)
             warn_once(
                 logger,
                 f"phase-drift:{c.name}",
                 "phase drift repaired",
                 {**_C, "conversation_id": c.name, "reason": action.reason},
+                cooldown_s=_DRIFT_WARN_COOLDOWN_S,
             )
             rows.set_phase(c.name, "Suspended")
             rows.release_assignment(c.name, c.generation)
@@ -267,8 +269,7 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
     _prev_gen.clear()
     _prev_gen.update({c.name: c.generation for c in convs})
 
-    # Forget conversations that did not drift this pass, so a future drift is logged again.
-    forget_warned({f"phase-drift:{n}" for n in drift_flagged})
+    expire_warned(_DRIFT_WARN_COOLDOWN_S)
 
     return results
 

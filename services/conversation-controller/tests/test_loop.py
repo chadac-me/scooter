@@ -627,15 +627,60 @@ def test_THE_SPAM_a_persistent_drift_warns_once_but_is_still_REPAIRED_every_pass
     assert len([p for p in k8s.patches if p[1] == {"phase": "Suspended"}]) == 5
 
 
-def test_a_drift_that_CLEARS_and_returns_is_loud_again(caplog):
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    import conversation_controller.logging_config as lc
+
+    c = _Clock()
+    monkeypatch.setattr(lc, "_clock", c)
+    return c
+
+
+def test_a_PING_PONG_drift_that_clears_and_returns_every_pass_warns_once_per_cooldown(caplog, clock):
     caplog.set_level("DEBUG")
     k8s = _drifting_k8s()
     reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # grace tick
+    for _ in range(10):
+        clock.t += 11
+        reconcile_once(k8s, cap=10, rows=FakeRows(k8s))      # drifted -> repaired
+        clock.t += 11
+        reconcile_once(k8s, cap=10, rows=FakeRows(k8s))      # clean pass
+        _rearm(k8s)                                          # the router re-claims it
+    assert len(_drift(caplog, "WARNING")) == 1
+
+
+def test_a_drift_still_recurring_after_the_cooldown_warns_again_with_the_suppressed_count(caplog, clock):
+    caplog.set_level("DEBUG")
+    k8s = _drifting_k8s()
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # grace tick
+    for _ in range(3):
+        reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+        _rearm(k8s)
+    clock.t += loop_mod._DRIFT_WARN_COOLDOWN_S
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+    warns = _drift(caplog, "WARNING")
+    assert len(warns) == 2
+    assert warns[1].suppressed_since_last == 2
+
+
+def test_a_drift_idle_past_the_cooldown_is_forgotten(clock):
+    import conversation_controller.logging_config as lc
+
+    k8s = _drifting_k8s()
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # grace tick
     reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # drifted -> warn
-    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # clean pass -> forgotten
-    _rearm(k8s)
-    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # drifts again -> loud
-    assert len(_drift(caplog, "WARNING")) == 2
+    assert "phase-drift:drifted" in lc._warned
+    clock.t += loop_mod._DRIFT_WARN_COOLDOWN_S
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))          # clean pass, long after
+    assert "phase-drift:drifted" not in lc._warned
 
 
 # --- the escalation budget must survive the oscillation it is counting ------------------

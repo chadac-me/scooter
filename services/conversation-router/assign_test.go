@@ -308,3 +308,27 @@ func TestSuspendAfterCachingForcesAClaim(t *testing.T) {
 		t.Fatal("a suspended conversation was routed without a claim")
 	}
 }
+
+func TestPassiveReadOfSuspendedConversationDoesNotClaim(t *testing.T) {
+	s := newMemStore("c1")
+	s.suspend("c1")
+	a := liveAssigner(s, pods("pod-a", "10.0.0.1"))
+	ip, conv, found, err := a.ResolveRead(context.Background(), "c1")
+	if err != nil || !found || conv != "c1" || ip != "" {
+		t.Fatalf("ip=%q conv=%q found=%v err=%v, want the fallback with no claim", ip, conv, found, err)
+	}
+	if s.claims.Load() != 0 || !s.rows["c1"].Suspended {
+		t.Fatalf("a passive read claimed a suspended conversation: %+v", s.rows["c1"])
+	}
+}
+
+func TestPassiveReadOfUnsuspendedConversationStillClaims(t *testing.T) {
+	s := newMemStore("c1")
+	a := liveAssigner(s, pods("pod-a", "10.0.0.1"))
+	if ip, _, _, err := a.ResolveRead(context.Background(), "c1"); err != nil || ip != "10.0.0.1" {
+		t.Fatalf("ip=%q err=%v, want a claim onto pod-a", ip, err)
+	}
+	if s.claims.Load() != 1 {
+		t.Fatal("an unassigned, unsuspended conversation was not claimed")
+	}
+}
