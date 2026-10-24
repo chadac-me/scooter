@@ -54,6 +54,10 @@ CREATE TABLE "conversations" (
   "user_titled"      boolean NULL,
   "starred"          boolean NULL,
   "pending_queue"    jsonb NULL,
+  -- Sidebar turn state: set while a run is in flight, NULL otherwise.
+  "run_started_at"   bigint NULL,
+  -- When the last run ended; the UI compares it to its last-seen mark for "unread".
+  "last_reply_at"    bigint NULL,
   -- ASSIGNMENT / FENCING. host_*, not owner_*: "owner" above is the end user.
   --
   -- host_pod is a pod NAME, never an IP: a name is stable identity, an IP is a mutable

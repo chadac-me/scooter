@@ -79,6 +79,8 @@ class Conversations(Base):
     user_titled: Mapped[Optional[bool]] = mapped_column(Boolean)
     starred: Mapped[Optional[bool]] = mapped_column(Boolean)
     pending_queue: Mapped[Optional[dict]] = mapped_column(JSONB)
+    run_started_at: Mapped[Optional[int]] = mapped_column(BigInteger)
+    last_reply_at: Mapped[Optional[int]] = mapped_column(BigInteger)
     host_pod: Mapped[Optional[str]] = mapped_column(Text)
     phase: Mapped[Optional[str]] = mapped_column(Text)
     sandbox_ref: Mapped[Optional[str]] = mapped_column(Text)

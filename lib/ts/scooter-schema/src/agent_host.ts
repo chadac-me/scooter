@@ -21,6 +21,10 @@ export const conversations = pgTable("conversations", {
 	userTitled: boolean("user_titled"),
 	starred: boolean(),
 	pendingQueue: jsonb("pending_queue"),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	runStartedAt: bigint("run_started_at", { mode: "number" }),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	lastReplyAt: bigint("last_reply_at", { mode: "number" }),
 	hostPod: text("host_pod"),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	hostGeneration: bigint("host_generation", { mode: "number" }).default(0).notNull(),
