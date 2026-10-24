@@ -27,6 +27,15 @@
       api = true;
     }];
 
+    # The fixture for contrib system tasks: `scooter.systemTasks.echo-greet` while echo
+    # is enabled, and nothing while it is not.
+    systemTasks.greet = {
+      entry = "scooter_contrib_echo.tasks:main";
+      args = [ "--greeting" "Hello from echo." ];
+      every = "1d";
+      timeout = "2m";
+    };
+
     # Never ship, since echo's factory returns enabled=true unconditionally.
     enable = false;
   };

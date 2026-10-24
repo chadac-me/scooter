@@ -53,7 +53,7 @@ def fake(monkeypatch, tmp_path):
     def from_env(**kw):
         return ScooterClient(
             agent_host_url="http://agent-host", scheduler_url="http://scheduler",
-            token_path=str(tmp_path / "token"), transport=httpx.MockTransport(f.handler), backoff_seconds=0.0,
+            token_path=str(tmp_path / "token"), run_token="rt", transport=httpx.MockTransport(f.handler), backoff_seconds=0.0,
         )
 
     monkeypatch.setattr(scooter_task.ScooterClient, "from_env", staticmethod(from_env))

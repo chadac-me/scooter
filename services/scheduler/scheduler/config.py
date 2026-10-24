@@ -32,6 +32,20 @@ class Settings(BaseSettings):
     spawn_attempts: int = 3
     spawn_backoff_seconds: float = 2.0
 
+    # --- system tasks ---------------------------------------------------------
+    # The deployment's scooter.systemTasks, rendered by modules/scheduler.nix; absent = none.
+    system_tasks_path: str = "/etc/scheduler/system-tasks/system-tasks.json"
+    # At most this many system-task runs at once, across all tasks.
+    system_task_concurrency: int = 4
+    # After SIGTERM at a run's timeout, SIGKILL this long later.
+    system_task_kill_grace_seconds: float = 30.0
+    # A run's working directory is <task_tmp_dir>/task-<run id>.
+    task_tmp_dir: str = "/tmp"
+    # Passed to a run (the task contract): where it reaches the broker and this service.
+    broker_url: str = ""
+    broker_token_path: str = ""  # SCOOTER_BROKER_TOKEN_PATH: audience agent-broker
+    scheduler_url: str = "http://agent-scheduler:8080"
+
     # --- API auth -----------------------------------------------------------
     # The key gating the /tasks API; empty disables auth.
     relay_key: str = ""

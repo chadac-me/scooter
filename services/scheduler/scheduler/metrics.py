@@ -10,6 +10,9 @@ Instruments:
   - scheduler_tasks: ObservableGauge {enabled=true|false}
   - scheduler_due_backlog: ObservableGauge
   - scheduler_runs_pruned_total: Counter
+  - scheduler_system_runs_total: Counter {status=succeeded|failed|timed_out}
+  - scheduler_system_run_duration_ms: Histogram
+  - scheduler_system_runs_skipped_total: Counter (a task still running when due again)
 
 No instrument carries a task_id or owner attribute, since their cardinality is unbounded.
 """
@@ -62,6 +65,14 @@ class MetricsSink:
         """Record the number of runs deleted by the retention sweep."""
         pass
 
+    def system_run_completed(self, *, status: str, duration_ms: float) -> None:
+        """A system-task run ended: succeeded, failed or timed_out."""
+        pass
+
+    def system_run_skipped(self) -> None:
+        """A system task came due while its last run was still going."""
+        pass
+
     async def shutdown(self) -> None:
         """Flush and shut down the exporter."""
         pass
@@ -88,6 +99,19 @@ class _OTelMetricsSink(MetricsSink):
         self._runs_pruned = meter.create_counter(
             "scheduler_runs_pruned_total",
             description="Task runs deleted by the retention sweep.",
+        )
+        self._system_runs = meter.create_counter(
+            "scheduler_system_runs_total",
+            description="System-task runs ended, by status (succeeded|failed|timed_out).",
+        )
+        self._system_skipped = meter.create_counter(
+            "scheduler_system_runs_skipped_total",
+            description="System-task windows skipped because the last run was still going.",
+        )
+        self._system_duration = meter.create_histogram(
+            "scheduler_system_run_duration_ms",
+            description="System-task run duration, milliseconds.",
+            unit="ms",
         )
 
         # Histograms
@@ -174,6 +198,13 @@ class _OTelMetricsSink(MetricsSink):
 
     def runs_pruned(self, *, count: int) -> None:
         self._runs_pruned.add(count)
+
+    def system_run_completed(self, *, status: str, duration_ms: float) -> None:
+        self._system_runs.add(1, {"status": status})
+        self._system_duration.record(duration_ms)
+
+    def system_run_skipped(self) -> None:
+        self._system_skipped.add(1)
 
     async def shutdown(self) -> None:
         try:

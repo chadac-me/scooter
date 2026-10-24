@@ -87,6 +87,11 @@ async def authenticate(request: Request) -> Identity:
                         service_account=username, is_approver=True,
                         relayed_user=relayed_user)
 
+    if username in _csv(settings.system_task_service_accounts):
+        # The scheduler, running a system task: no conversation and no user, and never an approver.
+        return Identity(conversation_id="", namespace=settings.sandbox_namespace,
+                        service_account=username, is_system_task=True)
+
     if username in _csv(settings.user_relay_service_accounts):
         # A relay account that is not also an approver is still not a sandbox; without
         # the header it names nobody, and user routes refuse it.

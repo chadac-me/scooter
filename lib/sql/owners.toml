@@ -64,8 +64,9 @@ remote_agents        = { writers = ["byoc-controller", "agent-host"], readers = 
 owner = "scheduler"
 
 [scheduler.tables]
-scheduled_tasks = { writers = ["scheduler"], readers = [] }
-task_runs       = { writers = ["scheduler"], readers = [] }
+scheduled_tasks        = { writers = ["scheduler"], readers = [] }
+task_run_conversations = { writers = ["scheduler"], readers = [] }
+task_runs              = { writers = ["scheduler"], readers = [] }
 
 [webhooks]
 owner = "webhooks"

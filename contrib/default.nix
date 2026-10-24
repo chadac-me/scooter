@@ -1,4 +1,5 @@
 { lib, writeText, python3Packages, broker, webhooks, scooterBrokerLib, scooterWebhooksLib
+, mkScooterTask ? null
 , deploymentModules ? [ ]
 , ... }:
 
@@ -12,6 +13,8 @@ let
   mkPackages = import ./build.nix {
     inherit lib python3Packages broker webhooks scooterBrokerLib scooterWebhooksLib;
   };
+  mkTasks = if mkScooterTask == null then (_: { })
+    else import ./tasks.nix { inherit lib mkScooterTask; };
 
   # deploymentModules says which contribs to ship, passed in because this tree is
   # vended.
@@ -50,6 +53,8 @@ let
       sqlDirs = lib.mapAttrs' (_: c: lib.nameValuePair c.db.name (c.src + "/sql"))
         (lib.filterAttrs (_: c: c.db.enable) contribs);
       packages = byName;
+      # name -> task id -> { package, args, … }: the system tasks the scheduler image ships.
+      tasks = mkTasks contribs;
       inherit eval;
     };
 in

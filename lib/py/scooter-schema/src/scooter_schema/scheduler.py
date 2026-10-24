@@ -4,7 +4,7 @@
 from typing import Optional
 import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, String, Text, text
+from sqlalchemy import Boolean, DateTime, ForeignKeyConstraint, Index, Integer, PrimaryKeyConstraint, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -20,14 +20,21 @@ class ScheduledTasks(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
-    cron: Mapped[str] = mapped_column(String, nullable=False)
     timezone: Mapped[str] = mapped_column(String, nullable=False)
     owner: Mapped[str] = mapped_column(String, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
+    kind: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'user'::character varying"))
+    cron: Mapped[Optional[str]] = mapped_column(String)
     next_run_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True))
     last_run_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True))
+    command: Mapped[Optional[str]] = mapped_column(Text)
+    args: Mapped[Optional[str]] = mapped_column(Text)
+    interval_seconds: Mapped[Optional[int]] = mapped_column(Integer)
+    timeout_seconds: Mapped[Optional[int]] = mapped_column(Integer)
+    model: Mapped[Optional[str]] = mapped_column(String)
+    unavailable: Mapped[Optional[str]] = mapped_column(Text)
 
     task_runs: Mapped[list['TaskRuns']] = relationship('TaskRuns', back_populates='task')
 
@@ -45,5 +52,25 @@ class TaskRuns(Base):
     fired_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
     conversation_id: Mapped[Optional[str]] = mapped_column(String)
     error: Mapped[Optional[str]] = mapped_column(Text)
+    finished_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True))
+    exit_code: Mapped[Optional[int]] = mapped_column(Integer)
+    report_token_sha256: Mapped[Optional[str]] = mapped_column(String)
 
     task: Mapped['ScheduledTasks'] = relationship('ScheduledTasks', back_populates='task_runs')
+    task_run_conversations: Mapped[list['TaskRunConversations']] = relationship('TaskRunConversations', back_populates='run')
+
+
+class TaskRunConversations(Base):
+    __tablename__ = 'task_run_conversations'
+    __table_args__ = (
+        ForeignKeyConstraint(['run_id'], ['task_runs.id'], ondelete='CASCADE', name='task_run_conversations_run_id_fkey'),
+        PrimaryKeyConstraint('run_id', 'conversation_id', name='task_run_conversations_pkey'),
+        Index('task_run_conversations_by_owner', 'owner')
+    )
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
+    owner: Mapped[Optional[str]] = mapped_column(String)
+
+    run: Mapped['TaskRuns'] = relationship('TaskRuns', back_populates='task_run_conversations')

@@ -119,6 +119,13 @@ let
     providerModelIds
     ++ lib.optional (cfg.agent.model != null && !(lib.elem cfg.agent.model providerModelIds)) cfg.agent.model
   );
+  # The catalog's `fast` model (at most one), else the default: what system tasks run on.
+  fastModelId =
+    let flagged = lib.unique (lib.concatMap
+      (p: lib.attrNames (lib.filterAttrs (_: m: m.fast) cfg.agent.availableModels.${p})) providerNames);
+    in if flagged == [ ] then defaultModelId
+    else if lib.length flagged == 1 then lib.head flagged
+    else throw "scooter.agent.availableModels flags ${lib.concatStringsSep ", " flagged} as `fast`; flag at most one.";
   # A model's hint: the first provider group defining one.
   hintOf = id:
     let hints = lib.filter (h: h != "")
@@ -626,6 +633,15 @@ in
               default = false;
               description = "This provider's default model (at most one per provider; else the group's first entry).";
             };
+            fast = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                The model background work runs on: a system task's conversations use it
+                unless the task sets `model`. At most one across the catalog; with none
+                flagged they use the default model.
+              '';
+            };
             hint = mkOption {
               type = types.str;
               default = "";
@@ -677,6 +693,12 @@ in
           UI/management API can also override per-conversation. Rendered to the
           agent-host as AGENT_MODELS_JSON.
         '';
+      };
+      resolvedModels = mkOption {
+        internal = true;
+        readOnly = true;
+        default = { default = defaultModelId; fast = fastModelId; ids = modelIds; };
+        description = "The catalog folded to its default, fast and offered ids, for modules that pick a model (modules/scheduler.nix).";
       };
       region = mkOption {
         type = types.str;

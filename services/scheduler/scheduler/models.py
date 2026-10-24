@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 from pydantic import BaseModel
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -22,7 +22,8 @@ class TaskRow(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
-    cron: Mapped[str] = mapped_column(String, nullable=False)
+    # NULL only for a system task that runs on interval_seconds.
+    cron: Mapped[str | None] = mapped_column(String)
     timezone: Mapped[str] = mapped_column(String, nullable=False, default="UTC")
     # The user who created the task, and the owner of every conversation it spawns.
     owner: Mapped[str] = mapped_column(String, nullable=False)
@@ -31,6 +32,16 @@ class TaskRow(Base):
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # 'user' (a prompt a user scheduled) or 'system' (a command synced from scooter.systemTasks).
+    kind: Mapped[str] = mapped_column(String, nullable=False, default="user", server_default="user")
+    # System tasks only.
+    command: Mapped[str | None] = mapped_column(Text)
+    args: Mapped[str | None] = mapped_column(Text)  # a JSON array
+    interval_seconds: Mapped[int | None] = mapped_column(Integer)
+    timeout_seconds: Mapped[int | None] = mapped_column(Integer)
+    model: Mapped[str | None] = mapped_column(String)
+    # Why this image cannot run the task (its command is missing), else None.
+    unavailable: Mapped[str | None] = mapped_column(Text)
 
 
 class RunRow(Base):
@@ -39,9 +50,25 @@ class RunRow(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     task_id: Mapped[str] = mapped_column(String, ForeignKey("scheduled_tasks.id", ondelete="CASCADE"), nullable=False)
     conversation_id: Mapped[str | None] = mapped_column(String)
-    status: Mapped[str] = mapped_column(String, nullable=False)  # spawning|spawned|failed
+    # User task: spawning|spawned|failed. System task: running|succeeded|failed|timed_out.
+    status: Mapped[str] = mapped_column(String, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     fired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    # sha256 of the secret a running system task records its spawns with; cleared when it ends.
+    report_token_sha256: Mapped[str | None] = mapped_column(String)
+
+
+class RunConversationRow(Base):
+    """A conversation a system-task run opened, and for whom."""
+
+    __tablename__ = "task_run_conversations"
+
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("task_runs.id", ondelete="CASCADE"), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner: Mapped[str | None] = mapped_column(String, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # --- API models ---------------------------------------------------------------
@@ -96,6 +123,13 @@ class Run(BaseModel):
             id=r.id, task_id=r.task_id, conversation_id=r.conversation_id,
             status=r.status, error=r.error, fired_at=r.fired_at,
         )
+
+
+class RunConversation(BaseModel):
+    """POST /runs/{run_id}/conversations: a conversation a system-task run opened."""
+
+    conversation_id: str
+    owner: str | None = None
 
 
 def new_id() -> str:

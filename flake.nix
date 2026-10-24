@@ -112,6 +112,7 @@
 
           contribs = pkgs.callPackage ./contrib {
             inherit deploymentModules;
+            inherit mkScooterTask;
             broker = brokerBase;
             webhooks = webhooksBase;
             inherit scooterBrokerLib scooterWebhooksLib;
@@ -232,6 +233,9 @@
               warmStoreController;
             contribManifest = contribs.uiManifest;
             contribSqlDirs = contribs.sqlDirs;
+            # The registry's contrib tasks and the built-in prompt task, whose closures the scheduler image ships.
+            inherit mkScooterTask scooterPrompt;
+            contribTasks = contribs.tasks;
           };
 
           # `contribs` is at the module root, not under `scooter`.

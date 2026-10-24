@@ -35,6 +35,9 @@ class Identity:
     # relay. Set only when the caller authenticated as a USER_RELAY_SERVICE_ACCOUNTS
     # account; from any other caller the header is ignored, so this stays None.
     relayed_user: str | None = None
+    # A system task run by the scheduler (SYSTEM_TASK_SERVICE_ACCOUNTS), which a contrib's
+    # /system routes require through `scooter_broker_lib.system.system_task_identity`.
+    is_system_task: bool = False
 
 
 # ---------------------------------------------------------------------------

@@ -181,6 +181,65 @@ let
       (config.source != null || config.tools != { } || config.settingsTabs != [ ]);
   };
 
+  # One recurring task this contrib ships, built by mkScooterTask (contrib/tasks.nix)
+  # and mapped into the platform's `scooter.systemTasks."<contrib>-<id>"`.
+  systemTaskModule = { ... }: {
+    options = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Ship this task. An operator can also turn it off at `scooter.systemTasks.\"${name}-<id>\".enable`.";
+      };
+      entry = mkOption {
+        type = types.str;
+        example = "scooter_contrib_${name}.tasks.refresh:main";
+        description = ''
+          `<module>:<command>`, a click command decorated with `scooter_task.task`
+          (lib/py/scooter-task), importable from this contrib's source directory.
+        '';
+      };
+      pythonDeps = mkOption {
+        type = types.functionTo (types.listOf types.package);
+        default = _: [ ];
+        example = literalExpression "ps: [ ps.pyyaml ]";
+        description = "Python packages the task needs beyond scooter-lib, scooter-task and click.";
+      };
+      args = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = literalExpression ''[ "--prompt-file" "''${./prompts/refresh.md}" ]'';
+        description = "The task's arguments. A store path here ships in the scheduler image with the task.";
+      };
+      every = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "1h";
+        description = "Run every this long (`<n>s|m|h|d`). Exactly one of `every` and `cron`.";
+      };
+      cron = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "0 9 * * 1";
+        description = "Run on this cron schedule, in `timezone`. Exactly one of `every` and `cron`.";
+      };
+      timezone = mkOption {
+        type = types.str;
+        default = "UTC";
+        description = "The timezone `cron` is read in.";
+      };
+      timeout = mkOption {
+        type = types.str;
+        default = "10m";
+        description = "SIGTERM after this long (`<n>s|m|h|d`), then SIGKILL 30s later.";
+      };
+      model = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "The model the task's conversations default to; null is the deployment's fast model.";
+      };
+    };
+  };
+
   serviceModule = svc: { ... }: {
     options = {
       enable = mkEnableOption "the ${svc} half of this contrib";
@@ -429,6 +488,26 @@ in
         see there for how a directory reaches the agent and the sandbox.
       '';
       type = types.attrsOf (types.submodule ../modules/skills/dir.nix);
+    };
+
+    systemTasks = mkOption {
+      type = types.attrsOf (types.submodule systemTaskModule);
+      default = { };
+      example = literalExpression ''
+        {
+          refresh-profile = {
+            entry = "scooter_contrib_${name}.tasks.refresh:main";
+            args = [ "--prompt-file" "''${./prompts/refresh.md}" ];
+            every = "1h";
+          };
+        }
+      '';
+      description = ''
+        Recurring tasks the scheduler runs for this contrib, keyed by id. Each is
+        built from this contrib's source with mkScooterTask and lands in the
+        platform as `scooter.systemTasks."${name}-<id>"`, where an operator can
+        tune or disable it. See lib/py/scooter-task for how to write one.
+      '';
     };
 
     services = mkOption {

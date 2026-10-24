@@ -38,9 +38,9 @@ What the scheduler relies on, whatever language a task is written in:
 | | |
 |---|---|
 | **Invocation** | `command args…`, working directory `/tmp/task-<run id>` |
-| **Environment** | `SCOOTER_TASK_ID`, `SCOOTER_TASK_RUN_ID`, `SCOOTER_TASK_DEADLINE`, `SCOOTER_TASK_MODEL`, `AGENT_HOST_URL`, `BROKER_URL`, `SCHEDULER_URL`, `SCOOTER_TOKEN_PATH` (the projected service-account token) |
+| **Environment** | `SCOOTER_TASK_ID`, `SCOOTER_TASK_RUN_ID`, `SCOOTER_TASK_RUN_TOKEN` (this run's secret), `SCOOTER_TASK_DEADLINE`, `SCOOTER_TASK_MODEL`, `AGENT_HOST_URL`, `BROKER_URL`, `SCHEDULER_URL`, `SCOOTER_TOKEN_PATH` (the projected service-account token, audience agent-host), `SCOOTER_BROKER_TOKEN_PATH` (audience agent-broker), and nothing else of the scheduler's environment |
 | **Exit code** | 0 = succeeded; anything else = failed; killed at the timeout = timed out (`@task` exits 143 on SIGTERM) |
 | **Output** | stdout and stderr go to the scheduler's log; the last 4 KiB of stderr is a failed run's error, so end with a one-line reason (`@task` prints `<name>: <Error>: <message>`) |
-| **Spawns** | to record a conversation on the run, `POST $SCHEDULER_URL/runs/$SCOOTER_TASK_RUN_ID/conversations` with `{conversation_id, owner}` and the token. `ctx.spawn` and `scooter-prompt` do this |
+| **Spawns** | to record a conversation on the run, `POST $SCHEDULER_URL/runs/$SCOOTER_TASK_RUN_ID/conversations` with `{conversation_id, owner}` and `Authorization: Bearer $SCOOTER_TASK_RUN_TOKEN`, accepted only while the run is going. `ctx.spawn` and `scooter-prompt` do this |
 
 A conversation spawned with `source: "system"` is owned by the user it was opened for.

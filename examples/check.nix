@@ -865,7 +865,72 @@ let
     ++ (if tabsThrow (nixpkgsLib.recursiveUpdate (echoOn [ (echoTab // { api = true; }) ]) { contribs.echo.services.broker.enable = nixpkgsLib.mkForce false; }) then [ ]
         else [ "a settings tab with api = true rendered for a contrib without a broker half — its relay would 404 at the broker" ]);
 
-  allProblems = disabledContribProblems ++ settingsTabProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  # System tasks: scooter.systemTasks renders into the scheduler's ConfigMap, contribs map
+  # in as "<contrib>-<id>" only while enabled, and bad config fails the render.
+  sysEval = extra: evalPlatform {
+    module = { ... }: { imports = [ ./kubenix-config.nix ]; config = extra; };
+  };
+  sysJsonOf = e: e.config.kubernetes.resources.configMaps.scheduler-system-tasks.data."system-tasks.json";
+  sysById = e: builtins.listToAttrs (map (t: { name = t.id; value = t; }) (builtins.fromJSON (sysJsonOf e)));
+  sysThrows = extra: !(builtins.tryEval (builtins.deepSeq (sysJsonOf (sysEval extra)) true)).success;
+  sysBase = sysById platform;
+  sysEcho = sysById (sysEval { contribs.echo.enable = nixpkgsLib.mkForce true; });
+  sysEchoTuned = sysById (sysEval {
+    contribs.echo.enable = nixpkgsLib.mkForce true;
+    scooter.systemTasks.echo-greet.every = "4h";
+  });
+  sysFast = sysById (sysEval { scooter.agent.availableModels.goose."us.anthropic.claude-opus-4-8".fast = true; });
+  schedImageOf = e: e.config.scooter.images.agent-scheduler.package.drvPath;
+  publishedSchedImage = flake.packages.${system}.scheduler-image.drvPath;
+  schedEnvVal = name: let m = builtins.filter (e: e.name == name) schedEnv; in if m == [ ] then "" else (builtins.head m).value or "";
+  brokerEnvVal = name: let m = builtins.filter (e: e.name == name) brokerEnv; in if m == [ ] then "" else (builtins.head m).value or "";
+  health = sysBase.broker-health or { };
+  sysTaskProblems =
+    (if health != { } then [ ] else [ "the example's systemTasks.broker-health is missing from the scheduler-system-tasks ConfigMap" ])
+    ++ (if (health.interval_seconds or null) == 900 && (health.timeout_seconds or null) == 60 && (health.cron or 1) == null then [ ]
+        else [ "broker-health should render interval_seconds 900, timeout_seconds 60 and no cron" ])
+    ++ (if nixpkgsLib.hasPrefix builtins.storeDir (health.command or "") then [ ]
+        else [ "broker-health's command is not a store path" ])
+    ++ (if (health.model or null) == "us.anthropic.claude-sonnet-4-6" then [ ]
+        else [ "with no model flagged `fast`, a task should run on the default model, got '${toString (health.model or null)}'" ])
+    ++ (if ((sysFast.broker-health or { }).model or null) == "us.anthropic.claude-opus-4-8" then [ ]
+        else [ "a model flagged `fast` is not what a task without `model` runs on" ])
+    ++ (if !(builtins.hasContext (sysJsonOf platform)) then [ ]
+        else [ "the scheduler-system-tasks ConfigMap carries string context, so rendering manifests would build every task" ])
+    ++ (if !(sysBase ? echo-greet) then [ ]
+        else [ "echo is disabled but its system task rendered" ])
+    ++ (if (sysEcho.echo-greet.interval_seconds or null) == 86400 && nixpkgsLib.hasSuffix "/bin/echo-greet" (sysEcho.echo-greet.command or "") then [ ]
+        else [ "enabling echo did not render its task as scooter.systemTasks.echo-greet (every 1d, bin/echo-greet)" ])
+    ++ (if (sysEchoTuned.echo-greet.interval_seconds or null) == 14400 then [ ]
+        else [ "an operator could not retune a contrib task (systemTasks.echo-greet.every = \"4h\")" ])
+    ++ (if !((sysById (sysEval { scooter.systemTasks.broker-health.enable = false; })) ? broker-health) then [ ]
+        else [ "systemTasks.<id>.enable = false did not drop the task" ])
+    ++ (if sysThrows { scooter.systemTasks.bare = { command = "sh"; every = "1h"; }; } then [ ]
+        else [ "a bare-name system task command (\"sh\") rendered; it must be a store path" ])
+    ++ (if sysThrows { scooter.systemTasks.broker-health.cron = "0 * * * *"; } then [ ]
+        else [ "a system task with both `every` and `cron` rendered" ])
+    ++ (if sysThrows { scooter.systemTasks.broker-health.every = nixpkgsLib.mkForce null; } then [ ]
+        else [ "a system task with neither `every` nor `cron` rendered" ])
+    ++ (if sysThrows { scooter.systemTasks.broker-health.every = nixpkgsLib.mkForce "15 minutes"; } then [ ]
+        else [ "a system task with an unparseable `every` rendered" ])
+    ++ (if sysThrows { scooter.systemTasks.broker-health.model = "not-a-model"; } then [ ]
+        else [ "a system task `model` outside availableModels rendered" ])
+    ++ (if sysThrows { scooter.agent.availableModels.goose = {
+          "us.anthropic.claude-opus-4-8".fast = true;
+          "us.anthropic.claude-sonnet-4-6".fast = true;
+        }; } then [ ]
+        else [ "two models flagged `fast` rendered" ])
+    # The image: a deployment's own task is in it; with none, it is the published image.
+    ++ (if schedImageOf (sysEval { scooter.systemTasks.broker-health.enable = false; }) == publishedSchedImage then [ ]
+        else [ "with no operator task, the scheduler image differs from the published one, so its content tag would not exist on the registry" ])
+    ++ (if schedImageOf platform != publishedSchedImage then [ ]
+        else [ "an operator task did not change the scheduler image, so its command is not in the image" ])
+    ++ (if schedEnvVal "SYSTEM_TASKS_PATH" != "" && schedEnvVal "SCHEDULER_URL" != "" then [ ]
+        else [ "scheduler.env SYSTEM_TASKS_PATH / SCHEDULER_URL (the scheduler cannot find or hand out its system tasks)" ])
+    ++ (if builtins.match ".*:agent-scheduler" (brokerEnvVal "SYSTEM_TASK_SERVICE_ACCOUNTS") != null then [ ]
+        else [ "broker.env.SYSTEM_TASK_SERVICE_ACCOUNTS does not name the scheduler, so a task's /system calls would 403" ]);
+
+  allProblems = sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

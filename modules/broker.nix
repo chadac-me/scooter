@@ -282,6 +282,8 @@ in
                   # The agent-host's /contrib-api relay names the signed-in user in
                   # X-Scooter-User; the broker trusts that header from this account only.
                   { name = "USER_RELAY_SERVICE_ACCOUNTS"; value = "system:serviceaccount:${cfg.namespace}:agent-host"; }
+                  # System tasks run in the scheduler pod and call contribs' /system routes as it.
+                  { name = "SYSTEM_TASK_SERVICE_ACCOUNTS"; value = lib.optionalString cfg.scheduler.enable "system:serviceaccount:${cfg.namespace}:agent-scheduler"; }
 
                   # --- The agent-facing MCP endpoint ---------------------------------
                   # Who may act for a conversation by presenting a signed conversation
