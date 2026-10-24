@@ -267,6 +267,8 @@ export interface SessionManager {
   end(id: SessionId): Promise<void>;
 
   get(id: SessionId): Conversation | undefined;
+  /** Whether end() tore this conversation down on this pod, so nothing may provision for it again. */
+  isEnded?(id: SessionId): boolean;
   /** Resolve a conversation by the short DNS-safe hash of its threadId (how the broker identifies
    *  it), hydrating a persisted one on demand. */
   getByShortId(shortHash: string): Promise<Conversation | undefined>;
@@ -1141,6 +1143,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     get(id) {
       const entry = entries.get(id);
       return entry ? toConversation(entry) : undefined;
+    },
+
+    isEnded(id) {
+      return endedIds.has(id);
     },
 
     touchById(id) {

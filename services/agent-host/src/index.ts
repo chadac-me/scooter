@@ -98,6 +98,7 @@ import { createMetrics, type MetricsSink } from "./metrics/metrics.js";
 import { parsePriceTable } from "./metrics/pricing.js";
 import { createGooseUsageReader } from "./metrics/gooseUsage.js";
 import type { SandboxRef, SessionId } from "./types.js";
+import { resumeUnlessEnded } from "./session/resumeGuard.js";
 import { formatError, logger, type Logger } from "./log.js";
 
 const hostLog = logger("agent-host");
@@ -940,7 +941,7 @@ export async function main(
     ? createJobManager({
         client: (id) => {
           const sb = sessions.get(id as SessionId)!.sandbox;
-          return deferredSandboxApi(sb, () => provisioner.resume(sb).then(() => {}));
+          return deferredSandboxApi(sb, resumeUnlessEnded(sessions, provisioner, id as SessionId, sb));
         },
         registry: jobRegistry!,
         cleanupTtlMs: Number(process.env.BACKGROUND_JOB_TTL_MS ?? 10 * 60 * 1000),
@@ -1614,7 +1615,7 @@ export async function main(
     const exec = createSandboxExecBackend(
       config.fakeSandbox
         ? createLocalSandboxApiClient()
-        : deferredSandboxApi(sandbox, () => provisioner.resume(sandbox).then(() => {})),
+        : deferredSandboxApi(sandbox, resumeUnlessEnded(sessions, provisioner, conversationId as SessionId, sandbox)),
       { commandTimeoutMs: config.commandTimeoutMs },
     );
     const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
