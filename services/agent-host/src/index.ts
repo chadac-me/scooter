@@ -74,6 +74,7 @@ import { createPgJobStore } from "./session/jobStore.js";
 import { createPgUserSkillStore } from "./session/userSkillStore.js";
 import { mintConvToken } from "./auth/convToken.js";
 import { createMcpEndpoint, resolveConversation } from "./agent/mcpServer.js";
+import type { ImageToolsWiring } from "./agent/imageTools.js";
 import { createBrokerMcpProxy } from "./agent/brokerMcpProxy.js";
 import {
   lastAssistantText,
@@ -936,13 +937,15 @@ export async function main(
     return rows.map((r) => personalSkill({ name: r.name, description: r.description, body: r.body }));
   };
 
+  // A conversation's pod-exec client, resuming a suspended sandbox on first use.
+  const sandboxClientFor = (id: string) => {
+    const sb = sessions.get(id as SessionId)!.sandbox;
+    return deferredSandboxApi(sb, resumeUnlessEnded(sessions, provisioner, id as SessionId, sb, conversationRegistry));
+  };
   const jobsEnabled = process.env.AGENT_BACKGROUND_JOBS !== "0" && !config.fakeSandbox && !!jobRegistry;
   const jobManager = jobsEnabled
     ? createJobManager({
-        client: (id) => {
-          const sb = sessions.get(id as SessionId)!.sandbox;
-          return deferredSandboxApi(sb, resumeUnlessEnded(sessions, provisioner, id as SessionId, sb, conversationRegistry));
-        },
+        client: sandboxClientFor,
         registry: jobRegistry!,
         cleanupTtlMs: Number(process.env.BACKGROUND_JOB_TTL_MS ?? 10 * 60 * 1000),
       })
@@ -1064,13 +1067,15 @@ export async function main(
 
   const convTokenSecret = process.env.CONV_TOKEN_SECRET ?? "";
   const brokerTokenPath = process.env.BROKER_TOKEN_PATH ?? "/var/run/secrets/broker/token";
+  const imageToolsWiring: ImageToolsWiring | undefined = config.fakeSandbox ? undefined : { client: sandboxClientFor };
   const mcpEndpoint =
     agentToolsWiring !== undefined ||
     jobManager !== undefined ||
     modelToolsWiring !== undefined ||
     resourceToolsWiring !== undefined ||
     schedulerToolsWiring !== undefined ||
-    subagentManager !== undefined
+    subagentManager !== undefined ||
+    imageToolsWiring !== undefined
       ? createMcpEndpoint({
           // The URL goose connects to; goose runs in this pod, so localhost reaches it.
           baseUrl: process.env.AGENT_SELF_MODIFY_MCP_URL ?? `http://127.0.0.1:${config.port}`,
@@ -1087,6 +1092,7 @@ export async function main(
           scheduler: schedulerToolsWiring,
           subagents: subagentManager,
           titles: titleToolsWiring,
+          images: imageToolsWiring,
         })
       : undefined;
 

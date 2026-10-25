@@ -36,6 +36,7 @@ import {
   handleSetSandboxResources,
   type SandboxResourceToolsWiring,
 } from "./resourceTools.js";
+import { handleViewImage, IMAGE_MAX_BYTES, type ImageToolsWiring } from "./imageTools.js";
 import { bearerFrom, mintConvToken, verifyConvToken } from "../auth/convToken.js";
 import { logger } from "../log.js";
 
@@ -133,6 +134,7 @@ export async function buildServer(
   scheduler?: SchedulerToolsWiring,
   subagents?: SubagentManager,
   titles?: TitleToolsWiring,
+  images?: ImageToolsWiring,
 ): Promise<McpServer> {
   const server = new McpServer({ name: "scooter-env", version: "1.0.0" });
   if (titles) {
@@ -369,6 +371,20 @@ export async function buildServer(
       async (args) => handleSetSandboxResources(resources, conversationId, args) as Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
     );
   }
+  if (images) {
+    server.registerTool(
+      "view_image",
+      {
+        title: "View an image in your sandbox",
+        description:
+          "Look at an image file in YOUR sandbox (a screenshot you took, a rendered chart, a downloaded PNG) and " +
+          `return it as an image you can see. Supports .png, .jpg, .jpeg, .gif and .webp up to ${IMAGE_MAX_BYTES / 1024 / 1024} MB. ` +
+          "Prefer it over a `read_image` tool if you have one: that reads a different machine's filesystem.",
+        inputSchema: { path: z.string().describe("Path to the image in the sandbox; relative paths resolve under /workspace.") },
+      },
+      async (args) => handleViewImage(images, conversationId, args),
+    );
+  }
   if (scheduler) {
     // The agent manages its own scheduled tasks, scoped to this conversation's owner.
     registerSchedulerTools(server, scheduler, conversationId);
@@ -419,6 +435,8 @@ export function createMcpEndpoint(deps: {
   subagents?: SubagentManager;
   /** When provided, exposes set_conversation_title. */
   titles?: TitleToolsWiring;
+  /** When provided, exposes view_image. */
+  images?: ImageToolsWiring;
 }): McpEndpoint {
   const path = deps.path ?? "/mcp";
   const secret = deps.convTokenSecret ?? "";
@@ -453,7 +471,7 @@ export function createMcpEndpoint(deps: {
       }
       // Stateless transport with no session id.
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      const server = await buildServer(conv, deps.agentTools, deps.jobs, deps.models, deps.resources, deps.scheduler, deps.subagents, deps.titles);
+      const server = await buildServer(conv, deps.agentTools, deps.jobs, deps.models, deps.resources, deps.scheduler, deps.subagents, deps.titles, deps.images);
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     },
