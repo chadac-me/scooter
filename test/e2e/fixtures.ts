@@ -7,6 +7,7 @@
  */
 
 import { test as base, expect, type Page, type Locator, type APIRequestContext } from "@playwright/test";
+import { newApiRequestContext } from "./support/apiRequest.mjs";
 
 export const sel = {
   errorBox: ".aui-message-error-root",
@@ -172,6 +173,20 @@ type Fixtures = {
 };
 
 export const test = base.extend<Fixtures>({
+  // A fresh connection per call, so a call after a long wait never lands on a socket
+  // the server already closed (see support/apiRequest.mjs).
+  request: async ({ playwright, baseURL, extraHTTPHeaders, httpCredentials, ignoreHTTPSErrors, userAgent }, use) => {
+    const ctx = await newApiRequestContext(playwright.request, {
+      baseURL,
+      extraHTTPHeaders,
+      httpCredentials,
+      ignoreHTTPSErrors,
+      userAgent,
+    });
+    await use(ctx);
+    await ctx.dispose();
+  },
+
   consoleErrors: async ({ page }, use) => {
     const errors: string[] = [];
     page.on("console", (m) => {
