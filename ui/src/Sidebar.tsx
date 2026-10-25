@@ -29,7 +29,6 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
-/** Per-row turn dot. `label` names the state; `hint` is the tooltip's second line, what it means. */
 const DOT: Record<TurnDot, { cls: string; label: string; hint: string }> = {
   active: { cls: "bg-success", label: "Agent working", hint: "A turn is in progress." },
   unread: { cls: "bg-status-active", label: "Unread reply", hint: "The agent replied since you last looked." },
@@ -44,7 +43,6 @@ function StatusDot({ dot }: { dot: TurnDot }) {
     <TooltipProvider delayDuration={150}>
       <Tooltip>
         <TooltipTrigger asChild>
-          {/* The dot is 4px; this padded wrapper is the hover target. */}
           <span
             data-testid="session-status-dot"
             data-dot={dot}
