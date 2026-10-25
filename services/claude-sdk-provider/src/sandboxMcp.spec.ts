@@ -4,12 +4,14 @@
  * with no SDK runtime.
  */
 
-import { execFileSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, it, expect } from "vitest";
 
-import { sandboxToolHandlers, TOOL_ALIASES, DISABLED_BUILTINS } from "./sandboxMcp.js";
+import { sandboxToolHandlers, TOOL_ALIASES, DISABLED_BUILTINS, IMAGE_MAX_BYTES, imageMimeType } from "./sandboxMcp.js";
 
 /** The injection canary, created only if the quoting fails. */
 const CANARY = "/tmp/scooter-injection-canary";
@@ -208,5 +210,71 @@ describe("sandbox glob + grep", () => {
     const { exec } = fakeExec();
     expect((await sandboxToolHandlers(exec).glob({ pattern: "  " })).isError).toBe(true);
     expect((await sandboxToolHandlers(exec).grep({ pattern: "" })).isError).toBe(true);
+  });
+});
+
+/** Image reads: the agent must be able to SEE a screenshot it took in its own sandbox. */
+describe("sandbox read of images", () => {
+  /** An ExecBackend whose run() executes the script on this host, so the real stat/base64 pipeline is exercised. */
+  function hostRunExec(): { exec: ExecBackend; runs: ExecRequest[] } {
+    const runs: ExecRequest[] = [];
+    const { exec: base } = fakeExec();
+    const exec: ExecBackend = {
+      ...base,
+      async run(req: ExecRequest) {
+        runs.push(req);
+        const r = spawnSync(req.command, req.args, { encoding: "utf8" });
+        return { exitCode: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
+      },
+    };
+    return { exec, runs };
+  }
+
+  // A 1x1 transparent PNG.
+  const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+  it("returns a .png as an image block the model can see", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scooter-img-"));
+    const path = join(dir, "it's a screenshot.PNG"); // quote + case exercise the quoting and mime lookup
+    writeFileSync(path, Buffer.from(PNG_B64, "base64"));
+    const { exec, runs } = hostRunExec();
+    const res = await sandboxToolHandlers(exec).read({ path });
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toEqual([{ type: "image", data: PNG_B64, mimeType: "image/png" }]);
+    // Bytes travel as base64 over exec, never through the text download path.
+    expect(runs).toHaveLength(1);
+  });
+
+  it("refuses an image over the API limit without shipping it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scooter-img-"));
+    const path = join(dir, "huge.jpg");
+    writeFileSync(path, Buffer.alloc(IMAGE_MAX_BYTES + 1));
+    const { exec } = hostRunExec();
+    const res = await sandboxToolHandlers(exec).read({ path });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]).toMatchObject({ type: "text" });
+    expect((res.content[0] as { text: string }).text).toMatch(/downscale/);
+  });
+
+  it("errors cleanly on a missing image", async () => {
+    const { exec } = hostRunExec();
+    const res = await sandboxToolHandlers(exec).read({ path: "/nonexistent/shot.png" });
+    expect(res.isError).toBe(true);
+  });
+
+  it("still reads non-image files as text", async () => {
+    const { exec } = fakeExec({ files: { "/workspace/notes.md": "# hi" } });
+    const res = await sandboxToolHandlers(exec).read({ path: "/workspace/notes.md" });
+    expect(res.content).toEqual([{ type: "text", text: "# hi" }]);
+  });
+
+  it("maps the supported extensions to mime types", () => {
+    expect(imageMimeType("/a/b.png")).toBe("image/png");
+    expect(imageMimeType("/a/b.JPEG")).toBe("image/jpeg");
+    expect(imageMimeType("/a/b.jpg")).toBe("image/jpeg");
+    expect(imageMimeType("/a/b.gif")).toBe("image/gif");
+    expect(imageMimeType("/a/b.webp")).toBe("image/webp");
+    expect(imageMimeType("/a/b.svg")).toBeUndefined();
+    expect(imageMimeType("/a/png")).toBeUndefined();
   });
 });
