@@ -308,14 +308,47 @@ func newRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, 
 	})
 }
 
-// serveVia reverse-proxies r to `target`, retrying once against `fallback` on a pre-response dial failure when `retry` is set.
+// agentHostKeepAlive is agent-host's server keepAliveTimeout (services/agent-host/src/agui/server.ts).
+const agentHostKeepAlive = 65 * time.Second
+
+// upstreamTransport pools connections to agent-host and drops idle ones before
+// agentHostKeepAlive, so the router never reuses a connection agent-host is closing.
+var upstreamTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.IdleConnTimeout = 30 * time.Second
+	return t
+}()
+
+// rewindBody resets r's body for a replay, reporting whether it could.
+func rewindBody(r *http.Request) bool {
+	if r.Body == nil || r.Body == http.NoBody {
+		return true
+	}
+	if r.GetBody == nil {
+		return false
+	}
+	body, err := r.GetBody()
+	if err != nil {
+		return false
+	}
+	r.Body = body
+	return true
+}
+
+// serveVia reverse-proxies r to `target`, retrying once against `fallback` on a pre-response failure when `retry` is set and the request can be replayed.
 func serveVia(shutdownCtx context.Context, w http.ResponseWriter, r *http.Request, target, fallback *url.URL, retry bool, convID string) {
 	log := logger("proxy")
 	tw := &trackingWriter{ResponseWriter: w}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = upstreamTransport
 	proxy.FlushInterval = -1 // flush immediately for SSE
 	proxy.ErrorHandler = func(ww http.ResponseWriter, rr *http.Request, e error) {
 		kind := classifyProxyError(e, shutdownCtx, rr.Context())
+		// An EOF or reset before any response, with the client still here, is the upstream
+		// closing on us; treating it as routine would answer an empty 200.
+		if kind.routine() && !tw.wrote && rr.Context().Err() == nil {
+			kind = proxyErrUpstream
+		}
 		fields := []any{
 			convAttr(convID),
 			slog.String("upstream", target.Host),
@@ -336,8 +369,8 @@ func serveVia(shutdownCtx context.Context, w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		if retry && !tw.wrote {
-			// The owner IP was unreachable before any bytes flowed, so serve via the fallback with retry=false.
+		if retry && !tw.wrote && (isDialFailure(e) || rewindBody(rr)) {
+			// The owner IP failed before any bytes flowed, so serve via the fallback with retry=false.
 			log.Warn("upstream unreachable, retrying via fallback",
 				append(fields, slog.String("fallback", fallback.Host),
 					slog.Bool("dial_failure", isDialFailure(e)))...)
@@ -459,6 +492,7 @@ func aguiThreadID(r *http.Request) string {
 		return ""
 	}
 	r.Body = io.NopCloser(bytes.NewReader(buf)) // restore for the upstream
+	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
 	r.ContentLength = int64(len(buf))
 	var body struct {
 		ThreadID string `json:"threadId"`

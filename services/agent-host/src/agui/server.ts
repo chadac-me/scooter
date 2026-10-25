@@ -22,6 +22,10 @@ const log = logger("agui");
 /** How long the /agui resume branch waits for the resumed run to stream anything before closing with a RUN_ERROR, read per call so SCOOTER_RESUME_GUARD_MS can override it. */
 const resumeStreamGuardMs = (): number => Number(process.env.SCOOTER_RESUME_GUARD_MS ?? 60_000);
 
+// Outlasts the conversation-router's 30s idle-connection timeout (upstreamTransport), so the
+// router never reuses a keep-alive connection this server is closing.
+export const KEEP_ALIVE_TIMEOUT_MS = 65_000;
+
 /** A raw inbound image on a user message, before the promptHandler stores it in the AssetStore. */
 export interface InboundImage {
   data: string; // base64
@@ -528,6 +532,8 @@ export function createAguiServer(): AguiServer {
             }
           });
         });
+        server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+        server.headersTimeout = KEEP_ALIVE_TIMEOUT_MS + 1_000;
         // WebSocket upgrades for registered handlers and proxied services.
         server.on("upgrade", (req, socket, head) => {
           const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
