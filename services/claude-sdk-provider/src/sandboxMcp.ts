@@ -12,7 +12,7 @@ import { SUBAGENT_BUILTINS } from "./toolPolicy.js";
 
 /** The MCP CallToolResult shape, redeclared locally so the handlers do not depend on the SDK at type time. */
 export interface ToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
   isError?: boolean;
 }
 
@@ -59,6 +59,42 @@ async function runCapture(exec: ExecBackend, script: string): Promise<string> {
   await handle.release();
   return out;
 }
+/** Image types the model accepts, keyed by lower-case extension. */
+const IMAGE_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+/** The API rejects images over 5 MB. */
+export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** Exit code the image script uses to report an oversized file. */
+const TOO_BIG_EXIT = 3;
+
+/** The image mime type for `path`, or undefined when it is not a viewable image. */
+export function imageMimeType(path: string): string | undefined {
+  const m = /\.([A-Za-z0-9]+)$/.exec(path);
+  return m ? IMAGE_MIME[m[1].toLowerCase()] : undefined;
+}
+
+/** Read a sandbox image as base64, size-checked in the pod so an oversized file is never shipped. */
+async function readImage(exec: ExecBackend, path: string, mimeType: string): Promise<ToolResult> {
+  const p = shq(path);
+  const script =
+    `sz=$(stat -c %s -- ${p}) || exit 1; ` +
+    `if [ "$sz" -gt ${IMAGE_MAX_BYTES} ]; then echo "$sz" >&2; exit ${TOO_BIG_EXIT}; fi; ` +
+    `base64 -w0 -- ${p}`;
+  const res = await exec.run({ command: "sh", args: ["-c", script], cwd: DEFAULT_CWD, env: {} });
+  if (res.exitCode === TOO_BIG_EXIT) {
+    return err(`read: ${path} is ${res.stderr.trim()} bytes; images over ${IMAGE_MAX_BYTES} bytes cannot be viewed — downscale it first`);
+  }
+  if (res.exitCode !== 0) return err(`read failed for ${path}: ${(res.stderr || res.stdout).trim() || `exit ${res.exitCode}`}`);
+  const data = res.stdout.replace(/\s+/g, "");
+  if (!data) return err(`read: ${path} is empty`);
+  return { content: [{ type: "image", data, mimeType }] };
+}
+
 const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const err = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
@@ -108,10 +144,18 @@ export function sandboxToolHandlers(exec: ExecBackend) {
       const out = await runCapture(exec, script);
       return ok(out.trim() ? out : `no matches for ${pattern} under ${root}`);
     },
-    /** Return a sandbox file's contents. */
+    /** Return a sandbox file's contents, or the image itself for a png/jpeg/gif/webp. */
     async read(args: { path: string }): Promise<ToolResult> {
       const path = args?.path;
       if (!path) return err("read: no path provided");
+      const mimeType = imageMimeType(path);
+      if (mimeType) {
+        try {
+          return await readImage(exec, path, mimeType);
+        } catch (e) {
+          return err(`read failed for ${path}: ${(e as Error)?.message ?? e}`);
+        }
+      }
       try {
         return ok(await exec.readTextFile(path));
       } catch (e) {
@@ -177,7 +221,7 @@ export async function createSandboxMcpServer(exec: ExecBackend): Promise<{
     tools: [
       sdk.tool("bash", "Run a shell command in the sandbox workspace.", { command: z.string(), cwd: z.string().optional() },
         (a) => h.bash(a as { command: string; cwd?: string })),
-      sdk.tool("read", "Read a file from the sandbox.", { path: z.string() },
+      sdk.tool("read", "Read a file from the sandbox. Images (.png, .jpg, .jpeg, .gif, .webp, up to 5 MB) are returned as images you can see, e.g. screenshots.", { path: z.string() },
         (a) => h.read(a as { path: string })),
       sdk.tool("write", "Write (create/overwrite) a file in the sandbox.", { path: z.string(), content: z.string() },
         (a) => h.write(a as { path: string; content: string })),

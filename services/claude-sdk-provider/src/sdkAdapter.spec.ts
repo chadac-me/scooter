@@ -71,6 +71,24 @@ describe("sdkMessageToUpdates", () => {
     ]);
   });
 
+  it("keeps an image tool_result's base64 out of rawOutput", () => {
+    const data = "A".repeat(4096); // 3 KB decoded
+    const msg: SdkMessage = {
+      type: "user",
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: "tu_img",
+          content: [{ type: "image", source: { type: "base64", media_type: "image/png", data } }, { type: "text", text: "note" }],
+        }],
+      },
+    };
+    const [u] = sdkMessageToUpdates(msg);
+    expect(u).toMatchObject({ sessionUpdate: "tool_call_update", toolCallId: "tu_img", status: "completed" });
+    expect((u as { rawOutput: unknown }).rawOutput).toEqual([{ type: "text", text: "[image/png image, 3 KB]" }, { type: "text", text: "note" }]);
+    expect(JSON.stringify(u)).not.toContain(data);
+  });
+
   it("maps an errored tool_result to a failed tool_call_update", () => {
     const msg: SdkMessage = {
       type: "assistant",

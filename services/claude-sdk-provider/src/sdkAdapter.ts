@@ -45,6 +45,20 @@ function imageBlock(b: Extract<SdkContentBlock, { type: "image" }>): ContentBloc
   return null;
 }
 
+/** Swap image blocks in a tool result for a short text marker, keeping base64 out of the UI's tool card and history. */
+export function elideResultImages(content: unknown): unknown {
+  if (!Array.isArray(content)) return content;
+  return content.map((b) => {
+    if (!b || typeof b !== "object" || (b as { type?: unknown }).type !== "image") return b;
+    // Accept both the Messages-API shape (source.data) and the MCP shape (data/mimeType).
+    const img = b as { data?: string; mimeType?: string; source?: { data?: string; media_type?: string } };
+    const data = img.source?.data ?? img.data ?? "";
+    const mime = img.source?.media_type ?? img.mimeType ?? "image";
+    const kb = Math.round((data.length * 3) / 4 / 1024);
+    return { type: "text", text: `[${mime} image, ${kb} KB]` };
+  });
+}
+
 /** Map one message's content[] blocks to session updates, shared by the `assistant` case and the `user` case that carries tool_result blocks. */
 function blocksToUpdates(content: SdkContentBlock[], partialsEnabled: boolean): SessionUpdate[] {
   const out: SessionUpdate[] = [];
@@ -67,7 +81,7 @@ function blocksToUpdates(content: SdkContentBlock[], partialsEnabled: boolean): 
           sessionUpdate: "tool_call_update",
           toolCallId: block.tool_use_id,
           status: block.is_error ? "failed" : "completed",
-          rawOutput: block.content,
+          rawOutput: elideResultImages(block.content),
         });
         break;
       }
