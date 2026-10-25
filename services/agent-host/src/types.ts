@@ -5,6 +5,8 @@
  * API (./exec/). The sandbox image contains neither the agent nor this host.
  */
 
+import type { BlockingTool } from "./acp/client.js";
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -26,6 +28,8 @@ export interface SessionConfig {
   mcpServers?: unknown[];
   /** Display name the agent goes by, needed to build the prompt a BYO container is sent. */
   agentName?: string;
+  /** Agent tools that block on the user's answer, offered to the provider on newSession. */
+  blockingTools?: Record<string, BlockingTool>;
 }
 
 export interface AgentLaunchConfig {

@@ -1,14 +1,13 @@
 /**
- * QuestionCard: the form for an AskUserQuestion interrupt (reason "input_required",
- * metadata.questions). Each question takes one option, several with multiSelect, or
- * typed text, and the card resumes the run with `answers` keyed by question text.
+ * QuestionCard: the Approvals-tab card for an `ask-user.questions` request, whose data is
+ * Claude's AskUserQuestion input. Each question takes one option, several with
+ * multiSelect, or typed text, and the card resolves with `{ answers }` keyed by question
+ * text, which the provider merges into the tool's input.
  */
 
 import { useState } from "react";
 
-import type { PendingInterrupt } from "./integrityAgent.js";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button, cn, type InterruptRendererProps } from "@/src/contrib/sdk";
 
 export interface Question {
   question: string;
@@ -23,13 +22,18 @@ export interface Selection {
   other: string;
 }
 
-/** The questions an interrupt carries, or undefined when it is not a question interrupt. */
-export function questionsOf(intr: PendingInterrupt): Question[] | undefined {
-  const raw = intr.metadata?.questions;
+/** The questions in a request's data, or undefined when it holds none. */
+export function questionsOf(data: unknown): Question[] | undefined {
+  const raw = (data as { questions?: unknown } | null | undefined)?.questions;
   if (!Array.isArray(raw) || raw.length === 0) return undefined;
-  const qs = raw.filter(
-    (q): q is Question => typeof q?.question === "string" && Array.isArray(q?.options),
-  );
+  const qs = raw
+    .filter((q): q is Question => typeof q?.question === "string" && Array.isArray(q?.options))
+    .map((q) => ({
+      ...q,
+      header: typeof q.header === "string" ? q.header : "",
+      options: q.options.filter((o) => typeof o?.label === "string"),
+    }))
+    .filter((q) => q.options.length > 0);
   return qs.length > 0 ? qs : undefined;
 }
 
@@ -61,14 +65,19 @@ export function buildAnswers(questions: Question[], sels: Record<number, Selecti
 
 const EMPTY: Selection = { picked: [], other: "" };
 
-export function QuestionCard({
-  intr,
+export default function QuestionCard({ message, data, busy, resolve, dismiss }: InterruptRendererProps) {
+  const questions = questionsOf(data);
+  // A request with no usable questions fails over to the core's plain Answer/Dismiss card.
+  if (!questions) throw new Error(`"${message}" carries no questions this card can show`);
+  return <Questions questions={questions} busy={busy} onAnswer={(answers) => resolve({ answers })} onDismiss={dismiss} />;
+}
+
+function Questions({
   questions,
   busy,
   onAnswer,
   onDismiss,
 }: {
-  intr: PendingInterrupt;
   questions: Question[];
   busy: boolean;
   onAnswer: (answers: Record<string, string>) => void;
@@ -82,7 +91,6 @@ export function QuestionCard({
     <form
       className="mb-3 rounded-lg border border-status-question/40 bg-muted/40 p-3 last:mb-0"
       data-testid="question-request"
-      data-interrupt-id={intr.id}
       onSubmit={(e) => {
         e.preventDefault();
         if (answers && !busy) onAnswer(answers);

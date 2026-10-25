@@ -27,7 +27,7 @@ import {
   type AuthenticateRequest,
 } from "@zed-industries/agent-client-protocol";
 
-import { ACP_ANSWERS_META, ACP_QUESTIONS_META } from "./acp/client.js";
+import { ACP_INTERRUPT_META, ACP_INTERRUPT_RESULT_META } from "./acp/client.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -115,8 +115,8 @@ class FakeAgent implements Agent {
     const u = (update: Parameters<AgentSideConnection["sessionUpdate"]>[0]["update"]) =>
       this.conn.sessionUpdate({ sessionId, update });
 
-    // A "??<question>" message is a test directive: ask an AskUserQuestion-style question
-    // (questions and answers ride the permission round-trip's _meta) and report the answer.
+    // A "??<question>" message is a test directive: raise an `ask-user.questions` request (the
+    // ask-user contrib's card) over the permission round-trip's _meta and report the answer.
     if (userText.startsWith("??")) {
       const question = userText.slice(2).trim() || "Which database should we use?";
       const res = (await this.conn.requestPermission({
@@ -124,20 +124,26 @@ class FakeAgent implements Agent {
         toolCall: { toolCallId: this.nextToolCallId(), title: question } as never,
         options: [{ optionId: "answer", name: "Answer", kind: "allow_once" }],
         _meta: {
-          [ACP_QUESTIONS_META]: [
-            {
-              question,
-              header: "Database",
-              options: [
-                { label: "Postgres", description: "Relational, the default" },
-                { label: "SQLite", description: "Embedded, zero setup" },
+          [ACP_INTERRUPT_META]: {
+            kind: "ask-user.questions",
+            data: {
+              questions: [
+                {
+                  question,
+                  header: "Database",
+                  options: [
+                    { label: "Postgres", description: "Relational, the default" },
+                    { label: "SQLite", description: "Embedded, zero setup" },
+                  ],
+                  multiSelect: false,
+                },
               ],
-              multiSelect: false,
             },
-          ],
+          },
         },
       } as never)) as { outcome: { outcome: string }; _meta?: Record<string, unknown> };
-      const answers = res._meta?.[ACP_ANSWERS_META] as Record<string, string> | undefined;
+      const result = res._meta?.[ACP_INTERRUPT_RESULT_META] as { answers?: Record<string, string> } | undefined;
+      const answers = result?.answers;
       const reply =
         res.outcome.outcome === "selected" && answers
           ? `🤖 (dummy agent) you answered: ${answers[question] ?? "(missing)"}`

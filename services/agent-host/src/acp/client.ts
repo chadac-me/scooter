@@ -52,6 +52,18 @@ export interface NewSessionParams {
   /** The agent identity prompt for a provider that cannot read this pod's filesystem (the BYO
    *  container, whose SDK has no prompt of its own); in-pod providers build theirs locally. */
   systemPrompt?: string;
+  /** Agent tools that block on the user's answer (contribs' `agent.blockingTools`), for a provider that
+   *  runs the tools itself (the Claude SDK); others ignore this. */
+  blockingTools?: Record<string, BlockingTool>;
+}
+
+/** One tool that waits on the user: its input is sent as a request of `kind`. */
+export interface BlockingTool {
+  kind: string;
+  /** The request's heading. */
+  title: string;
+  /** What the model is told when the user dismisses it. */
+  dismissed: string;
 }
 
 export interface PromptParams {
@@ -83,35 +95,29 @@ export interface PermissionRequest {
   /** Human-readable summary of what is being requested, from the tool call. */
   title: string;
   options: Array<{ optionId: string; name: string; kind: string }>;
-  /** Present when the agent asks the user questions (AskUserQuestion) rather than for a tool approval. */
-  questions?: UserQuestion[];
+  /** Set when the agent asks for input a contrib renders (AskUserQuestion is `ask-user.questions`) rather than a plain choice. */
+  request?: InterruptRequest;
 }
 
-/** One question the agent asks: the user picks one option (or several with multiSelect), or types their own answer. */
-export interface UserQuestion {
-  question: string;
-  header: string;
-  options: Array<{ label: string; description?: string; preview?: string }>;
-  multiSelect?: boolean;
+/** A contrib-rendered request: `kind` picks the UI card, and `data` reaches it as the agent sent it. */
+export interface InterruptRequest {
+  kind: string;
+  data: unknown;
 }
 
-/** The ACP `_meta` keys that carry a question request's questions and the user's answers over the wire. */
-export const ACP_QUESTIONS_META = "scooter.dev/questions";
-export const ACP_ANSWERS_META = "scooter.dev/answers";
+/** The ACP `_meta` keys that carry a request's kind and data, and the user's result back. */
+export const ACP_INTERRUPT_META = "scooter.dev/interrupt";
+export const ACP_INTERRUPT_RESULT_META = "scooter.dev/interrupt-result";
 
-/** The questions an ACP permission request's `_meta` carries, or undefined for a plain approval. */
-export function metaQuestions(meta: unknown): UserQuestion[] | undefined {
-  const raw = (meta as Record<string, unknown> | null | undefined)?.[ACP_QUESTIONS_META];
-  if (!Array.isArray(raw)) return undefined;
-  const qs = raw.filter(
-    (q): q is UserQuestion => typeof q?.question === "string" && Array.isArray(q?.options) && q.options.length > 0,
-  );
-  return qs.length > 0 ? qs : undefined;
+/** The request an ACP permission request's `_meta` carries, or undefined for a plain choice. */
+export function metaRequest(meta: unknown): InterruptRequest | undefined {
+  const m = meta as Record<string, { kind?: unknown; data?: unknown } | undefined> | null | undefined;
+  const raw = m?.[ACP_INTERRUPT_META];
+  return typeof raw?.kind === "string" && raw.kind ? { kind: raw.kind, data: raw.data } : undefined;
 }
 
-/** A permission handler selects an option or cancels; `answers` maps question text to the user's answer when the
- *  request carried questions. */
-export type PermissionAnswer = { optionId: string; answers?: Record<string, string> } | { cancelled: true };
+/** A permission handler selects an option or cancels; `result` is the user's answer to a contrib-rendered request. */
+export type PermissionAnswer = { optionId: string; result?: Record<string, unknown> } | { cancelled: true };
 
 export interface AcpClient {
   initialize(params: InitializeParams): Promise<{ protocolVersion: number }>;
@@ -278,20 +284,20 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
         );
         return { outcome: { outcome: "cancelled" } };
       }
-      const questions = metaQuestions(params._meta);
+      const request = metaRequest(params._meta);
       const answer = await permissionHandler({
         sessionId: params.sessionId,
         toolCallId: params.toolCall.toolCallId,
         title: params.toolCall.title ?? "The agent needs your choice",
         options: params.options.map((o) => ({ optionId: o.optionId, name: o.name, kind: o.kind })),
-        ...(questions ? { questions } : {}),
+        ...(request ? { request } : {}),
       });
       if ("cancelled" in answer) {
         return { outcome: { outcome: "cancelled" } };
       }
       return {
         outcome: { outcome: "selected", optionId: answer.optionId },
-        ...(answer.answers ? { _meta: { [ACP_ANSWERS_META]: answer.answers } } : {}),
+        ...(answer.result ? { _meta: { [ACP_INTERRUPT_RESULT_META]: answer.result } } : {}),
       };
     },
 

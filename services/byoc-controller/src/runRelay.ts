@@ -16,7 +16,7 @@ import type { SessionRegistry } from "./sessionRegistry.js";
 import type { AcpPromptPayload, ExecResultPayload, WireFrame } from "./remoteProtocol.js";
 
 /** The user's decision on a permission request. */
-export type PermissionAnswer = { optionId: string } | { cancelled: true };
+export type PermissionAnswer = { optionId: string; result?: Record<string, unknown> } | { cancelled: true };
 
 export type AnswerResult = { ok: true } | { ok: false; reason: string };
 

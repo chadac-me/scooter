@@ -6,7 +6,7 @@
  */
 
 /** What the local SDK expects back from its permission handler. */
-export type PermissionAnswer = { optionId: string; answers?: Record<string, string> } | { cancelled: true };
+export type PermissionAnswer = { optionId: string; result?: Record<string, unknown> } | { cancelled: true };
 
 const CANCELLED: PermissionAnswer = { cancelled: true };
 
@@ -17,21 +17,21 @@ export function parsePermissionAnswer(payload: unknown): PermissionAnswer {
   // An error means the controller could not deliver the decision, which is never an approval.
   if (typeof p.error === "string") return CANCELLED;
 
-  // The nested shape {result: {...}} is unwrapped once, then the same rules apply.
-  const body = (p.result && typeof p.result === "object" ? (p.result as Record<string, unknown>) : p);
+  // The nested shape {result: {...}} is unwrapped once, then the same rules apply; a flat answer
+  // has its own optionId, and its `result` is a contrib request's answer, not a wrapper.
+  const nested = typeof p.optionId !== "string" && p.result && typeof p.result === "object";
+  const body = nested ? (p.result as Record<string, unknown>) : p;
 
   if (body.cancelled === true) return CANCELLED;
   // A non-empty string is the only thing that counts as a real selection.
   if (typeof body.optionId === "string" && body.optionId.length > 0) {
-    const answers = stringRecord(body.answers);
-    return answers ? { optionId: body.optionId, answers } : { optionId: body.optionId };
+    const result = objectOf(body.result);
+    return result ? { optionId: body.optionId, result } : { optionId: body.optionId };
   }
   return CANCELLED;
 }
 
-/** The answers map with every non-string value dropped, or undefined when there is none. */
-function stringRecord(v: unknown): Record<string, string> | undefined {
-  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
-  const out = Object.fromEntries(Object.entries(v).filter(([, a]) => typeof a === "string")) as Record<string, string>;
-  return Object.keys(out).length > 0 ? out : undefined;
+/** `v` when it is a plain object (a contrib request's result), else undefined. */
+function objectOf(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }

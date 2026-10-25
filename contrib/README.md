@@ -578,7 +578,7 @@ ui = {
 };
 ```
 
-`enable` defaults to true as soon as `source`, `tools` or `settingsTabs` is set,
+`enable` defaults to true as soon as `source`, `tools`, `settingsTabs` or `interruptRenderers` is set,
 so a declared row cannot silently render nothing.
 
 #### Settings tabs (`ui.settingsTabs`)
@@ -614,6 +614,56 @@ ui.settingsTabs = [{
 
 `contrib/echo/ui/SettingsTab.tsx` is the minimal example. To see a tab under
 `npm run dev`, enable its contrib and copy the manifest as shown below.
+
+#### Approvals-tab cards (`ui.interruptRenderers`)
+
+When the agent needs something from the user, the run pauses on a request that
+shows in the Approvals tab. By default the core draws it as a message plus option
+buttons. A contrib can draw a request of its own **kind** instead:
+
+```nix
+ui.interruptRenderers."ask-user.questions".entry = "ui/QuestionCard.tsx";
+```
+
+- **Kind.** Every kind must start with `<name>.`, so contribs cannot claim each
+  other's requests. `contrib/interrupt-renderers.nix` throws at eval on a bad kind
+  or an `entry` that does not exist.
+- **The module.** Same file and import rules as a settings tab. Its default export
+  takes `InterruptRendererProps` from `@/src/contrib/sdk`: `message`, the request's
+  `data` exactly as the agent sent it, `busy`, `resolve(result)` with a JSON object,
+  and `dismiss()`. Check the shape of `data` yourself, and throw if you cannot draw it.
+- **Failure is contained.** A disabled contrib, an entry missing from the bundle, a
+  chunk that fails to load or a render that throws all fall back to the core's
+  Answer/Dismiss buttons (under an error card where something broke), so the user
+  can always unblock the agent.
+- **The wire.** The bridge puts `kind` and `data` on the interrupt's metadata, and
+  the resume payload carries `{ optionId, result }`. The agent-host does not look
+  inside either; it caps `data` at 64 KiB and `result` at 16 KiB. An ACP agent raises
+  one with `_meta["scooter.dev/interrupt"] = { kind, data }` on `requestPermission`,
+  and reads the answer from `_meta["scooter.dev/interrupt-result"]`.
+
+#### Tools that wait on the user (`agent.blockingTools`)
+
+Something has to raise the request. For the Claude provider, a contrib names an
+agent tool that should block until the user answers:
+
+```nix
+agent.blockingTools.AskUserQuestion = {
+  kind = "ask-user.questions";     # must start with "<name>."
+  title = "The agent has a question";
+  dismissed = "The user dismissed these questions …";  # what the model is told
+};
+```
+
+The platform renders these into the agent-host's `BLOCKING_TOOLS_JSON`, and the
+bridge offers them to the provider on `newSession` (BYO containers included). The
+provider's PreToolUse hook then sends the tool's input as a request of `kind`,
+waits, and merges the `result` object into the tool's input. Two contribs naming
+the same tool fail the eval. Goose has no such hook, so for Goose a contrib would
+raise the request from its own MCP tool.
+
+`contrib/ask-user/` is the worked example: it makes Claude's AskUserQuestion a
+blocking tool and draws its questions with `ui/QuestionCard.tsx`.
 
 Other React a contrib might ship (a `RightPanel` tab, a custom message renderer) is
 not supported yet; it lands with the first feature that needs it.

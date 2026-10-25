@@ -16,7 +16,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { createAguiServer, questionAnswers } from "./agui/server.js";
+import { createAguiServer, interruptResult } from "./agui/server.js";
+import { parseBlockingTools } from "./agent/blockingTools.js";
 import {
   createManagementApi,
   raiseApprovalInterrupt,
@@ -48,7 +49,7 @@ import { createPgMetaStore } from "./session/metaStore.js";
 import { createPvcAssetStore } from "./session/assetStore.js";
 import { createHybridAssetStore } from "./session/hybridAssetStore.js";
 import { createSessionBridge, PRIORITY_INTERRUPT, type AguiEvent, type ApproverIdentity } from "./bridge.js";
-import { createAcpClient } from "./acp/client.js";
+import { createAcpClient, type BlockingTool } from "./acp/client.js";
 import { createRecorder } from "./transcript/recorder.js";
 import { createSandboxExecBackend, connectSandbox } from "./exec/sandboxExec.js";
 import { createDeferredConnector } from "./exec/deferredConnect.js";
@@ -140,6 +141,8 @@ export interface AgentHostConfig {
   agentName: string;
   /** Directory of markdown skills injected into the agent, read per conversation into .goosehints. */
   skillsDir: string;
+  /** Agent tools contribs make wait on the user, from BLOCKING_TOOLS_JSON. */
+  blockingTools?: Record<string, BlockingTool>;
   /** Suspend conversations idle longer than this many ms, 0 for off. */
   idleSuspendMs: number;
   /** How often the idle sweep runs (ms). */
@@ -213,6 +216,7 @@ export function configFromEnv(): AgentHostConfig & AgentHostConfigExtra {
     availableModels: availableIds(catalog),
     agentName: process.env.AGENT_NAME ?? "Scooter",
     skillsDir: process.env.SKILLS_DIR ?? "/etc/agent-sandbox/skills",
+    blockingTools: parseBlockingTools(process.env.BLOCKING_TOOLS_JSON, (m) => hostLog.warn(m)),
     observability: {
       // Off unless OTEL_METRICS_ENABLED=1; the OTLP endpoint comes from the standard
       // OTEL_EXPORTER_OTLP_* env.
@@ -1223,12 +1227,12 @@ export async function main(
       entry.status === "cancelled"
         ? ""
         : ((entry.payload as { optionId?: string } | undefined)?.optionId ?? "");
-    const answers = entry.status === "cancelled" ? undefined : questionAnswers(entry.payload);
+    const result = entry.status === "cancelled" ? undefined : interruptResult(entry.payload);
 
     // `approver` is the human who answered, which an approval interrupt's onAnswer relays to
     // the broker for authorization.
     const answer = () =>
-      sessions.get(sessionId)?.bridge?.answerPermission(entry.interruptId, optionId, approver, answers) ?? false;
+      sessions.get(sessionId)?.bridge?.answerPermission(entry.interruptId, optionId, approver, result) ?? false;
 
     // 1) Fast path — the run is still live and holding this interrupt.
     if (answer()) return { ok: true };
@@ -1825,7 +1829,15 @@ export async function main(
 
     const bridge = createSessionBridge({
       conversationId,
-      config: { cwd, skillsDir: config.skillsDir, agentName: config.agentName, agent: cfg.agent, sandbox, mcpServers },
+      config: {
+        cwd,
+        skillsDir: config.skillsDir,
+        agentName: config.agentName,
+        blockingTools: config.blockingTools,
+        agent: cfg.agent,
+        sandbox,
+        mcpServers,
+      },
       exec,
         // Stamped onto RUN_STARTED so a later reader can tell a run this pod is still
         // executing from one stranded by a dead host.

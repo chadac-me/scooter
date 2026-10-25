@@ -24,6 +24,9 @@ const MODULES: Record<string, () => Promise<TabModule>> = Object.fromEntries(
   ]),
 );
 
+/** The loader for one bundled contrib module, or undefined when this build lacks it. */
+export const contribModuleLoader = (entry: string): (() => Promise<unknown>) | undefined => MODULES[entry];
+
 /** The entries this bundle can load, for tests and diagnostics. */
 export const bundledTabEntries = (): string[] => Object.keys(MODULES);
 

@@ -934,6 +934,40 @@ let
     ++ (if builtins.match ".*:agent-scheduler" (brokerEnvVal "SYSTEM_TASK_SERVICE_ACCOUNTS") != null then [ ]
         else [ "broker.env.SYSTEM_TASK_SERVICE_ACCOUNTS does not name the scheduler, so a task's /system calls would 403" ]);
 
+  # ask-user: its blocking tool reaches the agent-host as BLOCKING_TOOLS_JSON and its card
+  # reaches the UI manifest, both only while it is enabled, and a kind outside the
+  # contrib's namespace or a missing entry fails the eval.
+  resolveInterruptRenderers = import ../contrib/interrupt-renderers.nix { lib = nixpkgsLib; };
+  renderersWith = extra:
+    let
+      e = evalPlatform {
+        module = { ... }: {
+          imports = [ ./kubenix-config.nix ];
+          config = extra;
+        };
+      };
+    in resolveInterruptRenderers (nixpkgsLib.filterAttrs (_: c: c.enable) e.config.contribs);
+  renderersThrow = extra: !(builtins.tryEval (builtins.deepSeq (renderersWith extra) true)).success;
+  blockingOf = env:
+    let m = builtins.filter (e: e.name == "BLOCKING_TOOLS_JSON") env;
+    in if m == [ ] then { } else builtins.fromJSON (builtins.head m).value;
+  askUserOff = { contribs.ask-user.enable = nixpkgsLib.mkForce false; };
+  askUserProblems =
+    (if ((blockingOf hostEnv).AskUserQuestion.kind or null) == "ask-user.questions" then [ ]
+     else [ "host.env.BLOCKING_TOOLS_JSON has no AskUserQuestion -> ask-user.questions row while ask-user is enabled" ])
+    ++ (if blockingOf (hostEnvOf askUserOff) == { } then [ ]
+        else [ "host.env.BLOCKING_TOOLS_JSON is set while ask-user is disabled — blocking tools are not gated on the contrib's `enable`" ])
+    ++ (if ((renderersWith { })."ask-user.questions".entry or null) == "ask-user/ui/QuestionCard.tsx" then [ ]
+        else [ "the ask-user.questions renderer is not in the manifest as ask-user/ui/QuestionCard.tsx" ])
+    ++ (if (renderersWith askUserOff) ? "ask-user.questions"
+        then [ "the ask-user.questions renderer is in the manifest while ask-user is disabled" ] else [ ])
+    ++ (if renderersThrow { contribs.ask-user.ui.interruptRenderers."other.questions".entry = "ui/QuestionCard.tsx"; } then [ ]
+        else [ "an interrupt renderer kind outside `<contrib>.` rendered — request kinds are no longer scoped by contrib" ])
+    ++ (if renderersThrow { contribs.ask-user.ui.interruptRenderers."ask-user.more".entry = "ui/Missing.tsx"; } then [ ]
+        else [ "an interrupt renderer whose entry does not exist rendered" ])
+    ++ (if !(builtins.tryEval (builtins.deepSeq (hostEnvOf { contribs.ask-user.agent.blockingTools.Other.kind = "aws.x"; }) true)).success then [ ]
+        else [ "a blocking tool kind outside `<contrib>.` rendered" ]);
+
   # The UI pod serves the DEPLOYMENT's contrib manifest, mounted from a ConfigMap, so a
   # contrib left off here shows no settings tab even though the image's built-in
   # manifest (built from the repo's list) has one.
@@ -955,7 +989,7 @@ let
     else (if off.settingsTabs ? echo then [ "the UI manifest has the echo settings tab while echo is disabled" ] else [ ])
       ++ (if on.settingsTabs ? echo then [ ] else [ "enabling echo did not put its settings tab in the UI's mounted manifest" ]);
 
-  allProblems = sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  allProblems = sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

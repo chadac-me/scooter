@@ -173,6 +173,11 @@ let
   approvalContribsJson =
     if cfg.approvals == { } then null else builtins.toJSON cfg.approvals;
 
+  # The agent tools enabled contribs make wait on the user (tool -> request kind),
+  # read by the Claude provider's PreToolUse hook.
+  blockingTools = import ../contrib/blocking-tools.nix { inherit lib; }
+    (lib.filterAttrs (_: c: c.enable) config.contribs);
+
   # The UI's contrib manifest from THIS deployment's enabled contribs, mounted over
   # the image's built-in one (pkgs/ui-image/nginx.nix). The image is built with its
   # repo's contrib list, so without this a contrib the deployment left off would still
@@ -1499,6 +1504,9 @@ in
                   # The contribs that raise human approvals, name -> where its verbs live
                   # on the broker, so the agent-host can relay a user's Approve/Deny.
                   { name = "APPROVAL_CONTRIBS_JSON"; value = approvalContribsJson; }
+                ++ lib.optional (blockingTools != { })
+                  # Agent tools that block on the user's answer, tool -> { kind, title, dismissed }.
+                  { name = "BLOCKING_TOOLS_JSON"; value = builtins.toJSON blockingTools; }
                 ++ lib.optional (cfg.broker.enable && contribUserApi != { })
                   # Contribs whose settings tab reaches its broker half as the signed-in
                   # user through /contrib-api, name -> broker prefix.

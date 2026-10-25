@@ -1,15 +1,16 @@
 /**
- * The deployment's contrib UI metadata (brand rows, tool cards, filter chips, settings tabs),
- * fetched at runtime from `/contrib/manifest.json`, which the UI's nginx serves from
- * the contrib set that deployment enabled. Loading never throws: a 404, a network
- * error, a timeout or a malformed body all mean "no contribs", and the app renders
- * its built-ins. Rows are validated one at a time, so one malformed row costs its
- * own chip rather than the whole manifest.
+ * The deployment's contrib UI metadata (brand rows, tool cards, filter chips,
+ * settings tabs, Approvals-tab cards), fetched at runtime from `/contrib/manifest.json`,
+ * which the UI's nginx serves from the contrib set that deployment enabled. Loading
+ * never throws: a 404, a network error, a timeout or a malformed body all mean "no
+ * contribs", and the app renders its built-ins. Rows are validated one at a time, so
+ * one malformed row costs its own chip rather than the whole manifest.
  */
 
 import type {
   ContribApproval,
   ContribIcon,
+  ContribInterruptRenderer,
   ContribManifest,
   ContribSettingsTab,
   ContribSource,
@@ -30,6 +31,7 @@ const EMPTY: ContribManifest = {
   linkProviders: [],
   approvals: {},
   settingsTabs: {},
+  interruptRenderers: {},
 };
 
 let manifest: ContribManifest = EMPTY;
@@ -77,6 +79,16 @@ function asSettingsTab(id: string, v: unknown): ContribSettingsTab | undefined {
   return { contrib: r.contrib, label: r.label, order: r.order, entry: r.entry };
 }
 
+/** An interrupt renderer row. The kind (its key) must sit in its contrib's namespace and the
+ *  entry in its contrib's ui/, so a bad row cannot hijack another contrib's requests or module. */
+const KIND = /^[a-z][a-z0-9-]*\.[a-z][a-z0-9.-]*$/;
+function asInterruptRenderer(kind: string, v: unknown): ContribInterruptRenderer | undefined {
+  const r = asRecord(v);
+  if (!KIND.test(kind) || !isStr(r.contrib) || !isStr(r.entry)) return undefined;
+  if (!kind.startsWith(`${r.contrib}.`) || !r.entry.startsWith(`${r.contrib}/ui/`)) return undefined;
+  return { contrib: r.contrib, entry: r.entry };
+}
+
 /** Keep the rows that validate, drop the ones that don't. */
 function rows<T>(v: unknown, as: (x: unknown, key: string) => T | undefined): Record<string, T> {
   const out: Record<string, T> = {};
@@ -97,6 +109,7 @@ function parse(doc: unknown): ContribManifest {
     toolTitles: rows(d.toolTitles, (v) => (isStr(v) ? v : undefined)),
     approvals: rows(d.approvals, asApproval),
     settingsTabs: rows(d.settingsTabs, (v, id) => asSettingsTab(id, v)),
+    interruptRenderers: rows(d.interruptRenderers, (v, kind) => asInterruptRenderer(kind, v)),
     // A link provider whose source row failed validation would be a chip with no
     // icon, so it is dropped too.
     linkProviders: (Array.isArray(d.linkProviders) ? d.linkProviders : []).filter(
@@ -151,4 +164,9 @@ export function contribApprovals(): Record<string, ContribApproval> {
 /** Contrib settings tabs, keyed by tab id (SettingsPage.tsx). */
 export function contribSettingsTabs(): Record<string, ContribSettingsTab> {
   return manifest.settingsTabs;
+}
+
+/** Contrib Approvals-tab cards, keyed by request kind (InterruptPanel.tsx). */
+export function contribInterruptRenderers(): Record<string, ContribInterruptRenderer> {
+  return manifest.interruptRenderers;
 }

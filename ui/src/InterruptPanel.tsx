@@ -15,8 +15,8 @@ import { hasId, type MaybeConversationId } from "./conversation.js";
 
 import { useConversationInterrupts } from "./RuntimeProvider.js";
 import type { PendingInterrupt } from "./integrityAgent.js";
-import { contribApprovals } from "./contribManifest.js";
-import { QuestionCard, questionsOf } from "./QuestionCard.js";
+import { contribApprovals, contribInterruptRenderers } from "./contribManifest.js";
+import { ContribInterruptCard } from "./contribInterrupts.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +29,12 @@ interface Option {
 function optionsOf(intr: PendingInterrupt): Option[] {
   const raw = intr.metadata?.options;
   return Array.isArray(raw) ? (raw as Option[]) : [];
+}
+
+/** The request kind and data an interrupt carries for a contrib renderer, or undefined for a plain choice. */
+export function requestOf(intr: PendingInterrupt): { kind: string; data: unknown } | undefined {
+  const kind = intr.metadata?.kind;
+  return typeof kind === "string" && kind ? { kind, data: intr.metadata?.data } : undefined;
 }
 
 /** The contrib name and requestId an approval interrupt carries in its metadata, or
@@ -168,12 +174,12 @@ export function InterruptList() {
     intr: PendingInterrupt,
     status: "resolved" | "cancelled",
     optionId?: string,
-    answers?: Record<string, string>,
+    result?: Record<string, unknown>,
   ) => {
     setSubmitting(intr.id);
     try {
       await submitResume([
-        { interruptId: intr.id, status, payload: optionId ? { optionId, ...(answers ? { answers } : {}) } : undefined },
+        { interruptId: intr.id, status, payload: optionId ? { optionId, ...(result ? { result } : {}) } : undefined },
       ]);
     } catch {
       // The provider shows the failure in the send-error banner, and the card stays pending so the user can answer again.
@@ -188,19 +194,7 @@ export function InterruptList() {
         The agent is waiting on your decision to continue.
       </p>
       {pending.map((intr) => {
-        const questions = questionsOf(intr);
-        // The bridge offers a question interrupt exactly one option, which carries the answers.
-        const optionId = optionsOf(intr)[0]?.optionId;
-        return questions && optionId ? (
-          <QuestionCard
-            key={intr.id}
-            intr={intr}
-            questions={questions}
-            busy={submitting === intr.id}
-            onAnswer={(answers) => answer(intr, "resolved", optionId, answers)}
-            onDismiss={() => answer(intr, "cancelled")}
-          />
-        ) : (
+        const plain = (
           <InterruptCard
             key={intr.id}
             intr={intr}
@@ -208,6 +202,25 @@ export function InterruptList() {
             answer={answer}
             conversationId={conversationId}
             baseUrl={baseUrl}
+          />
+        );
+        const request = requestOf(intr);
+        const renderer = request && contribInterruptRenderers()[request.kind];
+        // A contrib request is offered one option, which carries the renderer's result.
+        const optionId = optionsOf(intr)[0]?.optionId;
+        if (!request || !renderer || !optionId) return plain;
+        return (
+          <ContribInterruptCard
+            key={intr.id}
+            renderer={renderer}
+            fallback={plain}
+            props={{
+              message: intr.message ?? "",
+              data: request.data,
+              busy: submitting === intr.id,
+              resolve: (result) => void answer(intr, "resolved", optionId, result),
+              dismiss: () => void answer(intr, "cancelled"),
+            }}
           />
         );
       })}

@@ -52,8 +52,16 @@ describe("buildAnswers", () => {
 });
 
 describe("questionsOf", () => {
-  it("reads metadata.questions, and is undefined for a plain approval", () => {
-    expect(questionsOf({ id: "i", reason: "input_required", metadata: { questions: [single] } })).toEqual([single]);
-    expect(questionsOf({ id: "i", reason: "confirmation", metadata: { options: [] } })).toBeUndefined();
+  it("reads the request data's questions, dropping malformed ones and label-less options", () => {
+    expect(questionsOf({ questions: [single] })).toEqual([single]);
+    expect(questionsOf({ questions: [{ question: "Q?", options: [{ label: "A" }, { nope: 1 }] }] })).toEqual([
+      { question: "Q?", header: "", options: [{ label: "A" }] },
+    ]);
+  });
+
+  it("is undefined when the data holds no usable question", () => {
+    expect(questionsOf(undefined)).toBeUndefined();
+    expect(questionsOf({ questions: [] })).toBeUndefined();
+    expect(questionsOf({ questions: [{ question: "Q?", options: [] }] })).toBeUndefined();
   });
 });
