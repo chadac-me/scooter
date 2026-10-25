@@ -27,26 +27,38 @@ import { SourceBadge, sourceLabel, TitleBadge } from "./sourceIcon.js";
 import { commitRename as commitRenameAction, isServerBacked, removeSession, toggleStar as toggleStarAction } from "./sessionActions.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
-/** Per-row turn dot: green while the agent works, blue for an unread reply, yellow for an unread
- *  reply whose sandbox has gone idle, red for a dead sandbox. */
-const DOT: Record<TurnDot, { cls: string; label: string }> = {
-  active: { cls: "bg-success", label: "Agent working" },
-  unread: { cls: "bg-status-active", label: "Unread reply" },
-  "unread-idle": { cls: "bg-warning", label: "Unread reply (sandbox idle)" },
-  failed: { cls: "bg-destructive", label: "Sandbox failed" },
+const DOT: Record<TurnDot, { cls: string; label: string; hint: string }> = {
+  active: { cls: "bg-success", label: "Agent working", hint: "A turn is in progress." },
+  unread: { cls: "bg-status-active", label: "Unread reply", hint: "The agent replied since you last looked." },
+  "unread-idle": { cls: "bg-warning", label: "Unread reply, sandbox suspended", hint: "The agent replied, then its sandbox was suspended." },
+  idle: { cls: "bg-muted-foreground", label: "Sandbox running", hint: "Nothing unread; the agent is idle but its sandbox is still up." },
+  failed: { cls: "bg-destructive", label: "Sandbox failed", hint: "The sandbox could not run." },
 };
 
 function StatusDot({ dot }: { dot: TurnDot }) {
-  const { cls, label } = DOT[dot];
+  const { cls, label, hint } = DOT[dot];
   return (
-    <span
-      data-testid="session-status-dot"
-      data-dot={dot}
-      aria-label={label}
-      title={label}
-      className={cn("h-1 w-1 shrink-0 rounded-full", cls)}
-    />
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            data-testid="session-status-dot"
+            data-dot={dot}
+            role="img"
+            aria-label={label}
+            className="-m-1.5 flex shrink-0 items-center justify-center p-1.5"
+          >
+            <span className={cn("h-1 w-1 rounded-full", cls)} />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="right" sideOffset={6}>
+          <div className="font-medium">{label}</div>
+          <div className="opacity-80">{hint}</div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 

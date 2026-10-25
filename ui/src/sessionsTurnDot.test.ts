@@ -34,8 +34,11 @@ describe("turnDot", () => {
   it("is red for a failed sandbox whatever else holds", () => {
     expect(turnDot({ ...base, status: "failed", runStartedAt: 5 })).toBe("failed");
   });
-  it("shows nothing once the reply has been seen", () => {
-    expect(turnDot({ ...base, lastReplyAt: 10, lastSeenAt: 10 })).toBeUndefined();
+  it("is grey once the reply has been seen while the sandbox is still up", () => {
+    expect(turnDot({ ...base, lastReplyAt: 10, lastSeenAt: 10 })).toBe("idle");
+  });
+  it("shows nothing for a read conversation whose sandbox is suspended", () => {
+    expect(turnDot({ ...base, status: "suspended", lastReplyAt: 10, lastSeenAt: 10 })).toBeUndefined();
   });
 });
 
@@ -54,6 +57,13 @@ describe("unread tracking through the store", () => {
     expect(turnDot(row("bg"))).toBe("unread");
     sessionStore.switchTo(row("bg").id);
     expect(turnDot(row("bg"))).toBeUndefined();
+  });
+
+  it("the first reply on a row that had none yet is unread", () => {
+    sessionStore.mergeFromServer([{ id: "fg2" }, { id: "fresh" }]);
+    sessionStore.switchTo(row("fg2").id);
+    sessionStore.mergeFromServer([{ id: "fresh", lastReplyAt: 7 }], { fullList: false });
+    expect(turnDot(row("fresh"))).toBe("unread");
   });
 
   it("a reply in the open conversation is read as it lands", () => {

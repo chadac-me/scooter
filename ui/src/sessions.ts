@@ -299,15 +299,15 @@ const markCurrentSeen = (s: State): State => {
   return { ...s, sessions };
 };
 
-/** The sidebar dot for a row, or undefined for none: a dead sandbox first, then a turn in
- *  flight, then a reply the user has not opened, yellow once its sandbox has gone idle. */
-export type TurnDot = "active" | "unread" | "unread-idle" | "failed";
+/** The sidebar dot for a row, or undefined for none. */
+export type TurnDot = "active" | "unread" | "unread-idle" | "idle" | "failed";
 export const turnDot = (s: Session): TurnDot | undefined => {
   if (s.status === "failed") return "failed";
   // A suspended or ended sandbox cannot be mid-turn, whatever a stale row says.
   const live = s.status === undefined || s.status === "running";
   if (s.runStartedAt !== undefined && live) return "active";
   if (s.lastReplyAt !== undefined && s.lastReplyAt > (s.lastSeenAt ?? 0)) return live ? "unread" : "unread-idle";
+  if (s.status === "running") return "idle";
   return undefined;
 };
 
@@ -488,9 +488,8 @@ export const sessionStore = {
         // Every server row is a whole row, so an absent runStartedAt means the turn ended.
         runStartedAt: c.runStartedAt,
         lastReplyAt: c.lastReplyAt ?? existing?.lastReplyAt,
-        // A row this browser has never seen starts read, so a new device does not light up every
-        // conversation; markCurrentSeen() advances it for the open one.
-        lastSeenAt: existing?.lastSeenAt ?? c.lastReplyAt ?? existing?.lastReplyAt,
+        // Only a snapshot baselines an unmarked row as read; a live upsert is a new reply.
+        lastSeenAt: existing?.lastSeenAt ?? (fullList ? c.lastReplyAt ?? existing?.lastReplyAt : 0),
       };
       // Keep the existing reference when nothing changed so React.memo skips the row.
       byId.set(c.id, existing && sameSession(existing, merged) ? existing : merged);
