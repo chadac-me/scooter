@@ -941,7 +941,7 @@ export async function main(
     ? createJobManager({
         client: (id) => {
           const sb = sessions.get(id as SessionId)!.sandbox;
-          return deferredSandboxApi(sb, resumeUnlessEnded(sessions, provisioner, id as SessionId, sb));
+          return deferredSandboxApi(sb, resumeUnlessEnded(sessions, provisioner, id as SessionId, sb, conversationRegistry));
         },
         registry: jobRegistry!,
         cleanupTtlMs: Number(process.env.BACKGROUND_JOB_TTL_MS ?? 10 * 60 * 1000),
@@ -1615,7 +1615,7 @@ export async function main(
     const exec = createSandboxExecBackend(
       config.fakeSandbox
         ? createLocalSandboxApiClient()
-        : deferredSandboxApi(sandbox, resumeUnlessEnded(sessions, provisioner, conversationId as SessionId, sandbox)),
+        : deferredSandboxApi(sandbox, resumeUnlessEnded(sessions, provisioner, conversationId as SessionId, sandbox, conversationRegistry)),
       { commandTimeoutMs: config.commandTimeoutMs },
     );
     const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;

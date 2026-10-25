@@ -1120,6 +1120,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // Depth-first: end descendants before this node.
         const children = [...entries.values()].filter((c) => c.parentId === targetId);
         for (const child of children) await endSubtree(child.id, false);
+        // The registry is the source of truth for existence, so remove the row BEFORE the pod
+        // goes: another replica's exec that then finds no pod must also find no row, or its
+        // resume-on-missing-pod recreates the Sandbox (resumeGuard.ts). A Sandbox left behind by
+        // a destroy failing after this is unreferenced, which the controller's orphan reap
+        // collects. A failure is logged rather than failing the delete.
+        await conversationRegistry.remove(targetId).catch((err: unknown) => {
+          log.errorWith("failed to remove the conversation from the registry; it may be re-adopted", err, {
+            conversation_id: targetId,
+          });
+        });
         await e.bridge?.stop();
         if (destroyPod) await provisioner.destroy(e.sandbox);
         e.bridge = undefined;
@@ -1128,13 +1138,6 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // hydrate().
         entries.delete(targetId);
         await store.removeConversation?.(targetId);
-        // The registry is the source of truth for existence, so remove it there too; a failure is
-        // logged rather than failing a delete that already succeeded locally.
-        await conversationRegistry.remove(targetId).catch((err: unknown) => {
-          log.errorWith("failed to remove the conversation from the registry; it may be re-adopted", err, {
-            conversation_id: targetId,
-          });
-        });
       };
       // Only a top-level conversation owns its pod; a subagent shares its ancestor's.
       await endSubtree(id, entry.parentId === undefined);
