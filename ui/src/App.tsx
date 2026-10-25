@@ -16,7 +16,7 @@ import { SettingsPage } from "./SettingsPage.js";
 import { viewStore, useView } from "./view.js";
 import { currentConversation, useSessions } from "./sessions.js";
 import { chatPath } from "./chatRoute.js";
-import { displayTitle } from "./pageTitle.js";
+import { HeaderConversationTitle } from "./HeaderConversationTitle.js";
 import { mobileNav, useDrawer } from "./mobileNav.js";
 import { StartingPodLanding } from "./DeadPodLanding.js";
 import { useSandboxStatus, LABEL as SANDBOX_LABEL, DOT as SANDBOX_DOT } from "./SandboxPanel.js";
@@ -39,25 +39,6 @@ export function ConversationArea() {
   const { starting } = useSandboxStatus();
   if (starting) return <StartingPodLanding />;
   return <GuardedThread />;
-}
-
-/** The conversation's title beside the wordmark; absent when unnamed. */
-export function HeaderConversationTitle() {
-  const { sessions, currentId } = useSessions();
-  const title = displayTitle(sessions.find((s) => s.id === currentId)?.title);
-  if (!title) return null;
-  return (
-    <>
-      <span className="text-muted-foreground/50" aria-hidden>/</span>
-      <span
-        data-testid="header-conversation-title"
-        title={title}
-        className="max-w-[9rem] truncate text-[13.5px] text-muted-foreground desk:max-w-[32rem]"
-      >
-        {title}
-      </span>
-    </>
-  );
 }
 
 /** Header sandbox pill mirroring the Sandbox tab's status. */
@@ -118,7 +99,7 @@ export function App() {
       <div className="flex h-dvh flex-col">
         <header className="flex h-11 items-center justify-between gap-3 border-b bg-header px-3 pl-4 text-sm">
           {/* Compact wordmark: mark + name. */}
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             {/* Mobile-only sessions-drawer toggle, hidden at desk+ and in settings. */}
             {view !== "settings" && (
               <Button
@@ -135,10 +116,11 @@ export function App() {
               </Button>
             )}
             <span className="text-[15px] leading-none" aria-hidden>🛴</span>
-            <span className="text-[13.5px] font-semibold tracking-tight">scooter</span>
-            {view !== "settings" && <HeaderConversationTitle />}
+            {/* The wordmark gives way below sm, so the title and its actions fit a phone header. */}
+            <span className="hidden text-[13.5px] font-semibold tracking-tight sm:inline">scooter</span>
+            {view !== "settings" && <HeaderConversationTitle actions />}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             {/* Live pod status, desktop-only. */}
             <span className="hidden desk:flex">
               <SandboxStatusPill />
