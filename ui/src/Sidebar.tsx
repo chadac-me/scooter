@@ -52,7 +52,12 @@ function StatusDot({ dot }: { dot: TurnDot }) {
             className="-m-1.5 flex shrink-0 items-center justify-center p-1.5"
           >
             {dot === "question" ? (
-              <span aria-hidden className={cn("text-xs font-bold leading-none", cls)}>!</span>
+              <span
+                aria-hidden
+                className={cn("flex h-3 w-3 items-center justify-center rounded-full bg-red-500/25 text-[10px] font-bold leading-none", cls)}
+              >
+                !
+              </span>
             ) : (
               <span className={cn("h-1 w-1 rounded-full", cls)} />
             )}
