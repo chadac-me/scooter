@@ -202,6 +202,7 @@
     duckduckgo.enable = true;
     github.enable = true;
     gitlab.enable = true;
+    google.enable = true;
     grafana.enable = true;
     jira.enable = true;
     kagi.enable = true;
@@ -218,6 +219,13 @@
     # Airtable provider: proxies /airtable/* -> https://api.airtable.com with a
     # personal access token injected, bounded by the PAT's own scopes.
     airtable.tokenSecret = { name = "airtable-token"; key = "AIRTABLE_TOKEN"; };
+
+    # Google provider: proxies /google/<host>/* -> https://<host>.googleapis.com
+    # with a service-account token, impersonating `subject` (domain-wide delegation).
+    google = {
+      serviceAccountSecret.name = "google-service-account";
+      subject = "agent@example.com";
+    };
 
     # AWS permissions broker: approval-gated STS access per account, with the
     # registry rendered into a ConfigMap whose checksum annotation rolls the pod.
