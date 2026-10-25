@@ -246,6 +246,38 @@ scooter.broker.extraEnv = map (name: {
 
 To start conversations from Jira comments, see the [Jira webhook](webhooks.md#jira).
 
+## Google Workspace
+
+The `google` contrib proxies `/google/<host>/*` to `https://<host>.googleapis.com`
+(Drive, Calendar, Docs, Sheets, Slides, Gmail, People, Tasks, Forms; any other host
+is a 404) with a short-lived token minted from a service account.
+
+```nix
+contribs.google = {
+  enable = true;
+  serviceAccountSecret.name = "google-service-account";  # key defaults to GOOGLE_SERVICE_ACCOUNT_JSON
+  subject = "agent@example.com";   # act as this Workspace user (domain-wide delegation)
+  # or, per conversation: impersonateOwner = true; ownerDomains = [ "example.com" ];
+  # scopes = [ ... ];              # default: read-only Drive/Docs/Sheets/Slides/Calendar/Gmail
+};
+```
+
+Setup:
+
+1. In a Google Cloud project, enable the APIs you want, create a service account,
+   and download a JSON key. Store it as `GOOGLE_SERVICE_ACCOUNT_JSON` in a Secret in
+   the broker namespace.
+2. To act as a user (`subject` or `impersonateOwner`), a Workspace admin grants the
+   service account's **client id** domain-wide delegation for exactly the configured
+   scopes (Admin console → Security → API controls → Domain-wide delegation).
+   Without delegation, leave `subject` empty, and the agent sees only what is
+   shared with the service account's email.
+
+`impersonateOwner` uses the conversation owner's email, so each user's agent sees
+that user's own Drive, Calendar and mail. Owners outside `ownerDomains` get a 403
+and never fall back to another identity. The scopes are the write gate: the
+defaults are all `*.readonly`, and Google rejects writes with them.
+
 ## Deploy and check
 
 ```bash

@@ -15,6 +15,7 @@
     ./echo/contrib.nix
     ./files/contrib.nix
     ./github/contrib.nix
+    ./google/contrib.nix
     ./gitlab/contrib.nix
     ./grafana/contrib.nix
     ./jira/contrib.nix

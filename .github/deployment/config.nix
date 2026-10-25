@@ -14,6 +14,7 @@
     files.enable = true;
     github.enable = true;
     gitlab.enable = true;
+    google.enable = true;
     grafana.enable = true;
     jira.enable = true;
     kagi.enable = true;
