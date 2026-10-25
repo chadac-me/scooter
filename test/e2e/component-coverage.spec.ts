@@ -15,9 +15,8 @@ const sb = {
   list: '[data-testid="session-list"]',
   item: '[data-testid="session-item"]',
   title: '[data-testid="session-title"]',
-  star: '[data-testid="session-star"]',
-  rename: '[data-testid="session-rename"]',
-  renameInput: '[data-testid="session-rename-input"]',
+  // The open conversation's star lives beside its title in the header.
+  star: '[data-testid="header-conversation"] [data-testid="session-star"]',
   search: '[data-testid="session-search"]',
   newSession: '[data-testid="new-session"]',
   filtersToggle: '[data-testid="filters-toggle"]',
@@ -70,7 +69,7 @@ test.describe("sidebar / session components", () => {
       .toBeTruthy();
     const row = page.locator(`${sb.item}[data-conversation-id="${convId}"]`);
 
-    await row.locator(sb.star).click();
+    await page.locator(sb.star).click();
 
     // The star must reach the durable row, asked of the server rather than the UI.
     const starredOnServer = async () => {
@@ -96,7 +95,7 @@ test.describe("sidebar / session components", () => {
 
     // Unstar before leaving: a starred conversation cannot be deleted (DELETE 409), so
     // cleanState could never remove it.
-    await row.locator(sb.star).click();
+    await page.locator(sb.star).click();
     await expect(row).not.toHaveAttribute("data-starred", "true", { timeout: 10_000 });
     // Confirm the unstar landed server-side, since a local-only unstar leaves the row undeletable.
     await expect.poll(starredOnServer, { timeout: 20_000 }).not.toBe(true);

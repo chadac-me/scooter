@@ -7,7 +7,6 @@
  */
 
 import { memo, useEffect, useState, type ReactNode } from "react";
-import { flushSync } from "react-dom";
 
 import {
   sessionStore,
@@ -24,7 +23,6 @@ import {
 import { LinkedResources } from "./LinkedResources.js";
 import { mobileNav, useDrawer } from "./mobileNav.js";
 import { SourceBadge, sourceLabel, TitleBadge } from "./sourceIcon.js";
-import { commitRename as commitRenameAction, isServerBacked, removeSession, toggleStar as toggleStarAction } from "./sessionActions.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -88,63 +86,22 @@ function InfoTip({ text }: { text: string }) {
   );
 }
 
-/** Whether a blurred inline-rename input stays open: only focus moving WITHIN its row keeps it,
- *  since an input left open with nothing focused strands the rename lock. Why: PR #783. */
-export const renameStaysOpen = (hasNextTarget: boolean, nextIsInRow: boolean): boolean =>
-  hasNextTarget && nextIsInRow;
-
-/** One conversation row: select, inline rename (double-click the title), star
- *  toggle, and delete-with-confirm. memo()'d so a stream merge, which reuses an
- *  unchanged Session object, does not re-render a row mid-interaction. */
+/** One conversation row: select only. Star / rename / delete live beside the title in the
+ *  header (HeaderConversationTitle), away from the tap target that switches conversations.
+ *  memo()'d so a stream merge, which reuses an unchanged Session object, does not re-render it. */
 const SessionRow = memo(function SessionRow({
   session: s,
   depth,
   childCount,
   active,
-  editing,
   labelMode,
 }: {
   session: import("./sessions.js").Session;
   depth: number;
   childCount: number;
   active: boolean;
-  // Owned by the store (editingId), not local state, so the row re-derives it on every
-  // render and survives a merge-triggered remount.
-  editing: boolean;
   labelMode: LabelMode;
 }) {
-  const [draft, setDraft] = useState(s.title);
-
-  // flushSync commits the editing state inside the click handler so the input mounts
-  // synchronously rather than on a later, interruptible render.
-  const openRename = () => {
-    flushSync(() => {
-      setDraft(s.title);
-      sessionStore.setEditing(s.id);
-    });
-  };
-
-  // The row actions address the server through sessionActions, which owns the
-  // local-key/server-id split.
-  const commitRename = () => {
-    sessionStore.clearEditing(s.id);
-    void commitRenameAction(s, draft);
-  };
-
-  const toggleStar = () => void toggleStarAction(s);
-
-  // A row unmounting under the pointer (deleted, filtered out) never fires pointerleave, so it
-  // releases its own hover hold rather than leave the list frozen.
-  useEffect(() => () => sessionStore.clearHover(s.id), [s.id]);
-
-  const remove = () => {
-    const msg = s.starred
-      ? `"${s.title}" is starred. Deleting destroys its sandbox and data permanently. Delete anyway?`
-      : `Delete "${s.title}"? This destroys its sandbox and data permanently.`;
-    if (!window.confirm(msg)) return;
-    void removeSession(s);
-  };
-
   const dot = turnDot(s);
 
   return (
@@ -166,56 +123,29 @@ const SessionRow = memo(function SessionRow({
       }
     >
       {/* Leading status dot in a fixed-width slot so titles align whether or not a row has one. */}
-      {!editing && (
-        <span className="flex w-1 shrink-0 items-center justify-center">
-          {dot && <StatusDot dot={dot} />}
-        </span>
-      )}
+      <span className="flex w-1 shrink-0 items-center justify-center">
+        {dot && <StatusDot dot={dot} />}
+      </span>
 
-      {editing ? (
-        <input
-          data-testid="session-rename-input"
-          autoFocus
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={(e) => {
-            const row = e.currentTarget.closest('[data-testid="session-item"]');
-            const hasNextTarget = e.relatedTarget instanceof Node;
-            const nextIsInRow = hasNextTarget && (row?.contains(e.relatedTarget) ?? false);
-            if (!renameStaysOpen(hasNextTarget, nextIsInRow)) commitRename();
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commitRename();
-            else if (e.key === "Escape") {
-              setDraft(s.title);
-              sessionStore.clearEditing(s.id);
-            }
-          }}
-          className="min-w-0 flex-1 rounded border border-input bg-background px-2 py-1.5 text-sm"
-        />
-      ) : (
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => sessionStore.switchTo(s.id)}
-          onDoubleClick={openRename}
-          className={cn("min-w-0 flex-1 justify-start truncate", active && "font-medium")}
-          title={`${s.title} — double-click to rename`}
-        >
-          {depth > 0 && <span className="me-1 text-muted-foreground" aria-hidden>↳</span>}
-          <span data-testid="session-title">{sessionLabel(s, labelMode)}</span>
-          {childCount > 0 && (
-            <span data-testid="subagent-count" className="ms-1.5 text-xs text-muted-foreground">
-              ▸ {childCount} subagent{childCount === 1 ? "" : "s"}
-            </span>
-          )}
-        </Button>
-      )}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => sessionStore.switchTo(s.id)}
+        className={cn("min-w-0 flex-1 justify-start truncate", active && "font-medium")}
+        title={s.title}
+      >
+        {depth > 0 && <span className="me-1 text-muted-foreground" aria-hidden>↳</span>}
+        <span data-testid="session-title">{sessionLabel(s, labelMode)}</span>
+        {childCount > 0 && (
+          <span data-testid="subagent-count" className="ms-1.5 text-xs text-muted-foreground">
+            ▸ {childCount} subagent{childCount === 1 ? "" : "s"}
+          </span>
+        )}
+      </Button>
 
-      {/* Provider link plates for linked external resources, hidden on hover so the
-          action overlay reads clearly over the same space. */}
-      {!editing && s.sources && s.sources.length > 0 && (
-        <span className="flex shrink-0 items-center gap-1 group-hover:opacity-0">
+      {/* Provider link plates for linked external resources. */}
+      {s.sources && s.sources.length > 0 && (
+        <span className="flex shrink-0 items-center gap-1">
           {s.sources.map((src) => (
             <span
               key={src}
@@ -226,59 +156,6 @@ const SessionRow = memo(function SessionRow({
           ))}
         </span>
       )}
-
-      {/* Row actions, absolutely positioned to overlay the row's right edge and fade in on hover. */}
-      {!editing && (
-        <div
-          data-testid="session-actions"
-          // The pointer on the action tiles holds the list still, so an incoming reorder cannot
-          // slide a different conversation under a star/rename/delete click.
-          onPointerEnter={() => sessionStore.setHover(s.id)}
-          onPointerLeave={() => sessionStore.clearHover(s.id)}
-          className="absolute inset-y-0 right-1 flex items-center gap-0.5 rounded-lg bg-gradient-to-l from-accent from-70% to-transparent pl-6 opacity-0 transition-opacity group-hover:opacity-100">
-          {/* Star is top-level only; subagents are not independently retained. */}
-          {depth === 0 && (
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              data-testid="session-star"
-              aria-label={s.starred ? `Unstar ${s.title}` : `Star ${s.title}`}
-              aria-pressed={s.starred ? true : false}
-              // Starred is server-owned, so an unsent conversation cannot be starred.
-              disabled={!isServerBacked(s)}
-              title={isServerBacked(s) ? undefined : "Send a message first — an unsent conversation can't be starred"}
-              onClick={toggleStar}
-              className={cn("shrink-0", s.starred ? "text-warning" : "text-muted-foreground hover:text-warning")}
-            >
-              {s.starred ? "★" : "☆"}
-            </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            data-testid="session-rename"
-            aria-label={`Rename ${s.title}`}
-            title="Rename"
-            onClick={(e) => {
-              e.stopPropagation();
-              openRename();
-            }}
-            className="shrink-0 text-muted-foreground"
-          >
-            ✎
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            data-testid="session-delete"
-            aria-label={`Delete ${s.title}`}
-            onClick={remove}
-            className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-          >
-            ✕
-          </Button>
-        </div>
-      )}
     </div>
   );
 });
@@ -287,7 +164,7 @@ const SessionRow = memo(function SessionRow({
 // and the sidebar reads only sessionStore, so this limits it to store changes.
 export const Sidebar = memo(function Sidebar() {
   const state = useSessions();
-  const { currentId, editingId, scope, query, providerFilter, labelMode } = state;
+  const { currentId, scope, query, providerFilter, labelMode } = state;
   // filteredSessions applies Mine/provider/query; nestSubagents groups children under
   // parents and collapses them unless the branch holds the active conversation.
   const rows = nestSubagents(filteredSessions(state), currentId);
@@ -487,7 +364,6 @@ export const Sidebar = memo(function Sidebar() {
             depth={depth}
             childCount={childCount}
             active={s.id === currentId}
-            editing={s.id === editingId}
             labelMode={labelMode}
           />
         ))}
@@ -499,7 +375,6 @@ export const Sidebar = memo(function Sidebar() {
             depth={depth}
             childCount={childCount}
             active={s.id === currentId}
-            editing={s.id === editingId}
             labelMode={labelMode}
           />
         ))}

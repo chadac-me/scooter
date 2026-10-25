@@ -1,5 +1,5 @@
 /**
- * The sidebar's per-conversation actions: star, rename, delete. Each one spans two
+ * The current conversation's actions in the header: star, rename, delete. Each one spans two
  * identities: a Session's `id` is its stable local key (a placeholder for a conversation
  * started in this browser), while the server must be addressed by `serverId`.
  */

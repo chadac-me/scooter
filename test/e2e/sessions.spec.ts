@@ -12,10 +12,14 @@ const sidebar = {
   item: '[data-testid="session-item"]',
   newButton: '[data-testid="new-session"]',
   title: '[data-testid="session-title"]',
-  deleteButton: '[data-testid="session-delete"]',
-  starButton: '[data-testid="session-star"]',
-  renameButton: '[data-testid="session-rename"]',
-  renameInput: '[data-testid="session-rename-input"]',
+};
+
+/** The current conversation's star / rename / delete, beside its title in the header. */
+const header = {
+  deleteButton: '[data-testid="header-conversation"] [data-testid="session-delete"]',
+  starButton: '[data-testid="header-conversation"] [data-testid="session-star"]',
+  renameButton: '[data-testid="header-conversation"] [data-testid="session-rename"]',
+  renameInput: '[data-testid="header-conversation"] [data-testid="session-rename-input"]',
 };
 
 /** The open conversation's title in the top header, which mirrors the tab title. */
@@ -58,7 +62,8 @@ test.describe("session selector & titles", () => {
   // whole story: the trace shows the click landing on ✎, and no editing render in the 15s
   // that follow — openRename() can silently no-op under load on any runner. That is a UI
   // bug (#796), not a test bug, and re-enabling here would only make it CI's problem.
-  // ui/src/Sidebar.rename.test.ts guards the blur rule meanwhile.
+  // ui/src/HeaderConversationTitle.rename.test.ts guards the blur rule meanwhile. Rename now
+  // lives in the header, away from the remounting sidebar row, so this may be re-enableable.
   test.skip("the user can rename a conversation, and the agent can't override it", async ({ chat, page }) => {
     await chat.open();
     await chat.send("help me refactor the parser");
@@ -74,8 +79,8 @@ test.describe("session selector & titles", () => {
     await expect(title).toHaveText(/refactor the parser/i, { timeout: 30_000 });
 
     // Open the rename input, type a name, Enter to commit.
-    await row.locator(sidebar.renameButton).click();
-    const input = row.locator(sidebar.renameInput);
+    await page.locator(header.renameButton).click();
+    const input = page.locator(header.renameInput);
     await expect(input).toBeVisible();
     await input.fill("My pinned project");
     await input.press("Enter");
@@ -131,7 +136,7 @@ test.describe("session selector & titles", () => {
     await chat.waitForReply(/dummy agent/i);
 
     const row = page.locator(sidebar.item).first();
-    const star = row.locator(sidebar.starButton);
+    const star = page.locator(header.starButton);
     await expect(row).not.toHaveAttribute("data-starred", "true");
     await star.click();
     await expect(row).toHaveAttribute("data-starred", "true", { timeout: 10_000 });
@@ -180,7 +185,8 @@ test.describe("session selector & titles", () => {
 
     // Delete shows a confirm dialog; accept it.
     page.on("dialog", (d) => d.accept());
-    await deleteRow.first().locator(sidebar.deleteButton).click();
+    // It is the open conversation, so the header delete acts on it.
+    await page.locator(header.deleteButton).click();
     // On the full target the DELETE also tears down the sandbox pod before the row clears.
     await expect(deleteRow).toHaveCount(0, { timeout: 30_000 });
     // The other conversation is untouched.
@@ -242,12 +248,7 @@ test.describe("session selector & titles", () => {
 
     // Deleting the current conversation selects a survivor, so the view must swap to it.
     page.on("dialog", (d) => d.accept()); // accept the delete confirm
-    await page
-      .locator(sidebar.item)
-      .filter({ hasText: /doomed/i })
-      .first()
-      .locator(sidebar.deleteButton)
-      .click();
+    await page.locator(header.deleteButton).click();
 
     // On the full target the DELETE also tears down the sandbox pod; assert the doomed row
     // went away and the survivor stayed, not a fleet-wide count.
