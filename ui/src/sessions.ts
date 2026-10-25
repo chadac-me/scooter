@@ -39,6 +39,8 @@ export interface Session {
   userTitled?: boolean;
   /** The user starred this conversation, server-sourced. */
   starred?: boolean;
+  /** "private" when only its owner may see and drive it, server-sourced; absent means shared. */
+  visibility?: "shared" | "private";
   /** Set while the agent is mid-turn (ms epoch), server-sourced; absent when idle. */
   runStartedAt?: number;
   /** When the agent's last turn ended (ms epoch), server-sourced. */
@@ -63,6 +65,7 @@ export type ServerConversation = {
   parentId?: string;
   userTitled?: boolean;
   starred?: boolean;
+  visibility?: "shared" | "private";
   runStartedAt?: number;
   lastReplyAt?: number;
   awaitingInputAt?: number;
@@ -148,6 +151,7 @@ const sameSession = (a: Session, b: Session): boolean => {
     a.title !== b.title ||
     a.userTitled !== b.userTitled ||
     a.starred !== b.starred ||
+    a.visibility !== b.visibility ||
     a.createdAt !== b.createdAt ||
     a.lastActivityAt !== b.lastActivityAt ||
     a.model !== b.model ||
@@ -485,6 +489,7 @@ export const sessionStore = {
         serverCreated: true,
         serverId: c.id,
         starred: c.starred ?? existing?.starred,
+        visibility: c.visibility ?? existing?.visibility,
         createdAt: c.createdAt ?? existing?.createdAt ?? Date.now(),
         lastActivityAt: c.lastActivityAt ?? existing?.lastActivityAt ?? Date.now(),
         // Only an unsent pick outranks the server, which also records the agent's switches.
@@ -645,6 +650,17 @@ export const sessionStore = {
         : f,
     );
     setState({ ...state, sessions, pendingFrames });
+  },
+
+  /** Optimistically set a conversation's visibility (and its subagents', which follow it); the caller persists via setConversationVisibility. */
+  setVisibility(id: string, visibility: "shared" | "private") {
+    const s = state.sessions.find((x) => x.id === id);
+    if (!s || (s.visibility ?? "shared") === visibility) return;
+    const key = s.serverId ?? s.id;
+    const sessions = state.sessions.map((x) =>
+      x.id === id || x.parentId === key ? { ...x, visibility } : x,
+    );
+    setState({ ...state, sessions });
   },
 
   /** Set a conversation's model, which the next prompt carries via the X-Agent-Model header. */

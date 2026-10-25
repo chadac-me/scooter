@@ -60,6 +60,8 @@ class Conversations(Base):
     __tablename__ = 'conversations'
     __table_args__ = (
         CheckConstraint("model_set_by = ANY (ARRAY['user'::text, 'agent'::text])", name='conversations_model_set_by_check'),
+        CheckConstraint("visibility = 'shared'::text OR owner IS NOT NULL", name='conversations_private_has_owner'),
+        CheckConstraint("visibility = ANY (ARRAY['shared'::text, 'private'::text])", name='conversations_visibility_check'),
         PrimaryKeyConstraint('id', name='conversations_pkey'),
         Index('conversations_by_activity', 'last_activity_at'),
         Index('conversations_by_owner', 'owner'),
@@ -71,6 +73,7 @@ class Conversations(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_activity_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    visibility: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'shared'::text"))
     host_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text('0'))
     model: Mapped[Optional[str]] = mapped_column(Text)
     model_set_by: Mapped[Optional[str]] = mapped_column(Text)

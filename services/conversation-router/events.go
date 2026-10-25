@@ -79,11 +79,11 @@ func (h *sseHub) broadcast(row listRow) {
 	if err != nil {
 		return
 	}
-	h.fanOut(row.Owner, sseData(frame))
+	h.fanOut(row.Owner, row.Visibility, sseData(frame))
 }
 
 // broadcastRemove tells the subscribers a conversation was visible to that it is gone, so the sidebar drops the row at once.
-func (h *sseHub) broadcastRemove(id string, owner *string) {
+func (h *sseHub) broadcastRemove(id string, owner *string, visibility string) {
 	frame, err := json.Marshal(struct {
 		Kind string `json:"kind"`
 		ID   string `json:"id"`
@@ -91,15 +91,35 @@ func (h *sseHub) broadcastRemove(id string, owner *string) {
 	if err != nil {
 		return
 	}
-	h.fanOut(owner, sseData(frame))
+	h.fanOut(owner, visibility, sseData(frame))
+}
+
+// broadcastRevoked sends `remove` to the subscribers who could see the row while it was shared and cannot now, so a conversation going private leaves their sidebars at once.
+func (h *sseHub) broadcastRevoked(id string, owner *string) {
+	frame, err := json.Marshal(struct {
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	}{Kind: "remove", ID: id})
+	if err != nil {
+		return
+	}
+	h.deliver(sseData(frame), func(s *sseSub) bool {
+		return visible(owner, VisibilityShared, s.callerOwner, s.scope) &&
+			!visible(owner, VisibilityPrivate, s.callerOwner, s.scope)
+	})
 }
 
 // fanOut delivers one pre-serialized frame to every subscriber the owner is visible to, asking a subscriber whose buffer is full to resync instead of blocking or silently losing the frame.
-func (h *sseHub) fanOut(owner *string, msg []byte) {
+func (h *sseHub) fanOut(owner *string, visibility string, msg []byte) {
+	h.deliver(msg, func(s *sseSub) bool { return visible(owner, visibility, s.callerOwner, s.scope) })
+}
+
+// deliver queues msg for every subscriber `to` accepts, resyncing one whose buffer is full.
+func (h *sseHub) deliver(msg []byte, to func(*sseSub) bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for s := range h.subs {
-		if !visible(owner, s.callerOwner, s.scope) {
+		if !to(s) {
 			continue
 		}
 		select {
@@ -142,6 +162,10 @@ type change struct {
 	Kind string `json:"kind"`
 	// Owner is the only copy of a deleted row's owner, since the row is gone before the re-read.
 	Owner *string `json:"owner"`
+	// Visibility filters a removal like Owner does; "" is a pre-visibility payload, read as shared.
+	Visibility string `json:"visibility"`
+	// WentPrivate is set on the shared -> private edge only, so non-owners get a `remove`.
+	WentPrivate bool `json:"went_private"`
 }
 
 // deleted reports whether this change removed the conversation.
@@ -153,7 +177,7 @@ func (c change) activityOnly() bool { return c.Kind == "activity" }
 // movesPod: a non-activity change, e.g. suspend or delete.
 func (c change) movesPod() bool { return !c.activityOnly() }
 
-// notifyDecision parses a NOTIFY payload ({id, op, kind, owner}), dropping unparseable payloads and those naming no conversation.
+// notifyDecision parses a NOTIFY payload ({id, op, kind, owner, visibility, went_private}), dropping unparseable payloads and those naming no conversation.
 func notifyDecision(payload string) (change, bool) {
 	var c change
 	if err := json.Unmarshal([]byte(payload), &c); err != nil || c.ID == "" {
@@ -177,8 +201,15 @@ func handleNotification(ctx context.Context, payload string, store *Store, links
 		if coal != nil {
 			coal.forget(id)
 		}
-		hub.broadcastRemove(id, c.Owner)
+		hub.broadcastRemove(id, c.Owner, c.Visibility)
 		return
+	}
+	if c.WentPrivate {
+		// Not throttled: the trigger marks a visibility change "meta", but revoke regardless of kind.
+		hub.broadcastRevoked(id, c.Owner)
+		if n := liveConns.revoke(id, c.Owner); n > 0 {
+			log.Info("ended non-owner connections to a conversation that went private", convAttr(id), slog.Int("ended", n))
+		}
 	}
 	if coal != nil && c.activityOnly() {
 		coal.submit(id)
@@ -189,6 +220,9 @@ func handleNotification(ctx context.Context, payload string, store *Store, links
 
 // pushUpsert re-reads a conversation and its links and fans the row out, dropping the push rather than emitting a row the snapshot would disagree with.
 func pushUpsert(ctx context.Context, id string, store *Store, links *LinkStore, hub *sseHub, log *slog.Logger) {
+	if store == nil {
+		return
+	}
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	m, err := store.ConversationByID(rctx, id)

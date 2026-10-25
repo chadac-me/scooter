@@ -25,6 +25,7 @@ export const conversations = pgTable("conversations", {
 	runStartedAt: bigint("run_started_at", { mode: "number" }),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	lastReplyAt: bigint("last_reply_at", { mode: "number" }),
+	visibility: text().default('shared').notNull(),
 	hostPod: text("host_pod"),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	hostGeneration: bigint("host_generation", { mode: "number" }).default(0).notNull(),
@@ -36,6 +37,8 @@ export const conversations = pgTable("conversations", {
 	index("conversations_by_owner").using("btree", table.owner.asc().nullsLast().op("text_ops")),
 	index("conversations_by_sandbox_ref").using("btree", table.sandboxRef.asc().nullsLast().op("text_ops")),
 	check("conversations_model_set_by_check", sql`model_set_by = ANY (ARRAY['user'::text, 'agent'::text])`),
+	check("conversations_visibility_check", sql`visibility = ANY (ARRAY['shared'::text, 'private'::text])`),
+	check("conversations_private_has_owner", sql`(visibility = 'shared'::text) OR (owner IS NOT NULL)`),
 ]);
 
 export const userSkills = pgTable("user_skills", {

@@ -9,7 +9,14 @@ import { flushSync } from "react-dom";
 
 import { displayTitle } from "./pageTitle.js";
 import { sessionStore, useSessions, type Session } from "./sessions.js";
-import { commitRename, isServerBacked, removeSession, toggleStar } from "./sessionActions.js";
+import {
+  canChangeVisibility,
+  commitRename,
+  isServerBacked,
+  removeSession,
+  toggleStar,
+  toggleVisibility,
+} from "./sessionActions.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -56,7 +63,9 @@ function RenameInput({ session: s }: { session: Session }) {
 }
 
 function Actions({ session: s }: { session: Session }) {
+  const { currentUser, currentUserAnonymous } = useSessions();
   const backed = isServerBacked(s);
+  const isPrivate = s.visibility === "private";
   // Rename is local-first, so a never-sent conversation can still be named.
   const openRename = () => flushSync(() => sessionStore.setEditing(s.id));
   const remove = () => {
@@ -80,6 +89,25 @@ function Actions({ session: s }: { session: Session }) {
           className={cn(s.starred ? "text-warning" : "text-muted-foreground hover:text-warning")}
         >
           {s.starred ? "★" : "☆"}
+        </Button>
+      )}
+      {/* Only the owner of a top-level conversation; subagents follow their parent. */}
+      {canChangeVisibility(s, currentUser, currentUserAnonymous) && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          data-testid="session-visibility"
+          aria-label={isPrivate ? `Make ${s.title} shared` : `Make ${s.title} private`}
+          aria-pressed={isPrivate}
+          title={
+            isPrivate
+              ? "Private: only you can see it. Click to share"
+              : "Shared: anyone signed in can see it. Click to make private"
+          }
+          onClick={() => void toggleVisibility(s)}
+          className="text-muted-foreground"
+        >
+          {isPrivate ? "🔒" : "🔓"}
         </Button>
       )}
       <Button

@@ -32,6 +32,8 @@ export interface Ctx {
 
 export type JsonResult = { status?: number; json: unknown };
 export type Handler = (ctx: Ctx) => Promise<JsonResult | void> | JsonResult | void;
+/** Runs before a matched handler; a result short-circuits it. */
+export type Guard = (ctx: Ctx) => Promise<JsonResult | undefined> | JsonResult | undefined;
 
 interface Route {
   method: string;
@@ -45,12 +47,15 @@ export interface Router {
   post(path: string, handler: Handler): Router;
   patch(path: string, handler: Handler): Router;
   del(path: string, handler: Handler): Router;
+  /** Add a guard run before every matched handler, in registration order. */
+  guard(g: Guard): Router;
   /** Returns true if a route matched and was dispatched. */
   handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
 }
 
 export function createRouter(resolveUser: ResolveUser = defaultResolveUser()): Router {
   const routes: Route[] = [];
+  const guards: Guard[] = [];
 
   const readBody = (req: IncomingMessage): Promise<string> =>
     new Promise((resolve, reject) => {
@@ -97,6 +102,10 @@ export function createRouter(resolveUser: ResolveUser = defaultResolveUser()): R
     del(path, handler) {
       return router.on("DELETE", path, handler);
     },
+    guard(g) {
+      guards.push(g);
+      return router;
+    },
 
     async handle(req, res) {
       const url = new URL(req.url ?? "/", "http://localhost");
@@ -121,9 +130,14 @@ export function createRouter(resolveUser: ResolveUser = defaultResolveUser()): R
         // Bind the conversation id for every /conversations/:id route in one place, so
         // their log lines carry it without being edited.
         const convId = params.id;
-        const result = convId
-          ? await withConversation(convId, () => route.handler(ctx))
-          : await route.handler(ctx);
+        const run = async () => {
+          for (const g of guards) {
+            const denied = await g(ctx);
+            if (denied) return denied;
+          }
+          return route.handler(ctx);
+        };
+        const result = convId ? await withConversation(convId, run) : await run();
         if (result && typeof result === "object" && "json" in result) {
           res.writeHead(result.status ?? 200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(result.json));

@@ -23,6 +23,7 @@ import type { Duplex } from "node:stream";
 import { inboundIdentityHeaders, sessionCookiePrefixes, stripSessionSetCookies, withHandoffIdentity, type UserContext } from "../auth/identity.js";
 import { logger } from "../log.js";
 import type { Conversation, SandboxProvisioner, SessionManager } from "../session/manager.js";
+import type { AccessCheck } from "../session/access.js";
 import type { SandboxRef, SessionId } from "../types.js";
 import { sandboxOrigin } from "./sandboxOrigin.js";
 
@@ -96,6 +97,8 @@ export interface WebServiceProxyDeps {
   wake?: (conversationId: string) => Promise<void>;
   /** The request's ingress identity. */
   resolveUser: (req: IncomingMessage) => UserContext | Promise<UserContext>;
+  /** The visibility check; absent means no check (tests and fake mode). */
+  accessCheck?: AccessCheck;
   /** Parent domain of the per-conversation service hosts (SANDBOX_DOMAIN). When set, services are
    *  served only on their conversation's own host, at /<service>/, and never on the main host. */
   sandboxDomain?: string;
@@ -537,9 +540,25 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     return origin ? `${origin}/${encodeURIComponent(parsed.service)}${parsed.rest}${url.search}` : undefined;
   }
 
+  /** Answer `deny` with a 404 (as for a missing conversation) and a failed check with a 503; true when the request was refused. */
+  async function refuseHidden(req: IncomingMessage, conversationId: string | undefined, refuse: (status: number) => void): Promise<boolean> {
+    if (!deps.accessCheck || !conversationId) return false;
+    try {
+      if ((await deps.accessCheck(conversationId, req, await userFor(req))) !== "deny") return false;
+      refuse(404);
+    } catch (err) {
+      log.errorWith("visibility check failed; refusing", err, { conversation_id: conversationId });
+      refuse(503);
+    }
+    return true;
+  }
+
   async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const startedAt = Date.now();
     const url = new URL(req.url ?? "/", "http://localhost");
+    // First, before the status poll (which returns logs and wakes the pod) or any resolve.
+    if (await refuseHidden(req, parseProxyPath(url.pathname)?.conversationId, (s) =>
+      res.writeHead(s, { "content-type": "text/plain; charset=utf-8" }).end(s === 404 ? "not found\n" : "unavailable\n"))) return;
 
     // Answer the loading page's poll before the normal resolve, which would 502 while the unit is down.
     const label = sandboxLabelOf(req);
@@ -631,6 +650,10 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
 
   async function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
+    if (await refuseHidden(req, parseProxyPath(url.pathname)?.conversationId, (s) => {
+      socket.write(`HTTP/1.1 ${s} ${s === 404 ? "Not Found" : "Service Unavailable"}\r\nConnection: close\r\n\r\n`);
+      socket.destroy();
+    })) return;
     const label = sandboxLabelOf(req);
     const r = await resolve(url.pathname, label);
     if (!r || !r.ok) {
@@ -718,6 +741,8 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       res.writeHead(404).end();
       return true;
     }
+    // The router caches this answer per caller identity, so a refusal here keeps it from proxying direct.
+    if (await refuseHidden(req, conversationId, (s) => json(s, { reason: s === 404 ? "not-found" : "unavailable" }))) return true;
     const service = url.searchParams.get("service") ?? "";
     const label = url.searchParams.get("label") || undefined;
     // Only a sandbox host is carried by the router; the main host stays on handleHttp.

@@ -81,6 +81,10 @@ function fakeSessions(): SessionManager {
       if (c) store.set(id, conv({ ...c, starred }));
       return Promise.resolve();
     }),
+    setVisibility: vi.fn(async (id, visibility) => {
+      const c = store.get(id);
+      if (c) store.set(id, conv({ ...c, visibility }));
+    }),
     sweepIdle: vi.fn(async () => []),
     sweepRetention: vi.fn(async () => []),
   };

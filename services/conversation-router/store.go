@@ -34,12 +34,14 @@ type ConversationRow struct {
 	LastReplyAt  *int64
 	// Set while the agent waits on the user's answer, from AwaitingStore; nil otherwise.
 	AwaitingInputAt *int64
+	// "shared" or "private"; NOT NULL in the schema, and "" (a test row) reads as shared.
+	Visibility string
 }
 
 // conversationColumns is the one projection list, shared by the SELECTs and the write path's RETURNING so they cannot drift.
 const conversationColumns = `id, thread_id, title, created_at, last_activity_at,
                              model, owner, parent_id, user_titled, starred, phase, sandbox_ref,
-                             run_started_at, last_reply_at`
+                             run_started_at, last_reply_at, visibility`
 
 // scannable is satisfied by both pgx.Row and pgx.Rows, so one scan helper serves every read.
 type scannable interface {
@@ -49,7 +51,7 @@ type scannable interface {
 func scanConversation(s scannable, c *ConversationRow) error {
 	return s.Scan(&c.ID, &c.ThreadID, &c.Title, &c.CreatedAt, &c.LastActivityAt,
 		&c.Model, &c.Owner, &c.ParentID, &c.UserTitled, &c.Starred, &c.Phase, &c.SandboxRef,
-		&c.RunStartedAt, &c.LastReplyAt)
+		&c.RunStartedAt, &c.LastReplyAt, &c.Visibility)
 }
 
 // Store is a read-only handle on the agent_host database, nil when no DSN is configured.
@@ -232,6 +234,20 @@ func (s *WriteStore) withAwaiting(ctx context.Context) func(*ConversationRow, er
 		}
 		return c, err
 	}
+}
+
+// SetVisibility sets the visibility of a conversation and every descendant (they share its pod)
+// in one statement, returning the root's updated row, (nil, nil) if it raced a delete.
+func (s *WriteStore) SetVisibility(ctx context.Context, id, visibility string) (*ConversationRow, error) {
+	return s.withAwaiting(ctx)(scanUpdated(s.pool.QueryRow(ctx, `
+		WITH RECURSIVE tree(id) AS (
+		  SELECT $1::text
+		  UNION SELECT c.id FROM conversations c JOIN tree t ON c.parent_id = t.id
+		), upd AS (
+		  UPDATE conversations SET visibility = $2 WHERE id IN (SELECT id FROM tree)
+		  RETURNING `+writeColumns+`
+		)
+		SELECT `+writeColumns+` FROM upd WHERE id = $1`, id, visibility)))
 }
 
 // CreateConversation inserts the create-time row, which is the conversation: it lists before its first prompt and the controller assigns it from there.

@@ -149,7 +149,7 @@ func TestSSEHubBroadcastRemoveVisibility(t *testing.T) {
 	bob := hub.subscribe("bob", "mine")
 	all := hub.subscribe("carol", "all")
 
-	hub.broadcastRemove("x", sp("alice"))
+	hub.broadcastRemove("x", sp("alice"), VisibilityShared)
 
 	if !received(alice) {
 		t.Error("owner (alice) must learn her own conversation is gone")
@@ -166,7 +166,7 @@ func TestSSEHubBroadcastRemoveVisibility(t *testing.T) {
 func TestSSEHubRemoveFrameShape(t *testing.T) {
 	hub := newSSEHub()
 	s := hub.subscribe("", "all")
-	hub.broadcastRemove("c9", sp("alice"))
+	hub.broadcastRemove("c9", sp("alice"), VisibilityShared)
 
 	msg := <-s.ch
 	if got := string(msg[:6]); got != "data: " {
@@ -195,7 +195,7 @@ func TestSSEHubBroadcastRemoveUnowned(t *testing.T) {
 	mine := hub.subscribe("alice", "mine")
 	all := hub.subscribe("alice", "all")
 
-	hub.broadcastRemove("x", nil)
+	hub.broadcastRemove("x", nil, VisibilityShared)
 
 	if received(mine) {
 		t.Error("scope=mine must not receive an unowned conversation's removal")
@@ -242,7 +242,7 @@ func TestSSEHubRemoveAlsoAsksToResync(t *testing.T) {
 	hub := newSSEHub()
 	s := hub.subscribe("", "all")
 	for i := 0; i < subBuffer+1; i++ {
-		hub.broadcastRemove("gone", sp("alice"))
+		hub.broadcastRemove("gone", sp("alice"), VisibilityShared)
 	}
 	if len(s.resync) != 1 {
 		t.Fatal("a dropped remove frame must ask for a snapshot")

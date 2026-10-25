@@ -321,6 +321,9 @@ func newRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, 
 		}
 		// Retry only when the primary target is an owner IP rather than the fallback.
 		canRetry := target.Host != fallback.Host
+		// Tracked so a switch to private can end what a non-owner already holds open.
+		r, release := liveConns.track(r, convID, ownerFrom(r))
+		defer release()
 		if IsAguiPost(r.Method, r.URL.Path) {
 			serveAguiLogged(func(ww http.ResponseWriter) {
 				serveVia(shutdownCtx, ww, r, target, fallback, canRetry, convID)

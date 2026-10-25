@@ -37,3 +37,21 @@ rollout cannot strand one.
 A conversation can spawn subagents: full conversations that **share the parent's sandbox pod**,
 run asynchronously, and report back. The parent can monitor, search, and interrupt a running
 subagent.
+
+## Shared and private conversations
+
+A conversation is **shared** by default: anyone signed in to the deployment can find it under
+*Everyone*, read it, send it messages, and open its terminal, files and other services.
+
+Its owner can make it **private** with the lock beside its title in the header. A private
+conversation is visible to its owner alone: other users don't see it in the list, and its
+history, its messages and its services answer them as if it did not exist. Making it private
+also ends any event stream or terminal another user already had open. Subagents share their
+parent's sandbox, so they are always exactly as private as their parent.
+
+The owner can make a private conversation shared again after a warning: everything in it,
+including whatever Scooter fetched while it was private, becomes visible to everyone.
+
+Private means hidden from other Scooter users, not from the deployment's operators: anyone with
+access to the cluster or the database can still read it. A conversation needs a signed-in
+owner to be private, so a deployment without user identity has no private conversations.

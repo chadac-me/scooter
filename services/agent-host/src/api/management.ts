@@ -33,6 +33,8 @@ import { fitAdvice, fitSummary } from "../session/resourceFit.js";
 import type { SandboxSizePreset } from "../session/resources.js";
 import { PRIORITY_INTERRUPT, type AguiEvent, type ApproverIdentity, type SessionBridge } from "../bridge.js";
 import { logger } from "../log.js";
+import type { AccessCheck } from "../session/access.js";
+import { isVisibility } from "../session/visibility.js";
 import { serviceUrl, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
 import { HUMAN_TRIGGER_SOURCES } from "../acp/remoteAgentRegistry.js";
@@ -66,6 +68,7 @@ function view(c: Conversation, now = Date.now()) {
     // Set by a user rename; the agent's <title> does not override it.
     userTitled: c.userTitled ?? false,
     starred: c.starred ?? false,
+    visibility: c.visibility ?? "shared",
     sandbox: { name: c.sandbox.name, namespace: c.sandbox.namespace },
   };
 }
@@ -116,6 +119,8 @@ export interface ManagementDeps {
   resolveUser?: ResolveUser;
   /** Whether a request is a trusted in-cluster caller (webhooks/scheduler) allowed to set a body `owner`; absent means a body owner is never honored. */
   ownerVerifier?: (req: IncomingMessage) => Promise<boolean>;
+  /** The visibility check guarding every /conversations/:id route; absent means no guard (tests). */
+  accessCheck?: AccessCheck;
   /** In-pod web-service registry powering the UI Services panel; absent in fake/local mode. */
   webServices?: WebServiceRegistry;
   /** Per-conversation service origins (SANDBOX_DOMAIN); absent keeps services under /c/<id>/. */
@@ -313,6 +318,22 @@ export function createManagementApi(deps: ManagementDeps): Router {
   const models = deps.models ?? { available: [] };
   const r = createRouter(deps.resolveUser);
 
+  // Every /conversations/:id route answers 404 for a private conversation the caller may not
+  // see: the same answer as a missing one, so its existence does not leak.
+  if (deps.accessCheck) {
+    const check = deps.accessCheck;
+    r.guard(async (ctx) => {
+      const id = ctx.params.id;
+      if (!id || !(ctx.req.url ?? "").startsWith("/conversations/")) return undefined;
+      try {
+        return (await check(id, ctx.req, ctx.user)) === "deny" ? { status: 404, json: { error: "not found" } } : undefined;
+      } catch (err) {
+        log.errorWith("visibility check failed; refusing", err, { conversation_id: id });
+        return { status: 503, json: { error: "could not check access" } };
+      }
+    });
+  }
+
   // The agent-self-modify MCP endpoint; the StreamableHTTP transport owns the response,
   // so the handler returns void.
   if (deps.mcpHandler) {
@@ -416,7 +437,10 @@ export function createManagementApi(deps: ManagementDeps): Router {
   // event-log key and a k8s resource name); in multi-replica the conversation-router serves
   // this path itself, so this route serves single-replica deployments and e2e.
   r.post("/conversations", async (ctx) => {
-    const body = await ctx.body<{ title?: string; model?: string; owner?: string }>();
+    const body = await ctx.body<{ title?: string; model?: string; owner?: string; visibility?: unknown }>();
+    if (body.visibility !== undefined && !isVisibility(body.visibility)) {
+      return { status: 400, json: { error: "visibility must be shared or private" } };
+    }
     // Reject an unknown model rather than silently falling back.
     if (body.model && body.model !== models.default && !models.available.includes(body.model)) {
       return { status: 400, json: { error: `unknown model: ${body.model}` } };
@@ -431,7 +455,10 @@ export function createManagementApi(deps: ManagementDeps): Router {
         log.warn("ignored a body owner from an unverified caller", { had_header_owner: owner !== undefined });
       }
     }
-    const conv = await sessions.start(randomUUID(), body.model, owner);
+    if (body.visibility === "private" && !owner) {
+      return { status: 400, json: { error: "a private conversation needs a signed-in owner" } };
+    }
+    const conv = await sessions.start(randomUUID(), body.model, owner, { visibility: body.visibility ?? "shared" });
     if (body.title) sessions.setTitle(conv.id, body.title);
     return { status: 201, json: view(sessions.get(conv.id)!) };
   });
@@ -469,6 +496,29 @@ export function createManagementApi(deps: ManagementDeps): Router {
     }
     return { conv, error: undefined };
   };
+
+  // Owner only, both ways. Going shared exposes everything Scooter fetched while private, so it
+  // needs `confirm: true` (the UI's warning dialog sets it). A subagent follows its root.
+  r.patch("/conversations/:id/visibility", async (ctx) => {
+    if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
+    const conv = sessions.get(ctx.params.id);
+    if (!conv) return { status: 404, json: { error: "not found" } };
+    const body = await ctx.body<{ visibility?: unknown; confirm?: unknown }>();
+    if (!isVisibility(body.visibility)) {
+      return { status: 400, json: { error: "visibility must be shared or private" } };
+    }
+    if (ctx.user.anonymous || !conv.owner || conv.owner !== ctx.user.id) {
+      return { status: 403, json: { error: "only the owner can change visibility" } };
+    }
+    if (conv.parentId) return { status: 409, json: { error: "a subagent takes its parent's visibility" } };
+    // Fresh, not memory: the router or another replica may have changed it.
+    const current = (await store.readAccess?.(conv.id))?.visibility ?? conv.visibility ?? "shared";
+    if (body.visibility === "shared" && current === "private" && body.confirm !== true) {
+      return { status: 409, json: { error: "making a private conversation shared needs confirm: true" } };
+    }
+    await sessions.setVisibility(conv.id, body.visibility);
+    return { json: view(sessions.get(conv.id)!) };
+  });
 
   // A user rename sets the title and locks it (userTitled) against the agent's <title>.
   r.patch("/conversations/:id/title", async (ctx) => {

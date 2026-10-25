@@ -44,6 +44,7 @@ type fakeMeta struct {
 	writeErr    error
 	setStarred  *bool
 	setTitle    *string
+	setVis      *string
 	writeCalled bool
 }
 
@@ -79,6 +80,20 @@ func (f *fakeMeta) SetUserTitle(_ context.Context, id, title string) (*Conversat
 	row.Title = title
 	yes := true
 	row.UserTitled = &yes
+	return row, nil
+}
+
+func (f *fakeMeta) SetVisibility(_ context.Context, id, visibility string) (*ConversationRow, error) {
+	f.writeCalled = true
+	f.setVis = &visibility
+	if f.writeErr != nil {
+		return nil, f.writeErr
+	}
+	row := f.rows[id]
+	if row == nil {
+		return nil, nil
+	}
+	row.Visibility = visibility
 	return row, nil
 }
 

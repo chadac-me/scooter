@@ -42,13 +42,15 @@ type listRow struct {
 	LastReplyAt *int64 `json:"lastReplyAt,omitempty"`
 	// Set while the agent waits on the user's answer (ms epoch); the sidebar shows it as "!".
 	AwaitingInputAt *int64 `json:"awaitingInputAt,omitempty"`
+	// "shared" or "private"; the sidebar shows a lock for private.
+	Visibility string `json:"visibility"`
 }
 
 // assembleList applies the visibility filter and enriches with links, preserving the order of metas that Store.Conversations establishes.
 func assembleList(metas []ConversationRow, links map[string][]Link, now int64, callerOwner, scope string) []listRow {
 	rows := make([]listRow, 0, len(metas))
 	for _, m := range metas {
-		if !visible(m.Owner, callerOwner, scope) {
+		if !visible(m.Owner, m.Visibility, callerOwner, scope) {
 			continue
 		}
 		rows = append(rows, makeListRow(m, links[m.ID], now))
@@ -90,6 +92,7 @@ func makeListRow(m ConversationRow, ls []Link, now int64) listRow {
 		AgeMs:          nonNeg(now - m.CreatedAt),
 		Model:          m.Model,
 		Owner:          m.Owner,
+		Visibility:     visibilityOf(m.Visibility),
 		ParentID:       m.ParentID,
 		UserTitled:     deref(m.UserTitled),
 		Starred:        deref(m.Starred),
@@ -111,8 +114,11 @@ func listScope(r *http.Request) string {
 	return "mine"
 }
 
-// visible mirrors agent-host's visibleFilter: scope=all or an anonymous caller sees everything, and a known caller under "mine" sees only their own.
-func visible(owner *string, callerOwner, scope string) bool {
+// visible mirrors agent-host's visibleFilter: scope=all or an anonymous caller sees every shared row, a known caller under "mine" sees only their own, and a private row only its owner.
+func visible(owner *string, visibility, callerOwner, scope string) bool {
+	if !canAccess(owner, visibility, callerOwner) {
+		return false
+	}
 	if scope == "all" || callerOwner == "" {
 		return true
 	}

@@ -135,9 +135,15 @@ func TestSelfAccessStripsIdentityAndToken(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("code %d", code)
 	}
-	for _, h := range []string{"x-auth-user", "x-auth-email", "x-amzn-oidc-identity", "x-amzn-oidc-data", "authorization"} {
+	for _, h := range []string{"x-auth-email", "x-amzn-oidc-data", "authorization"} {
 		if v := got.headers.Get(h); v != "" {
 			t.Errorf("%s forwarded as %q, want stripped", h, v)
+		}
+	}
+	// The pod's forged identity is replaced by the conversation's owner, which it acts for.
+	for _, h := range []string{"x-auth-user", "x-amzn-oidc-identity"} {
+		if v := got.headers.Get(h); v != "alice" {
+			t.Errorf("%s forwarded as %q, want the owner alice", h, v)
 		}
 	}
 	if got.headers.Get("x-scooter-caller") != "sandbox" {

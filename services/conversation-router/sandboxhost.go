@@ -180,6 +180,9 @@ func newSandboxHandler(shutdownCtx context.Context, cfg config, resolver ownerRe
 			http.Error(w, "no agent-host pod is ready", http.StatusServiceUnavailable)
 			return
 		}
+		// Tracked so a switch to private can end a non-owner's open terminal or other service.
+		r, release := liveConns.track(r, convID, ownerFrom(r))
+		defer release()
 		viaAgentHost := func(ww http.ResponseWriter, rr *http.Request) {
 			serveVia(shutdownCtx, ww, rr, target, fallback, target.Host != fallback.Host, convID)
 		}

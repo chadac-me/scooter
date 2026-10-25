@@ -4,7 +4,7 @@
  * started in this browser), while the server must be addressed by `serverId`.
  */
 
-import { deleteConversation, renameConversation, setConversationStarred } from "./client.js";
+import { deleteConversation, renameConversation, setConversationStarred, setConversationVisibility } from "./client.js";
 import { agentHostConfig } from "./config.js";
 import { conversationFor, sessionStore, type Session } from "./sessions.js";
 
@@ -48,4 +48,28 @@ export async function removeSession(s: Session): Promise<void> {
   const id = conv.serverId() ?? (creating ? await conv.ensureCreated() : null);
   if (!id) return;
   await deleteConversation(agentHostConfig, id);
+}
+
+/** The warning shown before a private conversation is made shared; going shared exposes what Scooter fetched while it was private. */
+export const MAKE_SHARED_WARNING =
+  "Other users will be able to read this conversation's history and open its terminal and files, " +
+  "including anything Scooter fetched as you (cloned repos, mail, documents). Make it shared?";
+
+/** Whether the signed-in user may change this conversation's visibility: its owner, on a top-level conversation the server has created. */
+export const canChangeVisibility = (s: Session, currentUser: string, anonymous: boolean): boolean =>
+  isServerBacked(s) && !s.parentId && !anonymous && !!currentUser && s.owner === currentUser;
+
+/** Make a conversation private, or shared after the user confirms the warning; reverts the optimistic change when the server refuses. */
+export async function toggleVisibility(s: Session, confirmShared: (msg: string) => boolean = (m) => window.confirm(m)): Promise<void> {
+  const id = serverIdOf(s);
+  if (id === undefined) return;
+  const current = s.visibility ?? "shared";
+  const next = current === "private" ? "shared" : "private";
+  if (next === "shared" && !confirmShared(MAKE_SHARED_WARNING)) return;
+  sessionStore.setVisibility(s.id, next); // optimistic, by local key
+  const updated = await setConversationVisibility(agentHostConfig, id, next, next === "shared");
+  if (updated) return;
+  if ((sessionStore.get().sessions.find((x) => x.id === s.id)?.visibility ?? "shared") === next) {
+    sessionStore.setVisibility(s.id, current);
+  }
 }

@@ -59,6 +59,9 @@ type selfAccess struct {
 	lookup    conversationLookup
 	// Identity headers stripped from every request: the agent-host must never see a pod-chosen user.
 	stripHeaders []string
+	// The headers the router sets to the conversation's owner once the pod is proven to be that
+	// conversation's sandbox: it acts for its owner, so a private conversation admits it.
+	ownerHeaders []string
 	// Per-conversation cap on POST /messages, so the agent cannot drive itself in a tight loop.
 	messagesPerMinute int
 	now               func() time.Time
@@ -75,7 +78,8 @@ func newSelfAccess(review reviewTokenFunc, namespace string, lookup conversation
 	s := &selfAccess{
 		verifier: svcauth.NewVerifier(review), namespace: namespace, lookup: lookup,
 		stripHeaders: strip, messagesPerMinute: messagesPerMinute, now: time.Now,
-		sent: map[string][]time.Time{},
+		ownerHeaders: []string{identity.userHeader, identity.albIdentityHeader},
+		sent:         map[string][]time.Time{},
 	}
 	s.verifier.Now = func() time.Time { return s.now() }
 	return s
@@ -132,6 +136,11 @@ func (s *selfAccess) wrap(next http.Handler) http.Handler {
 			return
 		}
 		r.Header.Del("authorization") // the pod's token is for this router only
+		if row.Owner != nil {
+			for _, h := range s.ownerHeaders {
+				r.Header.Set(h, *row.Owner)
+			}
+		}
 		r.Header.Set("x-scooter-caller", "sandbox")
 		next.ServeHTTP(w, r)
 	})

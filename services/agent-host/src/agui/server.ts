@@ -16,6 +16,7 @@ import type { Router } from "../http/router.js";
 import { sandboxLabelOf, type WebServiceProxy } from "../proxy/webServiceProxy.js";
 import { logger, withConversation } from "../log.js";
 import { isDbUnavailable } from "../db/pgPool.js";
+import type { AccessCheck } from "../session/access.js";
 
 const log = logger("agui");
 
@@ -168,6 +169,8 @@ export interface AguiServer {
   onUpgrade(pathname: string, handler: (req: import("node:http").IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => void): void;
   /** Set the verifier that decides whether a /agui request is the trusted webhooks caller, gating the privileged `owner` field. */
   useOwnerVerifier(verify: (req: import("node:http").IncomingMessage) => Promise<boolean>): void;
+  /** Set the visibility check run before /agui and /sessions/:id/* touch a conversation. */
+  useAccessCheck(check: AccessCheck): void;
   /** Resolve the caller's ingress identity so a conversation created via POST /agui is owned by the human who created it. */
   useIdentityResolver(resolve: (req: import("node:http").IncomingMessage) => ResolvedUser | Promise<ResolvedUser>): void;
   /** Attach an SSE response to a session's persistent event stream, returning once replay is done. */
@@ -206,6 +209,7 @@ export function createAguiServer(): AguiServer {
   // Exact-pathname WS upgrade handlers, consulted before the proxy on `upgrade`.
   const upgradeHandlers = new Map<string, (req: IncomingMessage, socket: import("node:stream").Duplex, head: Buffer) => void>();
   let ownerVerifier: ((req: IncomingMessage) => Promise<boolean>) | undefined;
+  let accessCheck: AccessCheck | undefined;
   let identityResolver: ((req: IncomingMessage) => ResolvedUser | Promise<ResolvedUser>) | undefined;
 
   /** Resolve the caller's ingress identity, degrading to undefined (anonymous) on any throw, synchronous or not. */
@@ -276,6 +280,20 @@ export function createAguiServer(): AguiServer {
       req.on("error", reject);
     });
 
+  /** 404 (as for a missing conversation) and true when the caller may not see `sessionId`; 503 and true when the check could not run. */
+  const refuseHidden = async (req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<boolean> => {
+    if (!accessCheck || !sessionId) return false;
+    try {
+      const user = await resolveUserSafely(req);
+      if ((await accessCheck(sessionId, req, user)) !== "deny") return false;
+      res.writeHead(404, { "Content-Type": "application/json" }).end('{"error":"not found"}');
+    } catch (err) {
+      log.errorWith("visibility check failed; refusing", err, { conversation_id: sessionId });
+      res.writeHead(503, { "Content-Type": "application/json" }).end('{"error":"could not check access"}');
+    }
+    return true;
+  };
+
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const parts = url.pathname.split("/").filter(Boolean);
@@ -318,6 +336,7 @@ export function createAguiServer(): AguiServer {
         source?: string;
       };
       const sessionId = input.threadId;
+      if (await refuseHidden(req, res, sessionId)) return;
       // One line per request and one per stream close: a prompt that commits a 200 and then
       // never runs (the e2e interrupt flakes) shows up as "received" followed by a close with
       // zero events, on the pod that took it.
@@ -472,6 +491,9 @@ export function createAguiServer(): AguiServer {
       return;
     }
 
+    // The legacy /sessions/:id/* routes below are gated like /agui.
+    if (parts[0] === "sessions" && parts[1] && (await refuseHidden(req, res, decodeURIComponent(parts[1])))) return;
+
     // GET /sessions/:id/events is the SSE subscription.
     if (req.method === "GET" && parts[0] === "sessions" && parts[2] === "events") {
       const sessionId = parts[1];
@@ -588,6 +610,9 @@ export function createAguiServer(): AguiServer {
     },
     use(router) {
       mountedRouter = router;
+    },
+    useAccessCheck(check) {
+      accessCheck = check;
     },
     useOwnerVerifier(verify) {
       ownerVerifier = verify;

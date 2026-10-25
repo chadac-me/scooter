@@ -14,6 +14,7 @@ import { danglingRunInfo, orphanRuns } from "./danglingRun.js";
 import { allowAllGuard, type OwnershipGuard } from "./ownershipGuard.js";
 import { noopRegistry, type ConversationRegistry } from "./conversationRegistry.js";
 import { formatError, logger } from "../log.js";
+import type { AccessFacts, Visibility } from "./visibility.js";
 
 const log = logger("manager");
 
@@ -112,6 +113,9 @@ export interface ConversationMeta {
   /** The user starred this conversation, which exempts it from retention reaping but not from
    *  idle-suspend. */
   starred?: boolean;
+  /** shared (default) or private (owner only). The Postgres store never writes it from saveMeta,
+   *  only from setVisibility, so a stale full-row save cannot flip a private conversation back. */
+  visibility?: Visibility;
   /** Messages still queued in the bridge when the conversation was suspended; revive() re-enqueues
    *  them and clears the field. */
   pendingQueue?: Array<{ text: string; priority: number }>;
@@ -178,6 +182,11 @@ export interface ConversationStore {
   gooseStatePath(id: SessionId): string;
   /** Persist conversation metadata so the list survives a restart; optional. */
   saveMeta?(meta: ConversationMeta): Promise<void>;
+  /** Set the visibility of `rootId` and every descendant in one write; optional. */
+  setVisibility?(rootId: SessionId, visibility: Visibility): Promise<void>;
+  /** Read a conversation's owner and visibility fresh from the shared store, since another
+   *  replica (or the router) may have changed them; undefined when the store cannot say. */
+  readAccess?(id: SessionId): Promise<AccessFacts | undefined>;
   /** Raise a conversation's persisted lastActivityAt to `at` without lowering it, whether or not
    *  this replica holds the conversation; optional. */
   touchActivity?(id: SessionId, at: number): Promise<void>;
@@ -238,11 +247,13 @@ export interface Conversation {
   readonly userTitled?: boolean;
   /** The user starred it. */
   readonly starred?: boolean;
+  /** shared (default) or private; a subagent always has its root's. */
+  readonly visibility?: Visibility;
 }
 
 export interface SessionManager {
   /** Start a brand-new conversation (cold Sandbox + goose + PVCs) on `model`, owned by `owner`. */
-  start(threadId: ThreadId, model?: string, owner?: string): Promise<Conversation>;
+  start(threadId: ThreadId, model?: string, owner?: string, opts?: { visibility?: Visibility }): Promise<Conversation>;
   /** Spawn a subagent: a new conversation with its own bridge that shares the parent's sandbox pod,
    *  inherits its owner and carries `parentId`; throws if the parent is unknown. */
   spawnChild(
@@ -320,6 +331,9 @@ export interface SessionManager {
   setUserTitle(id: SessionId, title: string): Promise<void>;
   /** Star or unstar a conversation and persist it. */
   setStarred(id: SessionId, starred: boolean): Promise<void>;
+  /** Set a top-level conversation's visibility and every descendant's (they share its pod);
+   *  throws for a subagent, or for private on an unowned conversation. */
+  setVisibility(id: SessionId, visibility: Visibility): Promise<void>;
   /** Load persisted conversations into the in-memory list after a restart; persisted-but-not-live
    *  ones come back as "suspended". */
   hydrate(): Promise<void>;
@@ -395,6 +409,7 @@ interface Entry {
   parentId?: SessionId;
   userTitled?: boolean;
   starred?: boolean;
+  visibility?: Visibility;
   /** Messages still queued in the bridge when this conversation was suspended, for revive() to
    *  re-enqueue. */
   pendingQueue?: Array<{ text: string; priority: number }>;
@@ -449,6 +464,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     parentId: e.parentId,
     userTitled: e.userTitled,
     starred: e.starred,
+    visibility: e.visibility,
   });
 
   // Mark the conversation active now; fire-and-forget because it runs on the prompt path and proxy
@@ -498,6 +514,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       userTitled: m.userTitled,
       starred: m.starred,
       pendingQueue: m.pendingQueue,
+      visibility: m.visibility,
     };
     entries.set(m.id, entry);
     return entry;
@@ -532,6 +549,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         model: c.spec.model,
         owner: c.spec.owner,
         parentId: c.spec.parentId,
+        visibility: c.spec.visibility,
       };
       // Publish sandboxRef now so the router can derive the routing short-id before the sandbox
       // finishes booting.
@@ -606,6 +624,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           parentId: e.parentId,
           userTitled: e.userTitled,
           starred: e.starred,
+          visibility: e.visibility,
           pendingQueue: e.pendingQueue,
         }) ?? Promise.resolve();
 
@@ -805,7 +824,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   };
 
   const api: SessionManager = {
-    async start(threadId, model, owner) {
+    async start(threadId, model, owner, opts) {
+      const visibility = opts?.visibility ?? "shared";
+      if (visibility === "private" && !owner) throw new Error("a private conversation needs an owner");
       // The conversation id is the thread id; the k8s name is a short hash of it.
       const id: SessionId = threadId;
       // Register the entry before the slow provisioning so the UI's immediate events.integrity GET
@@ -814,10 +835,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         id, threadId, sandbox: { name: `conv-${shortId(threadId)}`, namespace: "" },
         bridge: undefined, status: "running",
         title: PLACEHOLDER_TITLE, createdAt: nowMs(), lastActivityAt: nowMs(), model, owner,
+        ...(visibility === "private" ? { visibility } : {}),
         ...(model ? { modelSetBy: "user" as const } : {}),
       };
       entries.set(id, entry);
       await saveMeta(entry);
+      // saveMeta never writes visibility to Postgres; this is its one writer.
+      if (visibility === "private") await store.setVisibility?.(id, visibility);
 
       // Publish sandbox_ref and creator_pod before provisioning so the router can route and the
       // controller place it while the sandbox spins up; idempotent and non-throwing.
@@ -852,6 +876,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         model,
         owner: parent.owner,
         parentId,
+        // It shares the parent's pod, so it is exactly as private (the router's insert agrees).
+        ...(parent.visibility === "private" ? { visibility: "private" as const } : {}),
       };
       entries.set(id, entry);
       await saveMeta(entry);
@@ -1389,6 +1415,32 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       return saveMeta(entry);
     },
 
+    async setVisibility(id, visibility) {
+      const entry = entries.get(id);
+      if (!entry) throw new Error(`unknown conversation: ${id}`);
+      if (entry.parentId) throw new Error("a subagent takes its parent's visibility");
+      if (visibility === "private" && !entry.owner) throw new Error("a private conversation needs an owner");
+      // Durable first, and it throws: a failed write must fail the request, not leave memory saying
+      // private while the store (the truth every access check reads) says shared.
+      await store.setVisibility?.(id, visibility);
+      // The whole tree, since every descendant runs in this conversation's pod.
+      const tree = new Set<SessionId>([id]);
+      for (let grew = true; grew; ) {
+        grew = false;
+        for (const e of entries.values()) {
+          if (e.parentId && tree.has(e.parentId) && !tree.has(e.id)) {
+            tree.add(e.id);
+            grew = true;
+          }
+        }
+      }
+      for (const t of tree) {
+        const e = entries.get(t)!;
+        e.visibility = visibility;
+        void saveMeta(e); // the file store's only write; Postgres ignores it
+      }
+    },
+
     async hydrate() {
       const metas = (await store.listConversations?.()) ?? [];
 
@@ -1471,10 +1523,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           model: c.spec.model,
           owner: c.spec.owner,
           parentId: c.spec.parentId,
+          visibility: c.spec.visibility,
         };
         // The record is authoritative over a possibly stale meta.
         if (c.spec.owner) synthesized.owner = c.spec.owner;
         if (c.spec.model) synthesized.model = c.spec.model;
+        if (c.spec.visibility) synthesized.visibility = c.spec.visibility;
         // Key the reconcile result by the record's sandboxRef when it has one.
         const sandboxName = synthesized.parentId
           ? sandboxNameOf(synthesized, lineage)

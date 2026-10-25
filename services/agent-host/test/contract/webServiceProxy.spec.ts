@@ -19,6 +19,7 @@ import {
   type WebServiceProxy,
   type WebServiceRegistry,
 } from "../../src/proxy/webServiceProxy.js";
+import { createAccessCheck } from "../../src/session/access.js";
 
 /** The identity headers the in-pod service received. */
 interface IdentEcho {
@@ -989,3 +990,81 @@ function proxyUpgrade(
     ).catch(reject);
   });
 }
+
+// ---- private conversations ---------------------------------------------------
+
+describe("web-service proxy on a private conversation", () => {
+  let svc: { server: Server; port: number };
+  beforeEach(async () => {
+    svc = await fakeInPodService();
+  });
+  afterEach(() => {
+    svc.server.close();
+  });
+
+  const ID = "5a515e73-860b-49ba-bc3f-6ff8d5fda5ff";
+
+  /** A proxy over a private conversation owned by alice, with the caller named by x-auth-user. */
+  function privateProxy(registry: WebServiceRegistry, sandboxDomain?: string, failCheck = false) {
+    return createWebServiceProxy({
+      sessions: {
+        get: (id: string) => (id === "conv-1" || id === ID ? { id, threadId: id, owner: "alice", visibility: "private" } : undefined),
+        touchById: () => {},
+        refreshSandbox: async () => {},
+      } as never,
+      resolvePodTarget: (async () => ({ name: "pod", podIP: "127.0.0.1" })) as never,
+      registry,
+      publicHost: "scooter.example.com",
+      sandboxDomain,
+      resolveUser: (req) => {
+        const id = req.headers["x-auth-user"];
+        return typeof id === "string" ? { id, anonymous: false } : { id: "anonymous", anonymous: true };
+      },
+      accessCheck: createAccessCheck({
+        readAccess: failCheck ? async () => { throw new Error("db down"); } : undefined,
+        memory: () => ({ owner: "alice", visibility: "private" }),
+      }),
+    });
+  }
+
+  it("proxies the owner's request", async () => {
+    const { status } = await proxyGet(privateProxy(fakeRegistry(svc.port)), "/c/conv-1/marimo/app", { headers: { "x-auth-user": "alice" } });
+    expect(status).toBe(200);
+  });
+
+  it("answers 404 to another user and to an anonymous caller", async () => {
+    const proxy = privateProxy(fakeRegistry(svc.port));
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/app", { headers: { "x-auth-user": "bob" } })).status).toBe(404);
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/app")).status).toBe(404);
+  });
+
+  it("refuses the loading page's status poll, which returns logs and wakes the pod", async () => {
+    const registry = startingRegistry(svc.port, { logs: "secret log line" });
+    const got = await proxyGet(privateProxy(registry), "/c/conv-1/marimo/__scooter_status", { headers: { "x-auth-user": "bob" } });
+    expect(got.status).toBe(404);
+    expect(got.body).not.toContain("secret log line");
+    expect(registry.starts).toEqual([]);
+  });
+
+  it("refuses a non-owner's WebSocket upgrade (the terminal)", async () => {
+    const got = await proxyUpgrade(privateProxy(fakeRegistry(svc.port)), "/c/conv-1/marimo/ws", "hello", { headers: { "x-auth-user": "bob" } });
+    expect(got.statusLine).toContain("404");
+    expect(got.echoed).toBe("");
+  });
+
+  it("allows the owner's WebSocket upgrade", async () => {
+    const got = await proxyUpgrade(privateProxy(fakeRegistry(svc.port)), "/c/conv-1/marimo/ws", "hello", { headers: { "x-auth-user": "alice" } });
+    expect(got.echoed).toBe("hello");
+  });
+
+  it("refuses the router's direct-target lookup for a non-owner, so it cannot proxy around the check", async () => {
+    const proxy = privateProxy(fakeRegistry(svc.port), "scooter.example.com");
+    const q = `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`;
+    expect((await proxyGet(proxy, q, { headers: { "x-auth-user": "bob" } })).status).toBe(404);
+  });
+
+  it("answers 503 when the visibility read fails", async () => {
+    const proxy = privateProxy(fakeRegistry(svc.port), undefined, true);
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/app", { headers: { "x-auth-user": "alice" } })).status).toBe(503);
+  });
+});

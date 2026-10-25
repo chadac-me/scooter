@@ -8,9 +8,11 @@ package main
 const insertConversationSQL = `
 	INSERT INTO conversations
 	  (id, thread_id, title, created_at, last_activity_at, model, owner, parent_id, sandbox_ref,
-	   host_pod, host_generation)
+	   host_pod, host_generation, visibility)
 	SELECT $1, $1, $2, $3, $3, $4, $5, $6, $7,
-	       p.host_pod, CASE WHEN p.host_pod IS NULL THEN 0 ELSE 1 END
+	       p.host_pod, CASE WHEN p.host_pod IS NULL THEN 0 ELSE 1 END,
+	       -- A subagent shares its parent's pod, so it is never less private than the parent.
+	       CASE WHEN p.visibility = 'private' THEN 'private' ELSE COALESCE($8, 'shared') END
 	  FROM (SELECT 1) one
 	  LEFT JOIN conversations p ON p.id = $6
 	ON CONFLICT (id) DO NOTHING`
@@ -25,6 +27,8 @@ type conversationRow struct {
 	Owner      *string
 	ParentID   *string
 	SandboxRef *string
+	// nil means shared, or the parent's visibility for a subagent.
+	Visibility *string
 }
 
 // conversationRowOf is that projection, pure and so testable.
@@ -37,12 +41,13 @@ func conversationRowOf(c NewConversation, now int64) conversationRow {
 		Owner:      specString(c.Spec, "owner"),
 		ParentID:   specString(c.Spec, "parentId"),
 		SandboxRef: specString(c.Spec, "sandboxRef"),
+		Visibility: specString(c.Spec, "visibility"),
 	}
 }
 
 // args binds the row to insertConversationSQL's placeholders, in order.
 func (r conversationRow) args() []any {
-	return []any{r.ID, r.Title, r.Now, r.Model, r.Owner, r.ParentID, r.SandboxRef}
+	return []any{r.ID, r.Title, r.Now, r.Model, r.Owner, r.ParentID, r.SandboxRef, r.Visibility}
 }
 
 // specString reads a string spec value, treating "" and a non-string as absent.
