@@ -103,8 +103,8 @@ import { formatError, logger, type Logger } from "./log.js";
 
 const hostLog = logger("agent-host");
 
-/** Default per-file cap (~25MB) for materialized (non-image) uploads, overridable with FILE_MAX_BYTES. */
-const DEFAULT_FILE_MAX_BYTES = 25 * 1024 * 1024;
+/** Default per-file cap (~100MB) for materialized (non-image) uploads, overridable with FILE_MAX_BYTES. */
+const DEFAULT_FILE_MAX_BYTES = 100 * 1024 * 1024;
 
 /** Decoded byte length of a base64 string, computed without allocating a Buffer so an
  *  oversize upload is rejected before decoding. */

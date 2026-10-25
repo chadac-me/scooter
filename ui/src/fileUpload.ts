@@ -20,9 +20,9 @@ export interface OutboundFile {
   mimeType: string;
 }
 
-/** Default client cap (~25MB), tracking the agent-host FILE_MAX_BYTES; a larger file
+/** Default client cap (~100MB), tracking the agent-host FILE_MAX_BYTES; a larger file
  *  is rejected at add() time. */
-export const CLIENT_FILE_MAX_BYTES = 25 * 1024 * 1024;
+export const CLIENT_FILE_MAX_BYTES = 100 * 1024 * 1024;
 
 /** base64 length -> byte size (0.75 ratio, minus '=' padding). */
 export function base64Bytes(b64: string): number {
