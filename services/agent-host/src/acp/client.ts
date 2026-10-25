@@ -83,10 +83,35 @@ export interface PermissionRequest {
   /** Human-readable summary of what is being requested, from the tool call. */
   title: string;
   options: Array<{ optionId: string; name: string; kind: string }>;
+  /** Present when the agent asks the user questions (AskUserQuestion) rather than for a tool approval. */
+  questions?: UserQuestion[];
 }
 
-/** A permission handler either selects an option or cancels the request. */
-export type PermissionAnswer = { optionId: string } | { cancelled: true };
+/** One question the agent asks: the user picks one option (or several with multiSelect), or types their own answer. */
+export interface UserQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description?: string; preview?: string }>;
+  multiSelect?: boolean;
+}
+
+/** The ACP `_meta` keys that carry a question request's questions and the user's answers over the wire. */
+export const ACP_QUESTIONS_META = "scooter.dev/questions";
+export const ACP_ANSWERS_META = "scooter.dev/answers";
+
+/** The questions an ACP permission request's `_meta` carries, or undefined for a plain approval. */
+export function metaQuestions(meta: unknown): UserQuestion[] | undefined {
+  const raw = (meta as Record<string, unknown> | null | undefined)?.[ACP_QUESTIONS_META];
+  if (!Array.isArray(raw)) return undefined;
+  const qs = raw.filter(
+    (q): q is UserQuestion => typeof q?.question === "string" && Array.isArray(q?.options) && q.options.length > 0,
+  );
+  return qs.length > 0 ? qs : undefined;
+}
+
+/** A permission handler selects an option or cancels; `answers` maps question text to the user's answer when the
+ *  request carried questions. */
+export type PermissionAnswer = { optionId: string; answers?: Record<string, string> } | { cancelled: true };
 
 export interface AcpClient {
   initialize(params: InitializeParams): Promise<{ protocolVersion: number }>;
@@ -253,16 +278,21 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
         );
         return { outcome: { outcome: "cancelled" } };
       }
+      const questions = metaQuestions(params._meta);
       const answer = await permissionHandler({
         sessionId: params.sessionId,
         toolCallId: params.toolCall.toolCallId,
         title: params.toolCall.title ?? "The agent needs your choice",
         options: params.options.map((o) => ({ optionId: o.optionId, name: o.name, kind: o.kind })),
+        ...(questions ? { questions } : {}),
       });
       if ("cancelled" in answer) {
         return { outcome: { outcome: "cancelled" } };
       }
-      return { outcome: { outcome: "selected", optionId: answer.optionId } };
+      return {
+        outcome: { outcome: "selected", optionId: answer.optionId },
+        ...(answer.answers ? { _meta: { [ACP_ANSWERS_META]: answer.answers } } : {}),
+      };
     },
 
     readTextFile: sandbox.readTextFile,

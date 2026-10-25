@@ -34,13 +34,24 @@ export interface PromptParams {
   sessionId: string;
   prompt: ContentBlock[];
 }
+/** One AskUserQuestion question: the user picks one option (or several with multiSelect), or types their own answer. */
+export interface UserQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description?: string; preview?: string }>;
+  multiSelect?: boolean;
+}
+
 export interface PermissionRequest {
   sessionId: string;
   toolCallId: string;
   title: string;
   options: Array<{ optionId: string; name: string; kind: string }>;
+  /** Present when the agent asks the user questions rather than for a tool approval. */
+  questions?: UserQuestion[];
 }
-export type PermissionAnswer = { optionId: string } | { cancelled: true };
+/** `answers` maps question text to the user's answer, set when the request carried questions. */
+export type PermissionAnswer = { optionId: string; answers?: Record<string, string> } | { cancelled: true };
 
 export interface AcpClient {
   initialize(params: InitializeParams): Promise<{ protocolVersion: number }>;

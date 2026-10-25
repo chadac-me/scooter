@@ -25,6 +25,8 @@ export const conversations = pgTable("conversations", {
 	runStartedAt: bigint("run_started_at", { mode: "number" }),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	lastReplyAt: bigint("last_reply_at", { mode: "number" }),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	awaitingInputAt: bigint("awaiting_input_at", { mode: "number" }),
 	hostPod: text("host_pod"),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	hostGeneration: bigint("host_generation", { mode: "number" }).default(0).notNull(),

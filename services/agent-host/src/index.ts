@@ -16,7 +16,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { createAguiServer } from "./agui/server.js";
+import { createAguiServer, questionAnswers } from "./agui/server.js";
 import {
   createManagementApi,
   raiseApprovalInterrupt,
@@ -624,6 +624,9 @@ export async function main(
       if (event.type === "RUN_STARTED") void metaStore.setRunState(id, true, at);
       // An interrupt (awaiting approval) ends the turn too: the agent is waiting on the user.
       else if (event.type === "RUN_FINISHED" || event.type === "RUN_ERROR") void metaStore.setRunState(id, false, at);
+      // A pending interrupt (a question or an approval) shows as "!" until it is answered or dismissed.
+      if (event.type === "RUN_FINISHED" && event.outcome?.type === "interrupt") void metaStore.setAwaitingInput(id, at);
+      else if (event.type === "PERMISSION_RESOLVED") void metaStore.setAwaitingInput(id, null);
     });
   }
   // Image/media assets: metadata in Postgres and bytes on the assets PVC (ASSETS_PATH, else
@@ -1220,11 +1223,12 @@ export async function main(
       entry.status === "cancelled"
         ? ""
         : ((entry.payload as { optionId?: string } | undefined)?.optionId ?? "");
+    const answers = entry.status === "cancelled" ? undefined : questionAnswers(entry.payload);
 
     // `approver` is the human who answered, which an approval interrupt's onAnswer relays to
     // the broker for authorization.
     const answer = () =>
-      sessions.get(sessionId)?.bridge?.answerPermission(entry.interruptId, optionId, approver) ?? false;
+      sessions.get(sessionId)?.bridge?.answerPermission(entry.interruptId, optionId, approver, answers) ?? false;
 
     // 1) Fast path — the run is still live and holding this interrupt.
     if (answer()) return { ok: true };

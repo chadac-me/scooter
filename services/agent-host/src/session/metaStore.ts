@@ -28,6 +28,8 @@ export interface MetaStore {
   touchActivity(id: SessionId, at: number): Promise<void>;
   /** Record a run starting (`running`) or ending at `at`, for the sidebar's active/unread dot. */
   setRunState(id: SessionId, running: boolean, at: number): Promise<void>;
+  /** Mark the conversation as waiting on the user's answer (`at`) or clear it (null), for the sidebar's "!" dot. */
+  setAwaitingInput(id: SessionId, at: number | null): Promise<void>;
   /** The persisted lastActivityAt, or undefined when there is no row. */
   readLastActivity(id: SessionId): Promise<number | undefined>;
   listConversations(): Promise<ConversationMeta[]>;
@@ -163,6 +165,14 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
         }
       } catch (e) {
         log.error("setRunState failed (sidebar turn state not persisted)", { conversation_id: id, error: formatError(e) });
+      }
+    },
+
+    async setAwaitingInput(id, at) {
+      try {
+        await db.update(conversations).set({ awaitingInputAt: at }).where(eq(conversations.id, id));
+      } catch (e) {
+        log.error("setAwaitingInput failed (sidebar question state not persisted)", { conversation_id: id, error: formatError(e) });
       }
     },
 

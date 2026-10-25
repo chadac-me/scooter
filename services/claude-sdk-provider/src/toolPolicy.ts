@@ -27,6 +27,7 @@ export const TOOL_REDIRECTS: Record<string, string> = {
     "SendMessage is not available here. Use the scooter-env `send_to_subagent` tool " +
     "to message a subagent you spawned with `spawn_subagent`.",
   ListAgents: "ListAgents is not available here. Use the scooter-env `list_subagents` tool.",
+  // Only reached with no permission handler wired; otherwise sdkClient's hook asks the user (see askUser.ts).
   AskUserQuestion:
     "There is no interactive question channel here — the user reads this conversation " +
     "asynchronously. State the question and the options in your REPLY, say which option " +

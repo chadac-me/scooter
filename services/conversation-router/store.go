@@ -32,12 +32,14 @@ type ConversationRow struct {
 	// Turn state for the sidebar dot; both NULL until the first run.
 	RunStartedAt *int64
 	LastReplyAt  *int64
+	// Set while the agent waits on the user's answer to an interrupt; NULL otherwise.
+	AwaitingInputAt *int64
 }
 
 // conversationColumns is the one projection list, shared by the SELECTs and the write path's RETURNING so they cannot drift.
 const conversationColumns = `id, thread_id, title, created_at, last_activity_at,
                              model, owner, parent_id, user_titled, starred, phase, sandbox_ref,
-                             run_started_at, last_reply_at`
+                             run_started_at, last_reply_at, awaiting_input_at`
 
 // scannable is satisfied by both pgx.Row and pgx.Rows, so one scan helper serves every read.
 type scannable interface {
@@ -47,7 +49,7 @@ type scannable interface {
 func scanConversation(s scannable, c *ConversationRow) error {
 	return s.Scan(&c.ID, &c.ThreadID, &c.Title, &c.CreatedAt, &c.LastActivityAt,
 		&c.Model, &c.Owner, &c.ParentID, &c.UserTitled, &c.Starred, &c.Phase, &c.SandboxRef,
-		&c.RunStartedAt, &c.LastReplyAt)
+		&c.RunStartedAt, &c.LastReplyAt, &c.AwaitingInputAt)
 }
 
 // Store is a read-only handle on the agent_host database, nil when no DSN is configured.

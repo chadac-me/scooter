@@ -454,6 +454,21 @@ func TestPgNotifyKindSeparatesActivityFromMeta(t *testing.T) {
 		}
 	})
 
+	t.Run("awaiting_input_at notifies as meta, set and cleared", func(t *testing.T) {
+		// The sidebar's "!" dot must appear when the agent asks, not after the activity window.
+		insertConv(t, pool, "c-ask", "", "")
+		conn := listen(t)
+		for _, val := range []string{"1700000000000", "NULL"} {
+			if _, err := pool.Exec(ctx,
+				`UPDATE conversations SET awaiting_input_at = `+val+` WHERE id = 'c-ask'`); err != nil {
+				t.Fatal(err)
+			}
+			if c := next(t, conn, "c-ask"); c.activityOnly() {
+				t.Fatalf("awaiting_input_at = %s must push immediately, got kind=%q", val, c.Kind)
+			}
+		}
+	})
+
 	t.Run("starred, user_titled and owner stay meta", func(t *testing.T) {
 		for col, val := range map[string]string{
 			"starred":     "true",

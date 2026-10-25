@@ -43,6 +43,8 @@ export interface Session {
   runStartedAt?: number;
   /** When the agent's last turn ended (ms epoch), server-sourced. */
   lastReplyAt?: number;
+  /** Set while the agent waits on the user's answer to a question or approval (ms epoch), server-sourced. */
+  awaitingInputAt?: number;
   /** The lastReplyAt this browser has shown the user; local only. A reply newer than it is unread. */
   lastSeenAt?: number;
 }
@@ -63,6 +65,7 @@ export type ServerConversation = {
   starred?: boolean;
   runStartedAt?: number;
   lastReplyAt?: number;
+  awaitingInputAt?: number;
 };
 
 /** What a merge may claim beyond the rows themselves: list membership, and per-row link ownership. */
@@ -150,6 +153,7 @@ const sameSession = (a: Session, b: Session): boolean => {
     a.status !== b.status ||
     a.runStartedAt !== b.runStartedAt ||
     a.lastReplyAt !== b.lastReplyAt ||
+    a.awaitingInputAt !== b.awaitingInputAt ||
     a.lastSeenAt !== b.lastSeenAt ||
     a.parentId !== b.parentId
   ) return false;
@@ -300,9 +304,11 @@ const markCurrentSeen = (s: State): State => {
 };
 
 /** The sidebar dot for a row, or undefined for none. */
-export type TurnDot = "active" | "unread" | "unread-idle" | "idle" | "failed";
+export type TurnDot = "question" | "active" | "unread" | "unread-idle" | "idle" | "failed";
 export const turnDot = (s: Session): TurnDot | undefined => {
   if (s.status === "failed") return "failed";
+  // The agent is blocked on the user, which outranks every turn state.
+  if (s.awaitingInputAt !== undefined) return "question";
   // A suspended or ended sandbox cannot be mid-turn, whatever a stale row says.
   const live = s.status === undefined || s.status === "running";
   if (s.runStartedAt !== undefined && live) return "active";
@@ -488,6 +494,7 @@ export const sessionStore = {
         // Every server row is a whole row, so an absent runStartedAt means the turn ended.
         runStartedAt: c.runStartedAt,
         lastReplyAt: c.lastReplyAt ?? existing?.lastReplyAt,
+        awaitingInputAt: c.awaitingInputAt,
         // Only a snapshot baselines an unmarked row as read; a live upsert is a new reply.
         lastSeenAt: existing?.lastSeenAt ?? (fullList ? c.lastReplyAt ?? existing?.lastReplyAt : 0),
       };

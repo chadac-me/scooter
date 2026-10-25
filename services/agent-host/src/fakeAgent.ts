@@ -27,6 +27,8 @@ import {
   type AuthenticateRequest,
 } from "@zed-industries/agent-client-protocol";
 
+import { ACP_ANSWERS_META, ACP_QUESTIONS_META } from "./acp/client.js";
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** How long a `~subagent` child stays running, which must outlast the spec asserting on it since the host end()s a subagent as soon as it completes. */
@@ -112,6 +114,40 @@ class FakeAgent implements Agent {
 
     const u = (update: Parameters<AgentSideConnection["sessionUpdate"]>[0]["update"]) =>
       this.conn.sessionUpdate({ sessionId, update });
+
+    // A "??<question>" message is a test directive: ask an AskUserQuestion-style question
+    // (questions and answers ride the permission round-trip's _meta) and report the answer.
+    if (userText.startsWith("??")) {
+      const question = userText.slice(2).trim() || "Which database should we use?";
+      const res = (await this.conn.requestPermission({
+        sessionId,
+        toolCall: { toolCallId: this.nextToolCallId(), title: question } as never,
+        options: [{ optionId: "answer", name: "Answer", kind: "allow_once" }],
+        _meta: {
+          [ACP_QUESTIONS_META]: [
+            {
+              question,
+              header: "Database",
+              options: [
+                { label: "Postgres", description: "Relational, the default" },
+                { label: "SQLite", description: "Embedded, zero setup" },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+      } as never)) as { outcome: { outcome: string }; _meta?: Record<string, unknown> };
+      const answers = res._meta?.[ACP_ANSWERS_META] as Record<string, string> | undefined;
+      const reply =
+        res.outcome.outcome === "selected" && answers
+          ? `🤖 (dummy agent) you answered: ${answers[question] ?? "(missing)"}`
+          : "🤖 (dummy agent) question dismissed";
+      for (const word of reply.split(" ")) {
+        await u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: word + " " } });
+        await sleep(20);
+      }
+      return { stopReason: "end_turn" };
+    }
 
     // A "?<prompt>" message is a test directive: present an option choice via the ACP
     // permission round-trip and report the picked option.

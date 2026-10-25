@@ -288,8 +288,8 @@ export interface SessionBridge {
 
   /** Answer a pending permission/option request, returning true if one matched; an
    *  unknown optionId cancels, and `approver` identifies the answering human for an
-   *  external interrupt. */
-  answerPermission(toolCallId: string, optionId: string, approver?: ApproverIdentity): boolean;
+   *  external interrupt; `answers` carries the user's replies to an AskUserQuestion. */
+  answerPermission(toolCallId: string, optionId: string, approver?: ApproverIdentity, answers?: Record<string, string>): boolean;
 
   /** Raise an AG-UI interrupt not tied to an agent run; `onAnswer` fires with the chosen
    *  optionId (or null) and the answering user's identity. */
@@ -499,7 +499,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   // tool-permission blocks on `resolve`, while an external one (a broker AWS request)
   // fires `onExternal` with the chosen optionId.
   interface Pending {
-    resolve: (optionId: string | null) => void;
+    resolve: (optionId: string | null, answers?: Record<string, string>) => void;
     validOptions: Set<string>;
     onExternal?: (optionId: string | null, approver?: ApproverIdentity) => void;
     /** Set when the asking session is gone, so the answer is not treated as the user's. */
@@ -1293,9 +1293,10 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           closeOpenText(run);
           closeOpenReasoning(run);
         }
-        const optionId = await new Promise<string | null>((resolve) => {
+        const asking = req.questions !== undefined && req.questions.length > 0;
+        const { optionId, answers } = await new Promise<{ optionId: string | null; answers?: Record<string, string> }>((resolve) => {
           pendingPermissions.set(req.toolCallId, {
-            resolve,
+            resolve: (optionId, answers) => resolve({ optionId, answers }),
             validOptions: new Set(req.options.map((o) => o.optionId)),
           });
           emit({
@@ -1307,10 +1308,11 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
               interrupts: [
                 {
                   id: req.toolCallId,
-                  reason: "confirmation",
+                  // A question is "input_required": the UI renders a form, not approval buttons.
+                  reason: asking ? "input_required" : "confirmation",
                   message: req.title ?? "The agent needs your choice",
                   toolCallId: req.toolCallId,
-                  metadata: { options: req.options },
+                  metadata: asking ? { options: req.options, questions: req.questions } : { options: req.options },
                 },
               ],
             },
@@ -1325,7 +1327,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           emit({ type: "RUN_STARTED", threadId: run.threadId, runId: run.runId });
           run.ended = false;
         }
-        return optionId ? { optionId } : { cancelled: true as const };
+        if (!optionId) return { cancelled: true as const };
+        return answers ? { optionId, answers } : { optionId };
       });
       return { client, acpSessionId: sid, historySeeded: false, mcpFingerprint };
     })();
@@ -1534,7 +1537,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       titleListeners.add(cb);
       return () => titleListeners.delete(cb);
     },
-    answerPermission(toolCallId, optionId, approver) {
+    answerPermission(toolCallId, optionId, approver, answers) {
       const pending = pendingPermissions.get(toolCallId);
       if (!pending) return false; // no such pending request (or already answered)
       // An unknown optionId cancels rather than forwarding a garbage selection.
@@ -1546,7 +1549,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         persist({ type: "PERMISSION_RESOLVED", toolCallId, optionId: chosen });
         pending.onExternal(chosen, approver);
       } else {
-        pending.resolve(chosen); // unblocks the goose ACP requestPermission call
+        pending.resolve(chosen, chosen ? answers : undefined); // unblocks the agent's permission request
       }
       return true;
     },

@@ -122,6 +122,21 @@ export interface ResumeOutcome {
   reason?: string;
 }
 
+/** Most answers one resume may carry, and the longest each may be: AskUserQuestion asks at most 4. */
+const MAX_ANSWERS = 8;
+const MAX_ANSWER_CHARS = 4000;
+
+/** The question→answer map from a resume payload's `answers`, keeping only bounded string pairs; undefined when there is none. */
+export function questionAnswers(payload: unknown): Record<string, string> | undefined {
+  const raw = (payload as { answers?: unknown } | undefined)?.answers;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const pairs = Object.entries(raw as Record<string, unknown>)
+    .filter((e): e is [string, string] => typeof e[1] === "string" && e[1].trim() !== "")
+    .slice(0, MAX_ANSWERS)
+    .map(([q, a]) => [q.slice(0, MAX_ANSWER_CHARS), a.slice(0, MAX_ANSWER_CHARS)]);
+  return pairs.length > 0 ? Object.fromEntries(pairs) : undefined;
+}
+
 /** What the ingress identity resolver returns; `email`/`name` must be carried when present, since an approval is authorized against a configured claim. */
 export interface ResolvedUser {
   id: string;

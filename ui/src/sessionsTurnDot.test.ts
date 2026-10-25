@@ -37,6 +37,16 @@ describe("turnDot", () => {
   it("is grey once the reply has been seen while the sandbox is still up", () => {
     expect(turnDot({ ...base, lastReplyAt: 10, lastSeenAt: 10 })).toBe("idle");
   });
+  it("is the pink ! while the agent waits on the user, over a run or an unread reply @proves", () => {
+    expect(turnDot({ ...base, awaitingInputAt: 7 })).toBe("question");
+    expect(turnDot({ ...base, awaitingInputAt: 7, runStartedAt: 5 })).toBe("question");
+    expect(turnDot({ ...base, awaitingInputAt: 7, lastReplyAt: 10, lastSeenAt: 5 })).toBe("question");
+    // An external approval outlives the sandbox, so a suspended row still asks.
+    expect(turnDot({ ...base, status: "suspended", awaitingInputAt: 7 })).toBe("question");
+  });
+  it("leaves a failed sandbox red even with a question pending", () => {
+    expect(turnDot({ ...base, status: "failed", awaitingInputAt: 7 })).toBe("failed");
+  });
   it("shows nothing for a read conversation whose sandbox is suspended", () => {
     expect(turnDot({ ...base, status: "suspended", lastReplyAt: 10, lastSeenAt: 10 })).toBeUndefined();
   });
@@ -72,5 +82,15 @@ describe("unread tracking through the store", () => {
     sessionStore.mergeFromServer([{ id: "open", lastReplyAt: 9 }], { fullList: false });
     expect(row("open").lastSeenAt).toBe(9);
     expect(turnDot(row("open"))).toBeUndefined();
+  });
+
+  it("the ! follows awaitingInputAt on live upserts, even in the open conversation", () => {
+    sessionStore.mergeFromServer([{ id: "q" }]);
+    sessionStore.switchTo(row("q").id);
+    sessionStore.mergeFromServer([{ id: "q", awaitingInputAt: 5, lastReplyAt: 5 }], { fullList: false });
+    expect(turnDot(row("q"))).toBe("question");
+    // Every server row is whole, so an upsert without the field means the question was answered.
+    sessionStore.mergeFromServer([{ id: "q", runStartedAt: 6, lastReplyAt: 5 }], { fullList: false });
+    expect(turnDot(row("q"))).toBe("active");
   });
 });

@@ -6,7 +6,7 @@
  */
 
 /** What the local SDK expects back from its permission handler. */
-export type PermissionAnswer = { optionId: string } | { cancelled: true };
+export type PermissionAnswer = { optionId: string; answers?: Record<string, string> } | { cancelled: true };
 
 const CANCELLED: PermissionAnswer = { cancelled: true };
 
@@ -22,6 +22,16 @@ export function parsePermissionAnswer(payload: unknown): PermissionAnswer {
 
   if (body.cancelled === true) return CANCELLED;
   // A non-empty string is the only thing that counts as a real selection.
-  if (typeof body.optionId === "string" && body.optionId.length > 0) return { optionId: body.optionId };
+  if (typeof body.optionId === "string" && body.optionId.length > 0) {
+    const answers = stringRecord(body.answers);
+    return answers ? { optionId: body.optionId, answers } : { optionId: body.optionId };
+  }
   return CANCELLED;
+}
+
+/** The answers map with every non-string value dropped, or undefined when there is none. */
+function stringRecord(v: unknown): Record<string, string> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const out = Object.fromEntries(Object.entries(v).filter(([, a]) => typeof a === "string")) as Record<string, string>;
+  return Object.keys(out).length > 0 ? out : undefined;
 }

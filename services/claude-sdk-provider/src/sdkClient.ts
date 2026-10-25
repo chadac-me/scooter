@@ -23,6 +23,7 @@ import type { ExecBackend } from "./types.js";
 import { sdkMessageToUpdates, type SdkMessage } from "./sdkAdapter.js";
 import { createSandboxMcpServer } from "./sandboxMcp.js";
 import { decideTool } from "./toolPolicy.js";
+import { ASK_USER_QUESTION, ASK_USER_TIMEOUT_S, askUserHook } from "./askUser.js";
 import { debug, debugError } from "./debug.js";
 
 // Stream text/thinking as deltas, threaded into sdkMessageToUpdates so the final assistant message does not re-emit the text.
@@ -198,9 +199,20 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
     hooks: {
       PreToolUse: [
         {
+          // An AskUserQuestion call blocks here until the user answers; the other tools return at once.
+          timeout: ASK_USER_TIMEOUT_S,
           hooks: [
-            async (input: unknown) => {
+            async (input: unknown, toolUseId?: string, opts?: { signal?: AbortSignal }) => {
               const name = (input as { tool_name?: string })?.tool_name ?? "";
+              if (name === ASK_USER_QUESTION && permissionHandler) {
+                return askUserHook({
+                  sessionId,
+                  toolCallId: toolUseId ?? `ask-${permissionNonce}-${++permissionSeq}`,
+                  toolInput: (input as { tool_input?: unknown }).tool_input,
+                  ask: permissionHandler,
+                  signal: opts?.signal,
+                });
+              }
               const decision = decideTool(name, Object.values(toolAliases));
               if (decision.allow) return { continue: true };
               debugError("[sdk:tool-denied]", `${name}: ${decision.reason}`);

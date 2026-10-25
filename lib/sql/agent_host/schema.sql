@@ -58,6 +58,8 @@ CREATE TABLE "conversations" (
   "run_started_at"   bigint NULL,
   -- When the last run ended; the UI compares it to its last-seen mark for "unread".
   "last_reply_at"    bigint NULL,
+  -- Set while the agent waits on the user's answer to an interrupt (a question or approval).
+  "awaiting_input_at" bigint NULL,
   -- ASSIGNMENT / FENCING. host_*, not owner_*: "owner" above is the end user.
   --
   -- host_pod is a pod NAME, never an IP: a name is stable identity, an IP is a mutable
