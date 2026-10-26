@@ -116,7 +116,8 @@ func (h *sseHub) fanOut(owner *string, msg []byte) {
 }
 
 // runConversationListener owns the dedicated LISTEN connection, re-reading and fanning out each notified row, reconnecting after any drop and returning when ctx is cancelled.
-func runConversationListener(ctx context.Context, store *Store, links *LinkStore, hub *sseHub) {
+// onChange, when set, hears every non-activity change (a suspend's phase, a delete) before the push.
+func runConversationListener(ctx context.Context, store *Store, links *LinkStore, hub *sseHub, onChange func(id string)) {
 	if store == nil {
 		return
 	}
@@ -128,7 +129,7 @@ func runConversationListener(ctx context.Context, store *Store, links *LinkStore
 	}, nil)
 	defer coal.stop()
 	listenLoop(ctx, log, conversationsChannel, store.NewListenConn, func(payload string) {
-		handleNotification(ctx, payload, store, links, hub, log, coal)
+		handleNotification(ctx, payload, store, links, hub, log, coal, onChange)
 	})
 }
 
@@ -149,6 +150,11 @@ func (c change) deleted() bool { return c.Op == "delete" }
 // activityOnly reports whether this change may be throttled; it mirrors the trigger's `kind` test.
 func (c change) activityOnly() bool { return c.Kind == "activity" }
 
+// movesPod reports whether the change may mean the conversation's pod went or is going
+// away (a suspend publishes its phase, a delete ends it), so the sandbox-host direct
+// cache must drop it. Activity bumps never move the pod and are far too frequent.
+func (c change) movesPod() bool { return !c.activityOnly() }
+
 // notifyDecision parses a NOTIFY payload ({id, op, kind, owner}), dropping unparseable payloads and those naming no conversation.
 func notifyDecision(payload string) (change, bool) {
 	var c change
@@ -159,12 +165,15 @@ func notifyDecision(payload string) (change, bool) {
 }
 
 // handleNotification turns one NOTIFY payload into an upsert broadcast by re-reading the row and its links, or into a removal when the row is gone.
-func handleNotification(ctx context.Context, payload string, store *Store, links *LinkStore, hub *sseHub, log *slog.Logger, coal *coalescer) {
+func handleNotification(ctx context.Context, payload string, store *Store, links *LinkStore, hub *sseHub, log *slog.Logger, coal *coalescer, onChange func(id string)) {
 	c, proceed := notifyDecision(payload)
 	if !proceed {
 		return
 	}
 	id := c.ID
+	if onChange != nil && c.movesPod() {
+		onChange(id)
+	}
 	if c.deleted() {
 		// Before the removal, so a window's trailing push cannot re-add the row behind it.
 		if coal != nil {

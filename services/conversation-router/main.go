@@ -187,7 +187,12 @@ func main() {
 	// out to SSE subscribers — conversation rows from agent_host (events.go), link changes from
 	// webhooks (linkevents.go), both re-read and pushed as the same upsert frame.
 	hub := newSSEHub()
-	go runConversationListener(ctx, store, links, hub)
+	// The sandbox listener's direct-to-pod cache, dropped per conversation on a row change.
+	var direct *directProxy
+	if cfg.sandboxDomain != "" && cfg.sandboxDirect {
+		direct = newDirectProxy()
+	}
+	go runConversationListener(ctx, store, links, hub, direct.invalidate)
 	go runLinkListener(ctx, store, links, hub)
 
 	handler := newRouter(ctx, cfg, resolver, creator, trusted, store, writeStore, links, hub)
@@ -208,7 +213,7 @@ func main() {
 	}
 	if cfg.sandboxDomain != "" {
 		// The public wildcard Ingress points here, and this port serves sandbox hosts only.
-		sb := &http.Server{Addr: cfg.sandboxListenAddr, Handler: newSandboxRouter(ctx, cfg, resolver, store)}
+		sb := &http.Server{Addr: cfg.sandboxListenAddr, Handler: newSandboxRouter(ctx, cfg, resolver, store, direct)}
 		go func() {
 			<-ctx.Done()
 			sctx, c := context.WithTimeout(context.Background(), 10*time.Second)

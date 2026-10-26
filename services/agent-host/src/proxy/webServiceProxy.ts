@@ -426,11 +426,22 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       return { ok: false, kind: "error", status: 404, service, threadId };
     }
 
+    // A suspended conversation's pod is on its way out but can still look Running and Ready
+    // for a while, so it is asleep whatever the pod lookup would find: otherwise the router
+    // caches the dying pod and the page half-loads, then 502s. A subagent's status says
+    // nothing about the pod, which is its parent's.
+    const current = sessions.get(conv.id) ?? conv;
+    if (current.status === "suspended" && !current.parentId) {
+      // The resume brings a new pod, so the old address must not survive to answer it.
+      dropTarget(conv.id);
+      return { ok: false, kind: "asleep", conversationId: conv.id, service, basePath, threadId };
+    }
+
     // Deliberately no liveness check: a refused connection below is the answer, and
     // asking first costs a pod exec (~0.7s). Why: PR #791.
     let resolved: { target: PodTarget; cached: boolean };
     try {
-      resolved = await podTargetFor(sessions.get(conv.id) ?? conv);
+      resolved = await podTargetFor(current);
     } catch {
       // Pod suspended, not ready, or without an IP.
       return { ok: false, kind: "asleep", conversationId: conv.id, service, basePath, threadId };
