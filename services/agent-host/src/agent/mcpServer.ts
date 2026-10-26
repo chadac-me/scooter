@@ -459,7 +459,7 @@ export function createMcpEndpoint(deps: {
   jobs?: JobManager;
   /** When provided and more than one model is offered, exposes list_models / switch_model. */
   models?: ModelToolsWiring;
-  /** When provided, exposes show_sandbox_resources / set_sandbox_resources, plus restart_sandbox / stop_sandbox when wired. */
+  /** Exposes the sandbox resource, restart and stop tools. */
   resources?: SandboxResourceToolsWiring;
   /** When provided, exposes the scheduled-task tools. */
   scheduler?: SchedulerToolsWiring;

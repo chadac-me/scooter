@@ -1,8 +1,4 @@
-/**
- * Sandbox restart and staleness: pendingRestart() reports what a restart would pick up (a newer
- * image, a recorded size the running pod lacks), restart() cycles the pod onto both and waits for
- * it, and a transient image-reconcile failure is retried before the sandbox runs as-is.
- */
+/** Sandbox restart, pending-restart detection and reconcile retry. */
 
 import { describe, it, expect } from "vitest";
 
@@ -15,11 +11,11 @@ interface ClusterState {
   mode: "Running" | "Suspended";
   /** The CR's recorded resources. */
   resources?: Resources;
-  /** The live pod, if any, with the resources it was started with. */
+  /** The live pod and its resources, if any. */
   pod?: { resources?: Resources };
 }
 
-/** A stateful fake apiserver: Suspended removes the pod, Running starts one from the CR. */
+/** Fake apiserver: Suspended removes the pod, Running starts one. */
 function fakeCluster(init: ClusterState, opts: { failImagePatches?: number; failCode?: number } = {}) {
   const state: ClusterState = structuredClone(init);
   const modes: string[] = [];

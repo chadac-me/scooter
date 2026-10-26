@@ -1,9 +1,4 @@
-/**
- * SessionManager.stopSandbox / restartSandbox. Stopping from inside the agent's own turn must not
- * kill the turn: it stops only the pod and finishes the suspend when the run ends, unless a later
- * sandbox call revived the pod first. Both refuse while another conversation sharing the pod has a
- * run in flight, since cycling the pod would kill that run's commands.
- */
+/** SessionManager stopSandbox and restartSandbox, including mid-run stops. */
 
 import { describe, it, expect, vi } from "vitest";
 
@@ -34,7 +29,7 @@ const inMemoryStore = (): ConversationStore => {
   };
 };
 
-/** Bridges whose run state a test controls, and whose persisted events it can drive. */
+/** Fake bridges with test-controlled run state. */
 function controllableBridges() {
   const bridges = new Map<string, { running: boolean; stop: ReturnType<typeof vi.fn>; persist: (e: AguiEvent) => void }>();
   const factory = ({ conversationId }: { conversationId: string }) => {
@@ -55,7 +50,7 @@ function controllableBridges() {
       answerPermission: () => {},
     } as unknown as SessionBridge;
   };
-  /** End `id`'s run the way the bridge does: clear running, persist RUN_FINISHED. */
+  /** Ends `id`'s run: clears running, persists RUN_FINISHED. */
   const finishRun = (id: string) => {
     const b = bridges.get(id)!;
     b.running = false;

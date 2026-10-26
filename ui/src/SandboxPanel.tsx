@@ -345,7 +345,7 @@ export function SizeSection({ sizes, resources, onSelect, saving, error, pending
   );
 }
 
-/** "Update available — Restart sandbox": what a restart would pick up and what it costs. */
+/** The "Update available" banner with a restart button. */
 export function UpdateBanner({
   pending,
   running,
@@ -405,7 +405,7 @@ export interface SandboxPanelViewProps {
   sizeSaving?: boolean;
   sizeError?: string | null;
   sizePendingRestart?: boolean;
-  /** What a restart would pick up; drives the "Update available" banner. */
+  /** Pending restart changes; drives the update banner. */
   pendingRestart?: PendingRestart | null;
   /** A restart is in flight. */
   restarting?: boolean;
@@ -499,7 +499,7 @@ export function SandboxPanelView({
         ) : null}
       </div>
 
-      {/* Shown running or not: a suspended sandbox picks the change up on its next start, as the copy says. */}
+      {/* Shown even when suspended; it applies on next start. */}
       {pendingRestart && (pendingRestart.image || pendingRestart.env || pendingRestart.size) ? (
         <UpdateBanner
           pending={pendingRestart}
@@ -591,7 +591,7 @@ export function SandboxPanel() {
   // Re-fetched when the pod comes up, since the broker applies a pending size on restart.
   const [resources, setResources] = useState<SandboxResources | null>(null);
   const [pendingRestart, setPendingRestart] = useState<PendingRestart | null>(null);
-  // Bumped after a restart so the info is re-read even if the state never visibly changed.
+  // Bumped after a restart to re-read the info.
   const [infoNonce, setInfoNonce] = useState(0);
   useEffect(() => {
     setPendingRestart(null); // reset on conversation switch

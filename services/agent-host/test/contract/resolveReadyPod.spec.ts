@@ -101,7 +101,7 @@ describe("pollForReadyPod — a pod terminating after stop_sandbox", () => {
     let polls = 0;
     let resumed = false;
     const terminating = { ...readyPod(), metadata: { name: "conv-qis9hm-abc", deletionTimestamp: new Date() } };
-    // Two polls see the dying pod, then nothing until the resume brings a fresh one.
+    // Dying pod twice, then none until the resume.
     const listCandidates = vi.fn(async () => (++polls <= 2 ? [terminating] : resumed ? [readyPod()] : []));
     const ensureRunning = vi.fn(async () => {
       resumed = true;

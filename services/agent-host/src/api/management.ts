@@ -503,8 +503,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: view(sessions.get(ctx.params.id)!) };
   });
 
-  // Cycle the sandbox onto the current image and recorded size, waiting for the new pod; 409
-  // while a run is in flight in the sandbox, since the cycle would kill its commands.
+  // Restarts the sandbox; 409 while another run uses it.
   r.post("/conversations/:id/restart", async (ctx) => {
     if (!sessions.restartSandbox) return { status: 501, json: { error: "sandbox restart unavailable" } };
     if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
@@ -956,8 +955,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.get("/conversations/:id/resources", async (ctx) => {
     const id = await resolveConvId(ctx.params.id);
     if (!id) return { json: { resources: null, pendingRestart: null } };
-    // pendingRestart: what a restart would pick up (newer image, refreshed env, a recorded size
-    // the running pod lacks), driving the panel's "Update available" banner. Best-effort.
+    // What a restart would pick up; best-effort.
     const [resources, pendingRestart] = await Promise.all([
       deps.sandboxResources ? deps.sandboxResources(id).catch(() => undefined) : undefined,
       sessions.get(id) && sessions.pendingRestart ? sessions.pendingRestart(id as SessionId).catch(() => undefined) : undefined,

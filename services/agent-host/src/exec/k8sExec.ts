@@ -173,8 +173,7 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
       await sleep(1500);
       continue; // re-poll: the pod is now being recreated
     }
-    // A terminating pod (just stopped or cycled) still reports Running and ready until it exits;
-    // binding to it would send the next exec to a dying pod, so only a live pod counts.
+    // Terminating pods still report ready; skip them.
     const live = candidates.filter((p) => !p.metadata?.deletionTimestamp);
     const ready = live.find(
       (p) =>

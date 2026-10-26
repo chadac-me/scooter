@@ -57,9 +57,9 @@ const CONTRIB_OVERLAY_KEY = "contrib.yaml";
 /** How long to wait for a cycled sandbox's pod to disappear, and how often to look. */
 const POD_GONE_TIMEOUT_MS = 60_000;
 const POD_GONE_POLL_MS = 1_500;
-/** How long restart() waits for the new pod to be Ready. */
+/** How long restart() waits for the new pod. */
 const POD_READY_TIMEOUT_MS = 180_000;
-/** Backoff between image-reconcile attempts; one entry per retry. */
+/** Backoff before each image-reconcile retry. */
 const RECONCILE_RETRY_DELAYS_MS = [3_000, 6_000];
 
 type EnvVar = { name: string; value?: string };
@@ -77,8 +77,7 @@ export function imageTagOf(imageRef: string): string {
   return tag.includes("/") ? "" : tag; // a ':' before a '/' is a registry port, not a tag
 }
 
-/** Whether two rendered resources blocks ask for the same thing, comparing cpu and memory by
- *  value because the apiserver canonicalizes a pod's quantities ("1000m" reads back as "1"). */
+/** Compares cpu and memory by value, not string. */
 export function sameResources(a: RenderedResources | undefined, b: RenderedResources | undefined): boolean {
   const norm = (k: string, v: string | undefined) =>
     v === undefined ? undefined : k === "cpu" ? cpuToMillicores(v) ?? v : k === "memory" ? memoryToBytes(v) ?? v : v;
@@ -144,9 +143,9 @@ export interface K8sProvisionerOptions {
    *  systemd PID 1 a writable cgroup subtree without `privileged`; unset means the cluster default,
    *  and it is ignored for the generic image. */
   sandboxRuntimeClass?: string;
-  /** Backoff between image-reconcile retries (default 3s, 6s); a test passes zeros. */
+  /** Backoff before each image-reconcile retry (default 3s, 6s). */
   reconcileRetryDelaysMs?: number[];
-  /** Pod poll interval for restart and image cycling (default 1.5s); a test passes 0. */
+  /** Pod poll interval for restart (default 1.5s). */
   podPollMs?: number;
   kubeConfig?: KubeConfig;
 }
@@ -351,8 +350,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     }
   };
 
-  /** Wait (bounded) for the Sandbox's pod to disappear; a timeout is logged, not thrown, since
-   *  failing here would take the conversation down. */
+  /** Waits for the pod to go; a timeout only logs. */
   const waitPodGone = async (ref: SandboxRef): Promise<void> => {
     const deadline = Date.now() + POD_GONE_TIMEOUT_MS;
     while (!(await podGone(ref).catch(() => false))) {
@@ -367,7 +365,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     }
   };
 
-  /** Wait (bounded) for a Running pod whose containers are all ready; false on timeout. */
+  /** Waits for a ready pod; false on timeout. */
   const waitPodReady = async (ref: SandboxRef): Promise<boolean> => {
     const deadline = Date.now() + POD_READY_TIMEOUT_MS;
     for (;;) {
@@ -383,16 +381,14 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     }
   };
 
-  /** Bring `ref` to Running on the deployment's current sandbox image. A transient reconcile
-   *  failure (an apiserver 429) is retried; if every attempt fails the sandbox runs as-is and
-   *  pendingRestart() keeps reporting the stale image. */
+  /** Resumes on the current image, retrying failed reconciles. */
   const runOnCurrentImage = async (ref: SandboxRef): Promise<void> => {
     for (let attempt = 0; ; attempt++) {
       try {
         await reconcileImage(ref);
         break;
       } catch (e) {
-        // A 404 means the Sandbox is gone; resume()'s recreate path owns that.
+        // 404: the Sandbox is gone; resume() recreates it.
         if ((e as { code?: number })?.code === 404) throw e;
         const delay = retryDelays[attempt];
         if (delay === undefined) {
@@ -421,7 +417,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       group: GROUP, version: VERSION, namespace: refNs(ref), plural: PLURAL, name: ref.name,
     })) as SandboxCr;
 
-  /** The running pod's sandbox-container resources; null when there is no pod. */
+  /** The running pod's resources; null without a pod. */
   const podResources = async (ref: SandboxRef): Promise<RenderedResources | undefined | null> => {
     const pods = await core.listNamespacedPod({ namespace: refNs(ref), labelSelector: `${SANDBOX_NAME_LABEL}=${ref.name}` });
     const pod = pods.items[0];
@@ -431,7 +427,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     return (c?.resources ?? undefined) as RenderedResources | undefined;
   };
 
-  /** True when the CR's recorded size differs from what the running pod was started with. */
+  /** Whether the recorded size differs from the running pod's. */
   const sizePending = async (ref: SandboxRef, want: RenderedResources | undefined): Promise<boolean> => {
     const have = await podResources(ref);
     if (have === null) return false;
@@ -583,15 +579,14 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       const stale = staleImage(containers);
       if (stale) out.image = { from: stale, to: opts.sandboxImage };
       if (staleEnv(containers[0])) out.env = true;
-      // A suspended sandbox has no pod to compare; its size applies on the next revive anyway.
+      // Suspended: no pod to compare; revive applies the size.
       const running = (sb.spec?.operatingMode ?? "Running") !== "Suspended";
       if (running && (await sizePending(ref, containers[0]?.resources))) out.size = true;
       return Object.keys(out).length ? out : undefined;
     },
 
     async restart(ref: SandboxRef): Promise<SandboxRestartResult> {
-      // Suspend and wait the pod out first, so the reconcile patches a stopped template and a
-      // size-only change (which reconcileImage never cycles for) still gets a new pod.
+      // Stop first so size-only changes also get a new pod.
       const before = await readCr(ref);
       const beforeContainer = before.spec?.podTemplate?.spec?.containers?.[0];
       const wasRunning = (before.spec?.operatingMode ?? "Running") !== "Suspended";

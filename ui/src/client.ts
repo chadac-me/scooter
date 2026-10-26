@@ -403,14 +403,14 @@ export async function loadSandboxResources(
   return (await loadSandboxInfo(config, conversationId)).resources;
 }
 
-/** What a sandbox restart would pick up: a newer image, a recorded size the pod lacks, refreshed env. */
+/** What a sandbox restart would pick up. */
 export interface PendingRestart {
   image?: { from: string; to: string };
   size?: boolean;
   env?: boolean;
 }
 
-/** The sandbox's allotment plus any pending restart, from one /resources read; nulls on failure. */
+/** Sandbox size and pending restart; nulls on failure. */
 export async function loadSandboxInfo(
   config: AgentHostConfig,
   conversationId: string,
@@ -428,13 +428,12 @@ export async function loadSandboxInfo(
   }
 }
 
-/** Restart the sandbox onto the current image and recorded size, resolving once the new pod is up;
- *  returns null on success or the server's error (e.g. a run is in flight). */
+/** Restarts the sandbox; returns null or the error. */
 export async function restartSandbox(config: AgentHostConfig, conversationId: string): Promise<string | null> {
   return postForError(config, `/conversations/${encodeURIComponent(conversationId)}/restart`);
 }
 
-/** Stop (suspend) the sandbox to free its capacity; returns null on success or the error. */
+/** Suspends the sandbox; returns null or the error. */
 export async function suspendConversation(config: AgentHostConfig, conversationId: string): Promise<string | null> {
   return postForError(config, `/conversations/${encodeURIComponent(conversationId)}/suspend`);
 }

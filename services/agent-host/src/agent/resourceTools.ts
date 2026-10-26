@@ -21,9 +21,9 @@ export interface SandboxResourceToolsWiring {
   setResources(conversationId: string, resources: SandboxResources | { size: string }): Promise<boolean>;
   /** The named sandbox size presets and the default preset name, from the broker. */
   availableSizes?(): Promise<{ sizes: Record<string, SandboxSizePreset>; default: string | null }>;
-  /** Cycle the sandbox onto the current image and recorded size, resolving once the new pod is up; exposes restart_sandbox. */
+  /** Restarts onto the current image and size; enables restart_sandbox. */
   restartSandbox?(conversationId: string): Promise<SandboxRestartResult>;
-  /** Stop the sandbox to free its capacity, leaving the calling turn alive; exposes stop_sandbox. */
+  /** Stops the pod, keeping the turn alive; enables stop_sandbox. */
   stopSandbox?(conversationId: string): Promise<{ deferred: boolean; pending?: PendingRestart }>;
 }
 
@@ -178,14 +178,14 @@ export async function handleSetSandboxResources(
   }
 }
 
-/** The "apply it now" pointer appended to set_sandbox_resources' reply when restart is wired. */
+/** Hint appended to set_sandbox_resources when restart is available. */
 function applyNowHint(deps: SandboxResourceToolsWiring): string {
   return deps.restartSandbox
     ? " To apply it now, save your work and call restart_sandbox (running processes, background jobs and web services stop)."
     : "";
 }
 
-/** Render what a restart would pick up, or "" when nothing is pending. */
+/** Describes pending restart changes; empty when none. */
 function pendingLine(p: PendingRestart | undefined): string {
   if (!p) return "";
   const parts = [
@@ -196,7 +196,7 @@ function pendingLine(p: PendingRestart | undefined): string {
   return parts.length ? parts.join(", ") : "";
 }
 
-/** restart_sandbox: cycle the pod onto the current image and recorded size and wait for it. */
+/** restart_sandbox: cycle the pod and wait for it. */
 export async function handleRestartSandbox(deps: SandboxResourceToolsWiring, conversationId: string): Promise<ToolResult> {
   if (!deps.restartSandbox) return { isError: true, content: [{ type: "text", text: "Sandbox restart is not available here." }] };
   let r: SandboxRestartResult;
@@ -216,7 +216,7 @@ export async function handleRestartSandbox(deps: SandboxResourceToolsWiring, con
   return { content: [{ type: "text", text: lines.join("\n") }] };
 }
 
-/** stop_sandbox: stop the pod to free capacity now; a later sandbox call brings it back. */
+/** stop_sandbox: stop the pod; the next sandbox call restarts it. */
 export async function handleStopSandbox(deps: SandboxResourceToolsWiring, conversationId: string): Promise<ToolResult> {
   if (!deps.stopSandbox) return { isError: true, content: [{ type: "text", text: "Stopping the sandbox is not available here." }] };
   let r: { deferred: boolean; pending?: PendingRestart };

@@ -780,7 +780,7 @@ export async function main(
     },
     // Keep the pod up while a background job not yet announced as complete is still running,
     // so the idle sweep does not kill it.
-    // A stop or restart under a live bridge: the next sandbox call reconnects (and resumes a stopped pod).
+    // Reconnect exec clients after a stop or restart.
     onSandboxCycled: (ref) => bumpSandboxEpoch(ref),
     hasRunningBackgroundJob: async (id) => {
       if (!jobManager) return false;
@@ -939,8 +939,7 @@ export async function main(
     return rows.map((r) => personalSkill({ name: r.name, description: r.description, body: r.body }));
   };
 
-  // Resume a sandbox found gone under a live bridge, then tell the manager so a deferred
-  // stop_sandbox is cancelled and the conversation reads as running again.
+  // Resume the pod, then cancel any deferred stop.
   const healingResume = (id: SessionId, sb: SandboxRef) => {
     const resume = resumeUnlessEnded(sessions, provisioner, id, sb, conversationRegistry);
     return async () => {
@@ -1904,8 +1903,6 @@ export async function main(
 function deferredSandboxApi(sandbox: SandboxRef, ensureRunning?: () => Promise<void>) {
   // Concurrent first tool calls share one connect, and ensureRunning resumes a sandbox
   // idle-suspended out from under a live bridge when connect finds no pod.
-  // A stop or restart bumps the sandbox's epoch; the next call then drops the cached client and
-  // reconnects, which resolves the pod afresh and resumes a stopped one via ensureRunning.
   const ensure = createEpochConnector(() => connectSandbox(sandbox, { ensureRunning }), () => sandboxEpoch(sandbox));
   return {
     mode: "k8s-exec" as const,
