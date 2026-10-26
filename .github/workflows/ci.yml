@@ -516,11 +516,23 @@ jobs:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: create k3d cluster (k3s 1.35)
+      # The rancher/k3s image ships only runc, which gives non-privileged systemd no writable cgroup,
+      # and a user-namespaced pod cannot fall back to `privileged`. So hand the node a crun (plus the
+      # store it links against). k3s detects it on PATH and registers the `crun` RuntimeClass.
+      - name: create k3d cluster (k3s 1.35, with crun)
         run: |
+          set -euo pipefail
+          crun=$(readlink -f "$(nix build --no-link --print-out-paths nixpkgs#crun)/bin/crun")
           nix shell nixpkgs#k3d nixpkgs#kubectl -c k3d cluster create scooter-userns --no-lb --wait \
-            --image rancher/k3s:v1.35.4-k3s1
+            --image rancher/k3s:v1.35.4-k3s1 \
+            -v /nix/store:/nix/store:ro@server:0 \
+            -v "$crun:/usr/local/bin/crun:ro@server:0"
           nix shell nixpkgs#k3d -c k3d kubeconfig merge scooter-userns --kubeconfig-merge-default
+          for _ in $(seq 60); do
+            nix shell nixpkgs#kubectl -c kubectl get runtimeclass crun >/dev/null 2>&1 && break
+            sleep 2
+          done
+          nix shell nixpkgs#kubectl -c kubectl get runtimeclass crun
 
       - name: build + import sandbox image
         run: |

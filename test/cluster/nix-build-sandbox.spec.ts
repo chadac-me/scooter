@@ -14,6 +14,9 @@ const NS = "agent-sandbox-test";
 const IMAGE = process.env.SANDBOX_OS_IMAGE ?? "agent-sandbox-os:latest";
 const POD = "nix-build-sandbox";
 const SELECTOR = "app=nix-build-sandbox";
+/** A cgroup-delegating runtime is required: a user-namespaced pod cannot fall back to `privileged`,
+ *  and plain runc gives non-privileged systemd no writable cgroup. */
+const RUNTIME_CLASS = process.env.SANDBOX_RUNTIME_CLASS ?? "crun";
 
 maybe("sandbox image in a user-namespaced pod runs Nix builds in Nix's build sandbox", () => {
   let cluster: Cluster;
@@ -39,6 +42,7 @@ maybe("sandbox image in a user-namespaced pod runs Nix builds in Nix's build san
       metadata: { name: POD, namespace: NS, labels: { app: "nix-build-sandbox" } },
       spec: {
         hostUsers: false,
+        runtimeClassName: RUNTIME_CLASS,
         containers: [
           {
             name: "sandbox",
