@@ -353,6 +353,7 @@ jobs:
               - 'test/cluster/sandbox-os.spec.ts'
               - 'test/cluster/overlay-store.spec.ts'
               - 'test/cluster/scooter-converge.spec.ts'
+              - 'test/cluster/nix-build-sandbox.spec.ts'
               # The warm-seed unit lives in the sandbox image and the warm-store spec
               # needs only that image.
               - 'test/cluster/warm-store.spec.ts'
@@ -498,6 +499,52 @@ jobs:
         run: |
           nix shell nixpkgs#k3d -c k3d cluster delete scooter-ci || true
           nix shell nixpkgs#k3d -c k3d registry delete scooter-reg.localhost || true
+
+  # The image in a user-namespaced pod (`sandboxUserNamespace`): systemd boots with namespaced
+  # SYS_ADMIN, the overlay store mounts through idmapped volumes, and Nix builds run in Nix's own
+  # build sandbox. Pinned to the production k3s line, since user namespaces need Kubernetes >= 1.33.
+  cluster-userns:
+    name: cluster user-namespace sandbox (k3d)
+    needs: cluster-changes
+    if: needs.cluster-changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: nixbuild/nix-quick-install-action@v30
+      - uses: cachix/cachix-action@v15
+        with:
+          name: scooter
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: create k3d cluster (k3s 1.35)
+        run: |
+          nix shell nixpkgs#k3d nixpkgs#kubectl -c k3d cluster create scooter-userns --no-lb --wait \
+            --image rancher/k3s:v1.35.4-k3s1
+          nix shell nixpkgs#k3d -c k3d kubeconfig merge scooter-userns --kubeconfig-merge-default
+
+      - name: build + import sandbox image
+        run: |
+          set -euo pipefail
+          nix run ".#sandbox-os-image.copyTo" -- docker-daemon:agent-sandbox-os:latest
+          nix shell nixpkgs#k3d -c k3d image import agent-sandbox-os:latest -c scooter-userns
+
+      - name: user-namespace spec
+        env:
+          RUN_CLUSTER_TESTS: "1"
+          CLUSTER_PROVIDER: existing
+          SANDBOX_OS_IMAGE: agent-sandbox-os:latest
+          CI: "1"
+        run: nix develop --command bash -c 'npm install && npm run test:cluster -- nix-build-sandbox'
+
+      - name: dump pod state on failure
+        if: failure()
+        run: |
+          nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test describe pod nix-build-sandbox || true
+          nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test logs nix-build-sandbox --tail=200 || true
+
+      - name: tear down k3d
+        if: always()
+        run: nix shell nixpkgs#k3d -c k3d cluster delete scooter-userns || true
 
   # Validates the example's rendered YAML against a real k3d apiserver with a
   # server-side dry-run, which runs the real schema and admission validation that

@@ -66,6 +66,7 @@ class ControllerK8s:
     :param warm_golden_expr: the golden Nix expression the warm Job builds into the overlay.
     :param overlay_storage: size of each pool PVC.
     :param runtime_class: a cgroup-delegating RuntimeClass for the warm Job's systemd pod, matching the per-conversation sandboxRuntimeClass (empty means the cluster default).
+    :param user_namespace: run the warm Job in its own user namespace with an unmasked /proc, matching the per-conversation sandboxUserNamespace.
     :param pool_storage_class: the pool StorageClass, which must have reclaimPolicy Retain or nothing is ever recycled.
     """
 
@@ -74,6 +75,7 @@ class ControllerK8s:
     warm_golden_expr: str = ""
     overlay_storage: str = "20Gi"
     runtime_class: str = ""
+    user_namespace: bool = False
     pool_storage_class: str = ""
 
     # --- observe -----------------------------------------------------------
@@ -184,7 +186,9 @@ class ControllerK8s:
             image=self.warm_job_image,
             # systemd PID 1 needs SYS_ADMIN for the overlay mount, as in the per-conversation sandbox.
             security_context=client.V1SecurityContext(
-                capabilities=client.V1Capabilities(add=["SYS_ADMIN"])
+                capabilities=client.V1Capabilities(add=["SYS_ADMIN"]),
+                # Unmasked only under a user namespace; the apiserver rejects it otherwise.
+                proc_mount="Unmasked" if self.user_namespace else None,
             ),
             env=[client.V1EnvVar(name="SCOOTER_IMAGE_TAG", value=image_tag)],
             volume_mounts=[
@@ -207,6 +211,8 @@ class ControllerK8s:
                     spec=client.V1PodSpec(
                         restart_policy="OnFailure",
                         runtime_class_name=self.runtime_class or None,
+                        # Pod root and its SYS_ADMIN then apply only inside the pod's user namespace.
+                        host_users=False if self.user_namespace else None,
                         init_containers=[init],
                         containers=[sandbox],
                         volumes=[

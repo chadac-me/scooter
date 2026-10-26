@@ -486,6 +486,8 @@ export async function main(
         // cgroup-delegating runtime lets systemd PID 1 run non-privileged in a private
         // cgroup namespace.
         sandboxRuntimeClass: process.env.SANDBOX_RUNTIME_CLASS || undefined,
+        // SANDBOX_USER_NAMESPACE=1 runs the sandbox in its own user namespace with an unmasked /proc.
+        sandboxUserNamespace: process.env.SANDBOX_USER_NAMESPACE === "1",
         // SANDBOX_RESOURCES is a JSON {requests,limits} override of the provisioner's
         // Guaranteed 2cpu/4Gi default.
         sandboxResources: process.env.SANDBOX_RESOURCES

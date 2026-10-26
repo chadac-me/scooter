@@ -7,6 +7,7 @@
 
 let
   cfg = config.devEnvNix;
+  sandboxConf = "/run/nix-sandbox.conf";
 in
 {
   options.devEnvNix = {
@@ -19,13 +20,48 @@ in
         e.g. "github:NixOS/nixpkgs/<rev>"). Makes `nixpkgs#x` deterministic.
       '';
     };
+
+    autoBuildSandbox = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Probe at boot whether a build can mount its own /proc inside a nested user
+        namespace (true in a user-namespaced pod with an unmasked /proc, i.e.
+        `scooter.sandboxUserNamespace`), and turn on Nix's build sandbox only if it
+        can. A pod that fails the probe keeps building unsandboxed.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-    # Off, because these pods lack the user namespaces Nix's build sandbox needs.
+    # Off unless nix-sandbox-probe finds the pod can host it and writes the include below.
     nix.settings.sandbox = false;
+    # `!include` tolerates a missing file, so an unprobed pod reads only the setting above.
+    nix.extraOptions = lib.mkIf cfg.autoBuildSandbox "!include ${sandboxConf}";
+
+    systemd.services.nix-sandbox-probe = lib.mkIf cfg.autoBuildSandbox {
+      description = "Enable the Nix build sandbox if this pod can host it";
+      wantedBy = [ "multi-user.target" "nix-daemon.service" ];
+      before = [ "nix-daemon.service" ];
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+      path = [ pkgs.util-linux pkgs.coreutils ];
+      # The namespaces Nix's sandbox unshares; a masked /proc is what refuses the mount.
+      script = ''
+        probe=/run/nix-sandbox-probe
+        mkdir -p "$probe"
+        if unshare --user --map-root-user --mount --pid --net --ipc --uts --fork \
+             mount -t proc proc "$probe" 2>/dev/null; then
+          echo "sandbox = true" > ${sandboxConf}
+          echo "nix-sandbox-probe: build sandbox enabled"
+        else
+          rm -f ${sandboxConf}
+          echo "nix-sandbox-probe: cannot mount a nested /proc; build sandbox stays off"
+        fi
+        rmdir "$probe" 2>/dev/null || true
+      '';
+    };
 
     # "" disables the global flake registry, so the pinned `nixpkgs` entry below is
     # the only source.

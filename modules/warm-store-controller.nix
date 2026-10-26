@@ -172,6 +172,9 @@ in
                 # The warm Job's systemd pod needs the same runtimeClass as the per-conversation sandboxes.
                 ++ lib.optional (cfg.sandboxRuntimeClass != null)
                   { name = "SANDBOX_RUNTIME_CLASS"; value = cfg.sandboxRuntimeClass; }
+                # The warm Job boots the same image, so it gets the same user-namespace posture.
+                ++ lib.optional cfg.sandboxUserNamespace
+                  { name = "SANDBOX_USER_NAMESPACE"; value = "1"; }
                 ++ [
                   { name = "RECONCILE_INTERVAL_SECONDS"; value = toString wcfg.reconcileInterval; }
                   { name = "LEASE_DURATION_SECONDS"; value = toString wcfg.leaseSeconds; }
