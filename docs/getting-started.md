@@ -15,7 +15,7 @@ the options most deployments change.
   [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller installed.
   Scooter creates one `Sandbox` per conversation; the controller turns it into a pod.
 - **A CNI that enforces NetworkPolicy** (k3s's built-in controller, Calico, Cilium, …).
-  Scooter isolates sandbox pods with a NetworkPolicy; see [Sandbox network isolation](#sandbox-network-isolation).
+  Scooter isolates sandbox pods with a NetworkPolicy.
 - **Nix with flakes enabled**, on the machine you deploy from.
 - **An ingress controller** (nginx, Traefik, …), so the UI is reachable from a browser.
 - **An authenticating proxy** in front of the UI, such as
@@ -222,26 +222,6 @@ scooter = {
   sandboxRuntimeClass = "crun";    # optional; lets systemd run without privileges
   # Pre-warmed Nix stores, so new conversations start with common tools built.
   warmStore = { enable = true; goldenExpr = "nixpkgs#jq nixpkgs#nodejs"; };
-};
-```
-
-### Sandbox network isolation
-
-Sandboxes run in the same namespace as the platform, so Scooter renders a NetworkPolicy
-(`sandbox-isolation`) that lets a sandbox reach only the broker, its own self-access
-listener, DNS and the public internet. Without it, a sandbox can call the agent-host and
-Postgres directly and act as any user. It is on by default:
-
-```nix
-scooter.networkPolicy = {
-  # Set false only if you apply equivalent policies yourself.
-  enable = true;
-  # Ranges the "internet" rule excludes; they must cover your pod, Service and node CIDRs.
-  # internetExcept = [ "10.0.0.0/8" ... ];
-  # Extra egress for sandboxes, e.g. an in-network Nix cache.
-  extraEgress = [
-    { to = [ { ipBlock.cidr = "10.0.5.20/32"; } ]; ports = [ { protocol = "TCP"; port = 443; } ]; }
-  ];
 };
 ```
 
