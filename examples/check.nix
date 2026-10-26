@@ -560,7 +560,7 @@ let
         else [ "aws-off: broker.env.AWS_ENABLED present — contrib env is not gated on the contrib's own enable" ]);
 
   # A contrib's platform module reaches the sandbox pod through the manifest-overlay
-  # ConfigMap, and with aws off none of it does (an unsatisfiable volume would leave
+  # ConfigMap, and with aws off none of aws's does (an unsatisfiable volume would leave
   # every sandbox Pending).
   contribOverlayOf = e:
     let cms = e.config.kubernetes.resources.configMaps or { };
@@ -586,9 +586,16 @@ let
         else [ "sandboxPod.extraVolumes aws-accounts missing — the mount above has no source, so every sandbox pod stays Pending" ])
     ++ (if contribCtr == null || hasName (contribCtr.env or [ ]) "AWS_ACCOUNTS_FILE" then [ ]
         else [ "sandboxPod.extraEnv AWS_ACCOUNTS_FILE missing — the mount is there but nothing tells the sandbox where it is" ])
-    ++ (if contribOverlayOf awsOffPlatform == null then [ ]
-        else [ ("aws-off: sandbox-manifest-overlay still carries contrib.yaml — the sandbox seam is"
-                + " wired unconditionally, so every sandbox mounts a ConfigMap that is not rendered") ]);
+    ++ (let off = contribOverlayOf awsOffPlatform; in
+        if off == null || !(hasName (off.volumes or [ ]) "aws-accounts") then [ ]
+        else [ ("aws-off: sandbox-manifest-overlay still mounts aws-accounts — the sandbox seam is"
+                + " wired unconditionally, so every sandbox mounts a ConfigMap that is not rendered") ])
+    # The forge proxy is always on: every sandbox trusts the forge CA (optional, so pods start
+    # before the broker first publishes it) and sends HTTPS through the in-pod shim.
+    ++ (if contribPodSpec != null && builtins.any (v: v.name == "forge-ca" && (v.configMap.optional or false)) (contribPodSpec.volumes or [ ]) then [ ]
+        else [ "sandboxPod.extraVolumes forge-ca (optional ConfigMap scooter-forge-ca) missing — no sandbox trusts the forge CA" ])
+    ++ (if contribCtr != null && hasName (contribCtr.env or [ ]) "HTTPS_PROXY" && hasName (contribCtr.env or [ ]) "FORGE_PROXY_ADDR" then [ ]
+        else [ "sandboxPod.extraEnv HTTPS_PROXY / FORGE_PROXY_ADDR missing — sandbox git/gh/glab bypass the forge proxy" ]);
 
   # Sandbox self-access: the router serves the listener, a Service fronts it, and every sandbox
   # gets the token audience and the URL to reach it.

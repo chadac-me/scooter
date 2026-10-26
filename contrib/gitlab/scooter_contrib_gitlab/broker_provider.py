@@ -1,4 +1,4 @@
-"""GitLab provider: a PAT via the PRIVATE-TOKEN header, over http-proxy, git-credential, the forge proxy and the agent tool."""
+"""GitLab provider: a PAT via the PRIVATE-TOKEN header, over http-proxy, the forge proxy and the agent tool."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from scooter_broker_lib.forge import ForgeHost, ForgeHosts, load_policy
 from scooter_broker_lib.registry import register_provider
 from scooter_broker_lib.types import Provider
 from scooter_broker_lib.sources.static_token import StaticTokenSource
-from scooter_broker_lib.transports.git_credential import GitCredential
 from scooter_broker_lib.transports.http_proxy import HttpProxy
 from scooter_broker_lib.transports.mcp_tools import McpTools
 
@@ -39,9 +38,7 @@ def gitlab() -> Provider:
         credential=StaticTokenSource(
             token=settings.gitlab_token, kind="header", header_name="PRIVATE-TOKEN"
         ),
-        # Specific routes before the HttpProxy catch-all.
         transports=[
-            GitCredential(host="gitlab.com"),
             # A bare-host upstream, so agents call the full API path through the proxy.
             HttpProxy(
                 upstream=UPSTREAM,

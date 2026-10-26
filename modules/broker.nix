@@ -113,22 +113,13 @@ in
       };
     };
     # --- The forge egress proxy (broker/forge/) -----------------------------
+    # Sandbox git/`gh`/`glab` traffic to the forges (GitHub, GitLab) goes through a
+    # broker-side CONNECT proxy that terminates TLS for those hosts and injects the
+    # provider credential, so the token never enters the sandbox. The broker creates
+    # its CA (Secret `scooter-forge-ca`, never mounted in a sandbox) and publishes the
+    # public cert and host list (ConfigMap `scooter-forge-ca`), which each sandbox
+    # mounts and trusts; the CA's name constraints limit it to the forge hosts.
     forgeProxy = {
-      enable = mkOption {
-        type = types.bool;
-        default = false;
-        description = ''
-          Route sandbox git/`gh`/`glab` traffic to the forges (GitHub, GitLab)
-          through a broker-side CONNECT proxy that terminates TLS for those hosts
-          and injects the provider credential, so the token never enters the
-          sandbox. Turning it on also stops serving `/{provider}/git-credentials`.
-
-          The broker creates its CA (Secret `scooter-forge-ca`, never mounted in a
-          sandbox) and publishes the public cert and host list (ConfigMap
-          `scooter-forge-ca`), which each sandbox mounts and trusts. The CA's name
-          constraints limit it to the forge hosts.
-        '';
-      };
       port = mkOption {
         type = types.port;
         default = 3128;
@@ -282,8 +273,10 @@ in
                   requests = { cpu = "50m"; memory = "256Mi"; };
                   limits = { memory = "1Gi"; };
                 };
-                ports = [{ containerPort = 8080; name = "http"; }]
-                  ++ lib.optional bcfg.forgeProxy.enable { containerPort = bcfg.forgeProxy.port; name = "forge-proxy"; };
+                ports = [
+                  { containerPort = 8080; name = "http"; }
+                  { containerPort = bcfg.forgeProxy.port; name = "forge-proxy"; }
+                ];
                 env = [
                   { name = "PORT"; value = "8080"; }
                   { name = "TOKEN_AUDIENCE"; value = "agent-broker"; }
@@ -332,8 +325,7 @@ in
                   { name = "SHARES_PUBLIC_BASE_URL"; value = sharesBaseUrl; }
                 ++ lib.optional (sharesFrameAncestors != "")
                   { name = "SHARES_FRAME_ANCESTORS"; value = sharesFrameAncestors; }
-                ) ++ lib.optionals bcfg.forgeProxy.enable [
-                  { name = "FORGE_PROXY_ENABLED"; value = "true"; }
+                ) ++ [
                   { name = "FORGE_PROXY_PORT"; value = toString bcfg.forgeProxy.port; }
                 ] ++ lib.optionals bcfg.fga.enable [
                   # Settings for the authorizer core/authz.py hands to every provider.
@@ -359,12 +351,14 @@ in
         metadata = { name = "agent-broker"; namespace = cfg.namespace; };
         spec = {
           selector.app = "agent-broker";
-          ports = [{ port = 8080; targetPort = "http"; name = "http"; }]
-            ++ lib.optional bcfg.forgeProxy.enable { port = bcfg.forgeProxy.port; targetPort = "forge-proxy"; name = "forge-proxy"; };
+          ports = [
+            { port = 8080; targetPort = "http"; name = "http"; }
+            { port = bcfg.forgeProxy.port; targetPort = "forge-proxy"; name = "forge-proxy"; }
+          ];
         };
       };
     }
-    (lib.mkIf bcfg.forgeProxy.enable {
+    {
       # The forge CA: the broker creates the Secret (key) and ConfigMap (public cert +
       # hosts) on first start. `create` cannot be narrowed by resourceNames.
       roles.agent-broker-forge-ca = {
@@ -384,7 +378,7 @@ in
         roleRef = { apiGroup = "rbac.authorization.k8s.io"; kind = "Role"; name = "agent-broker-forge-ca"; };
         subjects = [{ kind = "ServiceAccount"; name = "agent-broker"; namespace = cfg.namespace; }];
       };
-    })
+    }
     (lib.mkIf bcfg.fga.enable {
       # OpenFGA server backed by its own `openfga` database in the shared Postgres;
       # the broker seeds the model and approver tuples at startup.
@@ -437,7 +431,7 @@ in
     # broker first publishes it) and the env that points HTTPS clients at the in-pod
     # shim (modules/sandbox-os/forge-proxy.nix). The bundle paths exist from boot:
     # activation appends the forge CA to the system bundle before systemd starts.
-    scooter.sandboxPod = lib.mkIf bcfg.forgeProxy.enable {
+    scooter.sandboxPod = {
       extraVolumes = [
         { name = "forge-ca"; configMap = { name = "scooter-forge-ca"; optional = true; }; }
       ];

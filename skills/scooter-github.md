@@ -175,9 +175,8 @@ agent-broker "github/repos/OWNER/REPO/pulls/42/comments?per_page=100" \
 
 ## Pushing a branch works normally
 
-`git push` needs no special handling. The broker supplies the credential (through
-the forge proxy, or the preconfigured `credential.helper` without it), so
-pushing a branch is ordinary git:
+`git push` needs no special handling. The broker's forge proxy supplies the
+credential, so pushing a branch is ordinary git:
 
 ```bash
 git checkout -b my-branch

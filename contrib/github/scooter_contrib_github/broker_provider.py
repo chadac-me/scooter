@@ -1,4 +1,4 @@
-"""GitHub provider: a GitHub App (or PAT fallback) credential source, an http-proxy to api.github.com, a git-credential helper for github.com, the forge-proxy hosts, and the agent tool."""
+"""GitHub provider: a GitHub App (or PAT fallback) credential source, an http-proxy to api.github.com, the forge-proxy hosts, and the agent tool."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from scooter_broker_lib.forge import ForgeHost, ForgeHosts, load_policy
 from scooter_broker_lib.registry import register_provider
 from scooter_broker_lib.types import Provider
 from scooter_broker_lib.sources.static_token import StaticTokenSource
-from scooter_broker_lib.transports.git_credential import GitCredential
 from scooter_broker_lib.transports.http_proxy import HttpProxy
 from scooter_broker_lib.transports.mcp_tools import McpTools
 
@@ -75,9 +74,7 @@ def github() -> Provider:
     return Provider(
         name="github",
         credential=credential,
-        # FastAPI matches routes in registration order, so git-credentials must precede the HttpProxy catch-all.
         transports=[
-            GitCredential(host="github.com", username="x-access-token"),
             HttpProxy(
                 upstream=UPSTREAM,
                 link_rules=_GITHUB_LINK_RULES,

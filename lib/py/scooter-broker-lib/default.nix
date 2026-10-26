@@ -34,7 +34,6 @@ python3Packages.buildPythonPackage {
     "scooter_broker_lib.autolink"
     "scooter_broker_lib.sources.static_token"
     "scooter_broker_lib.transports.http_proxy"
-    "scooter_broker_lib.transports.git_credential"
     "scooter_broker_lib.transports.whoami"
     "scooter_broker_lib.transports.token_vend"
     "scooter_broker_lib.transports.mcp_tools"

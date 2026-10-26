@@ -61,36 +61,4 @@ maybe("broker credential flow (IRSA)", () => {
     );
     expect(stdout.trim()).toBe("401");
   });
-
-  it("git-credential-broker vends a credential for an authenticated pod", async () => {
-    // Invoke the helper as git would, with the credential description on stdin.
-    const { stdout, exitCode } = await cluster.exec(
-      SELECTOR(id),
-      [
-        "sh",
-        "-c",
-        "printf 'protocol=https\\nhost=test-git.local\\n\\n' | git-credential-broker get",
-      ],
-      NS,
-    );
-    expect(exitCode).toBe(0);
-    expect(stdout).toContain("username=test-user");
-    expect(stdout).toContain("password=test-broker-token");
-  });
-
-  it("git itself uses the broker helper (credential.helper broker)", async () => {
-    // `git credential fill` runs the configured helper chain, so this covers git to broker end to end.
-    const { stdout, exitCode } = await cluster.exec(
-      SELECTOR(id),
-      [
-        "sh",
-        "-c",
-        "printf 'protocol=https\\nhost=test-git.local\\n\\n' | git credential fill",
-      ],
-      NS,
-    );
-    expect(exitCode).toBe(0);
-    expect(stdout).toContain("username=test-user");
-    expect(stdout).toContain("password=test-broker-token");
-  });
 });
