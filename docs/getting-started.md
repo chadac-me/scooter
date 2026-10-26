@@ -223,25 +223,6 @@ scooter = {
 };
 ```
 
-### File uploads
-
-Users can attach files to a message, and the agent finds them in the sandbox under
-`/workspace/uploads/`. By default each file may be up to 25MB, with at most 4 per message:
-
-```nix
-scooter.uploads = {
-  maxFileBytes = 100 * 1024 * 1024;  # per file
-  maxFilesPerMessage = 4;
-};
-```
-
-The UI reads these limits from the agent-host, so changing them needs no new image. The
-UI's nginx gets a matching request body limit, sized for `maxFilesPerMessage` files at the
-cap. With `ingress.className = "nginx"` the Ingress gets it too, as
-`nginx.ingress.kubernetes.io/proxy-body-size`. Any other proxy or load balancer in front of
-the UI must allow a body that large (`ui`'s `UPLOAD_MAX_BODY` env var shows the value), or
-large uploads fail there with a 413.
-
 ### Storage on single-node clusters
 
 The agent-host stores uploaded files on a volume shared by all its replicas, so it needs
