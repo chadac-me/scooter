@@ -25,3 +25,35 @@ export function createDeferredConnector<T>(connect: () => Promise<T>): () => Pro
     return pending;
   };
 }
+
+/**
+ * createDeferredConnector, but dropped and re-made whenever `epoch()` changes: a pod stopped or
+ * cycled under a live bridge bumps the epoch, so the next call reconnects (resolving the pod
+ * afresh, and resuming a stopped one) instead of reusing a client bound to the old pod.
+ */
+export function createEpochConnector<T>(connect: () => Promise<T>, epoch: () => number): () => Promise<T> {
+  let seen = epoch();
+  let ensure = createDeferredConnector(connect);
+  return () => {
+    const now = epoch();
+    if (now !== seen) {
+      seen = now;
+      ensure = createDeferredConnector(connect);
+    }
+    return ensure();
+  };
+}
+
+/** Per-Sandbox connection generations, keyed namespace/name. */
+const sandboxEpochs = new Map<string, number>();
+const epochKey = (ref: { namespace: string; name: string }) => `${ref.namespace}/${ref.name}`;
+
+/** The Sandbox's current connection generation. */
+export function sandboxEpoch(ref: { namespace: string; name: string }): number {
+  return sandboxEpochs.get(epochKey(ref)) ?? 0;
+}
+
+/** Invalidate every cached connection to the Sandbox's pod; call after stopping or cycling it. */
+export function bumpSandboxEpoch(ref: { namespace: string; name: string }): void {
+  sandboxEpochs.set(epochKey(ref), sandboxEpoch(ref) + 1);
+}

@@ -34,6 +34,8 @@ import {
 import {
   handleShowSandboxResources,
   handleSetSandboxResources,
+  handleRestartSandbox,
+  handleStopSandbox,
   type SandboxResourceToolsWiring,
 } from "./resourceTools.js";
 import { handleViewImage, IMAGE_MAX_BYTES, type ImageToolsWiring } from "./imageTools.js";
@@ -370,6 +372,36 @@ export async function buildServer(
       },
       async (args) => handleSetSandboxResources(resources, conversationId, args) as Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
     );
+    if (resources.restartSandbox) {
+      server.registerTool(
+        "restart_sandbox",
+        {
+          title: "Restart your sandbox",
+          description:
+            "Restart YOUR sandbox pod onto the deployment's current image and your recorded size " +
+            "(set_sandbox_resources), and wait until it is back. Your turn continues. /workspace, installed " +
+            "modules and /nix/store builds persist; running processes, background jobs and web services STOP " +
+            "and must be restarted. Save state first. Refused while another conversation's run is using the sandbox.",
+          inputSchema: {},
+        },
+        async () => handleRestartSandbox(resources, conversationId) as Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
+      );
+    }
+    if (resources.stopSandbox) {
+      server.registerTool(
+        "stop_sandbox",
+        {
+          title: "Stop your sandbox",
+          description:
+            "Stop YOUR sandbox pod now to free its node capacity, instead of waiting for the idle timeout. Call it " +
+            "as your LAST action when you are finished: any later sandbox tool call starts the pod again (one pod " +
+            "boot). /workspace persists; running processes, background jobs and web services stop. Returns any " +
+            "pending update or size change, which applies when the sandbox next starts.",
+          inputSchema: {},
+        },
+        async () => handleStopSandbox(resources, conversationId) as Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
+      );
+    }
   }
   if (images) {
     server.registerTool(
@@ -427,7 +459,7 @@ export function createMcpEndpoint(deps: {
   jobs?: JobManager;
   /** When provided and more than one model is offered, exposes list_models / switch_model. */
   models?: ModelToolsWiring;
-  /** When provided, exposes show_sandbox_resources / set_sandbox_resources. */
+  /** When provided, exposes show_sandbox_resources / set_sandbox_resources, plus restart_sandbox / stop_sandbox when wired. */
   resources?: SandboxResourceToolsWiring;
   /** When provided, exposes the scheduled-task tools. */
   scheduler?: SchedulerToolsWiring;

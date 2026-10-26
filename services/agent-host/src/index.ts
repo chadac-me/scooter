@@ -51,7 +51,7 @@ import { createSessionBridge, PRIORITY_INTERRUPT, type AguiEvent, type ApproverI
 import { createAcpClient } from "./acp/client.js";
 import { createRecorder } from "./transcript/recorder.js";
 import { createSandboxExecBackend, connectSandbox } from "./exec/sandboxExec.js";
-import { createDeferredConnector } from "./exec/deferredConnect.js";
+import { bumpSandboxEpoch, createEpochConnector, sandboxEpoch } from "./exec/deferredConnect.js";
 import { createLocalSandboxApiClient } from "./exec/localExec.js";
 import { resolvePodTarget } from "./exec/k8sExec.js";
 import { createWake, createWebServiceProxy } from "./proxy/webServiceProxy.js";
@@ -780,6 +780,8 @@ export async function main(
     },
     // Keep the pod up while a background job not yet announced as complete is still running,
     // so the idle sweep does not kill it.
+    // A stop or restart under a live bridge: the next sandbox call reconnects (and resumes a stopped pod).
+    onSandboxCycled: (ref) => bumpSandboxEpoch(ref),
     hasRunningBackgroundJob: async (id) => {
       if (!jobManager) return false;
       const jobs = await jobManager.list(id as SessionId);
@@ -937,10 +939,20 @@ export async function main(
     return rows.map((r) => personalSkill({ name: r.name, description: r.description, body: r.body }));
   };
 
+  // Resume a sandbox found gone under a live bridge, then tell the manager so a deferred
+  // stop_sandbox is cancelled and the conversation reads as running again.
+  const healingResume = (id: SessionId, sb: SandboxRef) => {
+    const resume = resumeUnlessEnded(sessions, provisioner, id, sb, conversationRegistry);
+    return async () => {
+      await resume();
+      sessions.noteSandboxResumed?.(id);
+    };
+  };
+
   // A conversation's pod-exec client, resuming a suspended sandbox on first use.
   const sandboxClientFor = (id: string) => {
     const sb = sessions.get(id as SessionId)!.sandbox;
-    return deferredSandboxApi(sb, resumeUnlessEnded(sessions, provisioner, id as SessionId, sb, conversationRegistry));
+    return deferredSandboxApi(sb, healingResume(id as SessionId, sb));
   };
   const jobsEnabled = process.env.AGENT_BACKGROUND_JOBS !== "0" && !config.fakeSandbox && !!jobRegistry;
   const jobManager = jobsEnabled
@@ -1025,6 +1037,8 @@ export async function main(
           return true; // recorded — it applies on the next sandbox restart
         },
         availableSizes: async () => k8sProvisioner.getSizes(),
+        restartSandbox: (id: string) => sessions.restartSandbox!(id as SessionId),
+        stopSandbox: (id: string) => sessions.stopSandbox!(id as SessionId),
       }
     : undefined;
 
@@ -1621,7 +1635,7 @@ export async function main(
     const exec = createSandboxExecBackend(
       config.fakeSandbox
         ? createLocalSandboxApiClient()
-        : deferredSandboxApi(sandbox, resumeUnlessEnded(sessions, provisioner, conversationId as SessionId, sandbox, conversationRegistry)),
+        : deferredSandboxApi(sandbox, healingResume(conversationId as SessionId, sandbox)),
       { commandTimeoutMs: config.commandTimeoutMs },
     );
     const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
@@ -1890,7 +1904,9 @@ export async function main(
 function deferredSandboxApi(sandbox: SandboxRef, ensureRunning?: () => Promise<void>) {
   // Concurrent first tool calls share one connect, and ensureRunning resumes a sandbox
   // idle-suspended out from under a live bridge when connect finds no pod.
-  const ensure = createDeferredConnector(() => connectSandbox(sandbox, { ensureRunning }));
+  // A stop or restart bumps the sandbox's epoch; the next call then drops the cached client and
+  // reconnects, which resolves the pod afresh and resumes a stopped one via ensureRunning.
+  const ensure = createEpochConnector(() => connectSandbox(sandbox, { ensureRunning }), () => sandboxEpoch(sandbox));
   return {
     mode: "k8s-exec" as const,
     // Forward the AbortSignal so kill()'s abort reaches the k8s exec layer.
