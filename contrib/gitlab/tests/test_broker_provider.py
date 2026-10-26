@@ -87,3 +87,16 @@ def test_success_does_not_leak_the_upstream_url_header():
     resp = client.get("/gitlab/api/v4/user")
     assert resp.status_code == 200
     assert "x-broker-upstream-url" not in {k.lower() for k in resp.headers}
+
+
+def test_forge_proxy_intercepts_gitlab_com(monkeypatch):
+    from scooter_broker_lib.forge import ALLOW_ALL, find_forge_hosts
+
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat-xxx")
+    provider = gitlab()
+    forge = find_forge_hosts(provider)
+    assert forge is not None
+    [host] = forge.hosts
+    assert (host.host, host.git, host.api_prefixes) == ("gitlab.com", True, ("/api/",))
+    assert (forge.dialect, forge.git_username) == ("gitlab", "oauth2")
+    assert provider.forge_policy is ALLOW_ALL
