@@ -377,6 +377,23 @@ describe("management API", () => {
     expect(me.json).toEqual({ id: "anonymous", email: null, anonymous: true });
   });
 
+  it("GET /whoami carries the upload caps in a separate limits block", async () => {
+    const api = createManagementApi({
+      sessions: fakeSessions(),
+      store: fakeStore([]),
+      server: stubServer,
+      answerPermission: async () => {},
+      uploadLimits: { maxFileBytes: 100 * 1024 * 1024, maxFilesPerMessage: 2 },
+    });
+    const me = await call(api, "GET", "/whoami", undefined, { "x-auth-user": "alice" });
+    expect(me.json).toEqual({
+      id: "alice",
+      email: null,
+      anonymous: false,
+      limits: { maxFileBytes: 100 * 1024 * 1024, maxFilesPerMessage: 2 },
+    });
+  });
+
   // --- GET /users/by-email (external-user identity mapping) --------------------
 
   const fakeIdentity = (byEmail: Record<string, string>) =>

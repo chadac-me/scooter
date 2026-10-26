@@ -73,6 +73,9 @@ let
   # origin), else the agent-host directly.
   ingressBackend = if cfg.ui.enable then "ui" else "agent-host";
 
+  # The /agui request body limit scooter.uploads implies ("144m" for the defaults).
+  uploadMaxBody = import ./upload-max-body.nix { inherit (cfg.uploads) maxFileBytes maxFilesPerMessage; };
+
   # The enabled contribs' sandbox-pod parts as a manifest overlay spliced into the
   # Sandbox CR the agent-host creates; empty when nothing contributes.
   contribPodOverlay = lib.optionalAttrs
@@ -864,6 +867,42 @@ in
       '';
     };
 
+    # File attachments (non-image) in the chat UI. Every layer is derived from these
+    # two numbers: the agent-host's checks, the caps the UI reads from /whoami, the ui
+    # nginx body limit on /agui and, for ingress-nginx, the Ingress's proxy-body-size.
+    uploads = {
+      maxFileBytes = mkOption {
+        type = types.ints.positive;
+        default = 25 * 1024 * 1024;
+        defaultText = literalExpression "25 * 1024 * 1024";
+        example = literalExpression "100 * 1024 * 1024";
+        description = ''
+          Largest file a user can attach, in bytes. Each file in a message may be
+          this large.
+
+          The request body limit is sized for `maxFilesPerMessage` files at this
+          cap, base64-encoded, plus headroom (`144m` for the defaults). The ui
+          nginx gets it automatically, and so does the Ingress when
+          `ingress.className` is `"nginx"`. Any other controller in front of the
+          UI must allow a body at least that large, or uploads get a 413 there:
+          for example Traefik's buffering middleware `maxRequestBodyBytes`, or a
+          cloud load balancer's request size limit. With an empty `className`
+          (the cluster's default IngressClass) the platform can't tell which
+          controller that is, so it adds nothing.
+        '';
+      };
+      maxFilesPerMessage = mkOption {
+        type = types.ints.positive;
+        default = 4;
+        description = ''
+          Most file attachments a single message may carry. The UI refuses
+          another file past this count, and the agent-host rejects a message
+          with more. Raising it raises the request body limit proportionally
+          (see `maxFileBytes`).
+        '';
+      };
+    };
+
     auth = {
       # The agent-host does no login itself: it trusts an identity header the ingress
       # sets (a missing header means the `anonymous` user), so the ingress must strip
@@ -1071,6 +1110,11 @@ in
         description = ''
           Annotations on the chat Ingress — controller-specific config (cert,
           scheme, AUTH, the trusted identity header, external-dns hostname, …).
+          With `className = "nginx"` the platform adds
+          `nginx.ingress.kubernetes.io/proxy-body-size`, sized from
+          `scooter.uploads`; setting it here overrides that. Other controllers
+          need their own body limit raised to match (see
+          `scooter.uploads.maxFileBytes`).
           SECURITY: the agent-host trusts an identity header set by the ingress;
           put your auth + header-setting annotations here so unauthenticated
           requests can't spoof a user. Nothing is auth-gated by the module itself.
@@ -1377,6 +1421,10 @@ in
                   # unless a deployment opts in).
                   { name = "RETENTION_MAX_AGE_MS"; value = toString cfg.retentionMaxAgeMs; }
                 ++ [
+                  # scooter.uploads: the agent-host enforces both and serves them to the
+                  # UI in /whoami's `limits`.
+                  { name = "FILE_MAX_BYTES"; value = toString cfg.uploads.maxFileBytes; }
+                  { name = "FILE_MAX_PER_MESSAGE"; value = toString cfg.uploads.maxFilesPerMessage; }
                   # Agent identity and skills, written into the per-conversation
                   # .goosehints; SKILLS_DIR is the ConfigMap mount.
                   { name = "AGENT_NAME"; value = cfg.agent.name; }
@@ -1799,6 +1847,10 @@ in
                 # cluster-internal; harmless when shares is off.
                 name = "BROKER_URL";
                 value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080";
+              } {
+                # client_max_body_size on /agui, sized for scooter.uploads.
+                name = "UPLOAD_MAX_BODY";
+                value = uploadMaxBody;
               }] ++ lib.optional (cfg.ingress.sandboxDomain != "")
                 # nginx lets /chat/<id> be framed only by that conversation's own sandbox
                 # origin, <label>.<sandboxDomain> (pkgs/ui-image/nginx.nix).
@@ -1842,7 +1894,14 @@ in
         metadata = {
           name = "agent-host";
           namespace = cfg.namespace;
-          annotations = cfg.ingress.annotations;
+          # ingress-nginx has its own 1m body limit, so it gets the uploads-derived one
+          # (an explicit annotation wins). Other controllers are documented on
+          # scooter.uploads.maxFileBytes.
+          annotations =
+            lib.optionalAttrs (cfg.ingress.className == "nginx") {
+              "nginx.ingress.kubernetes.io/proxy-body-size" = uploadMaxBody;
+            }
+            // cfg.ingress.annotations;
         };
         spec = {
           ingressClassName = lib.mkIf (cfg.ingress.className != "") cfg.ingress.className;
