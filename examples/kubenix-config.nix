@@ -97,6 +97,13 @@
     # Ingress and the agent-host's remote-agent routes.
     byoc.enable = true;
 
+    # Attachments up to 50MB, at most 4 per message. The ui nginx and (className
+    # "nginx") the Ingress get the matching body limit.
+    uploads = {
+      maxFileBytes = 50 * 1024 * 1024;
+      maxFilesPerMessage = 4;
+    };
+
     # The agent-host trusts an identity header the ingress sets, so auth config
     # goes in `annotations`.
     ingress = {

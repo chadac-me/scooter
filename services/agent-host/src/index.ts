@@ -100,11 +100,9 @@ import { createGooseUsageReader } from "./metrics/gooseUsage.js";
 import type { SandboxRef, SessionId } from "./types.js";
 import { resumeUnlessEnded } from "./session/resumeGuard.js";
 import { formatError, logger, type Logger } from "./log.js";
+import { assertFileCount, uploadLimitsFromEnv } from "./config/uploads.js";
 
 const hostLog = logger("agent-host");
-
-/** Default per-file cap (~25MB) for materialized (non-image) uploads, overridable with FILE_MAX_BYTES. */
-const DEFAULT_FILE_MAX_BYTES = 25 * 1024 * 1024;
 
 /** Decoded byte length of a base64 string, computed without allocating a Buffer so an
  *  oversize upload is rejected before decoding. */
@@ -645,7 +643,8 @@ export async function main(
   });
   // Per-file cap for materialized (non-image) uploads, separate from ASSET_MAX_BYTES since
   // files go straight into the sandbox.
-  const fileMaxBytes = Number(process.env.FILE_MAX_BYTES) || DEFAULT_FILE_MAX_BYTES;
+  const uploadLimits = uploadLimitsFromEnv();
+  const fileMaxBytes = uploadLimits.maxFileBytes;
   const server = createAguiServer();
   // The privileged /agui `owner` field is honored only for the trusted webhooks caller,
   // whose SA token is verified via k8s TokenReview.
@@ -1185,6 +1184,8 @@ export async function main(
       promptFiles.push({ name: f.name, data: f.data, mimeType: f.mimeType });
     }
     try {
+      // Refuse the whole message rather than silently dropping files past the count.
+      assertFileCount(input.files, uploadLimits);
       await sessions.promptByThread(sessionId, input.text, model, input.priority, input.owner, promptImages, promptFiles, input.source, input.provider);
     } catch (err) {
       // The run could not start, so persist a RUN_ERROR to the durable log so a reattaching
@@ -1288,6 +1289,7 @@ export async function main(
   // as /agui.
   server.use(
     createManagementApi({
+    uploadLimits,
     // Live appends only reach the owner's local store, so the integrity stream reports
     // whether this pod owns the conversation.
     streamOwnership: conversationRegistry && podName

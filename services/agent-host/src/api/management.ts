@@ -110,6 +110,8 @@ export interface ManagementDeps {
   resourceLookup?: { lookup(conversationId: string, source: string): Promise<unknown | undefined> };
   /** The broker-MCP proxy handler; absent when the broker or the conversation-token secret is not configured. */
   brokerMcpHandler?: (req: IncomingMessage, res: ServerResponse, body: unknown) => Promise<void>;
+  /** Upload caps served to the UI in /whoami's `limits` block (scooter.uploads). */
+  uploadLimits?: { maxFileBytes: number; maxFilesPerMessage: number };
   /** Resolves the caller's identity per request; defaults to the env-configured resolver. */
   resolveUser?: ResolveUser;
   /** Whether a request is a trusted in-cluster caller (webhooks/scheduler) allowed to set a body `owner`; absent means a body owner is never honored. */
@@ -336,7 +338,12 @@ export function createManagementApi(deps: ManagementDeps): Router {
 
   // The caller per the trusted ingress identity header (anonymous when none).
   r.get("/whoami", (ctx) => ({
-    json: { id: ctx.user.id, email: ctx.user.email ?? null, anonymous: ctx.user.anonymous },
+    json: {
+      id: ctx.user.id,
+      email: ctx.user.email ?? null,
+      anonymous: ctx.user.anonymous,
+      ...(deps.uploadLimits ? { limits: { ...deps.uploadLimits } } : {}),
+    },
   }));
 
   // --- Bring-your-own-Claude: connect a personal Claude agent ------------------

@@ -3,6 +3,7 @@
 # The UI's nginx config, rendered by the image's own `render` and served for real: who may
 # frame which page. Only `/chat/<id>` may be framed, and only by that conversation's own
 # sandbox origin (or 'self' without a sandbox domain); every other UI route, by nothing.
+# Also the /agui body limit (UPLOAD_MAX_BODY, derived from scooter.uploads).
 
 let
   ui = pkgs.runCommand "ui-stub" { } ''
@@ -20,11 +21,12 @@ pkgs.runCommand "ui-nginx-frame-ancestors"
   fail=0
 
   # Render as the container would, then point the writable paths at $TMPDIR.
-  serve() { # serve <name> <port> [SANDBOX_DOMAIN] [CONTRIB_MANIFEST_FILE]
+  serve() { # serve <name> <port> [SANDBOX_DOMAIN] [CONTRIB_MANIFEST_FILE] [UPLOAD_MAX_BODY]
     local dir=$TMPDIR/$1
     mkdir -p $dir
     env -i PATH="$PATH" AGENT_HOST_URL=http://127.0.0.1:1 BROKER_URL=http://127.0.0.1:1 \
-      ''${3:+SANDBOX_DOMAIN=$3} ''${4:+CONTRIB_MANIFEST_FILE=$4} ${conf.render} $dir/rendered.conf
+      ''${3:+SANDBOX_DOMAIN=$3} ''${4:+CONTRIB_MANIFEST_FILE=$4} ''${5:+UPLOAD_MAX_BODY=$5} \
+      ${conf.render} $dir/rendered.conf
     sed -e "s|pid /var/run/nginx.pid;|pid $dir/nginx.pid;|" \
         -e "s|listen 8080;|listen 127.0.0.1:$2;|" \
         -e "s|access_log /dev/stdout;|access_log off;|" \
@@ -84,7 +86,26 @@ pkgs.runCommand "ui-nginx-frame-ancestors"
   curl -s -D - -o /dev/null http://127.0.0.1:18082/contrib/manifest.json | grep -qi "^content-type: application/json" \
     || { echo "FAIL /contrib/manifest.json is not served as JSON"; fail=1; }
 
-  kill $(cat $TMPDIR/sandbox/nginx.pid) $(cat $TMPDIR/shared/nginx.pid) || true
+  # /agui body limit. The upstream is unreachable, so a body nginx accepts gets a 502;
+  # one over client_max_body_size gets a 413 before it is proxied.
+  upload() { # upload <port> <MiB> <want status>
+    head -c $(( $2 * 1024 * 1024 )) /dev/zero > $TMPDIR/body
+    local got; got=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+      -H 'content-type: application/json' --data-binary @$TMPDIR/body "http://127.0.0.1:$1/agui")
+    if [ "$got" = "$3" ]; then echo "ok   /agui $2MiB -> $got"; else echo "FAIL /agui $2MiB -> $got (want $3)"; fail=1; fi
+  }
+  serve uploads 18083 "" "" 10m
+  upload 18083 5 502
+  upload 18083 12 413
+  # Without UPLOAD_MAX_BODY the render default matches the platform's default
+  # (4 x 25MB). Checked in the rendered text rather than with a ~140MB request; this
+  # also catches UPLOAD_MAX_BODY missing from envsubst's variable list.
+  grep -q 'client_max_body_size 144m;' $TMPDIR/shared/rendered.conf \
+    || { echo "FAIL default render lacks client_max_body_size 144m"; grep -n client_max_body_size $TMPDIR/shared/rendered.conf; fail=1; }
+  grep -q 'client_max_body_size 10m;' $TMPDIR/uploads/rendered.conf \
+    || { echo "FAIL UPLOAD_MAX_BODY=10m not rendered"; fail=1; }
+
+  kill $(cat $TMPDIR/sandbox/nginx.pid) $(cat $TMPDIR/shared/nginx.pid) $(cat $TMPDIR/uploads/nginx.pid) || true
   [ $fail = 0 ] || exit 1
   touch $out
 ''
