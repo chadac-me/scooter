@@ -8,6 +8,9 @@ import { expect, type Page, type Response } from "@playwright/test";
 import { test } from "./fixtures.js";
 import { fullOnly } from "./target.js";
 
+/** Parent domain of the per-conversation service origins, set when the platform has them on. */
+const SANDBOX_DOMAIN = process.env.E2E_SANDBOX_DOMAIN ?? "";
+
 /** Records every main-frame document response, so a 404 anywhere in the redirect/reload chain fails the test. */
 function recordNavigations(page: Page): Array<{ url: string; status: number }> {
   const seen: Array<{ url: string; status: number }> = [];
@@ -22,6 +25,9 @@ function recordNavigations(page: Page): Array<{ url: string; status: number }> {
 fullOnly("needs a real sandbox pod to suspend and a real web service to auto-start")(
   "opening a web service on a suspended sandbox",
   () => {
+    // Service links point at the conversation's own host, so that is the address under test.
+    test.skip(!SANDBOX_DOMAIN, "the platform has no ingress.sandboxDomain");
+
     test("the files viewer wakes the sandbox, auto-starts and shows the workspace", async ({
       chat,
       page,
@@ -50,13 +56,16 @@ fullOnly("needs a real sandbox pod to suspend and a real web service to auto-sta
         }, { timeout: 120_000 })
         .toContain("files");
 
-      const filesUrl = `${base}/c/${id}/files/`;
+      // The link the agent hands out: the conversation's dedicated host, not /c/<id>/ on the main one.
+      const origin = `https://${thread!.slice(0, 8)}.${SANDBOX_DOMAIN}`;
+      const filesUrl = `${origin}/files/`;
       const viewer = await page.context().newPage();
       const tree = (p: Page) => p.getByRole("button", { name: fileName });
 
       // Start the service once while awake, so the wake below has to bring a used service back.
       await viewer.goto(filesUrl);
       await expect(tree(viewer)).toBeVisible({ timeout: 300_000 });
+      expect(viewer.url()).toBe(filesUrl);
       await viewer.close();
 
       const suspended = await request.post(`${base}/conversations/${id}/suspend`);
@@ -77,6 +86,8 @@ fullOnly("needs a real sandbox pod to suspend and a real web service to auto-sta
       // The real viewer, listing the workspace from the woken pod.
       await expect(tree(page2)).toBeVisible({ timeout: 360_000 });
       await expect(page2).toHaveTitle("Files");
+      // Still on the conversation's own host: no bounce to the main host or another conversation.
+      expect(page2.url()).toBe(filesUrl);
       await expect(page2.getByText(/^Starting files/)).toHaveCount(0);
 
       // And it reads a file's contents, not just the listing.
@@ -93,6 +104,8 @@ fullOnly("needs a real sandbox pod to suspend and a real web service to auto-sta
 
       const failed = navigations.filter((n) => n.status >= 400);
       expect(failed, "no navigation along the wake → start → reload path may fail").toEqual([]);
+      const offHost = navigations.filter((n) => new URL(n.url).origin !== origin);
+      expect(offHost, "every navigation must stay on the conversation's own host").toEqual([]);
     });
   },
 );
