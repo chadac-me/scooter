@@ -605,6 +605,30 @@ let
     ++ (if (builtins.fromJSON (if hostEnvVal "SCOOTER_ENV" == "" then "{}" else hostEnvVal "SCOOTER_ENV")) ? SCOOTER_SELF_URL then [ ]
         else [ "host.env.SCOOTER_ENV lacks SCOOTER_SELF_URL — the sandbox cannot find the listener" ]);
 
+  # Sandbox isolation renders by default, admits only the SA-token surfaces, and turns off.
+  sandboxNp = (res.networkPolicies or { }).sandbox-isolation or null;
+  npEgress = if sandboxNp == null then [ ] else sandboxNp.spec.egress;
+  npPeerApps = rule: map (p: p.podSelector.matchLabels.app or null) (rule.to or [ ]);
+  npPortsTo = app: builtins.concatMap (r: if builtins.elem app (npPeerApps r) then map (p: p.port) (r.ports or [ ]) else [ ]) npEgress;
+  ctrPortNames = dep: builtins.concatMap (c: map (p: p.name or "") (c.ports or [ ]))
+    (builtins.attrValues (res.deployments.${dep}.spec.template.spec.containers or { }));
+  npInternet = builtins.concatMap (r: builtins.filter (p: p ? ipBlock) (r.to or [ ])) npEgress;
+  npProblems =
+    if sandboxNp == null then [ "networkPolicies.sandbox-isolation missing (networkPolicy.enable defaults to true)" ] else
+    (if sandboxNp.spec.podSelector.matchExpressions or [ ] == [ { key = "agents.x-k8s.io/sandbox-name-hash"; operator = "Exists"; } ] then [ ]
+     else [ "sandbox-isolation does not select sandbox pods by agents.x-k8s.io/sandbox-name-hash (the controller strips the template label)" ])
+    ++ (if npPortsTo "agent-broker" == [ "http" ] ++ (if platform.config.scooter.broker.forgeProxy.enable then [ "forge-proxy" ] else [ ]) then [ ]
+        else [ "sandbox-isolation must admit the broker's http (+ forge-proxy when on) ports, got ${builtins.toJSON (npPortsTo "agent-broker")}" ])
+    ++ (if npPortsTo "conversation-router" == [ "self" ] then [ ]
+        else [ "sandbox-isolation must admit the router's `self` port only, got ${builtins.toJSON (npPortsTo "conversation-router")}" ])
+    ++ builtins.concatMap (n: if builtins.elem n (ctrPortNames "agent-broker") then [ ] else [ "sandbox-isolation names broker port `${n}`, which the broker does not declare" ]) (npPortsTo "agent-broker")
+    ++ (if hasName routerPorts "self" then [ ] else [ "sandbox-isolation names router port `self`, which the router does not declare" ])
+    ++ builtins.concatMap (app: if npPortsTo app == [ ] then [ ] else [ "sandbox-isolation lets sandboxes reach ${app}" ]) [ "agent-host" "agent-shared-db" "agent-webhooks" "agent-scheduler" "ui" ]
+    ++ (if builtins.all (b: b.ipBlock.cidr == "0.0.0.0/0" && builtins.all (c: builtins.elem c b.ipBlock.except) [ "10.0.0.0/8" "100.64.0.0/10" "169.254.0.0/16" ]) npInternet && npInternet != [ ] then [ ]
+        else [ "sandbox-isolation internet egress must except the pod/tailnet/metadata ranges" ])
+    ++ (if ((evalPlatform { module = { lib, ... }: { imports = [ ./kubenix-config.nix ]; scooter.networkPolicy.enable = lib.mkForce false; }; }).config.kubernetes.resources.networkPolicies or { }) ? sandbox-isolation
+        then [ "networkPolicy.enable = false still renders sandbox-isolation" ] else [ ]);
+
   # A contrib's approval declaration reaches the agent-host, and with aws off it does not.
   approvalsJson =
     let m = builtins.filter (e: e.name == "APPROVAL_CONTRIBS_JSON") hostEnv;
@@ -994,7 +1018,7 @@ let
     ++ (if bodyAnn overrideRes == "1g" then [ ]
         else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
 
-  allProblems = uploadsProblems ++ sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  allProblems = uploadsProblems ++ sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

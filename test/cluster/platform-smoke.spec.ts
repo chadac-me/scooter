@@ -150,4 +150,47 @@ maybe("multi-replica platform smoke", () => {
       }
     }
   });
+
+  it("a sandbox reaches the broker but not the agent-host (sandbox-isolation NetworkPolicy)", async () => {
+    const threadId = await createConversation(cluster);
+    await cluster.curlInCluster(`${AGENT_HOST}/agui`, {
+      method: "POST",
+      headers: ["Content-Type: application/json", "Accept: text/event-stream"],
+      body: JSON.stringify({
+        threadId,
+        runId: "r1",
+        messages: [{ id: "m1", role: "user", content: "network isolation" }],
+      }),
+      timeoutMs: 60_000,
+    });
+    const row = await waitForConversationRow(NS, threadId, (r) => !!r.sandbox_ref);
+    const sandbox = row.sandbox_ref as string;
+    // status.selector is the controller's own pod selector: it strips our agents.x-k8s.io/sandbox-name template label, and
+    // sandbox-name-hash is the label the NetworkPolicy keys on.
+    const sb = await cluster.waitFor<{
+      status?: { selector?: string; conditions?: Array<{ type: string; status: string }> };
+    }>(
+      "Sandbox",
+      sandbox,
+      (s) => !!s.status?.selector && !!s.status?.conditions?.some((c) => c.type === "Ready" && c.status === "True"),
+      180_000,
+      NS,
+    );
+    const selector = sb.status?.selector as string;
+    expect(selector, "the Sandbox selector must key on the label the policy selects").toMatch(/^agents\.x-k8s\.io\/sandbox-name-hash=/);
+    const httpCode = async (url: string) =>
+      (
+        await cluster.exec(
+          selector,
+          ["sh", "-c", `curl -s -m 5 -o /dev/null -w '%{http_code}' ${url}`],
+          NS,
+        )
+      ).stdout.trim();
+
+    // The allowed path first, so a sandbox with no network at all cannot pass as "isolated".
+    expect(await httpCode(`http://agent-broker.${NS}.svc.cluster.local:8080/health`)).toBe("200");
+    // The main listener trusts identity headers, so a sandbox must not get a connection at all.
+    expect(await httpCode(`${AGENT_HOST}/whoami`), "sandbox reached the agent-host front door").toBe("000");
+    expect(await httpCode(`http://agent-host-pods.${NS}.svc.cluster.local:8080/whoami`), "sandbox reached an agent-host pod").toBe("000");
+  }, 300_000);
 });

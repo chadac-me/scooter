@@ -371,6 +371,8 @@ jobs:
             platform:
               - 'modules/platform.nix'
               - 'modules/conversation-controller.nix'
+              # Sandbox NetworkPolicy: only a real CNI shows whether it blocks too much.
+              - 'modules/network-policy.nix'
               - 'services/conversation-controller/**'
               - 'services/conversation-router/**'
               - 'test/cluster/platform-smoke.spec.ts'
