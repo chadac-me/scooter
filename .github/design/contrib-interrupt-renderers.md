@@ -51,7 +51,7 @@ Today an interrupt is options plus an optional free-form `metadata`. Add one fie
   and `scooter.dev/interrupt-result` on its response.
 - `reason` goes back to always being `confirmation`. `kind` replaces the
   `input_required` signal.
-- The sidebar `!` and `awaiting_input_at` stay exactly as in #912. They fire for
+- The sidebar `!` stays as in #912, its state in the `conversation_awaiting_input` table. It fires for
   any pending request, whatever its kind.
 
 ### 2. An interrupt-renderer UI slot (core)

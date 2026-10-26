@@ -4,7 +4,7 @@
 from typing import Optional
 import datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Index, PrimaryKeyConstraint, Text, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKeyConstraint, Index, PrimaryKeyConstraint, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -81,7 +81,6 @@ class Conversations(Base):
     pending_queue: Mapped[Optional[dict]] = mapped_column(JSONB)
     run_started_at: Mapped[Optional[int]] = mapped_column(BigInteger)
     last_reply_at: Mapped[Optional[int]] = mapped_column(BigInteger)
-    awaiting_input_at: Mapped[Optional[int]] = mapped_column(BigInteger)
     host_pod: Mapped[Optional[str]] = mapped_column(Text)
     phase: Mapped[Optional[str]] = mapped_column(Text)
     sandbox_ref: Mapped[Optional[str]] = mapped_column(Text)
@@ -104,3 +103,14 @@ class UserSkills(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('true'))
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class ConversationAwaitingInput(Conversations):
+    __tablename__ = 'conversation_awaiting_input'
+    __table_args__ = (
+        ForeignKeyConstraint(['conversation_id'], ['conversations.id'], ondelete='CASCADE', name='conversation_awaiting_input_conversation_id_fkey'),
+        PrimaryKeyConstraint('conversation_id', name='conversation_awaiting_input_pkey')
+    )
+
+    conversation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    since: Mapped[int] = mapped_column(BigInteger, nullable=False)

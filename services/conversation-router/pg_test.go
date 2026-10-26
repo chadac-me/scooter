@@ -412,6 +412,33 @@ func TestPgNotifyKindSeparatesActivityFromMeta(t *testing.T) {
 		}
 	}
 
+	// freshListen is listen on a connection of its own: a pooled one can still be LISTENing from
+	// an earlier subtest, with that subtest's notifications queued ahead of this one's.
+	freshListen := func(t *testing.T) *pgx.Conn {
+		t.Helper()
+		conn, err := pgx.ConnectConfig(ctx, pool.Config().ConnConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close(context.Background()) })
+		if _, err := conn.Exec(ctx, "listen conversations_changed"); err != nil {
+			t.Fatal(err)
+		}
+		return conn
+	}
+	nextOn := func(t *testing.T, conn *pgx.Conn, id string) change {
+		t.Helper()
+		for {
+			n, err := conn.WaitForNotification(ctx)
+			if err != nil {
+				t.Fatalf("%s: no notification arrived: %v", id, err)
+			}
+			if c, ok := notifyDecision(n.Payload); ok && c.ID == id {
+				return c
+			}
+		}
+	}
+
 	t.Run("a last_activity_at bump notifies, and is throttleable", func(t *testing.T) {
 		// Before #776 this fired no notification at all, which is why the list poll could not go.
 		insertConv(t, pool, "c-busy", "", "")
@@ -454,18 +481,61 @@ func TestPgNotifyKindSeparatesActivityFromMeta(t *testing.T) {
 		}
 	})
 
-	t.Run("awaiting_input_at notifies as meta, set and cleared", func(t *testing.T) {
+	t.Run("conversation_awaiting_input notifies as meta, set, moved and cleared", func(t *testing.T) {
 		// The sidebar's "!" dot must appear when the agent asks, not after the activity window.
 		insertConv(t, pool, "c-ask", "", "")
-		conn := listen(t)
-		for _, val := range []string{"1700000000000", "NULL"} {
-			if _, err := pool.Exec(ctx,
-				`UPDATE conversations SET awaiting_input_at = `+val+` WHERE id = 'c-ask'`); err != nil {
+		if _, err := pool.Exec(ctx, `UPDATE conversations SET owner = 'alice' WHERE id = 'c-ask'`); err != nil {
+			t.Fatal(err)
+		}
+		conn := freshListen(t)
+		for _, stmt := range []string{
+			`INSERT INTO conversation_awaiting_input (conversation_id, since) VALUES ('c-ask', 1700000000000)`,
+			`UPDATE conversation_awaiting_input SET since = 1700000000001 WHERE conversation_id = 'c-ask'`,
+			`DELETE FROM conversation_awaiting_input WHERE conversation_id = 'c-ask'`,
+		} {
+			if _, err := pool.Exec(ctx, stmt); err != nil {
 				t.Fatal(err)
 			}
-			if c := next(t, conn, "c-ask"); c.activityOnly() {
-				t.Fatalf("awaiting_input_at = %s must push immediately, got kind=%q", val, c.Kind)
+			c := nextOn(t, conn, "c-ask")
+			if c.activityOnly() || c.deleted() || c.Owner == nil || *c.Owner != "alice" {
+				t.Fatalf("%s must push an immediate upsert for alice, got %+v", stmt, c)
 			}
+		}
+	})
+
+	t.Run("deleting a waiting conversation cascades and sends only the removal", func(t *testing.T) {
+		insertConv(t, pool, "c-ask-del", "", "")
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO conversation_awaiting_input (conversation_id, since) VALUES ('c-ask-del', 1)`); err != nil {
+			t.Fatal(err)
+		}
+		conn := freshListen(t)
+		if _, err := pool.Exec(ctx, `DELETE FROM conversations WHERE id = 'c-ask-del'`); err != nil {
+			t.Fatal(err)
+		}
+		if c := nextOn(t, conn, "c-ask-del"); !c.deleted() {
+			t.Fatalf("the conversation delete must notify a removal, got %+v", c)
+		}
+		// A sentinel row's insert bounds the wait: anything naming c-ask-del before it is the
+		// cascade's trigger re-announcing a conversation that is gone.
+		insertConv(t, pool, "c-ask-sentinel", "", "")
+		for {
+			n, err := conn.WaitForNotification(ctx)
+			if err != nil {
+				t.Fatalf("no sentinel notification arrived: %v", err)
+			}
+			c, _ := notifyDecision(n.Payload)
+			if c.ID == "c-ask-del" {
+				t.Fatalf("the cascade must not notify after the removal, got %q", n.Payload)
+			}
+			if c.ID == "c-ask-sentinel" {
+				break
+			}
+		}
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM conversation_awaiting_input WHERE conversation_id = 'c-ask-del'`).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("the cascade must drop the wait row, got n=%d err=%v", n, err)
 		}
 	})
 

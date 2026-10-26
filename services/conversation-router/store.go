@@ -37,9 +37,12 @@ type ConversationRow struct {
 }
 
 // conversationColumns is the one projection list, shared by the SELECTs and the write path's RETURNING so they cannot drift.
+// awaiting_input_at lives in its own table; a scalar subquery rather than a join keeps the list valid in RETURNING.
 const conversationColumns = `id, thread_id, title, created_at, last_activity_at,
                              model, owner, parent_id, user_titled, starred, phase, sandbox_ref,
-                             run_started_at, last_reply_at, awaiting_input_at`
+                             run_started_at, last_reply_at,
+                             (SELECT a.since FROM conversation_awaiting_input a
+                               WHERE a.conversation_id = conversations.id) AS awaiting_input_at`
 
 // scannable is satisfied by both pgx.Row and pgx.Rows, so one scan helper serves every read.
 type scannable interface {

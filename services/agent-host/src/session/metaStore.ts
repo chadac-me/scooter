@@ -19,7 +19,7 @@ import type { SessionId, ThreadId } from "../types.js";
 
 const log = logger("metaStore");
 
-const { conversations } = agent_host;
+const { conversations, conversationAwaitingInput } = agent_host;
 
 /** The store seam the ConversationStore's meta methods delegate to. */
 export interface MetaStore {
@@ -170,7 +170,15 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
 
     async setAwaitingInput(id, at) {
       try {
-        await db.update(conversations).set({ awaitingInputAt: at }).where(eq(conversations.id, id));
+        if (at === null) {
+          await db.delete(conversationAwaitingInput).where(eq(conversationAwaitingInput.conversationId, id));
+        } else {
+          // INSERT ... SELECT so a conversation already deleted is a no-op, not a foreign-key error.
+          await db.execute(sql`
+            INSERT INTO conversation_awaiting_input (conversation_id, since)
+            SELECT id, ${at} FROM conversations WHERE id = ${id}
+            ON CONFLICT (conversation_id) DO UPDATE SET since = EXCLUDED.since`);
+        }
       } catch (e) {
         log.error("setAwaitingInput failed (sidebar question state not persisted)", { conversation_id: id, error: formatError(e) });
       }

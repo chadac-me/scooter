@@ -1,45 +1,29 @@
--- Push awaiting_input_at as 'meta' so the sidebar's "!" dot appears as soon as the agent asks the user.
+-- Push conversation_awaiting_input changes as 'meta' on 'conversations_changed', so the sidebar's
+-- "!" appears as soon as the agent asks the user. The payload names the conversation, as a
+-- conversations-row change would, so the router re-reads the row with no second LISTEN.
 --
--- Replaces the function and UPDATE trigger from 20261022200100; see 20261015190000 for why triggers
--- live here and not in schema.sql.
-CREATE OR REPLACE FUNCTION "conversations_notify"() RETURNS trigger LANGUAGE plpgsql AS $$
+-- The owner comes from the parent row. When that row is gone (the cascade from a conversation
+-- delete), nothing is sent: the conversations DELETE trigger already announced the removal, and
+-- an upsert naming a missing row would only make the router re-read it for nothing.
+--
+-- See 20261015190000 for why triggers live here and not in schema.sql.
+CREATE FUNCTION "conversation_awaiting_input_notify"() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
-  change_kind text := 'meta';
+  conv_id text := COALESCE(NEW.conversation_id, OLD.conversation_id);
+  conv_owner text;
 BEGIN
-  -- Every sidebar column except last_activity_at unchanged; an INSERT or DELETE is never 'activity'.
-  IF TG_OP = 'UPDATE'
-     AND OLD."title"          IS NOT DISTINCT FROM NEW."title"
-     AND OLD."starred"        IS NOT DISTINCT FROM NEW."starred"
-     AND OLD."user_titled"    IS NOT DISTINCT FROM NEW."user_titled"
-     AND OLD."owner"          IS NOT DISTINCT FROM NEW."owner"
-     AND OLD."phase"          IS NOT DISTINCT FROM NEW."phase"
-     AND OLD."run_started_at" IS NOT DISTINCT FROM NEW."run_started_at"
-     AND OLD."last_reply_at"  IS NOT DISTINCT FROM NEW."last_reply_at"
-     AND OLD."awaiting_input_at" IS NOT DISTINCT FROM NEW."awaiting_input_at"
-  THEN
-    change_kind := 'activity';
+  SELECT c.owner INTO conv_owner FROM "conversations" c WHERE c.id = conv_id;
+  IF NOT FOUND THEN
+    RETURN NULL;
   END IF;
   PERFORM pg_notify('conversations_changed',
-    json_build_object('id', COALESCE(NEW.id, OLD.id),
-                      'op', CASE WHEN TG_OP = 'DELETE' THEN 'delete' ELSE 'upsert' END,
-                      'kind', change_kind,
-                      -- NULL for an unowned conversation, which the router treats as it does an unowned upsert.
-                      'owner', COALESCE(NEW.owner, OLD.owner))::text);
+    json_build_object('id', conv_id, 'op', 'upsert', 'kind', 'meta', 'owner', conv_owner)::text);
   RETURN NULL; -- AFTER trigger: the return value is ignored.
 END;
 $$;
 
-DROP TRIGGER "conversations_notify_upd" ON "conversations";
+CREATE TRIGGER "conversation_awaiting_input_notify" AFTER INSERT OR DELETE ON "conversation_awaiting_input"
+  FOR EACH ROW EXECUTE FUNCTION "conversation_awaiting_input_notify"();
 
-CREATE TRIGGER "conversations_notify_upd" AFTER UPDATE ON "conversations"
-  FOR EACH ROW WHEN (
-    OLD."title"            IS DISTINCT FROM NEW."title"            OR
-    OLD."starred"          IS DISTINCT FROM NEW."starred"          OR
-    OLD."user_titled"      IS DISTINCT FROM NEW."user_titled"      OR
-    OLD."owner"            IS DISTINCT FROM NEW."owner"            OR
-    OLD."phase"            IS DISTINCT FROM NEW."phase"            OR
-    OLD."run_started_at"   IS DISTINCT FROM NEW."run_started_at"   OR
-    OLD."last_reply_at"    IS DISTINCT FROM NEW."last_reply_at"    OR
-    OLD."awaiting_input_at" IS DISTINCT FROM NEW."awaiting_input_at" OR
-    OLD."last_activity_at" IS DISTINCT FROM NEW."last_activity_at"
-  ) EXECUTE FUNCTION "conversations_notify"();
+CREATE TRIGGER "conversation_awaiting_input_notify_upd" AFTER UPDATE ON "conversation_awaiting_input"
+  FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION "conversation_awaiting_input_notify"();
