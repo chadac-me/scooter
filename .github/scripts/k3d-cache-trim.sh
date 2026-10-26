@@ -33,11 +33,15 @@ busy() {
   done | grep -qxF "$1"
 }
 
+# The contents are written by root inside the k3d containers, so the wipe runs as
+# root from the start: an unprivileged pass deletes only some files, and a registry
+# left with manifests whose blobs are gone breaks every later pull.
 wipe() {
-  if [ -w "$1" ]; then
-    find "$1" -mindepth 1 -delete
-  else
+  if sudo -n true 2>/dev/null; then
     sudo -n find "$1" -mindepth 1 -delete
+  else
+    docker run --rm --entrypoint find -v "$1:/cache" \
+      "${K3D_TRIM_IMAGE:-docker.io/library/registry:2}" /cache -mindepth 1 -delete
   fi
 }
 

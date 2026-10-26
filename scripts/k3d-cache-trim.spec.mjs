@@ -1,17 +1,18 @@
 // Covers .github/scripts/k3d-cache-trim.sh, run as k3d-platform-up.sh runs it,
 // with `df` and `docker` stubbed on PATH so free space and live mounts are inputs.
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+const realFind = execFileSync("bash", ["-c", "command -v find"], { encoding: "utf8" }).trim();
 const script = fileURLToPath(new URL("../.github/scripts/k3d-cache-trim.sh", import.meta.url));
 
 /** freeGb: dir -> GB free on its volume; mounted: dirs a container bind-mounts. */
-function setup({ freeGb, mounted = [] }) {
+function setup({ freeGb, mounted = [], sudo = false }) {
   const root = mkdtempSync(join(tmpdir(), "k3d-trim-"));
   const bin = join(root, "bin");
   mkdirSync(bin);
@@ -32,8 +33,17 @@ function setup({ freeGb, mounted = [] }) {
   const mounts = mounted.map((name) => join(root, name)).join("\\n");
   writeFileSync(
     join(bin, "docker"),
-    `#!/usr/bin/env bash\ncase "$1" in\n  ps) ${mounted.length ? "echo c1" : ":"} ;;\n  inspect) printf '${mounts}\\n' ;;\nesac\n`,
+    `#!/usr/bin/env bash\ncase "$1" in\n  ps) ${mounted.length ? "echo c1" : ":"} ;;\n  inspect) printf '${mounts}\\n' ;;\n` +
+      `  run) echo "$*" >> "${root}/docker-run.log"; while [ "$1" != -v ]; do shift; done; rm -rf "\${2%%:*}"/* ;;\nesac\n`,
   );
+  // `find` logs who ran it; `sudo` either runs the command (passwordless) or refuses.
+  writeFileSync(join(bin, "find"), `#!/usr/bin/env bash\necho "\${FIND_AS:-user}" >> "${root}/find.log"\nexec ${realFind} "$@"\n`);
+  writeFileSync(
+    join(bin, "sudo"),
+    sudo ? '#!/usr/bin/env bash\n[ "$1" = -n ] && shift\nFIND_AS=root exec "$@"\n' : "#!/usr/bin/env bash\nexit 1\n",
+  );
+  chmodSync(join(bin, "find"), 0o755);
+  chmodSync(join(bin, "sudo"), 0o755);
   chmodSync(join(bin, "df"), 0o755);
   chmodSync(join(bin, "docker"), 0o755);
   const run = (env = {}) =>
@@ -60,6 +70,25 @@ describe("k3d-cache-trim", () => {
     expect(existsSync(join(t.root, "containerd"))).toBe(true);
     expect(t.emptied("registry")).toBe(false);
     expect(log).toContain("emptied");
+  });
+
+  // An unprivileged pass would delete only the files it owns, leaving a registry
+  // whose manifests name blobs that are gone.
+  it("without sudo, empties through a root container and never deletes as the runner user", () => {
+    const t = setup({ freeGb: { containerd: 5 } });
+    const log = t.run();
+    expect(t.emptied("containerd")).toBe(true);
+    expect(log).toContain("emptied");
+    expect(readFileSync(join(t.root, "docker-run.log"), "utf8")).toContain("--entrypoint find");
+    expect(existsSync(join(t.root, "find.log"))).toBe(false);
+  });
+
+  it("with passwordless sudo, deletes as root without a container", () => {
+    const t = setup({ freeGb: { containerd: 5 }, sudo: true });
+    t.run();
+    expect(t.emptied("containerd")).toBe(true);
+    expect(existsSync(join(t.root, "docker-run.log"))).toBe(false);
+    expect(readFileSync(join(t.root, "find.log"), "utf8").trim()).toBe("root");
   });
 
   it("never empties a cache a live container mounts", () => {
