@@ -466,6 +466,11 @@
           };
         in
         {
+          # fastmcp 3.4.x is marked broken against mcp>=2; pin mcp_1 until fastmcp supports it (PR #906).
+          _module.args.pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ (_: prev: { pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [ (pf: _: { mcp = pf.mcp_1; }) ]; }) ];
+          };
           # Deprecated alias of `lib.evalPlatform` (which reads it); kept for existing deploys.
           legacyPackages.evalPlatform = evalPlatform;
           legacyPackages.imageModules = imageModules;
