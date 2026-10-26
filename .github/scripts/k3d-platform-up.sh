@@ -34,6 +34,9 @@ trap _phase_summary EXIT
 
 phase "cluster+registry"
 # --- cluster + registry ------------------------------------------------------
+# Before the caches below are mounted, so an emptied one is not in use.
+"$(dirname "$0")/k3d-cache-trim.sh"
+
 # A `.localhost` name resolves to 127.0.0.1 on the host (skopeo pushes to it) and
 # to the registry container inside the cluster (containerd pulls from it), so one
 # image ref works on both sides; see k3dImages in flake.nix.
