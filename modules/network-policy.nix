@@ -17,8 +17,9 @@ let
   npcfg = cfg.networkPolicy;
   ccfg = cfg.conversationController;
 
-  # Set on every sandbox pod by the provisioner (k8sProvisioner.ts SANDBOX_NAME_LABEL).
-  sandboxLabel = "agents.x-k8s.io/sandbox-name";
+  # The agent-sandbox controller sets this on every sandbox pod and strips any agents.x-k8s.io/*
+  # label from the pod template, so the provisioner's own sandbox-name label never reaches the pod.
+  sandboxLabel = "agents.x-k8s.io/sandbox-name-hash";
   isSandbox = { matchExpressions = [{ key = sandboxLabel; operator = "Exists"; }]; };
   notSandbox = { matchExpressions = [{ key = sandboxLabel; operator = "DoesNotExist"; }]; };
 

@@ -165,17 +165,23 @@ maybe("multi-replica platform smoke", () => {
     });
     const row = await waitForConversationRow(NS, threadId, (r) => !!r.sandbox_ref);
     const sandbox = row.sandbox_ref as string;
-    await cluster.waitFor<{ status?: { conditions?: Array<{ type: string; status: string }> } }>(
+    // The controller's own selector: it strips our agents.x-k8s.io/sandbox-name template label, and
+    // sandbox-name-hash is the label the NetworkPolicy keys on.
+    const sb = await cluster.waitFor<{
+      status?: { labelSelector?: string; conditions?: Array<{ type: string; status: string }> };
+    }>(
       "Sandbox",
       sandbox,
-      (s) => !!s.status?.conditions?.some((c) => c.type === "Ready" && c.status === "True"),
+      (s) => !!s.status?.labelSelector && !!s.status?.conditions?.some((c) => c.type === "Ready" && c.status === "True"),
       180_000,
       NS,
     );
+    const selector = sb.status?.labelSelector as string;
+    expect(selector, "the Sandbox selector must key on the label the policy selects").toMatch(/^agents\.x-k8s\.io\/sandbox-name-hash=/);
     const httpCode = async (url: string) =>
       (
         await cluster.exec(
-          `agents.x-k8s.io/sandbox-name=${sandbox}`,
+          selector,
           ["sh", "-c", `curl -s -m 5 -o /dev/null -w '%{http_code}' ${url}`],
           NS,
         )
