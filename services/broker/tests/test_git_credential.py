@@ -55,3 +55,11 @@ def test_test_provider_mounts_git_credentials():
     app = create_app()
     resp = TestClient(app).get("/test/git-credentials")
     assert resp.status_code != 404
+
+
+def test_forge_proxy_stops_serving_git_credentials(monkeypatch):
+    # The forge proxy exists so the token never reaches the sandbox; the old route would undo that.
+    monkeypatch.setenv("FORGE_PROXY_ENABLED", "true")
+    app = create_app()
+    app.dependency_overrides[authenticate] = _fake_identity
+    assert TestClient(app).get("/test/git-credentials").status_code == 404

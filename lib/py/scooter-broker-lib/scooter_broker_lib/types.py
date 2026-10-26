@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkable
 
 import httpx
 from fastapi import APIRouter
+
+if TYPE_CHECKING:
+    from .forge.policy import ForgePolicy
 
 
 # ---------------------------------------------------------------------------
@@ -114,3 +117,5 @@ class Provider:
     # Optional hooks run by the app's lifespan.
     on_startup: Callable[[], Awaitable[None]] | None = None
     on_shutdown: Callable[[], Awaitable[None]] | None = None
+    # Checked before the credential goes on any request to this provider's forge (forge/policy.py); None allows all.
+    forge_policy: "ForgePolicy | None" = None

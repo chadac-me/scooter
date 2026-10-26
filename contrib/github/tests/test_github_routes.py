@@ -46,3 +46,32 @@ def test_git_credentials_are_vended_by_the_app_source(monkeypatch):
     assert provider.enabled
     assert isinstance(provider.credential, GitHubAppSource)
     assert provider.credential.installation_id == 42
+
+
+def test_forge_proxy_intercepts_github_hosts():
+    from scooter_broker_lib.forge import ALLOW_ALL, find_forge_hosts
+
+    provider = github()
+    forge = find_forge_hosts(provider)
+    assert forge is not None
+    assert {h.host for h in forge.hosts} == {"github.com", "api.github.com", "uploads.github.com"}
+    assert [h.host for h in forge.hosts if h.git] == ["github.com"]
+    assert forge.dialect == "github"
+    assert provider.forge_policy is ALLOW_ALL
+
+
+def test_gh_graphql_creates_are_linked():
+    from scooter_broker_lib.forge import find_forge_hosts
+
+    rules = find_forge_hosts(github()).graphql_link_rules
+    pr = rules["createPullRequest"]({"pullRequest": {"url": "https://github.com/o/r/pull/7", "title": "T"}})
+    assert (pr.resource_type, pr.url, pr.title) == ("pr", "https://github.com/o/r/pull/7", "T")
+    assert rules["createIssue"]({"issue": {"url": "https://github.com/o/r/issues/8"}}).resource_type == "issue"
+    assert rules["createPullRequest"]({"pullRequest": None}) is None
+
+
+def test_forge_policy_is_loaded_from_settings(monkeypatch):
+    monkeypatch.setenv("GITHUB_FORGE_POLICY", "scooter_broker_lib.forge:AllowAll")
+    from scooter_broker_lib.forge import AllowAll
+
+    assert isinstance(github().forge_policy, AllowAll)

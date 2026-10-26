@@ -17,6 +17,8 @@ dependencies = [
   "openfga-sdk",  # OpenFGA authorization
   "pyjwt",        # conversation-token verification (core/conv_token.py)
   "fastmcp",      # the agent-facing /mcp endpoint (broker/mcp/routes.py)
+  "h11",          # HTTP/1.1 inside the forge proxy tunnel (broker/forge/proxy.py)
+  "cryptography", # the forge proxy CA and leaf certificates (broker/forge/ca.py)
   "scooter-schema", # generated SQLAlchemy models for the broker DB (lib/py/scooter-schema)
   "scooter-lib",    # shared structured-logging convention (lib/py/scooter-lib)
   "scooter-broker-lib", # the provider extension surface

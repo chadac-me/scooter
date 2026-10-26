@@ -562,6 +562,9 @@
             # The broker tools (agent-broker / git-credential-broker)
             broker-tools = brokerTools.agent-broker;
 
+            # nix build .#forge-shim  ->  the sandbox's local forge proxy shim (runs go test)
+            forge-shim = pkgs.callPackage ./pkgs/forge-shim { };
+
             # nix build .#broker-image  ->  broker OCI image
             broker-image = builtImages.agent-broker.package;
 

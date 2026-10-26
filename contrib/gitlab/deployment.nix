@@ -14,6 +14,6 @@ in
           key = ccfg.tokenSecret.key;
         };
       }
-    ];
+    ] ++ lib.optional (ccfg.forgePolicy != "") { name = "GITLAB_FORGE_POLICY"; value = ccfg.forgePolicy; };
   };
 }

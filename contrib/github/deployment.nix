@@ -16,6 +16,6 @@ in
           key = ccfg.privateKeySecret.key;
         };
       }
-    ];
+    ] ++ lib.optional (ccfg.forgePolicy != "") { name = "GITHUB_FORGE_POLICY"; value = ccfg.forgePolicy; };
   };
 }

@@ -78,6 +78,12 @@ class BrokerSettings(ScooterBaseSettings):
     # only inside the Scooter conversation UI (space-separated origins, or 'self').
     shares_frame_ancestors: str = "'self'"
 
+    # --- The forge egress proxy (broker/forge/) --------------------------------
+    # Sandboxes reach git/gh/glab hosts through this CONNECT proxy, which injects the
+    # provider credential; while on, /{provider}/git-credentials is not served.
+    forge_proxy_enabled: bool = False
+    forge_proxy_port: int = 3128
+
     port: int = 8080
 
     def store_config(self, dsn: str = "") -> "StoreConfig":
