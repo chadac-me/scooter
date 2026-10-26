@@ -39,7 +39,12 @@ in
       # BROKER_URL is read from PID 1's environ, and --file targets the agent's HOME where --global would hit /root.
       script = ''
         broker_url=$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^BROKER_URL=//p' | head -1 || true)
-        if [ -n "$broker_url" ]; then
+        # With the forge proxy (forge-proxy.nix) git needs no helper, and the broker no longer vends one; the
+        # workspace PVC keeps .gitconfig across restarts, so an earlier `broker` helper is removed.
+        if [ -s /etc/scooter/forge-ca/ca.crt ]; then
+          ${pkgs.git}/bin/git config --file ${lib.escapeShellArg "${cfg.home}/.gitconfig"} --unset-all credential.helper '^broker$' || true
+          echo "forge proxy present; no git credential helper"
+        elif [ -n "$broker_url" ]; then
           mkdir -p ${lib.escapeShellArg cfg.home}
           ${pkgs.git}/bin/git config --file ${lib.escapeShellArg "${cfg.home}/.gitconfig"} credential.helper broker || true
           echo "git credential helper -> broker ($broker_url) in ${cfg.home}/.gitconfig"

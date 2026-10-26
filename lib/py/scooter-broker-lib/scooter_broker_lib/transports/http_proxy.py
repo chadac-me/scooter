@@ -13,8 +13,11 @@ from dataclasses import dataclass, field
 
 import httpx
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import JSONResponse
 
 from ..autolink import Link, LinkRule, post_link
+from ..forge.hosts import api_forge_request
+from ..forge.policy import DENY_HEADER, denial_message, enforce
 from ..types import AuthDependency, Identity, Provider, Transport
 from scooter_lib.logging_config import format_error
 
@@ -60,6 +63,18 @@ class HttpProxy(Transport):
                     content=body or None,
                     params=dict(request.query_params),
                 )
+                forge_req = api_forge_request(
+                    provider, identity, via="http-proxy",
+                    method=request.method, url=outbound.url, body=body,
+                )
+                if forge_req is not None:
+                    decision = await enforce(provider.forge_policy, forge_req)
+                    if not decision.allowed:
+                        return JSONResponse(
+                            {"message": denial_message(decision)},
+                            status_code=403,
+                            headers={DENY_HEADER: decision.reason or "denied"},
+                        )
                 if credential_source is not None:
                     cred = await credential_source.get(identity)
                     cred.inject(outbound)

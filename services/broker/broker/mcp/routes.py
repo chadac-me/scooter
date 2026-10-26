@@ -21,6 +21,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from fastmcp.server.middleware import Middleware
 
 from scooter_broker_lib.autolink import list_links
+from scooter_broker_lib.forge import DENY_HEADER, api_forge_request, denial_message, enforce
 from scooter_broker_lib.mcp import ToolContext, collect_mcp_servers, gate_for, tool_context
 from scooter_broker_lib.types import Identity, Provider
 from scooter_lib.logging_config import format_error
@@ -58,6 +59,20 @@ class _Upstream:
             outbound = client.build_request(
                 method.upper(), url, json=json, params=params, headers=headers
             )
+            forge_req = api_forge_request(
+                self._provider, self._identity, via="mcp",
+                method=outbound.method, url=outbound.url, body=outbound.content,
+            )
+            if forge_req is not None:
+                decision = await enforce(self._provider.forge_policy, forge_req)
+                if not decision.allowed:
+                    # A response, not an exception, so tools surface it the way they surface any upstream 403.
+                    return httpx.Response(
+                        403,
+                        json={"message": denial_message(decision)},
+                        headers={DENY_HEADER: decision.reason or "denied"},
+                        request=outbound,
+                    )
             if self._provider.credential is not None:
                 cred = await self._provider.credential.get(self._identity)
                 cred.inject(outbound)

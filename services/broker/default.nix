@@ -26,6 +26,8 @@ python3Packages.buildPythonApplication {
     openfga-sdk
     pyjwt          # conversation-token verification (core/conv_token.py)
     fastmcp        # serves the agent-facing /mcp endpoint (broker/mcp/routes.py)
+    h11            # HTTP/1.1 inside the forge proxy tunnel (broker/forge/proxy.py)
+    cryptography   # the forge proxy CA and leaf certificates (broker/forge/ca.py)
     scooterSchema  # generated SQLAlchemy models for the broker DB
     scooterLib     # shared structured-logging convention
     scooterBrokerLib # the extension surface a provider composes
@@ -35,7 +37,7 @@ python3Packages.buildPythonApplication {
     pytestCheckHook
     pytest-asyncio
   ];
-  pythonImportsCheck = [ "broker.core.app" ];
+  pythonImportsCheck = [ "broker.core.app" "broker.forge.proxy" "broker.forge.ca_store" ];
 
   meta.description = "Extensible credential broker for kubenix-agent-manager";
 }

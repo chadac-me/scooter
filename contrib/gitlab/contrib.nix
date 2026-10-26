@@ -1,6 +1,18 @@
 { lib, ... }:
 {
   contribs.gitlab = {
+    options.forgePolicy = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      example = "my_scooter_policies.gitlab:policy";
+      description = ''
+        A `module:attr` naming a ForgePolicy (scooter_broker_lib.forge) the broker
+        checks on every GitLab request it makes for an agent: git push/fetch through
+        the forge proxy, `glab`, the http-proxy and the agent tools. The module must be
+        importable by the broker. Empty (the default) allows everything the token allows.
+      '';
+    };
+
     options.tokenSecret = lib.mkOption {
       type = lib.types.submodule {
         options = {
@@ -19,6 +31,7 @@
 
     config = {
       src = ./.;
+      sandbox.module = ./sandbox.nix;
 
       # The UI row: the GitLab chip, icon and card.
       ui = {

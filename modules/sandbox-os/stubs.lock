@@ -39,6 +39,24 @@
         ],
         "name": "code-server-4.141.0"
       },
+      "gh": {
+        "attr": "gh",
+        "drv": "/nix/store/8gvqzg3xvns2am26mbq582i113q2fhwx-gh-2.102.0.drv",
+        "output": "out",
+        "bins": [
+          "gh"
+        ],
+        "name": "gh-2.102.0"
+      },
+      "glab": {
+        "attr": "glab",
+        "drv": "/nix/store/736b0g3wkcsnkks9kk87zxvxa2spvy7v-glab-1.114.0.drv",
+        "output": "out",
+        "bins": [
+          "glab"
+        ],
+        "name": "glab-1.114.0"
+      },
       "marimo": {
         "attr": "marimo",
         "drv": "/nix/store/yldxq9qbhb5xr52r9f5wrm0jbw4171ab-python3.14-marimo-0.25.1.drv",
@@ -104,6 +122,24 @@
           "code-server"
         ],
         "name": "code-server-4.141.0"
+      },
+      "gh": {
+        "attr": "gh",
+        "drv": "/nix/store/gncyxnjib2092b909nv0gg3v97wq3m45-gh-2.102.0.drv",
+        "output": "out",
+        "bins": [
+          "gh"
+        ],
+        "name": "gh-2.102.0"
+      },
+      "glab": {
+        "attr": "glab",
+        "drv": "/nix/store/jz5x3jlq0kr4mg5qz0xaq135piy8pzyj-glab-1.114.0.drv",
+        "output": "out",
+        "bins": [
+          "glab"
+        ],
+        "name": "glab-1.114.0"
       },
       "marimo": {
         "attr": "marimo",
