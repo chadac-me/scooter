@@ -1,8 +1,9 @@
-"""GitHub provider: a GitHub App (or PAT fallback) credential source, an http-proxy to api.github.com, a git-credential helper for github.com, and the agent tool."""
+"""GitHub provider: a GitHub App (or PAT fallback) credential source, an http-proxy to api.github.com, a git-credential helper for github.com, the forge-proxy hosts, and the agent tool."""
 
 from __future__ import annotations
 
 from scooter_broker_lib.autolink import Link, rule
+from scooter_broker_lib.forge import ForgeHost, ForgeHosts, load_policy
 from scooter_broker_lib.registry import register_provider
 from scooter_broker_lib.types import Provider
 from scooter_broker_lib.sources.static_token import StaticTokenSource
@@ -25,6 +26,28 @@ _GITHUB_LINK_RULES = [
         "POST", r"^repos/[^/]+/[^/]+/issues/?$",
         lambda r: Link(source="github", resource_type="issue", url=r.get("html_url", ""), title=r.get("title")),
     ),
+]
+
+
+# The same creates made by `gh` through the forge proxy, which uses GraphQL for most of them.
+def _graphql_link(field: str, resource_type: str):
+    def link(data: dict) -> Link | None:
+        node = (data or {}).get(field) or {}
+        url = node.get("url")
+        return Link(source="github", resource_type=resource_type, url=url, title=node.get("title")) if url else None
+    return link
+
+
+_GITHUB_GRAPHQL_LINK_RULES = {
+    "createPullRequest": _graphql_link("pullRequest", "pr"),
+    "createIssue": _graphql_link("issue", "issue"),
+}
+
+# git smart-HTTP on github.com; the REST/GraphQL API and release uploads on their own hosts.
+FORGE_HOSTS = [
+    ForgeHost("github.com", git=True),
+    ForgeHost("api.github.com", api_prefixes=("/",)),
+    ForgeHost("uploads.github.com", api_prefixes=("/",)),
 ]
 
 
@@ -62,6 +85,14 @@ def github() -> Provider:
             ),
             # The agent tool shares the proxy's upstream so the two cannot drift.
             McpTools(server=github_mcp_server(), upstream=UPSTREAM),
+            ForgeHosts(
+                hosts=FORGE_HOSTS,
+                dialect="github",
+                git_username="x-access-token",
+                link_rules=_GITHUB_LINK_RULES,
+                graphql_link_rules=_GITHUB_GRAPHQL_LINK_RULES,
+            ),
         ],
         enabled=enabled,
+        forge_policy=load_policy(settings.github_forge_policy),
     )

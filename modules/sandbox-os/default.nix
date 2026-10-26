@@ -17,6 +17,7 @@
     ../skills/sandbox.nix
     ./mcp-servers.nix
     ./carry-over.nix
+    ./forge-proxy.nix
     ./runtime-converge.nix
     ./broker-modules.nix
     ./local-modules.nix

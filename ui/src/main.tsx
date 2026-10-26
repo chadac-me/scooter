@@ -9,6 +9,7 @@ import { App } from "./App.js";
 import { viewStore } from "./view.js";
 import { currentConversation, sessionStore } from "./sessions.js";
 import { loadWhoami } from "./client.js";
+import { setUploadLimits } from "./fileUpload.js";
 import { subscribeConversations } from "./conversationStream.js";
 import { initTelemetryFromServer, installGlobalErrorHandlers } from "./telemetry.js";
 import { loadContribManifest } from "./contribManifest.js";
@@ -36,7 +37,11 @@ if (chatId) {
 
 // The ingress identity: labels conversations "mine" and names the signed-in user in
 // the header.
-void loadWhoami({ baseUrl: BASE_URL }).then((me) => sessionStore.setCurrentUser(me));
+void loadWhoami({ baseUrl: BASE_URL }).then((me) => {
+  sessionStore.setCurrentUser(me);
+  // The upload caps come from the deployment (scooter.uploads), not the image.
+  setUploadLimits(me.limits);
+});
 
 // The conversation list has exactly one source: the stream's `snapshot` on connect, then its
 // upsert/remove frames. There is no periodic GET /conversations behind it — a tab opened

@@ -189,3 +189,33 @@ async def authenticate_mcp(request: Request) -> Identity:
         namespace=namespace,
         service_account=username,
     )
+
+
+# ---------------------------------------------------------------------------
+# The forge proxy: a sandbox SA token presented as Proxy-Authorization on CONNECT
+# ---------------------------------------------------------------------------
+
+# git opens several connections per operation, so a validated token is reused briefly.
+_SANDBOX_TOKEN_TTL = 60.0
+_sandbox_tokens: dict[str, tuple[Identity, float]] = {}
+
+
+async def sandbox_identity(token: str) -> Identity:
+    """Validate a sandbox's SA token outside a FastAPI request; only sandboxes (not approvers) are admitted."""
+    import hashlib
+    import time
+
+    key = hashlib.sha256(token.encode()).hexdigest()
+    now = time.monotonic()
+    cached = _sandbox_tokens.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
+    username = await _review(token)
+    m = _SA_PATTERN.match(username or "")
+    if not m or m.group(1) != settings.sandbox_namespace:
+        raise HTTPException(status_code=403, detail="the forge proxy serves sandboxes only")
+    identity = Identity(conversation_id=m.group(2), namespace=m.group(1), service_account=username)
+    if len(_sandbox_tokens) > 10_000:
+        _sandbox_tokens.clear()
+    _sandbox_tokens[key] = (identity, now + _SANDBOX_TOKEN_TTL)
+    return identity

@@ -39,4 +39,8 @@
   scooter-vscode-ahp = pkgs.callPackage ../../contrib/code-server/ahp { };
 
   awscli2 = { package = pkgs.awscli2; bins = [ "aws" "aws_completer" ]; };
+
+  # The forge CLIs (contrib/github, contrib/gitlab), authenticated by the broker's forge proxy.
+  gh = pkgs.gh;
+  glab = pkgs.glab;
 }

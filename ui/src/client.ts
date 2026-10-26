@@ -508,11 +508,13 @@ export async function setSandboxSize(
   }
 }
 
-/** The caller's identity from the trusted ingress header. */
+/** The caller's identity from the trusted ingress header, plus the deployment's upload
+ *  caps (absent from an older agent-host). */
 export interface Whoami {
   id: string;
   email: string | null;
   anonymous: boolean;
+  limits?: { maxFileBytes?: number; maxFilesPerMessage?: number };
 }
 
 /** Fetch the caller's identity, falling back to anonymous if unreachable. */

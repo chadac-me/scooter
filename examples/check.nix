@@ -955,7 +955,46 @@ let
     else (if off.settingsTabs ? echo then [ "the UI manifest has the echo settings tab while echo is disabled" ] else [ ])
       ++ (if on.settingsTabs ? echo then [ ] else [ "enabling echo did not put its settings tab in the UI's mounted manifest" ]);
 
-  allProblems = sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  # scooter.uploads: the body-limit formula, and that every layer gets it. The example
+  # sets 50MB x 4 on an nginx-class Ingress.
+  uploadBody = import ../modules/upload-max-body.nix;
+  uploadsEval = extra:
+    (evalPlatform {
+      module = { ... }: {
+        imports = [ ./kubenix-config.nix ];
+        config = extra;
+      };
+    }).config.kubernetes.resources;
+  envOf = r: dep: name:
+    let
+      ctrs = builtins.attrValues (r.deployments.${dep}.spec.template.spec.containers or { });
+      m = builtins.filter (e: e.name == name) (builtins.concatMap (c: c.env or [ ]) ctrs);
+    in if m == [ ] then null else (builtins.head m).value;
+  bodyAnn = r: r.ingresses.agent-host.metadata.annotations."nginx.ingress.kubernetes.io/proxy-body-size" or null;
+  traefikRes = uploadsEval { scooter.ingress.className = nixpkgsLib.mkForce "traefik"; };
+  overrideRes = uploadsEval {
+    scooter.ingress.annotations."nginx.ingress.kubernetes.io/proxy-body-size" = "1g";
+  };
+  uploadsProblems =
+    (if uploadBody { maxFileBytes = 25 * 1024 * 1024; maxFilesPerMessage = 4; } == "144m" then [ ]
+     else [ "upload-max-body: 4 x 25MB should give 144m (the ui image's render default)" ])
+    ++ (if uploadBody { maxFileBytes = 50 * 1024 * 1024; maxFilesPerMessage = 1; } == "72m" then [ ]
+        else [ "upload-max-body: 1 x 50MB should give 72m" ])
+    ++ (if uploadBody { maxFileBytes = 1024; maxFilesPerMessage = 1; } == "2m" then [ ]
+        else [ "upload-max-body: a tiny cap should still get the 1MiB headroom (2m)" ])
+    ++ (if envOf res "agent-host" "FILE_MAX_BYTES" == toString (50 * 1024 * 1024)
+          && envOf res "agent-host" "FILE_MAX_PER_MESSAGE" == "4" then [ ]
+        else [ "agent-host.env FILE_MAX_BYTES / FILE_MAX_PER_MESSAGE do not carry scooter.uploads" ])
+    ++ (if envOf res "ui" "UPLOAD_MAX_BODY" == "287m" then [ ]
+        else [ "ui.env UPLOAD_MAX_BODY should be 287m for 4 x 50MB (got ${toString (envOf res "ui" "UPLOAD_MAX_BODY")})" ])
+    ++ (if bodyAnn res == "287m" then [ ]
+        else [ "the nginx-class Ingress lacks proxy-body-size = UPLOAD_MAX_BODY, so ingress-nginx's 1m default would 413 uploads" ])
+    ++ (if bodyAnn traefikRes == null then [ ]
+        else [ "a non-nginx Ingress got the ingress-nginx proxy-body-size annotation" ])
+    ++ (if bodyAnn overrideRes == "1g" then [ ]
+        else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
+
+  allProblems = uploadsProblems ++ sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

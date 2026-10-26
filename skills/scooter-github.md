@@ -32,13 +32,30 @@ triggers:
 or issue on GitHub, or to acknowledge a comment someone left you there. It is not
 relevant to ordinary `git` work.**
 
-## `gh` is not installed. Use `agent-broker` instead.
+## `gh` and `glab`: use them if this sandbox has the forge proxy
 
-The GitHub CLI is **not present** in this sandbox. `gh pr create` fails with
-`command not found`. Do not try to install it.
+Check once:
 
-Instead call the GitHub REST API through `agent-broker`, which injects
-credentials for you — you never see or handle a token:
+```bash
+[ -s /etc/scooter/forge-ca/ca.crt ] && echo "forge proxy: use gh/glab" || echo "no forge proxy: use agent-broker"
+```
+
+**With the forge proxy**, `gh` and `glab` work normally (they download on first
+use). The broker injects the credential on the way out. You never hold a token,
+and `GH_TOKEN`/`GITLAB_TOKEN` are placeholders, so don't try to read or set a real one.
+
+```bash
+gh pr create --title "Fix X" --body "..." --base main
+gh api repos/OWNER/REPO/pulls/42/comments
+glab mr create --title "Fix X" --description "..."
+```
+
+A `403` carrying an `X-Scooter-Policy` header (or "denied by the Scooter forge
+policy") is the deployment's policy refusing that action. It is **not** an auth
+bug, so don't retry it another way. Tell the user what was refused.
+
+**Without it**, `gh` is not available. Call the GitHub REST API through
+`agent-broker`, which also injects credentials for you:
 
 ```bash
 # Open a pull request. NOTE: the broker PATH comes FIRST, then curl-style args.
@@ -46,6 +63,8 @@ agent-broker github/repos/OWNER/REPO/pulls \
   -X POST -H 'Content-Type: application/json' \
   -d '{"title":"Fix X","head":"my-branch","base":"main","body":"..."}'
 ```
+
+`agent-broker` works in both setups, and the examples below use it.
 
 ```bash
 # Open an issue.
@@ -156,8 +175,9 @@ agent-broker "github/repos/OWNER/REPO/pulls/42/comments?per_page=100" \
 
 ## Pushing a branch works normally
 
-`git push` needs no special handling. `credential.helper` is preconfigured to
-the broker (see `scooter-links`), so pushing a branch is ordinary git:
+`git push` needs no special handling. The broker supplies the credential (through
+the forge proxy, or the preconfigured `credential.helper` without it), so
+pushing a branch is ordinary git:
 
 ```bash
 git checkout -b my-branch
@@ -170,7 +190,8 @@ before the API call.
 
 ## Anything created via the broker is auto-linked
 
-A PR or issue you create through `agent-broker github/...` is automatically
+A PR or issue you create through `agent-broker github/...` (or `gh` with the
+forge proxy) is automatically
 attached to this conversation, so it shows in the UI's linked resources. If you
 create one some other way, attach it yourself:
 
