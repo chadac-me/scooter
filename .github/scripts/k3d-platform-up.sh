@@ -34,6 +34,9 @@ trap _phase_summary EXIT
 
 phase "cluster+registry"
 # --- cluster + registry ------------------------------------------------------
+# Before the caches below are mounted, so an emptied one is not in use.
+"$(dirname "$0")/k3d-cache-trim.sh"
+
 # A `.localhost` name resolves to 127.0.0.1 on the host (skopeo pushes to it) and
 # to the registry container inside the cluster (containerd pulls from it), so one
 # image ref works on both sides; see k3dImages in flake.nix.
@@ -145,12 +148,21 @@ done \
       # evaluation; a registry that does not answer falls through to a real push.
       repo="${push_ref#*/}"; repo="${repo%%:*}"
       tag="${push_ref##*:}"
-      if curl -sfI -o /dev/null --max-time 5 \
+      # Every blob the manifest names must be present too, since a manifest that
+      # outlived its blobs would otherwise be skipped here and fail every pull.
+      if manifest=$(curl -sf --max-time 5 \
            "http://localhost:5800/v2/${repo}/manifests/${tag}" \
            -H "Accept: application/vnd.oci.image.manifest.v1+json" \
-           -H "Accept: application/vnd.docker.distribution.manifest.v2+json" 2>/dev/null; then
-        echo "= $attr already in registry at $tag -- skipping push"
-        exit 0
+           -H "Accept: application/vnd.docker.distribution.manifest.v2+json" 2>/dev/null); then
+        complete=1
+        for digest in $(printf "%s" "$manifest" | grep -oE "sha256:[0-9a-f]{64}" | sort -u); do
+          curl -sfI -o /dev/null --max-time 5 "http://localhost:5800/v2/${repo}/blobs/${digest}" \
+            || { complete=0; echo "~ $attr manifest at $tag is missing blob $digest -- re-pushing"; break; }
+        done
+        if [ "$complete" = 1 ]; then
+          echo "= $attr already in registry at $tag -- skipping push"
+          exit 0
+        fi
       fi
 
       echo "push $attr -> $ref (via $push_ref)"
