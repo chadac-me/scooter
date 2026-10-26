@@ -170,3 +170,25 @@ describe("a conversation the server has never created", () => {
     expect(sessionStore.get().sessions.some((x) => x.id === key)).toBe(false);
   });
 });
+
+describe("deleting a draft while its first send is creating it", () => {
+  it("deletes the conversation server-side once its id arrives, rather than orphaning it", async () => {
+    const calls = stubFetch(204);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    setConversationMinter(async () => {
+      await gate;
+      return "conv-late";
+    });
+    const key = sessionStore.newSession();
+    const create = conversationFor(current(key)).ensureCreated();
+
+    const removing = removeSession(current(key));
+    expect(sessionStore.get().sessions.some((x) => x.id === key)).toBe(false);
+    release();
+    await create;
+    await removing;
+
+    expect(calls).toEqual([expect.objectContaining({ method: "DELETE", url: expect.stringMatching(/\/conversations\/conv-late$/) })]);
+  });
+});

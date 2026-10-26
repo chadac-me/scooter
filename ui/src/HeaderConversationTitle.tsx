@@ -18,7 +18,9 @@ import { cn } from "@/lib/utils";
 export const renameStaysOpen = (hasNextTarget: boolean, nextIsInside: boolean): boolean =>
   hasNextTarget && nextIsInside;
 
-export function confirmDeleteMessage(s: Pick<Session, "title" | "starred">): string {
+export function confirmDeleteMessage(s: Pick<Session, "title" | "starred">, backed = true): string {
+  // A never-sent conversation has no sandbox, so don't threaten to destroy one.
+  if (!backed) return `Delete "${s.title}"? It was never sent, so there is nothing on the server to remove.`;
   return s.starred
     ? `"${s.title}" is starred. Deleting destroys its sandbox and data permanently. Delete anyway?`
     : `Delete "${s.title}"? This destroys its sandbox and data permanently.`;
@@ -58,7 +60,7 @@ function Actions({ session: s }: { session: Session }) {
   // Rename is local-first, so a never-sent conversation can still be named.
   const openRename = () => flushSync(() => sessionStore.setEditing(s.id));
   const remove = () => {
-    if (!window.confirm(confirmDeleteMessage(s))) return;
+    if (!window.confirm(confirmDeleteMessage(s, backed))) return;
     void removeSession(s);
   };
   return (

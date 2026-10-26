@@ -41,8 +41,11 @@ export async function commitRename(s: Session, title: string): Promise<void> {
 
 /** Delete the sandbox and data server-side; a never-created conversation is local-only, so dropping the row is the whole delete. */
 export async function removeSession(s: Session): Promise<void> {
-  const id = serverIdOf(s);
+  const conv = conversationFor(s);
+  const creating = conv.creating;
   sessionStore.deleteSession(s.id); // optimistic local removal, by local key
-  if (id === undefined) return;
+  // Mid-create, wait for the id rather than leave a server conversation with no row to delete it from.
+  const id = conv.serverId() ?? (creating ? await conv.ensureCreated() : null);
+  if (!id) return;
   await deleteConversation(agentHostConfig, id);
 }

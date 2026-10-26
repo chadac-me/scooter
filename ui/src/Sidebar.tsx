@@ -200,7 +200,7 @@ export const Sidebar = memo(function Sidebar() {
           variant="default"
           size="sm"
           data-testid="new-session"
-          onClick={() => sessionStore.newSession()}
+          onClick={() => sessionStore.startFresh()}
           className="w-full justify-center gap-1.5"
         >
           <span aria-hidden>＋</span> New conversation

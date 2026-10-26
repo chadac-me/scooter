@@ -1044,3 +1044,56 @@ describe("hover hold on a row's action tiles", () => {
     expect(sessionStore.get().sessions.find((x) => x.serverId === "h-10")!.title).toBe("Lands");
   });
 });
+
+describe("a draft whose first send is still creating it", () => {
+  /** A minter held open until `release` is called, standing in for a slow POST /conversations. */
+  const slowMinter = (id: string) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    setConversationMinter(async () => {
+      await gate;
+      return id;
+    });
+    return () => release();
+  };
+  const row = (key: string) => sessionStore.get().sessions.find((s) => s.id === key)!;
+
+  it("is not reused by startFresh, so New conversation opens a separate draft", async () => {
+    const release = slowMinter("slow-1");
+    const sent = sessionStore.startFresh();
+    const create = conversationFor(row(sent)).ensureCreated();
+
+    const next = sessionStore.startFresh();
+    expect(next).not.toBe(sent);
+    expect(sessionStore.get().currentId).toBe(next);
+
+    release();
+    await create;
+    expect(row(sent).serverId).toBe("slow-1");
+  });
+
+  it("survives a full-list merge read before the create landed, so its server id has a row to land on", async () => {
+    const release = slowMinter("slow-2");
+    const sent = sessionStore.startFresh();
+    const create = conversationFor(row(sent)).ensureCreated();
+    sessionStore.newSession(); // selection moves away
+
+    sessionStore.mergeFromServer([{ id: "slow-other", title: "Other" }]);
+    expect(sessionStore.get().sessions.some((s) => s.id === sent)).toBe(true);
+
+    release();
+    await create;
+    expect(row(sent).serverId).toBe("slow-2");
+  });
+});
+
+describe("clicking New conversation twice (startFresh)", () => {
+  it("leaves one unsent draft, not two", () => {
+    const before = sessionStore.get().sessions.length;
+    const a = sessionStore.startFresh();
+    const grew = sessionStore.get().sessions.length - before;
+    const b = sessionStore.startFresh();
+    expect(b).toBe(a);
+    expect(sessionStore.get().sessions.length - before).toBe(grew);
+  });
+});

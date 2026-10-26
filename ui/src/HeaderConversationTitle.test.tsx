@@ -55,4 +55,9 @@ describe("HeaderConversationTitle", () => {
     expect(confirmDeleteMessage({ title: "A", starred: true })).toMatch(/is starred/);
     expect(confirmDeleteMessage({ title: "A", starred: false })).not.toMatch(/starred/);
   });
+
+  it("does not threaten to destroy a sandbox a never-sent conversation does not have", () => {
+    expect(confirmDeleteMessage({ title: "New chat", starred: false }, false)).not.toMatch(/sandbox/);
+    expect(confirmDeleteMessage({ title: "A", starred: false }, true)).toMatch(/sandbox/);
+  });
 });
