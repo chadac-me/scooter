@@ -19,6 +19,12 @@ maybe("sandbox image in a user-namespaced pod runs Nix builds in Nix's build san
   let cluster: Cluster;
 
   const sh = (script: string) => cluster.exec(SELECTOR, ["sh", "-c", script], NS);
+  // A failed exec reports only through exitCode/stderr, so surface them in the assertion.
+  const ok = async (script: string) => {
+    const r = await sh(script);
+    expect(r.exitCode, `'${script}' failed: ${r.stderr}`).toBe(0);
+    return r;
+  };
 
   beforeAll(async () => {
     cluster = await withCluster({ installController: false, namespace: NS });
@@ -58,6 +64,8 @@ maybe("sandbox image in a user-namespaced pod runs Nix builds in Nix's build san
   }, 60_000);
 
   afterAll(async () => {
+    // CI keeps the pod so its failure step can describe it and read its logs.
+    if (process.env.KEEP_TEST_PODS === "1") return;
     await cluster?.deletePod(POD, NS).catch(() => {});
   });
 
@@ -67,29 +75,35 @@ maybe("sandbox image in a user-namespaced pod runs Nix builds in Nix's build san
     );
     const deadline = Date.now() + 180_000;
     let state = "";
+    let last = { stdout: "", stderr: "", exitCode: 0 };
     for (;;) {
-      state = (await sh("systemctl is-system-running")).stdout.trim();
+      last = await sh("systemctl is-system-running");
+      state = last.stdout.trim();
       if (!["initializing", "starting", ""].includes(state) || Date.now() > deadline) break;
       await new Promise((res) => setTimeout(res, 2000));
+    }
+    if (!["running", "degraded"].includes(state)) {
+      const why = await sh("systemctl --failed --no-legend; journalctl -b -p warning --no-pager | tail -60");
+      console.error("systemd did not settle:", JSON.stringify(last), "\n", why.stdout, why.stderr);
     }
     expect(["running", "degraded"]).toContain(state);
   }, 400_000);
 
   it("pod root is not host root (uid 0 maps to a non-zero host uid)", async () => {
-    const r = await sh("cat /proc/self/uid_map");
+    const r = await ok("cat /proc/self/uid_map");
     const [inside, outside] = r.stdout.trim().split(/\s+/);
     expect(inside).toBe("0");
     expect(outside).not.toBe("0");
   });
 
   it("the overlay store is mounted over /nix/store through the idmapped volume", async () => {
-    const r = await sh("systemctl is-active overlay-store-setup.service; grep ' /nix/store ' /proc/mounts");
+    const r = await ok("systemctl is-active overlay-store-setup.service; grep ' /nix/store ' /proc/mounts");
     expect(r.stdout).toContain("active");
     expect(r.stdout).toMatch(/overlay/);
   });
 
   it("nix-sandbox-probe enabled the build sandbox", async () => {
-    const r = await sh("journalctl -u nix-sandbox-probe --no-pager -o cat; nix config show sandbox");
+    const r = await ok("journalctl -u nix-sandbox-probe --no-pager -o cat; nix config show sandbox");
     expect(r.stdout.trim().split("\n").pop()).toBe("true");
   });
 
