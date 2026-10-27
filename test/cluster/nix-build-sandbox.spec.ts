@@ -128,4 +128,35 @@ maybe("sandbox image in a user-namespaced pod runs Nix builds in Nix's build san
     expect(r.exitCode, r.stderr).toBe(0);
     expect(r.stdout).toContain("ISOLATED");
   }, 300_000);
+
+  // Directory outputs are renamed into the store; without userxattr that's EXDEV.
+  it("a build with a directory output lands in the store", async () => {
+    // The sandbox's /bin/sh has no mkdir; take coreutils from the image's store.
+    const expr = [
+      'let cu = builtins.storePath (builtins.getEnv "CU"); in derivation {',
+      `  name = "userns-dir-output-\${toString builtins.currentTime}";`,
+      "  system = builtins.currentSystem;",
+      '  builder = "/bin/sh";',
+      '  args = [ "-c" "${cu}/bin/mkdir -p $out/sub; echo ok > $out/sub/f" ];',
+      "}",
+    ].join("\n");
+    const script =
+      'export CU=$(dirname "$(dirname "$(readlink -f "$(command -v mkdir)")")"); ' +
+      'out=$(nix-build --no-out-link -E "$1") && cat "$out/sub/f"';
+    const r = await cluster.exec(SELECTOR, ["sh", "-c", script, "_", expr], NS);
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe("ok");
+  }, 300_000);
+
+  it("a directory can be added to the store (what lazy stubs do on first use)", async () => {
+    const r = await ok(
+      "d=$(mktemp -d) && mkdir -p $d/x && echo hi > $d/x/f && p=$(nix-store --add $d) && cat $p/x/f",
+    );
+    expect(r.stdout.trim().split("\n").pop()).toBe("hi");
+  }, 300_000);
+
+  it("the store overlay uses user xattrs inside the user namespace", async () => {
+    const r = await ok("grep ' /nix/store ' /proc/self/mountinfo | grep scooter-store");
+    expect(r.stdout).toContain("userxattr");
+  });
 });

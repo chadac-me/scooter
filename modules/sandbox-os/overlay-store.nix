@@ -95,10 +95,15 @@ in
           mount -o remount,bind,ro "$lower"
         fi
 
+        opts="lowerdir=$lower,upperdir=$upper_root/upper,workdir=$upper_root/work"
+        # In a user namespace trusted.* xattrs are unwritable; without user ones
+        # every directory rename fails EXDEV and Nix can't add store paths.
+        if ! grep -qE '^ *0 +0 +4294967295 *$' /proc/self/uid_map; then
+          opts="$opts,userxattr"
+        fi
+
         # Mount the overlay over /nix/store; reads fall through to the lower.
-        mount -t overlay scooter-store \
-          -o "lowerdir=$lower,upperdir=$upper_root/upper,workdir=$upper_root/work" \
-          /nix/store
+        mount -t overlay scooter-store -o "$opts" /nix/store
         echo "overlay-store: /nix/store = ro($lower) + rw($upper_root/upper)"
       '';
     };
