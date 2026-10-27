@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, byocController, ... }:
+{ pkgs, lib, n2c, imageLayers, byocController, ... }:
 
 # OCI image for the BYOC controller (Node service).
 
@@ -6,6 +6,9 @@ let
   image = n2c.buildImage {
     name = "byoc-controller";
     tag = "latest";
+    # Shared runtime layer; splitting the rest keeps app pushes small.
+    layers = [ imageLayers.node ];
+    maxLayers = 30;
     copyToRoot = pkgs.buildEnv {
       name = "byoc-controller-root";
       # nodejs runs the bin/ entry script, and cacert lets the controller reach

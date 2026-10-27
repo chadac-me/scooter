@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, scheduler, mkScooterTask, scooterPrompt, contribTasks ? { }, ... }:
+{ pkgs, lib, n2c, imageLayers, scheduler, mkScooterTask, scooterPrompt, contribTasks ? { }, ... }:
 
 # OCI image for the scheduler service, with every system task it can run.
 #
@@ -31,6 +31,9 @@ let
     n2c.buildImage {
       name = "agent-scheduler";
       tag = "latest";
+      # Shared runtime and third-party layers; first-party paths split from them.
+      layers = [ imageLayers.python (imageLayers.pythonDeps scheduler) ];
+      maxLayers = 30;
       copyToRoot = pkgs.buildEnv {
         name = "scheduler-root";
         paths = [ scheduler pkgs.cacert scooterPrompt ];

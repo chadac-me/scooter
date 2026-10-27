@@ -6,6 +6,8 @@ let
   image = n2c.buildImage {
     name = "conversation-router";
     tag = "latest";
+    # Splitting the closure keeps app pushes small.
+    maxLayers = 30;
     copyToRoot = pkgs.buildEnv {
       name = "conversation-router-root";
       paths = [ conversationRouter pkgs.cacert ];

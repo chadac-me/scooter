@@ -133,6 +133,8 @@ let
   image = n2c.buildImage {
     name = "agent-db-migrator";
     tag = "latest";
+    # Splitting the closure keeps app pushes small.
+    maxLayers = 60;
     copyToRoot = pkgs.buildEnv {
       name = "db-migrator-root";
       paths = [ runScript pkgs.atlas pkgs.bashInteractive pkgs.coreutils pkgs.cacert ];

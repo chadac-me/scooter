@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, webhooks, ... }:
+{ pkgs, lib, n2c, imageLayers, webhooks, ... }:
 
 # OCI image for the webhooks service.
 
@@ -6,6 +6,9 @@ let
   image = n2c.buildImage {
     name = "agent-webhooks";
     tag = "latest";
+    # Shared runtime and third-party layers; first-party paths split from them.
+    layers = [ imageLayers.python (imageLayers.pythonDeps webhooks) ];
+    maxLayers = 30;
     copyToRoot = pkgs.buildEnv {
       name = "webhooks-root";
       paths = [ webhooks pkgs.cacert ];

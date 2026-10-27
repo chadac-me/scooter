@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, agentHost, agent, ... }:
+{ pkgs, lib, n2c, imageLayers, agentHost, agent, ... }:
 { config, ... }:
 let
   # claude.enable bakes the unfree claude CLI; off keeps the image lean.
@@ -17,7 +17,6 @@ let
 
   # Dedicated layers for the big, rarely-changing closures.
   gooseLayer = n2c.buildLayer { deps = [ agent ]; };
-  nodeLayer = n2c.buildLayer { deps = [ pkgs.nodejs ]; };
 
   # The claude-code CLI's own layer, only when withClaudeCode.
   claudeCode = pkgs.claude-code;
@@ -30,7 +29,7 @@ let
 
     # Stable layers first; maxLayers auto-splits the rest so the app lands in its
     # own thin layer.
-    layers = [ gooseLayer nodeLayer ] ++ lib.optional withClaudeCode claudeLayer;
+    layers = [ gooseLayer imageLayers.node ] ++ lib.optional withClaudeCode claudeLayer;
     maxLayers = 50;
 
     copyToRoot = [
