@@ -153,6 +153,27 @@ export function decorateSystemMessage(source: string, text: string): string {
   );
 }
 
+/** A provider's ACP session and what it has seen. */
+interface ReadySession {
+  client: AcpClient;
+  acpSessionId: string;
+  mcpFingerprint: string;
+  /** Shown the conversation's history at least once. */
+  historySeeded: boolean;
+  /** Last run served; later events were missed. */
+  lastRunId?: RunId;
+}
+
+/** Events after `runId`'s last event, or all when absent. */
+export function eventsAfterRun(events: AguiEvent[], runId: RunId | undefined): AguiEvent[] {
+  if (runId === undefined) return events;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if ((events[i] as { runId?: string }).runId === runId) return events.slice(i + 1);
+  }
+  // Run not in the log: replay everything.
+  return events;
+}
+
 /** Rewrite a known raw agent/API error (context overflow) into a clearer user-facing
  *  message; anything unrecognized passes through. */
 export function clarifyRunError(raw: string): string {
@@ -419,8 +440,10 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   /** The provider serving the current run; provider+session is the true session identity
    *  since providers mint ids independently. */
   let currentProviderId = "";
-  /** The established session this run resolved to, carrying its own historySeeded flag. */
-  let currentReady: { historySeeded: boolean } | undefined;
+  /** The session this run resolved to. */
+  let currentReady: ReadySession | undefined;
+  /** The session that served the previous run. */
+  let lastRunReady: ReadySession | undefined;
   let started = false;
   // The run queue: a bridge has one agent session, so runs are serialized through an
   // inspectable queue that orders by priority and can force-interrupt the current run,
@@ -489,7 +512,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     ];
 
   // One ready client per provider id, plus the client and session serving the current run.
-  const readySessions = new Map<string, Promise<{ client: AcpClient; acpSessionId: string; historySeeded: boolean; mcpFingerprint: string }>>();
+  const readySessions = new Map<string, Promise<ReadySession>>();
   let acpClient: AcpClient | undefined;
 
   // A wedged run's cause usually arrives after the watchdog gave up and the client was
@@ -971,18 +994,27 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       // ready client.
       await resolveForRun(runContextFor(input));
       debug("[bridge] prompt: sending to goose, session=%s", acpSessionId);
-      // Seed the session with the conversation's prior turns if it has never been seeded.
+      // Seed new sessions fully, returning ones with missed turns.
       let historyPreamble = "";
-      if (deps.loadHistory && currentReady && !currentReady.historySeeded) {
-        currentReady.historySeeded = true;
+      const ready = currentReady;
+      if (deps.loadHistory && ready && (!ready.historySeeded || ready !== lastRunReady)) {
+        const fresh = !ready.historySeeded;
+        const sinceRun = ready.lastRunId;
+        ready.historySeeded = true;
         try {
-          const events = await deps.loadHistory();
-          historyPreamble = buildHistoryPreamble(
-            events.filter((e) => !thisTurnIds.has((e as { messageId?: string }).messageId ?? "")),
+          const events = (await deps.loadHistory()).filter(
+            (e) => !thisTurnIds.has((e as { messageId?: string }).messageId ?? ""),
           );
+          historyPreamble = fresh
+            ? buildHistoryPreamble(events)
+            : buildHistoryPreamble(eventsAfterRun(events, sinceRun), undefined, "catch-up");
         } catch (err) {
           debug("[bridge] loadHistory failed (continuing without reinjection): %s", err);
         }
+      }
+      if (ready) {
+        ready.lastRunId = runId;
+        lastRunReady = ready;
       }
       // Decorate system-sourced items, combine the burst into one prompt, and prepend the
       // history preamble as a separate block when present.
@@ -1247,7 +1279,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
 
   // Lazily ready one client per provider (initialize, newSession, hooks wired once), cached
   // by provider id; a failed init drops the entry.
-  const readyProvider = (provider: AcpProvider): Promise<{ client: AcpClient; acpSessionId: string; historySeeded: boolean; mcpFingerprint: string }> => {
+  const readyProvider = (provider: AcpProvider): Promise<ReadySession> => {
     let ready = readySessions.get(provider.id);
     if (ready) return ready;
     ready = (async () => {

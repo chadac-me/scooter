@@ -80,6 +80,20 @@ describe("transcript: foldTurns", () => {
     expect(t.text.length).toBeLessThan(1_000);
   });
 
+  it("keeps platform events (webhooks, job results) as system turns", () => {
+    const log: AguiEvent[] = [
+      ...userTurn("u1", "fix it"),
+      { type: "SYSTEM_MESSAGE", messageId: "s1", source: "background job", text: "job done: PR 961 opened" },
+      ...asstTurn("a1", "noted"),
+    ];
+    expect(foldTurns(log)).toEqual([
+      { role: "user", text: "fix it" },
+      { role: "system", text: "(background job) job done: PR 961 opened" },
+      { role: "assistant", text: "noted" },
+    ]);
+    expect(buildHistoryPreamble(log)).toContain("System: (background job) job done: PR 961 opened");
+  });
+
   it("drops empty turns (a START/END with no content)", () => {
     const log: AguiEvent[] = [
       { type: "TEXT_MESSAGE_START", messageId: "e", role: "assistant" },
