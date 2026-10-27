@@ -98,3 +98,39 @@ describe("history reinjection is per ACP session", () => {
       "same session remembers — re-seeding would duplicate the transcript").toBe(false);
   });
 });
+
+describe("a returning session is caught up on turns it missed", () => {
+  it("switching A → B → A gives A the turns B ran, and only those", async () => {
+    const exec = createSandboxExecBackend(createFakeSandboxApi());
+    const byoc = recordingAgent(exec);
+    const floor = recordingAgent(exec);
+
+    let human = true;
+    const providers: AcpProvider[] = [
+      { id: "byoc", kind: "claude", priority: 10, eligible: () => human, createClient: () => byoc.client },
+      { id: "floor", kind: "claude", priority: 0, eligible: () => true, createClient: () => floor.client },
+    ];
+
+    const log: AguiEvent[] = [];
+    const bridge = createSessionBridge({
+      config: BRIDGE_CONFIG, exec, acpProviders: providers,
+      loadHistory: async () => [...log],
+    });
+    bridge.onPersist((e) => log.push(e));
+    const text = (p: Array<{ text?: string }>) => p.map((b) => b.text ?? "").join("\n");
+
+    await bridge.prompt({ threadId: "t1", text: "fix the 502", source: "ui" });
+    human = false;
+    await bridge.prompt({ threadId: "t1", text: "job finished: opened PR 961", source: "background job" });
+    human = true;
+    await bridge.prompt({ threadId: "t1", text: "did you push it?", source: "ui" });
+    await bridge.prompt({ threadId: "t1", text: "thanks", source: "ui" });
+
+    expect(byoc.prompts).toHaveLength(3);
+    const back = text(byoc.prompts[1]);
+    expect(back, "the returning session sees the floor's turn").toContain("opened PR 961");
+    expect(back).toContain("Turns you missed");
+    expect(back, "its own earlier turn is not replayed").not.toContain("fix the 502");
+    expect(text(byoc.prompts[2]), "no catch-up when nothing was missed").not.toContain("Turns you missed");
+  });
+});

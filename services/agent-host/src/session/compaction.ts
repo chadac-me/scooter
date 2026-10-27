@@ -65,9 +65,13 @@ export async function compactConversation(
   if (older.length === 0) return null; // nothing older than the kept tail
 
   // foldTurns emits `tool` turns too; the summarizer only knows user|assistant, so a tool turn
-  // folds in as an assistant-side turn.
+  // folds in as an assistant-side turn and a platform event as a user-side one.
   const oldTurns: SummaryTurn[] = foldTurns(older).map((t) =>
-    t.role === "tool" ? { role: "assistant", text: t.text } : { role: t.role, text: t.text },
+    t.role === "tool"
+      ? { role: "assistant", text: t.text }
+      : t.role === "system"
+        ? { role: "user", text: `[System] ${t.text}` }
+        : { role: t.role, text: t.text },
   );
   if (oldTurns.length === 0) return null; // no summarizable content
 

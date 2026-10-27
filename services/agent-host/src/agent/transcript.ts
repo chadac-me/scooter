@@ -10,7 +10,7 @@
 import type { AguiEvent } from "../bridge.js";
 
 export interface TranscriptTurn {
-  role: "user" | "assistant" | "tool";
+  role: "user" | "assistant" | "tool" | "system";
   text: string;
 }
 
@@ -76,6 +76,12 @@ export function foldTurns(events: Iterable<AguiEvent>): TranscriptTurn[] {
         if (t) turns[t.index] = { role: "tool", text: renderTool(t, e.content) };
         break;
       }
+      // Platform events (webhooks, job results) carry the work's triggers.
+      case "SYSTEM_MESSAGE": {
+        const text = e.text.trim();
+        if (text) turns.push({ role: "system", text: `(${e.source}) ${clip(text, TOOL_FIELD_MAX * 2)}` });
+        break;
+      }
       default:
         break;
     }
@@ -88,10 +94,15 @@ const ROLE_LABEL: Record<TranscriptTurn["role"], string> = {
   user: "User",
   assistant: "Assistant",
   tool: "Tool",
+  system: "System",
 };
 
 /** Build the history preamble to prepend to the first prompt after a revive, or "" when there are no prior turns; `maxChars` trims from the oldest end and is generous because this history is the only continuity a revived session has. */
-export function buildHistoryPreamble(events: Iterable<AguiEvent>, maxChars = 48_000): string {
+export function buildHistoryPreamble(
+  events: Iterable<AguiEvent>,
+  maxChars = 48_000,
+  framing: "resumed" | "catch-up" = "resumed",
+): string {
   const turns = foldTurns(events);
   if (turns.length === 0) return "";
 
@@ -100,6 +111,15 @@ export function buildHistoryPreamble(events: Iterable<AguiEvent>, maxChars = 48_
   if (body.length > maxChars) {
     // Trim from the oldest end and mark the elision.
     body = "…(earlier messages omitted)…\n\n" + body.slice(body.length - maxChars);
+  }
+  if (framing === "catch-up") {
+    return (
+      "[Turns you missed — since your last reply, another session (a different model or " +
+      "provider) handled these turns of this same conversation. Treat their work as done by " +
+      "you; do NOT redo it. Lines prefixed `Tool:` record a tool call and its result.]\n\n" +
+      body +
+      "\n\n[End of missed turns. The new message follows.]"
+    );
   }
   return (
     "[Previous conversation — this session was resumed and you have no memory of it. " +
