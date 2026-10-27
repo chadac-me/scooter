@@ -389,3 +389,86 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestDirectInvalidatedByARowChange(t *testing.T) {
+	pod, _, _ := fakePod(t)
+	tg := podTargetFor(t, pod)
+	var asleep atomic.Bool
+	ah := newFakeAgentHost(t, func(*http.Request) (int, directTarget) {
+		if asleep.Load() {
+			return http.StatusServiceUnavailable, directTarget{}
+		}
+		return 200, tg
+	})
+	d := newDirectProxy()
+	h := directHandler(t, ah, d)
+	if rec := sandboxGet(t, h, "GET", "/files/", nil); rec.Header().Get(DirectRouteHeader) != "direct" {
+		t.Fatalf("awake request not carried direct: %d %q", rec.Code, rec.Body.String())
+	}
+
+	asleep.Store(true)
+	d.invalidate(directID)
+	rec := sandboxGet(t, h, "GET", "/files/", nil)
+	if rec.Header().Get("X-Served-By") != "agent-host" {
+		t.Fatalf("after the row change the cached pod still served: %d %q", rec.Code, rec.Body.String())
+	}
+	if n := ah.lookups.Load(); n != 2 {
+		t.Errorf("lookups = %d, want 2 (the row change drops the cache)", n)
+	}
+}
+
+func TestMovesPod(t *testing.T) {
+	for payload, want := range map[string]bool{
+		`{"id":"a","op":"upsert","kind":"meta"}`:     true,
+		`{"id":"a","op":"delete","kind":"meta"}`:     true,
+		`{"id":"a","op":"upsert"}`:                   true, // pre-#776: un-throttled, so treated as meta
+		`{"id":"a","op":"upsert","kind":"activity"}`: false,
+	} {
+		c, ok := notifyDecision(payload)
+		if !ok || c.movesPod() != want {
+			t.Errorf("%s: movesPod = %v, want %v", payload, c.movesPod(), want)
+		}
+	}
+}
+
+func TestDirectInvalidatedMidLookup(t *testing.T) {
+	pod, _, _ := fakePod(t)
+	tg := podTargetFor(t, pod)
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	var first atomic.Bool
+	first.Store(true)
+	ah := newFakeAgentHost(t, func(*http.Request) (int, directTarget) {
+		if first.CompareAndSwap(true, false) {
+			entered <- struct{}{}
+			<-release
+		}
+		return 200, tg
+	})
+	d := newDirectProxy()
+	h := directHandler(t, ah, d)
+	done := make(chan *httptest.ResponseRecorder)
+	go func() { done <- sandboxGet(t, h, "GET", "/files/", nil) }()
+	<-entered
+	d.invalidate(directID)
+	close(release)
+	if rec := <-done; rec.Header().Get("X-Served-By") != "agent-host" {
+		t.Fatalf("a lookup invalidated mid-flight still went direct: %q", rec.Header().Get(DirectRouteHeader))
+	}
+	if rec := sandboxGet(t, h, "GET", "/files/", nil); rec.Header().Get(DirectRouteHeader) != "direct" {
+		t.Fatalf("settled lookup not direct: %d", rec.Code)
+	}
+	if n := ah.lookups.Load(); n != 2 {
+		t.Errorf("lookups = %d, want 2", n)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.gen) != 0 {
+		t.Errorf("gen left behind: %v", d.gen)
+	}
+}
+
+func TestDirectInvalidateNil(t *testing.T) {
+	var d *directProxy
+	d.invalidate(directID)
+}

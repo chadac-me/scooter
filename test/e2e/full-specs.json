@@ -28,6 +28,7 @@
   "settings-tabs.spec.ts",
   "stop-run.spec.ts",
   "suspended-recovery.spec.ts",
+  "suspended-web-service.spec.ts",
   "tail-rerender.spec.ts",
   "ui-state-consistency.spec.ts"
 ]
