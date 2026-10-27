@@ -737,7 +737,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
     }
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-store",
       Connection: "keep-alive",
     });
     const send = (frame: unknown) => res.write(`data: ${JSON.stringify(frame)}\n\n`);

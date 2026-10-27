@@ -115,6 +115,8 @@ export function subscribeIntegrity(
       try {
         const res = await doFetch(url, {
           headers: { Accept: "text/event-stream", ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}) },
+          // Firefox makes identical stored GETs wait on a never-ending stream.
+          cache: "no-store",
           signal: controller.signal,
         });
         if (res.status === 404) {

@@ -86,6 +86,8 @@ export function subscribeConversations(
             Accept: "text/event-stream",
             ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}),
           },
+          // Firefox makes identical stored GETs wait on a never-ending stream.
+          cache: "no-store",
           signal: c.signal,
         });
         if (!res.ok || !res.body) {

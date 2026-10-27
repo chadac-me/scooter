@@ -521,7 +521,8 @@ export class IntegrityAgent extends AbstractAgent {
     onSynced?: () => void,
   ): Promise<ConnectionOutcome> {
     try {
-      const res = await this.doFetch(url, { headers, signal: controller.signal });
+      // Firefox makes identical stored GETs wait on a never-ending stream.
+      const res = await this.doFetch(url, { headers, cache: "no-store", signal: controller.signal });
       if (res.status === 404) return "not-found"; // created on first prompt
       // 401/403 means an expired auth session that retrying cannot fix.
       if (res.status === 401 || res.status === 403) return "auth-error";
