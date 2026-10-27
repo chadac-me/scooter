@@ -126,27 +126,31 @@
         w.history[m] = (...args) => { const r = orig(...args); sync(); return r; };
       }
       w.addEventListener("popstate", sync);
-      // marimo opens notebooks in other tabs (a named target per file). Open them as this page
-      // instead, so every notebook keeps its chat; in-frame navigation is left alone.
-      const asPage = (href) => {
+      // marimo opens notebooks in new tabs; keep them in this frame instead.
+      const asMarimo = (href) => {
         const u = new URL(href, w.location.href);
-        return u.origin === MARIMO.origin && u.pathname === MARIMO.pathname ? location.pathname + u.search + u.hash : null;
+        return u.origin === MARIMO.origin && u.pathname === MARIMO.pathname ? u : null;
       };
       const origOpen = w.open.bind(w);
       w.open = (url, target, features) => {
-        const page = url ? asPage(String(url)) : null;
-        return page ? window.open(page, target || "_blank", features) : origOpen(url, target, features);
+        const u = url ? asMarimo(String(url)) : null;
+        if (!u) return origOpen(url, target, features);
+        w.location.assign(u.href);
+        return w;
       };
       const onLink = (e) => {
         const a = e.target.closest && e.target.closest("a[href]");
-        const page = a && asPage(a.href);
-        if (!page) return;
-        const newTab = e.type === "auxclick" || e.metaKey || e.ctrlKey || e.shiftKey;
-        const target = newTab ? "_blank" : (a.target || "_self").toLowerCase();
-        if (target === "_self") return;
+        const u = a && asMarimo(a.href);
+        if (!u) return;
+        // An explicit new-tab gesture still opens this page, with its chat.
+        if (e.type === "auxclick" || e.metaKey || e.ctrlKey || e.shiftKey) {
+          e.preventDefault();
+          window.open(location.pathname + u.search + u.hash, "_blank");
+          return;
+        }
+        if ((a.target || "_self").toLowerCase() === "_self") return;
         e.preventDefault();
-        if (target === "_top" || target === "_parent") location.href = page;
-        else window.open(page, target);
+        w.location.assign(u.href);
       };
       w.document.addEventListener("click", onLink, true);
       w.document.addEventListener("auxclick", (e) => { if (e.button === 1) onLink(e); }, true);

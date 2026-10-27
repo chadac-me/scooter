@@ -237,7 +237,7 @@ export function createAguiServer(): AguiServer {
   const subscribeSSE = async (sessionId: SessionId, res: ServerResponse): Promise<void> => {
     res.writeHead(200, {
       "Content-Type": encoder.getContentType(),
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-store",
       Connection: "keep-alive",
     });
     let set = connections.get(sessionId);
@@ -366,7 +366,7 @@ export function createAguiServer(): AguiServer {
       );
       res.writeHead(200, {
         "Content-Type": encoder.getContentType(),
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-store",
         Connection: "keep-alive",
       });
 
@@ -499,7 +499,7 @@ export function createAguiServer(): AguiServer {
       const sessionId = parts[1];
       res.writeHead(200, {
         "Content-Type": encoder.getContentType(),
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-store",
         Connection: "keep-alive",
       });
       let set = connections.get(sessionId);
