@@ -15,6 +15,8 @@ type identityConfig struct {
 	userHeader string
 	// alb-oidc: the header carrying the OIDC subject.
 	albIdentityHeader string
+	// alb-oidc: the header carrying ALB's signed claims JWT.
+	albDataHeader string
 }
 
 func identityConfigFromEnv() identityConfig {
@@ -22,6 +24,7 @@ func identityConfigFromEnv() identityConfig {
 		mode:              strings.ToLower(env("AUTH_MODE", "header")),
 		userHeader:        env("AUTH_USER_HEADER", "x-auth-user"),
 		albIdentityHeader: env("AUTH_ALB_IDENTITY_HEADER", "x-amzn-oidc-identity"),
+		albDataHeader:     env("AUTH_ALB_DATA_HEADER", "x-amzn-oidc-data"),
 	}
 }
 

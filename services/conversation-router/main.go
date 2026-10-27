@@ -195,7 +195,8 @@ func main() {
 	go runLinkListener(ctx, store, links, hub)
 
 	handler := newRouter(ctx, cfg, resolver, creator, trusted, store, writeStore, links, hub)
-	srv := &http.Server{Addr: cfg.listenAddr, Handler: handler}
+	mainGate, sandboxGate := buildGateways(kubeCfg, log)
+	srv := &http.Server{Addr: cfg.listenAddr, Handler: guarded(mainGate, handler)}
 	if self := buildSelfServer(kubeCfg, cfg, store, handler, log); self != nil {
 		go func() {
 			<-ctx.Done()
@@ -212,7 +213,7 @@ func main() {
 	}
 	if cfg.sandboxDomain != "" {
 		// The public wildcard Ingress points here, and this port serves sandbox hosts only.
-		sb := &http.Server{Addr: cfg.sandboxListenAddr, Handler: newSandboxRouter(ctx, cfg, resolver, store, direct)}
+		sb := &http.Server{Addr: cfg.sandboxListenAddr, Handler: guarded(sandboxGate, newSandboxRouter(ctx, cfg, resolver, store, direct))}
 		go func() {
 			<-ctx.Done()
 			sctx, c := context.WithTimeout(context.Background(), 10*time.Second)

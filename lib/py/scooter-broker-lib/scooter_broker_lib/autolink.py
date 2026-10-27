@@ -9,6 +9,7 @@ or posted never breaks the proxied call.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,8 +17,21 @@ from dataclasses import dataclass
 import httpx
 
 from scooter_lib.logging_config import format_error
+from scooter_lib.svcauth import TokenSource
 
 logger = logging.getLogger(__name__)
+
+# The broker's router token; absent outside a cluster.
+_router_token = TokenSource(os.environ.get("SCOOTER_ROUTER_TOKEN_PATH", "/var/run/secrets/scooter-router/token"))
+
+
+def router_headers() -> dict[str, str]:
+    """Auth headers for a call to the router, empty when no token can be read."""
+    try:
+        return _router_token.headers()
+    except OSError as e:
+        logger.warning("router token unreadable; calling without it", extra={"error": format_error(e)})
+        return {}
 
 
 @dataclass(frozen=True)
@@ -62,7 +76,7 @@ async def post_link(agent_host_url: str, conversation_id: str, link: Link) -> No
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(_links_url(agent_host_url, conversation_id), json=payload)
+            resp = await client.post(_links_url(agent_host_url, conversation_id), json=payload, headers=router_headers())
         if resp.status_code >= 300:
             logger.warning(
                 "auto-link POST /links failed",
@@ -111,7 +125,7 @@ async def create_link(agent_host_url: str, conversation_id: str, link: Link) -> 
         "title": link.title,
     }
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(_links_url(agent_host_url, conversation_id), json=payload)
+        resp = await client.post(_links_url(agent_host_url, conversation_id), json=payload, headers=router_headers())
         resp.raise_for_status()
 
 
@@ -120,7 +134,7 @@ async def list_links(agent_host_url: str, conversation_id: str) -> list[dict]:
     if not agent_host_url or not conversation_id:
         return []
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(_links_url(agent_host_url, conversation_id))
+        resp = await client.get(_links_url(agent_host_url, conversation_id), headers=router_headers())
         resp.raise_for_status()
         data = resp.json()
     return data.get("links", []) if isinstance(data, dict) else []

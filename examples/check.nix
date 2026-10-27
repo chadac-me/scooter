@@ -507,6 +507,13 @@ let
         else [ "router.env.WEBHOOKS_SERVICE_ACCOUNT omits the scheduler SA (scheduled-task owners are dropped)" ])
     ++ (if routerEnvVal "WEBHOOKS_TOKEN_AUDIENCE" != "" then [ ]
         else [ "router.env.WEBHOOKS_TOKEN_AUDIENCE (TokenReview rejects the caller's projected token)" ])
+    # The gateway must admit the broker's router calls.
+    ++ (if builtins.match ".*:agent-broker" (routerEnvVal "ROUTER_SERVICE_ACCOUNTS") != null then [ ]
+        else [ "router.env.ROUTER_SERVICE_ACCOUNTS omits the broker SA (its /links calls look unauthenticated)" ])
+    ++ (if builtins.any (v: v.name == "scooter-router-token"
+            && builtins.any (s: (s.serviceAccountToken.audience or "") == routerEnvVal "ROUTER_TOKEN_AUDIENCE") (v.projected.sources or [ ]))
+          (res.deployments.agent-broker.spec.template.spec.volumes or [ ]) then [ ]
+        else [ "broker.volumes scooter-router-token must be minted for ROUTER_TOKEN_AUDIENCE" ])
     ++ (if (res.clusterRoleBindings or { }) ? conversation-router-tokenreview then [ ]
         else [ "clusterRoleBindings.conversation-router-tokenreview (TokenReview 403s, so every webhook conversation is unowned)" ])
     ++ (if builtins.any (e: e.name == "AUTH_MODE" && e.value == "alb-oidc") albRouterEnv then [ ]
