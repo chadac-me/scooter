@@ -12,6 +12,7 @@ from scooter_broker_lib.transports.mcp_tools import McpTools
 from scooter_broker_lib.types import Provider
 
 from . import mcp_tools
+from .agent_host import AgentHost
 from .config import settings
 from .store import PersonalizationStore
 from .transport import Personalization
@@ -26,9 +27,9 @@ def personalization(ctx: BrokerContext) -> Provider:
         return Provider(name="personalization", transports=[transport, tools], enabled=False)
 
     store = PersonalizationStore(ctx.contrib_store_config("personalization"))
+    agent_host = AgentHost(settings.agent_host_url) if settings.agent_host_url else None
     transport.store = store
-    mcp_tools.set_store(store)
-    # transport.user defaults to the /contrib-api relay identity.
-    # TODO(PR 3): transport.system and transport.activity, once the scheduler identity
-    # and an agent-host activity query exist.
+    if agent_host is not None:
+        transport.activity = agent_host.latest_activity
+    mcp_tools.set_store(store, agent_host)
     return Provider(name="personalization", transports=[transport, tools], enabled=True)
