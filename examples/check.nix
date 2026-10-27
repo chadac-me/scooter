@@ -975,6 +975,8 @@ let
   sysThrows = extra: !(builtins.tryEval (builtins.deepSeq (sysJsonOf (sysEval extra)) true)).success;
   sysBase = sysById platform;
   sysEcho = sysById (sysEval { contribs.echo.enable = nixpkgsLib.mkForce true; });
+  sysPersEval = extra: sysEval ({ contribs.personalization.enable = nixpkgsLib.mkForce true; } // extra);
+  sysPers = (sysById (sysPersEval { })).personalization-refresh-profile or { };
   sysEchoTuned = sysById (sysEval {
     contribs.echo.enable = nixpkgsLib.mkForce true;
     scooter.systemTasks.echo-greet.every = "4h";
@@ -1001,6 +1003,12 @@ let
         else [ "echo is disabled but its system task rendered" ])
     ++ (if (sysEcho.echo-greet.interval_seconds or null) == 86400 && nixpkgsLib.hasSuffix "/bin/echo-greet" (sysEcho.echo-greet.command or "") then [ ]
         else [ "enabling echo did not render its task as scooter.systemTasks.echo-greet (every 1d, bin/echo-greet)" ])
+    ++ (if !(sysBase ? personalization-refresh-profile) then [ ]
+        else [ "personalization is disabled but its refresh-profile task rendered" ])
+    ++ (if (sysPers.interval_seconds or null) == 3600 && builtins.elem "10d" (sysPers.args or [ ]) then [ ]
+        else [ "enabling personalization did not render personalization-refresh-profile (every 1h, --interval 10d)" ])
+    ++ (if schedImageOf (sysPersEval { scooter.systemTasks.broker-health.enable = false; }) == publishedSchedImage then [ ]
+        else [ "with personalization enabled the scheduler image differs from the published one" ])
     ++ (if (sysEchoTuned.echo-greet.interval_seconds or null) == 14400 then [ ]
         else [ "an operator could not retune a contrib task (systemTasks.echo-greet.every = \"4h\")" ])
     ++ (if !((sysById (sysEval { scooter.systemTasks.broker-health.enable = false; })) ? broker-health) then [ ]

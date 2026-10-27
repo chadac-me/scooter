@@ -42,17 +42,18 @@
         api = true;
       }];
 
-      # TODO(PR 3): the system task.
-      # systemTasks.refresh-profile = {
-      #   entry = "scooter_contrib_personalization.tasks.refresh:main";
-      #   args = [
-      #     "--prompt-file" "${./prompts/refresh.md}"
-      #     "--interval" config.refreshInterval
-      #     "--max-spawns" (toString config.maxSpawnsPerRun)
-      #   ];
-      #   every = "1h";
-      #   timeout = "10m";
-      # };
+      # Mapped in as scooter.systemTasks.personalization-refresh-profile only while this
+      # contrib is enabled.
+      systemTasks.refresh-profile = {
+        entry = "scooter_contrib_personalization.tasks.refresh:main";
+        args = [
+          "--prompt-file" "${./prompts/refresh.md}"
+          "--interval" config.refreshInterval
+          "--max-spawns" (toString config.maxSpawnsPerRun)
+        ];
+        every = "1h";
+        timeout = "10m";
+      };
     };
   };
 }

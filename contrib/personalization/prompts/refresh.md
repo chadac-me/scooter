@@ -12,7 +12,7 @@ agents work the way this user wants, without being told again.
    - **environment**: tools, repos and services they work with.
    Leave out one-offs, secrets, credentials and anything about other people.
 4. Call `personalization_write` once with all your changes and a final
-   `{"op": "done", "last_conversation_seen": <newest conversation's timestamp>}`.
+   `{"op": "done", "last_conversation_seen": <the newest conversation's last_activity>}`.
    Prefer updating or deleting a stale agent note to adding a near-duplicate. You
    cannot change notes the user wrote or pinned; don't try.
 

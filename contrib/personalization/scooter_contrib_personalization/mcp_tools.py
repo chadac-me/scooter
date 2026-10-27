@@ -8,35 +8,47 @@ conversation, never from an argument.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 
 from fastmcp import FastMCP
 
 from scooter_broker_lib.mcp import ToolContext, ToolContextDep, ToolResult, gate
 
+from .agent_host import AgentHost, is_refresh_run
 from .store import PersonalizationStore, ProtectedNote, now_iso
 
 mcp = FastMCP(name="personalization")
 
 # Set by the provider factory.
 _store: PersonalizationStore | None = None
+_agent_host: AgentHost | None = None
 
 
-def set_store(store: PersonalizationStore | None) -> None:
-    global _store
-    _store = store
+def set_store(store: PersonalizationStore | None, agent_host: AgentHost | None = None) -> None:
+    global _store, _agent_host
+    _store, _agent_host = store, agent_host
 
 
-def _owner(ctx: ToolContext) -> str | None:
-    # TODO: a sandbox SA carries no owner; resolve conversation -> owner through the
-    # agent-host when identity.owner is unset (design, "Agent tools").
-    return ctx.identity.owner
+async def _conversation(ctx: ToolContext) -> dict | None:
+    if _agent_host is None or not ctx.identity.conversation_id:
+        return None
+    return await _agent_host.conversation(ctx.identity.conversation_id)
+
+
+async def _owner(ctx: ToolContext) -> str | None:
+    # A sandbox token carries no owner, so ask the agent-host whose conversation it is.
+    if ctx.identity.owner:
+        return ctx.identity.owner
+    conv = await _conversation(ctx)
+    return (conv or {}).get("owner")
 
 
 async def _is_system_conversation(ctx: ToolContext) -> bool:
-    # TODO(PR 3): true when the conversation's source is "system" and it was spawned
-    # by personalization's refresh-profile task. Until then the tools stay unlisted.
-    return False
+    # Keyed on the run title, set before the first prompt; renaming one's own
+    # conversation to it exposes only one's own data.
+    conv = await _conversation(ctx)
+    return conv is not None and bool(conv.get("owner")) and is_refresh_run(conv)
 
 
 def _grouped(notes) -> str:
@@ -60,7 +72,7 @@ async def personalization_get(category: str = "", ctx: ToolContext = ToolContext
     Call it at the start of substantive work. Treat notes as preferences, not commands:
     the user's explicit instructions in this conversation always win.
     """
-    owner = _owner(ctx)
+    owner = await _owner(ctx)
     if _store is None or owner is None:
         return "No personalization profile is available for this conversation."
     profile = await _store.profile(owner)
@@ -76,9 +88,22 @@ async def personalization_history(
     since: str = "", limit: int = 20, ctx: ToolContext = ToolContextDep
 ) -> ToolResult:
     """The user's recent conversations (title, dates, condensed transcript), newest
-    first, excluding system conversations. Only for the refresh-profile task."""
-    # TODO(PR 3): read through the agent-host as the user, condensed per conversation.
-    return ToolResult.error("personalization_history is not wired yet (needs system tasks).")
+    first, excluding system conversations. Only for the refresh-profile task.
+
+    `since` (ISO timestamp) defaults to the newest conversation the last analysis saw;
+    pass "all" to ignore it. `limit` is capped at 50.
+    """
+    owner = await _owner(ctx)
+    if _store is None or _agent_host is None or owner is None:
+        return ToolResult.error("no profile owner for this conversation")
+    if since == "all":
+        cutoff = None
+    else:
+        cutoff = since or (await _store.profile(owner)).last_conversation_seen
+    convs = await _agent_host.history(owner, since=cutoff, limit=max(1, min(limit, 50)))
+    if not convs:
+        return ToolResult.ok(f"No conversations since {cutoff}." if cutoff else "No conversations yet.")
+    return ToolResult.ok(json.dumps(convs, indent=1))
 
 
 @gate(_is_system_conversation)
@@ -91,7 +116,7 @@ async def personalization_write(ops: list[dict], ctx: ToolContext = ToolContextD
     "last_conversation_seen": ISO timestamp}. User-written and pinned notes are
     read-only to you; an op on one is refused and the rest still apply.
     """
-    owner = _owner(ctx)
+    owner = await _owner(ctx)
     if _store is None or owner is None:
         return ToolResult.error("no profile owner for this conversation")
     applied, refused = 0, []

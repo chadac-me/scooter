@@ -13,8 +13,7 @@
 
 The /user/* routes are reached only through the /contrib-api relay, which names the
 user (scooter_broker_lib.user.user_identity); every query is scoped to that user.
-/system/* is only for the scheduler's service account (PR 3); until that caller
-exists its default dependency answers 501.
+/system/* is only for a system task (scooter_broker_lib.system).
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ from typing import Awaitable, Callable
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from scooter_broker_lib.types import AuthDependency, Provider, Transport
+from scooter_broker_lib.system import system_task_identity
 from scooter_broker_lib.user import user_identity
 
 from .store import PersonalizationStore, now_iso
@@ -38,11 +38,6 @@ _INTERVAL = re.compile(r"^(\d+)([hd])$")
 # Returns the newest non-system conversation timestamp per owner. The agent-host
 # owns conversations, so the provider wires this to it.
 ActivitySource = Callable[[], Awaitable[dict[str, str]]]
-
-
-async def _no_system_caller() -> None:
-    # TODO(PR 3): accept only the scheduler's service account.
-    raise HTTPException(status_code=501, detail="needs system tasks")
 
 
 async def _no_activity() -> dict[str, str]:
@@ -79,7 +74,8 @@ class Personalization(Transport):
     store: PersonalizationStore | None = field(default=None)
     # The relayed user; None means user_identity(authed). Tests may inject a fake.
     user: Callable[..., Awaitable[str]] | None = None
-    system: Callable[..., Awaitable[None]] = field(default=_no_system_caller)
+    # The system-task caller; None means system_task_identity(authed).
+    system: Callable[..., Awaitable[object]] | None = None
     activity: ActivitySource = field(default=_no_activity)
 
     def routes(self, provider: Provider, authed: AuthDependency) -> APIRouter:
@@ -91,6 +87,7 @@ class Personalization(Transport):
             return self.store
 
         user = Depends(self.user or user_identity(authed))
+        system = Depends(self.system or system_task_identity(authed))
 
         @router.get("/user/profile")
         async def get_profile(owner: str = user) -> dict:
@@ -147,7 +144,7 @@ class Personalization(Transport):
             profile = await _store().update_profile(owner, refresh_requested_at=now_iso())
             return {"profile": profile.payload()}
 
-        @router.get("/system/eligible", dependencies=[Depends(self.system)])
+        @router.get("/system/eligible", dependencies=[system])
         async def eligible(
             interval: str = Query(default="10d"), limit: int = Query(default=25, ge=1, le=500)
         ) -> dict:
@@ -157,7 +154,7 @@ class Personalization(Transport):
             )
             return {"owners": owners}
 
-        @router.post("/system/spawned", dependencies=[Depends(self.system)])
+        @router.post("/system/spawned", dependencies=[system])
         async def spawned(body: dict = Body(...)) -> dict:
             owner, conv = body.get("owner"), body.get("conversation_id")
             if not isinstance(owner, str) or not isinstance(conv, str):
