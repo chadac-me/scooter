@@ -110,7 +110,7 @@ test.describe("personalization settings tab", () => {
     expect(calls).toEqual(expect.arrayContaining(["POST notes", "PATCH notes/n1", "DELETE notes/n1"]));
   });
 
-  test("the opt-out toggle disables Refresh now, and Delete all empties the profile", async ({ page }) => {
+  test("opting out disables Refresh now, a refresh greys it out until it runs, and Delete all empties the profile", async ({ page }) => {
     await serveTab(page);
     const calls = await fakeBroker(page, [
       { id: "a1", category: "preferences", note: "Prefers short replies", source: "agent", pinned: false, updated_at: "2026-10-01T00:00:00Z" },
@@ -118,14 +118,17 @@ test.describe("personalization settings tab", () => {
     await page.goto("/settings/personalization");
     const refresh = tab(page).getByRole("button", { name: "Refresh now" });
     await expect(refresh).toBeEnabled({ timeout: 20_000 });
-    await refresh.click();
-    await expect(tab(page)).toContainText("refresh requested");
-
     // A controlled checkbox: it flips once the PATCH and reload land, so click and wait.
     const toggle = tab(page).getByLabel("Analyse my conversations");
     await toggle.click();
     await expect(toggle).not.toBeChecked();
     await expect(refresh).toBeDisabled();
+    await toggle.click();
+    await expect(toggle).toBeChecked();
+
+    await refresh.click();
+    await expect(tab(page).getByRole("button", { name: "Refresh queued" })).toBeDisabled();
+    await expect(tab(page)).toContainText("refresh queued, starts within the hour");
 
     page.once("dialog", (d) => void d.accept());
     await tab(page).getByRole("button", { name: "Delete all notes" }).click();
