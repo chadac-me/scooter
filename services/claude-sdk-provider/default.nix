@@ -22,6 +22,8 @@ buildNpmPackage {
     runHook preInstall
     mkdir -p $out/lib/node_modules/@scooter/claude-sdk-provider
     cp -r dist package.json node_modules $out/lib/node_modules/@scooter/claude-sdk-provider/
+    # Callers always pass pathToClaudeCodeExecutable; drop the SDK's bundled binaries.
+    rm -rf $out/lib/node_modules/@scooter/claude-sdk-provider/node_modules/@anthropic-ai/claude-agent-sdk-*
     runHook postInstall
   '';
 

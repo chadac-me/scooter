@@ -32,6 +32,8 @@ buildNpmPackage {
     runHook preInstall
     mkdir -p $out/lib/scooter-remote-agent
     cp -r dist package.json node_modules $out/lib/scooter-remote-agent/
+    # The SDK runs CLAUDE_CODE_COMMAND, so drop its bundled binaries.
+    rm -rf $out/lib/scooter-remote-agent/node_modules/@anthropic-ai/claude-agent-sdk-*
     makeWrapper ${nodejs}/bin/node $out/bin/scooter-remote-agent \
       --add-flags $out/lib/scooter-remote-agent/dist/main.js \
       ${lib.optionalString (claude-code != null) "--set CLAUDE_CODE_COMMAND ${claude-code}/bin/claude --prefix PATH : ${claude-code}/bin"}

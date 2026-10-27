@@ -229,9 +229,12 @@
             ./pkgs/warm-store-controller-image/image.nix
           ] ++ [ sandboxOsImage.module imagePackageConfig ];
 
+          # Runtime layers the service images share.
+          imageLayers = import ./pkgs/image-layers.nix { inherit pkgs lib n2c; };
+
           # Build inputs the image modules take as ordinary arguments.
           imageArgs = {
-            inherit pkgs lib n2c agent agentHost broker webhooks scheduler ui
+            inherit pkgs lib n2c imageLayers agent agentHost broker webhooks scheduler ui
               remoteAgent byocController conversationController conversationRouter
               warmStoreController;
             contribManifest = contribs.uiManifest;

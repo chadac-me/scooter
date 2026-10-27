@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, conversationController, ... }:
+{ pkgs, lib, n2c, imageLayers, conversationController, ... }:
 
 # OCI image for the conversation controller.
 
@@ -6,6 +6,9 @@ let
   image = n2c.buildImage {
     name = "conversation-controller";
     tag = "latest";
+    # Shared runtime and third-party layers; first-party paths split from them.
+    layers = [ imageLayers.python (imageLayers.pythonDeps conversationController) ];
+    maxLayers = 30;
     copyToRoot = pkgs.buildEnv {
       name = "conversation-controller-root";
       paths = [ conversationController pkgs.cacert ];
