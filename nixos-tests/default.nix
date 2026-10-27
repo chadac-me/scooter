@@ -11,6 +11,8 @@
 , byocController ? null
   # agent-host for byoc-mcp-e2e.nix, the cloud side that replies to a tunnel open.
 , agentHost ? null
+  # The broker with its contribs, for forge-proxy.nix.
+, broker ? null
 , deploymentModules ? [ ] }:
 
 let
@@ -68,6 +70,10 @@ in
 }
 # The full container -> controller -> agent-host -> broker round trip, which needs
 # agent-host and three VMs.
+// lib.optionalAttrs (broker != null) {
+  # git/gh/glab through the shim and broker to a fake forge.
+  dev-env-forge-proxy = import ./forge-proxy.nix { inherit pkgs lib sandboxModule broker; };
+}
 // lib.optionalAttrs (byocController != null && agentHost != null) {
   byoc-mcp-e2e = import ./byoc-mcp-e2e.nix { inherit pkgs lib byocController agentHost; };
 }
