@@ -236,3 +236,36 @@ type raceWriter struct{ *fakeMeta }
 func (r *raceWriter) SetStarred(context.Context, string, bool) (*ConversationRow, error) {
 	return nil, nil
 }
+
+// assignedResolver reports every conversation as live on an owner pod.
+type assignedResolver struct{ assigned bool }
+
+func (a assignedResolver) Resolve(context.Context, string) (string, string, bool, error) {
+	return "", "", false, nil
+}
+func (a assignedResolver) Assigned(context.Context, string) bool { return a.assigned }
+
+// Star and title are router-only even when live; live visibility goes to the owner pod.
+func TestRouterServesPatch(t *testing.T) {
+	ctx := context.Background()
+	live, idle := assignedResolver{true}, assignedResolver{false}
+	cases := []struct {
+		field    string
+		resolver ownerResolver
+		want     bool
+	}{
+		{"starred", live, true},
+		{"starred", idle, true},
+		{"starred", nil, true},
+		{"title", live, true},
+		{"title", nil, true},
+		{"visibility", live, false},
+		{"visibility", idle, true},
+		{"visibility", nil, false},
+	}
+	for _, c := range cases {
+		if got := routerServesPatch(ctx, c.resolver, c.field, "c1"); got != c.want {
+			t.Errorf("routerServesPatch(%T%v, %q) = %v, want %v", c.resolver, c.resolver, c.field, got, c.want)
+		}
+	}
+}

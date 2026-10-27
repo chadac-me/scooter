@@ -6,13 +6,14 @@
  * loop over a title nobody wants changed.
  */
 
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect } from "vitest";
 
 import {
   createSessionManager,
   isPlaceholderTitle,
   type SandboxProvisioner,
   type ConversationStore,
+  type RouterMeta,
 } from "../../src/session/manager.js";
 import {
   handleSetConversationTitle,
@@ -30,9 +31,13 @@ const fakeProvisioner = (): SandboxProvisioner => ({
   destroy: async () => {},
 });
 
+/** The conversations row as the conversation-router writes it. */
+const routerRows = new Map<SessionId, RouterMeta>();
+
 const inMemoryStore = (): ConversationStore => {
   const logs = new Map<SessionId, AguiEvent[]>();
   return {
+    readRouterMeta: async (id) => routerRows.get(id),
     appendEvent: async (id, e) => {
       (logs.get(id) ?? logs.set(id, []).get(id)!).push(e);
     },
@@ -42,6 +47,10 @@ const inMemoryStore = (): ConversationStore => {
     gooseStatePath: (id) => `/state/${id}/goose`,
   };
 };
+
+/** A user rename, which the conversation-router writes straight to the row. */
+const renameAsUser = (id: SessionId, title: string) =>
+  routerRows.set(id, { title, userTitled: true, starred: false });
 
 /** A conversation already named by its opening marker, plus the wiring index.ts builds. */
 async function titledConversation(): Promise<{
@@ -56,13 +65,18 @@ async function titledConversation(): Promise<{
     sessions,
     titles: {
       currentTitle: (id) => sessions.get(id)?.title,
-      userTitled: (id) => sessions.get(id)?.userTitled === true,
+      userTitled: async (id) => {
+        await sessions.refreshRouterMeta(id as SessionId);
+        return sessions.get(id)?.userTitled === true;
+      },
       setTitle: (id, title) => sessions.setTitle(id, title, { force: true }),
     },
   };
 }
 
 describe("set_conversation_title", () => {
+  beforeEach(() => routerRows.clear());
+
   it("renames a conversation the marker gate has already closed on", async () => {
     const { sessions, titles } = await titledConversation();
     const res = await handleSetConversationTitle(titles, "t", { title: "Migrate the auth service" });
@@ -72,7 +86,7 @@ describe("set_conversation_title", () => {
 
   it("refuses to overwrite a title the USER chose, and says so without erroring", async () => {
     const { sessions, titles } = await titledConversation();
-    await sessions.setUserTitle("t", "Mine");
+    renameAsUser("t", "Mine");
     const res = await handleSetConversationTitle(titles, "t", { title: "Mine, actually" });
     // Not an error: the agent should stop, not retry.
     expect(res.isError).toBeFalsy();
@@ -98,7 +112,8 @@ describe("set_conversation_title", () => {
     const { sessions, titles } = await titledConversation();
     await handleSetConversationTitle(titles, "t", { title: "The agent's choice" });
     expect(sessions.get("t")?.userTitled).toBeFalsy();
-    await sessions.setUserTitle("t", "Mine");
+    renameAsUser("t", "Mine");
+    await sessions.refreshRouterMeta("t");
     expect(sessions.get("t")?.title).toBe("Mine");
   });
 

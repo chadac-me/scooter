@@ -14,7 +14,7 @@ import { agent_host } from "@scooter/schema";
 import { formatError, logger } from "../log.js";
 import { createPgPool } from "../db/pgPool.js";
 
-import type { ConversationMeta } from "./manager.js";
+import type { ConversationMeta, RouterMeta } from "./manager.js";
 import type { AccessFacts, Visibility } from "./visibility.js";
 import type { SessionId, ThreadId } from "../types.js";
 
@@ -31,6 +31,8 @@ export interface MetaStore {
   setRunState(id: SessionId, running: boolean, at: number): Promise<void>;
   /** The persisted lastActivityAt, or undefined when there is no row. */
   readLastActivity(id: SessionId): Promise<number | undefined>;
+  /** The router-owned star and title; undefined without a row, throws on failure. */
+  readRouterMeta(id: SessionId): Promise<RouterMeta | undefined>;
   /** Set the visibility of `rootId` and all its descendants in one statement; throws on failure. */
   setVisibility(rootId: SessionId, visibility: Visibility): Promise<void>;
   /** The row's owner and visibility, undefined when there is no row; throws on a failed read. */
@@ -124,14 +126,15 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
   };
 
   return {
-    /** UPDATE, so a straggler save cannot resurrect a removed row; lastActivityAt only moves
-     *  forward, so a replica holding a stale copy cannot erase activity another one recorded. */
+    /** UPDATE only; a stale copy never unstars or unrenames. */
     async saveMeta(meta) {
+      const { starred: _starred, userTitled: _userTitled, ...values } = rowValues(meta);
       try {
         await db
           .update(conversations)
           .set({
-            ...rowValues(meta),
+            ...values,
+            title: sql`CASE WHEN ${conversations.userTitled} IS TRUE THEN ${conversations.title} ELSE ${values.title} END`,
             lastActivityAt: sql`GREATEST(${conversations.lastActivityAt}, ${meta.lastActivityAt})`,
           })
           .where(eq(conversations.id, meta.id));
@@ -141,6 +144,16 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
           error: formatError(e),
         });
       }
+    },
+
+    async readRouterMeta(id) {
+      const rows = await db
+        .select({ title: conversations.title, userTitled: conversations.userTitled, starred: conversations.starred })
+        .from(conversations)
+        .where(eq(conversations.id, id))
+        .limit(1);
+      if (!rows.length) return undefined;
+      return { title: rows[0].title, userTitled: rows[0].userTitled === true, starred: rows[0].starred === true };
     },
 
     async touchActivity(id, at) {

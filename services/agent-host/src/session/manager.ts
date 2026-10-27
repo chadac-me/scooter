@@ -36,6 +36,13 @@ const MODEL_SWITCH_NUDGE =
 /** The title a conversation is created with, before the agent's <title> marker names it. */
 export const PLACEHOLDER_TITLE = "New chat";
 
+/** The conversation fields only the conversation-router writes. */
+export interface RouterMeta {
+  title: string;
+  userTitled: boolean;
+  starred: boolean;
+}
+
 /** Whether a title is still the create-time placeholder, i.e. the conversation is unnamed. */
 export function isPlaceholderTitle(title: string | undefined): boolean {
   return (title ?? "").trim() === "" || title === PLACEHOLDER_TITLE;
@@ -184,6 +191,8 @@ export interface ConversationStore {
   gooseStatePath(id: SessionId): string;
   /** Persist conversation metadata so the list survives a restart; optional. */
   saveMeta?(meta: ConversationMeta): Promise<void>;
+  /** The router-owned star and title as persisted; optional. */
+  readRouterMeta?(id: SessionId): Promise<RouterMeta | undefined>;
   /** Set the visibility of `rootId` and every descendant in one write; optional. */
   setVisibility?(rootId: SessionId, visibility: Visibility): Promise<void>;
   /** Read a conversation's owner and visibility fresh from the shared store, since another
@@ -331,10 +340,8 @@ export interface SessionManager {
    *  conversation is named, which `force` (a deliberate rename through set_conversation_title)
    *  overrides — a user rename locks the title against both. */
   setTitle(id: SessionId, title: string, opts?: { force?: boolean }): Promise<void>;
-  /** Rename from the user: set the title and lock it against the agent's <title> marker. */
-  setUserTitle(id: SessionId, title: string): Promise<void>;
-  /** Star or unstar a conversation and persist it. */
-  setStarred(id: SessionId, starred: boolean): Promise<void>;
+  /** Pull the router-owned star and title into memory; throws on a failed read. */
+  refreshRouterMeta(id: SessionId): Promise<void>;
   /** Set a top-level conversation's visibility and every descendant's (they share its pod);
    *  throws for a subagent, or for private on an unowned conversation. */
   setVisibility(id: SessionId, visibility: Visibility): Promise<void>;
@@ -633,6 +640,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           visibility: e.visibility,
           pendingQueue: e.pendingQueue,
         }) ?? Promise.resolve();
+
+  // The router writes star and title without telling this replica.
+  const refreshRouterMeta = async (e: Entry): Promise<void> => {
+    const m = await store.readRouterMeta?.(e.id);
+    if (!m) return;
+    e.starred = m.starred;
+    e.userTitled = m.userTitled;
+    if (m.userTitled) e.title = m.title;
+  };
 
   /** Events dropped by the ownership fence, per conversation — for sampled logging only. */
   const fencedDrops = new Map<SessionId, number>();
@@ -1441,33 +1457,28 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         .map(toConversation);
     },
 
-    setTitle(id, title, opts) {
+    async setTitle(id, title, opts) {
       const entry = entries.get(id);
-      if (!entry) return Promise.resolve();
+      if (!entry) return;
       const force = opts?.force === true;
+      try {
+        await refreshRouterMeta(entry);
+      } catch (err) {
+        log.warn("router meta read failed; deciding from memory", { conversation_id: id, error: formatError(err) });
+      }
       // A user-chosen name is locked against the agent, force or not.
-      if (entry.userTitled) return Promise.resolve();
+      if (entry.userTitled) return;
       // A conversation is named only once; `force` is the deliberate rename.
-      if (!force && !isPlaceholderTitle(entry.title)) return Promise.resolve();
+      if (!force && !isPlaceholderTitle(entry.title)) return;
       entry.title = title;
       // The durable write drives the live sidebar: the conversations row's trigger fires NOTIFY and
       // the conversation-router pushes the upsert.
       return saveMeta(entry);
     },
 
-    setUserTitle(id, title) {
+    async refreshRouterMeta(id) {
       const entry = entries.get(id);
-      if (!entry) return Promise.resolve();
-      entry.title = title;
-      entry.userTitled = true; // lock it against the agent's <title>
-      return saveMeta(entry);
-    },
-
-    setStarred(id, starred) {
-      const entry = entries.get(id);
-      if (!entry) return Promise.resolve();
-      entry.starred = starred;
-      return saveMeta(entry);
+      if (entry) await refreshRouterMeta(entry);
     },
 
     async setVisibility(id, visibility) {
@@ -1733,6 +1744,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       });
       for (const entry of candidates) {
         try {
+          // The router stars without telling this replica.
+          await refreshRouterMeta(entry);
+          if (entry.starred) continue;
           await this.end(entry.id);
           reaped.push(entry.id);
         } catch (err) {

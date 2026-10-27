@@ -66,44 +66,30 @@ function fakeDb(): {
         return { rows: [], rowCount: 1 };
       }
 
-      if (head.startsWith("UPDATE") && values.length === 2) {
-        // touchActivity: SET last_activity_at = GREATEST(last_activity_at, $1) WHERE id = $2.
-        const [at, target] = values as [number, string];
-        const row = rows.get(target);
-        if (!row) return { rows: [], rowCount: 0 };
-        row.last_activity_at = String(Math.max(Number(row.last_activity_at), Number(at)));
-        return { rows: [], rowCount: 1 };
-      }
-
       if (head.startsWith("UPDATE")) {
-        // Every column, then the target id as the last param.
-        const [id, threadId, title, createdAt, lastActivityAt, model, modelSetBy, owner, parentId, userTitled, starred, pendingQueue, target] =
-          values as [string, string, string, number, number, string | null, string | null, string | null, string | null, boolean | null, boolean | null, unknown, string];
-        if (!rows.has(target)) return { rows: [], rowCount: 0 }; // no row => nothing written
-        rows.set(target, {
-          id,
-          thread_id: threadId,
-          title,
-          created_at: String(createdAt),
-          // saveMeta only moves lastActivityAt forward (GREATEST), never back.
-          last_activity_at: /GREATEST/i.test(text)
-            ? String(Math.max(Number(rows.get(target)!.last_activity_at), Number(lastActivityAt)))
-            : String(lastActivityAt),
-          model,
-          model_set_by: modelSetBy,
-          owner,
-          parent_id: parentId,
-          user_titled: userTitled,
-          starred,
-          pending_queue: pendingQueue,
-        });
+        // Applies SET assignments by column name.
+        const param = (ref: string) => values[Number(ref.slice(1)) - 1];
+        const target = param(/where .*"id" = (\$\d+)/i.exec(text)![1]) as string;
+        const row = rows.get(target);
+        if (!row) return { rows: [], rowCount: 0 }; // no row => nothing written
+        const setClause = text.slice(text.search(/ set /i) + 5, text.search(/ where /i));
+        const next = { ...row };
+        for (const [, col, expr] of setClause.matchAll(/"(\w+)" = (CASE WHEN .*? END|GREATEST\(.*?\)|\$\d+)/gi)) {
+          const ref = /\$\d+/.exec(expr)![0];
+          const v = param(ref);
+          if (expr.startsWith("GREATEST")) next[col] = String(Math.max(Number(row[col]), Number(v)));
+          else if (expr.startsWith("CASE")) next[col] = row.user_titled === true ? row[col] : v;
+          else next[col] = col === "created_at" || col === "last_activity_at" ? String(v) : v;
+        }
+        rows.set(target, next);
         return { rows: [], rowCount: 1 };
       }
 
       if (head.startsWith("SELECT") && /WHERE/i.test(text)) {
-        // readLastActivity: SELECT last_activity_at WHERE id = $1 LIMIT $2.
+        // A narrow read by id: the selected columns, in order.
         const row = rows.get(values[0] as string);
-        return { rows: row ? [[row.last_activity_at]] : [], rowCount: row ? 1 : 0 };
+        const cols = [...text.slice(0, text.search(/ from /i)).matchAll(/"(\w+)"(?:,|$)/g)].map((m) => m[1]);
+        return { rows: row ? [cols.map((c) => row[c])] : [], rowCount: row ? 1 : 0 };
       }
 
       if (head.startsWith("SELECT")) {
@@ -141,6 +127,10 @@ function fakeDb(): {
 
   return { db: drizzle(client as never), rows, created };
 }
+
+/** Stands in for the conversation-router's targeted UPDATE. */
+const routerWrites = (rows: Map<string, Record<string, unknown>>, id: string, cols: Record<string, unknown>) =>
+  Object.assign(rows.get(id)!, cols);
 
 /** A file-backed store standing in for one a deployment still carries on disk. */
 const legacyWith = (metas: ConversationMeta[]) => ({
@@ -184,7 +174,7 @@ describe("conversation metadata in Postgres", () => {
   });
 
   it("round-trips every field", async () => {
-    const { db, created } = fakeDb();
+    const { db, rows, created } = fakeDb();
     const store = createPgMetaStore({ db });
     created("conv-1");
     const full = meta({
@@ -198,6 +188,7 @@ describe("conversation metadata in Postgres", () => {
     });
 
     await store.saveMeta(full);
+    routerWrites(rows, "conv-1", { starred: true, user_titled: true });
     expect((await store.listConversations())[0]).toEqual(full);
   });
 
@@ -274,12 +265,42 @@ describe("conversation metadata in Postgres", () => {
     const store = createPgMetaStore({ db });
     created("conv-1");
     await store.saveMeta(meta({ title: "New chat" }));
-    await store.saveMeta(meta({ title: "Renamed", userTitled: true }));
+    await store.saveMeta(meta({ title: "Agent title" }));
 
     const listed = await store.listConversations();
     expect(listed).toHaveLength(1);
-    expect(listed[0].title).toBe("Renamed");
-    expect(listed[0].userTitled).toBe(true);
+    expect(listed[0].title).toBe("Agent title");
+  });
+
+  it("a stale replica's saveMeta does not UNSTAR a conversation the router starred", async () => {
+    const { db, rows, created } = fakeDb();
+    const store = createPgMetaStore({ db });
+    created("conv-1");
+    // The router stars it; this replica's copy still says unstarred.
+    routerWrites(rows, "conv-1", { starred: true });
+    await store.saveMeta(meta({ starred: false, lastActivityAt: 3_000 }));
+    await store.saveMeta(meta({ lastActivityAt: 4_000 }));
+
+    expect((await store.readRouterMeta("conv-1" as SessionId))?.starred).toBe(true);
+    expect((await store.listConversations())[0].starred).toBe(true);
+    expect(await store.readRouterMeta("missing" as SessionId)).toBeUndefined();
+  });
+
+  it("a stale replica's saveMeta does not undo a user rename", async () => {
+    const { db, rows, created } = fakeDb();
+    const store = createPgMetaStore({ db });
+    created("conv-1");
+    routerWrites(rows, "conv-1", { title: "My name", user_titled: true });
+    await store.saveMeta(meta({ title: "New chat", userTitled: false }));
+
+    const [row] = await store.listConversations();
+    expect(row.title).toBe("My name");
+    expect(row.userTitled).toBe(true);
+    expect(await store.readRouterMeta("conv-1" as SessionId)).toEqual({
+      title: "My name",
+      userTitled: true,
+      starred: false,
+    });
   });
 
   it("orders the list by recency", async () => {
