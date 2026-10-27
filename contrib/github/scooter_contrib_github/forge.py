@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
-from scooter_broker_lib.forge import ForgeHost
+if TYPE_CHECKING:
+    from scooter_broker_lib.forge import ForgeHost
 
 DOTCOM = "github.com"
 # GHES serves REST under /api/v3; github.com on api.github.com.
@@ -30,6 +32,8 @@ def api_base(host: str) -> str:
 
 def forge_hosts(host: str) -> list[ForgeHost]:
     """github.com splits git, API and uploads; GHES uses one host."""
+    # Lazy: webhooks imports this module but doesn't ship the broker lib.
+    from scooter_broker_lib.forge import ForgeHost
     if host == DOTCOM:
         return [
             ForgeHost(DOTCOM, git=True),
