@@ -12,7 +12,7 @@ python3Packages.buildPythonPackage {
   build-system = [ python3Packages.hatchling ];
 
   dependencies = with python3Packages; [
-    httpx # scooter_lib.client
+    httpx # scooter_lib.client, scooter_lib.svcauth
     pydantic
     pydantic-settings
   ];
@@ -20,7 +20,7 @@ python3Packages.buildPythonPackage {
   nativeCheckInputs = with python3Packages; [
     pytestCheckHook
   ];
-  pythonImportsCheck = [ "scooter_lib.logging_config" "scooter_lib.client" ];
+  pythonImportsCheck = [ "scooter_lib.logging_config" "scooter_lib.client" "scooter_lib.svcauth" ];
 
   meta.description = "Shared library for Scooter's Python services";
 }

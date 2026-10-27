@@ -4,6 +4,7 @@ SQLite has no migrations, so the test suite builds its schema from the ORM model
 while on Postgres the lib/sql migrations own the schema and the services issue no DDL.
 """
 
+import pytest
 from sqlalchemy.orm import DeclarativeBase
 
 from scooter_broker_lib.store import StoreConfig
@@ -25,3 +26,11 @@ async def create_schema(store, base: type[DeclarativeBase]) -> None:
     )
     async with engine.begin() as conn:
         await conn.run_sync(base.metadata.create_all)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_token_cache(monkeypatch):
+    """Tests reuse token strings for different SAs, so each starts with an empty verdict cache."""
+    from broker.core import auth
+
+    monkeypatch.setattr(auth, "_verifier", auth.Verifier(auth._kube_review))
