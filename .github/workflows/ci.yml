@@ -550,18 +550,6 @@ jobs:
           KEEP_TEST_PODS: "1"
         run: nix develop --command bash -c 'npm install && npm run test:cluster -- nix-build-sandbox'
 
-      # The platform default: sandboxUserNamespace on, sandboxRuntimeClass unset (runc).
-      - name: user-namespace spec (runc, the default runtime)
-        if: ${{ !cancelled() }}
-        env:
-          RUN_CLUSTER_TESTS: "1"
-          CLUSTER_PROVIDER: existing
-          SANDBOX_OS_IMAGE: agent-sandbox-os:latest
-          SANDBOX_RUNTIME_CLASS: ""
-          CI: "1"
-          KEEP_TEST_PODS: "1"
-        run: nix develop --command bash -c 'npm install && npm run test:cluster -- nix-build-sandbox'
-
       - name: dump pod state on failure
         if: failure()
         run: |

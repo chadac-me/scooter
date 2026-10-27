@@ -12,9 +12,9 @@ import { withCluster, clusterTestsEnabled, type Cluster } from "../support/clust
 const maybe = clusterTestsEnabled() ? describe : describe.skip;
 const NS = "agent-sandbox-test";
 const IMAGE = process.env.SANDBOX_OS_IMAGE ?? "agent-sandbox-os:latest";
-/** RuntimeClass for the pod; empty runs the cluster default (runc), the platform default. */
+/** RuntimeClass for the pod; empty runs the cluster default runtime. */
 const RUNTIME_CLASS = process.env.SANDBOX_RUNTIME_CLASS ?? "crun";
-/** Per-runtime pod name, so both runtimes can run back to back in one namespace. */
+/** Per-runtime pod name, so runs under different runtimes do not collide. */
 const POD = `nix-build-sandbox-${RUNTIME_CLASS || "default"}`;
 const SELECTOR = `app=${POD}`;
 

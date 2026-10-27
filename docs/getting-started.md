@@ -11,11 +11,9 @@ the options most deployments change.
 
 ## Prerequisites
 
-- **A Kubernetes cluster** (k3s, kind, EKS, …), version 1.33 or later, with the
+- **A Kubernetes cluster** (k3s, kind, EKS, …) with the
   [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller installed.
   Scooter creates one `Sandbox` per conversation; the controller turns it into a pod.
-  Sandbox pods run in their own user namespace; on an older cluster set
-  `scooter.sandboxUserNamespace = false`.
 - **A CNI that enforces NetworkPolicy** (k3s's built-in controller, Calico, Cilium, …).
   Scooter isolates sandbox pods with a NetworkPolicy.
 - **Nix with flakes enabled**, on the machine you deploy from.

@@ -67,8 +67,7 @@ bring_up_cluster() {
       if ! k3d cluster list | grep -q "$CLUSTER_NAME"; then
         k3d registry list 2>/dev/null | grep -q "k3d-scooter-reg.localhost" \
           || k3d registry create scooter-reg.localhost --port 5800
-        # k3s >= 1.33 for user-namespaced sandboxes (sandboxUserNamespace, default on).
-        k3d cluster create "$CLUSTER_NAME" --image rancher/k3s:v1.35.4-k3s1 --registry-use k3d-scooter-reg.localhost:5800
+        k3d cluster create "$CLUSTER_NAME" --registry-use k3d-scooter-reg.localhost:5800
       fi
       # Write and export a kubeconfig of our own, since k3d's merge into ~/.kube/config can fail silently.
       k3d kubeconfig get "$CLUSTER_NAME" > "$K3D_KUBECONFIG"

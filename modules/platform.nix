@@ -372,7 +372,8 @@ in
     };
     sandboxUserNamespace = mkOption {
       type = types.bool;
-      default = true;
+      default = config.scooter.sandboxRuntimeClass != null;
+      defaultText = literalExpression "config.scooter.sandboxRuntimeClass != null";
       description = ''
         Run each sandbox pod, and the warm-store seed Job, in its own Kubernetes user
         namespace (`hostUsers: false`) with an unmasked /proc (`procMount: Unmasked`).
@@ -381,8 +382,9 @@ in
         build sandbox (see `devEnvNix.autoBuildSandbox`). Needs Kubernetes >= 1.33,
         a runtime with user-namespace support (containerd >= 2.0 or CRI-O, with
         runc >= 1.2 or crun >= 1.9), and volumes on a filesystem that supports
-        idmapped mounts (ext4, xfs, btrfs, tmpfs, overlayfs). On an older cluster
-        sandbox pods are rejected; set this to false there to keep host-uid sandboxes.
+        idmapped mounts (ext4, xfs, btrfs, tmpfs, overlayfs). On by default when
+        `sandboxRuntimeClass` is set: systemd boots user-namespaced under crun but
+        not under plain runc, so leave this off without a cgroup-delegating runtime.
       '';
     };
     sandboxSizes = mkOption {
