@@ -74,7 +74,8 @@ class Store:
     # --- tasks --------------------------------------------------------------
 
     async def create_task(
-        self, *, title: str, prompt: str, cron: str, timezone_: str, owner: str, enabled: bool
+        self, *, title: str, prompt: str, cron: str, timezone_: str, owner: str, enabled: bool,
+        conversation_id: str | None = None,
     ) -> TaskRow:
         """Persist a task, validating cron and timezone (InvalidSchedule) and computing the first next_run_at."""
         validate(cron, timezone_)
@@ -82,6 +83,7 @@ class Store:
         row = TaskRow(
             id=new_id(), title=title, prompt=prompt, cron=cron, timezone=timezone_,
             owner=owner, enabled=enabled,
+            conversation_id=conversation_id or None,
             next_run_at=next_run(cron, timezone_, now) if enabled else None,
         )
         async with self._session() as s:
@@ -134,6 +136,16 @@ class Store:
             await s.commit()
             await s.refresh(row)
             return row
+
+    async def disable_task(self, task_id: str) -> None:
+        """Stop a task firing, e.g. once its target conversation is gone."""
+        async with self._session() as s:
+            await s.execute(
+                update(TaskRow).where(TaskRow.id == task_id).values(
+                    enabled=False, next_run_at=None, updated_at=_utcnow()
+                )
+            )
+            await s.commit()
 
     async def delete_task(self, task_id: str, owner: str | None) -> bool:
         async with self._session() as s:

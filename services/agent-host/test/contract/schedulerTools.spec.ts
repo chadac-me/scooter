@@ -6,7 +6,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  handleList, handleSearch, handleView, handleCreate, handleEdit, handleDelete,
+  handleList, handleSearch, handleView, handleCreate, handleEdit, handleDelete, registerSchedulerTools,
   type SchedulerClient, type SchedulerToolsWiring, type ScheduledTask, type Owner,
 } from "../../src/agent/schedulerTools.js";
 
@@ -30,9 +30,13 @@ function fakeClient(tasks: ScheduledTask[] = []) {
   return { client, calls };
 }
 
+/** Conversations by id and owner: conv-1 (the caller) and conv-mine are alice's, conv-bob is bob's. */
+const CONVERSATIONS: Record<string, Owner> = { "conv-1": "alice", "conv-mine": "alice", "conv-bob": "bob" };
+
 const wiringFor = (owner: Owner, tasks: ScheduledTask[] = []): { wiring: SchedulerToolsWiring; calls: ReturnType<typeof fakeClient>["calls"] } => {
   const { client, calls } = fakeClient(tasks);
-  return { wiring: { client, owner: async () => owner }, calls };
+  const conversationOwner = async (id: string) => (id in CONVERSATIONS ? { owner: CONVERSATIONS[id] } : undefined);
+  return { wiring: { client, owner: async () => owner, conversationOwner }, calls };
 };
 
 const CONV = "conv-1";
@@ -90,5 +94,56 @@ describe("scheduler agent tools", () => {
     const { wiring } = wiringFor("alice", [task({ id: "t9", owner: "bob" })]);
     const res = await handleDelete(wiring, CONV, { id: "t9" });
     expect(res.isError).toBe(true);
+  });
+});
+
+describe("scheduler agent tools: target conversation", () => {
+  const base = { title: "t", prompt: "p", cron: "0 9 * * *" };
+  const sent = (calls: ReturnType<typeof fakeClient>["calls"], method: string) =>
+    calls.find((c) => c.method === method)?.arg as Record<string, unknown> | undefined;
+
+  it("create without a target spawns, sending conversation_id null", async () => {
+    const { wiring, calls } = wiringFor("alice");
+    const res = await handleCreate(wiring, CONV, base);
+    expect(res.isError).toBeUndefined();
+    expect(sent(calls, "create")).toMatchObject({ conversation_id: null });
+  });
+
+  it("create with 'this' targets the calling conversation", async () => {
+    const { wiring, calls } = wiringFor("alice");
+    const res = await handleCreate(wiring, CONV, { ...base, conversation_id: "this" });
+    expect(res.isError).toBeUndefined();
+    expect(sent(calls, "create")).toMatchObject({ conversation_id: CONV });
+    expect(res.content[0].text).toContain(`prompts conversation ${CONV}`);
+  });
+
+  it("create may target another conversation the caller owns", async () => {
+    const { wiring, calls } = wiringFor("alice");
+    await handleCreate(wiring, CONV, { ...base, conversation_id: "conv-mine" });
+    expect(sent(calls, "create")).toMatchObject({ conversation_id: "conv-mine" });
+  });
+
+  it("create refuses someone else's conversation and an unknown one alike, without calling the scheduler", async () => {
+    for (const target of ["conv-bob", "conv-nope"]) {
+      const { wiring, calls } = wiringFor("alice");
+      const res = await handleCreate(wiring, CONV, { ...base, conversation_id: target });
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toContain("isn't yours");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    }
+  });
+
+  it("edit without conversation_id leaves the target untouched", async () => {
+    const { wiring, calls } = wiringFor("alice", [task()]);
+    await handleEdit(wiring, CONV, { id: "t1", enabled: false });
+    expect((sent(calls, "patch") as { body: object }).body).not.toHaveProperty("conversation_id");
+  });
+
+  it("the edit tool has no conversation_id input, since the target is fixed at creation", async () => {
+    const tools = new Map<string, { inputSchema?: Record<string, unknown> }>();
+    const server = { registerTool: (name: string, meta: { inputSchema?: Record<string, unknown> }) => tools.set(name, meta) };
+    registerSchedulerTools(server as never, wiringFor("alice", []).wiring, CONV);
+    expect(Object.keys(tools.get("edit_scheduled_task")?.inputSchema ?? {})).not.toContain("conversation_id");
+    expect(Object.keys(tools.get("create_scheduled_task")?.inputSchema ?? {})).toContain("conversation_id");
   });
 });

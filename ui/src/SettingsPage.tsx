@@ -44,9 +44,12 @@ function TaskForm({
   submitLabel,
   onSubmit,
   onCancel,
+  targetLocked = false,
 }: {
   initial: ScheduledTaskInput;
   submitLabel: string;
+  /** Edit mode: the target conversation is fixed at creation. */
+  targetLocked?: boolean;
   onSubmit: (input: ScheduledTaskInput) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -61,7 +64,13 @@ function TaskForm({
     setBusy(true);
     setError(null);
     try {
-      await onSubmit({ ...form, title: form.title.trim(), prompt: form.prompt.trim(), cron: form.cron.trim() });
+      await onSubmit({
+        ...form,
+        title: form.title.trim(),
+        prompt: form.prompt.trim(),
+        cron: form.cron.trim(),
+        conversation_id: form.conversation_id?.trim() || null,
+      });
     } catch (e) {
       setError((e as Error)?.message ?? "Something went wrong.");
     } finally {
@@ -116,6 +125,22 @@ function TaskForm({
             className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
           />
         </div>
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-xs font-medium text-muted-foreground">Conversation (optional)</label>
+        <input
+          data-testid="task-conversation"
+          value={form.conversation_id ?? ""}
+          onChange={(e) => set("conversation_id", e.target.value)}
+          readOnly={targetLocked}
+          placeholder={targetLocked ? "A new conversation each run" : "Leave empty to start a new conversation each run"}
+          className="rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm read-only:opacity-60"
+        />
+        <span className="text-[11px] text-muted-foreground">
+          {targetLocked
+            ? "Fixed when the task was created; delete and recreate the task to change it."
+            : "The id of one of your conversations to send the prompt to each run instead."}
+        </span>
       </div>
       <label className="flex items-center gap-2 text-sm">
         <input
@@ -186,10 +211,18 @@ function TaskRow({
     return (
       <li data-testid="task-item" className="list-none">
         <TaskForm
-          initial={{ title: task.title, prompt: task.prompt, cron: task.cron, timezone: task.timezone, enabled: task.enabled }}
+          initial={{
+            title: task.title,
+            prompt: task.prompt,
+            cron: task.cron,
+            timezone: task.timezone,
+            enabled: task.enabled,
+            conversation_id: task.conversation_id ?? null,
+          }}
           submitLabel="Save changes"
+          targetLocked
           onCancel={() => setEditing(false)}
-          onSubmit={async (input) => {
+          onSubmit={async ({ conversation_id: _fixed, ...input }) => {
             await updateScheduledTask(agentHostConfig, task.id, input);
             setEditing(false);
             onChanged();
@@ -218,6 +251,11 @@ function TaskRow({
           <span>{task.timezone}</span>
           {task.next_run_at && <span>next: {new Date(task.next_run_at).toLocaleString()}</span>}
           {task.last_run_at && <span>last: {new Date(task.last_run_at).toLocaleString()}</span>}
+          {task.conversation_id && (
+            <span data-testid="task-target">
+              into <span className="font-mono">{task.conversation_id}</span>
+            </span>
+          )}
         </div>
         <p className="mt-1 line-clamp-2 text-sm text-foreground/80">{task.prompt}</p>
       </div>

@@ -2,7 +2,7 @@
 an OTLP exporter, a no-op sink when disabled, and an in-memory reader as a test seam.
 
 Instruments:
-  - scheduler_fires_total: Counter {status=spawned|failed}
+  - scheduler_fires_total: Counter {status=spawned|delivered|failed}
   - scheduler_spawn_duration_ms: Histogram
   - scheduler_tick_duration_ms: Histogram
   - scheduler_ticks_total: Counter {outcome=ok|error}
@@ -38,7 +38,7 @@ class MetricsSink:
         pass
 
     def fire_completed(self, *, status: str, duration_ms: float) -> None:
-        """A task fire completed with status spawned or failed."""
+        """A task fire completed with status spawned, delivered or failed."""
         pass
 
     def tick_started(self) -> None:
@@ -90,7 +90,7 @@ class _OTelMetricsSink(MetricsSink):
         # Counters
         self._fires = meter.create_counter(
             "scheduler_fires_total",
-            description="Task fires completed, by status (spawned|failed).",
+            description="Task fires completed, by status (spawned|delivered|failed).",
         )
         self._ticks = meter.create_counter(
             "scheduler_ticks_total",

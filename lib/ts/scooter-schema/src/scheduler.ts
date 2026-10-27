@@ -25,6 +25,7 @@ export const scheduledTasks = pgTable("scheduled_tasks", {
 	timeoutSeconds: integer("timeout_seconds"),
 	model: varchar(),
 	unavailable: text(),
+	conversationId: varchar("conversation_id"),
 });
 
 export const taskRuns = pgTable("task_runs", {

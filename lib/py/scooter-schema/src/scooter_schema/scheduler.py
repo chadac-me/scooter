@@ -35,6 +35,7 @@ class ScheduledTasks(Base):
     timeout_seconds: Mapped[Optional[int]] = mapped_column(Integer)
     model: Mapped[Optional[str]] = mapped_column(String)
     unavailable: Mapped[Optional[str]] = mapped_column(Text)
+    conversation_id: Mapped[Optional[str]] = mapped_column(String)
 
     task_runs: Mapped[list['TaskRuns']] = relationship('TaskRuns', back_populates='task')
 
