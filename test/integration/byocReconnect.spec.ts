@@ -37,14 +37,17 @@ async function until(what: string, ok: () => boolean | Promise<boolean>, ms = 20
   }
 }
 
-/** TCP forwarder; `blackhole` silences open connections like a dead path. */
+/** TCP forwarder: `blackhole` drops traffic, `stall` delays it. */
 async function forwarder(targetPort: number) {
   const live = new Set<{ client: Socket; upstream: Socket; dead: boolean }>();
+  // Bytes held during a stall, flushed in order after.
+  let held: Array<() => void> | undefined;
+  const relay = (fn: () => void) => (held ? held.push(fn) : fn());
   const server = createServer((client) => {
     const pair = { client, upstream: connect(targetPort, "127.0.0.1"), dead: false };
     live.add(pair);
-    client.on("data", (d) => pair.dead || pair.upstream.write(d));
-    pair.upstream.on("data", (d) => pair.dead || client.write(d));
+    client.on("data", (d) => pair.dead || relay(() => pair.upstream.write(d)));
+    pair.upstream.on("data", (d) => pair.dead || relay(() => client.write(d)));
     const end = () => {
       live.delete(pair);
       if (pair.dead) return; // a dead path reports nothing
@@ -70,6 +73,13 @@ async function forwarder(targetPort: number) {
     url: `http://127.0.0.1:${port}`,
     blackhole() {
       for (const p of live) p.dead = true;
+    },
+    async stall(ms: number) {
+      held = [];
+      await new Promise((r) => setTimeout(r, ms));
+      const queued = held;
+      held = undefined;
+      for (const fn of queued) fn();
     },
   };
 }
@@ -214,5 +224,26 @@ describe("BYOC reconnect", () => {
     const convo = byoConversation(ctl.url);
     await convo.bridge.prompt({ threadId: "t1", text: "after the redial" });
     await until("the reply", () => convo.said().includes("echo: after the redial"));
+  }, 60_000);
+
+  it("rides out a pause longer than one ping interval without failing the turn", async () => {
+    const ctl = controllerHost();
+    await ctl.start({ wsPingMs: 200 });
+    const path = await forwarder(ctl.port);
+    await joinContainer(path.url, { pingTimeoutMs: 5_000 });
+    await until("the container to attach", async () => (await ctl.status()) === "connected");
+
+    const convo = byoConversation(ctl.url);
+    const turn = convo.bridge.prompt({ threadId: "t1", text: "~sleep 2" });
+    await until("the turn to start", () => convo.said().includes("sleeping 2s"));
+    let dropped = false;
+    const watch = setInterval(() => void ctl.status().then((s) => (dropped ||= s !== "connected")), 50);
+    // Two missed pongs is jitter, not a dead container.
+    await path.stall(450);
+    await turn;
+    clearInterval(watch);
+
+    expect(convo.said()).toContain("slept 2s");
+    expect(dropped, "the controller dropped a socket that was only slow").toBe(false);
   }, 60_000);
 });

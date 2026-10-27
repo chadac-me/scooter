@@ -12,8 +12,10 @@ import { createDeviceAuth, type DeviceStore } from "./deviceAuth.js";
 
 /** SSE comment cadence on every stream. */
 export const SSE_HEARTBEAT_MS = 15_000;
-/** Container ping cadence; a missed pong terminates the socket. */
+/** Container ping cadence. */
 export const WS_PING_MS = 20_000;
+/** Consecutive unanswered pings before the socket is declared dead. */
+export const WS_MAX_MISSED_PONGS = 3;
 
 export interface ControllerOptions {
   /** 0 picks a free port. */
@@ -24,6 +26,7 @@ export interface ControllerOptions {
   deviceStore: DeviceStore;
   sseHeartbeatMs?: number;
   wsPingMs?: number;
+  wsMaxMissedPongs?: number;
 }
 
 export interface RunningController {
@@ -54,6 +57,7 @@ export async function startController(opts: ControllerOptions): Promise<RunningC
   const { secret, store, deviceStore } = opts;
   const sseHeartbeatMs = opts.sseHeartbeatMs ?? SSE_HEARTBEAT_MS;
   const wsPingMs = opts.wsPingMs ?? WS_PING_MS;
+  const wsMaxMissedPongs = Math.max(1, opts.wsMaxMissedPongs ?? WS_MAX_MISSED_PONGS);
 
   const registry = createSessionRegistry({ store, secret });
   const relay = createRunRelay({ registry });
@@ -117,16 +121,20 @@ export async function startController(opts: ControllerOptions): Promise<RunningC
   const wss = new WebSocketServer({ noServer: true });
   const sockets = new Set<WebSocket>();
 
-  // Ping every container; a missed pong means it's gone.
+  // Unanswered pings per socket; one miss is jitter, not death.
+  const missedPongs = new WeakMap<WebSocket, number>();
   const pinger = setInterval(() => {
     for (const ws of sockets) {
-      const live = ws as WebSocket & { awaitingPong?: boolean };
-      if (live.awaitingPong) {
-        console.warn("[byoc] container missed a pong; terminating its socket");
-        ws.terminate();
-        continue;
+      const missed = missedPongs.get(ws);
+      if (missed !== undefined) {
+        if (missed + 1 >= wsMaxMissedPongs) {
+          console.warn(`[byoc] container missed ${missed + 1} pongs in a row; terminating its socket`);
+          ws.terminate();
+          continue;
+        }
+        console.warn(`[byoc] container missed a pong (${missed + 1}/${wsMaxMissedPongs}); still waiting`);
       }
-      live.awaitingPong = true;
+      missedPongs.set(ws, missed === undefined ? 0 : missed + 1);
       ws.ping();
     }
   }, wsPingMs);
@@ -184,9 +192,7 @@ export async function startController(opts: ControllerOptions): Promise<RunningC
         const liveSessionId = attached.sessionId;
         console.log(`[byoc] container attached: session=${liveSessionId} owner=${authorized.owner}`);
         sockets.add(ws);
-        ws.on("pong", () => {
-          (ws as WebSocket & { awaitingPong?: boolean }).awaitingPong = false;
-        });
+        ws.on("pong", () => missedPongs.delete(ws));
         // Confirm the attach, which the client waits for before logging ready.
         ws.send(JSON.stringify({ type: "connected", payload: { owner: authorized.owner, sessionId: liveSessionId } }));
 
