@@ -94,8 +94,7 @@ type directProxy struct {
 	cache    map[string]directEntry
 	inflight map[string]*directCall
 	touched  map[string]time.Time
-	// gen counts each conversation's invalidations, so a lookup in flight across one
-	// (a suspend landing mid-fetch) does not cache or hand out the answer it got before.
+	// gen counts invalidations per conversation while a lookup is in flight.
 	gen map[string]uint64
 }
 
@@ -162,12 +161,10 @@ func (d *directProxy) lookup(ctx context.Context, owner, fallback *url.URL, conv
 	d.mu.Lock()
 	delete(d.inflight, key)
 	if d.gen[convID] != gen {
-		// Invalidated mid-fetch: the answer may name the pod that is going away, so this
-		// request and its waiters take the agent-host path, which knows the new state.
+		// Invalidated mid-fetch; fall back to the agent-host.
 		t = nil
 	}
 	if !d.inflightForLocked(convID) {
-		// Nothing else compares against it, so the counter can go.
 		delete(d.gen, convID)
 	}
 	if t != nil {
@@ -251,9 +248,7 @@ func (d *directProxy) inflightForLocked(convID string) bool {
 	return false
 }
 
-// invalidate drops a conversation's cached targets: after the pod refused or broke, and
-// on any change to its row (a suspend publishes its phase there), so a pod on its way
-// out is not served from the cache. Safe on a nil proxy (sandbox-direct off).
+// invalidate drops a conversation's cached targets; nil-safe.
 func (d *directProxy) invalidate(convID string) {
 	if d == nil {
 		return

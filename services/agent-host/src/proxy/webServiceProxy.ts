@@ -426,13 +426,10 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       return { ok: false, kind: "error", status: 404, service, threadId };
     }
 
-    // A suspended conversation's pod is on its way out but can still look Running and Ready
-    // for a while, so it is asleep whatever the pod lookup would find: otherwise the router
-    // caches the dying pod and the page half-loads, then 502s. A subagent's status says
-    // nothing about the pod, which is its parent's.
+    // A suspended pod may still look Ready; subagents share the parent's.
     const current = sessions.get(conv.id) ?? conv;
     if (current.status === "suspended" && !current.parentId) {
-      // The resume brings a new pod, so the old address must not survive to answer it.
+      // Resume brings a new pod.
       dropTarget(conv.id);
       return { ok: false, kind: "asleep", conversationId: conv.id, service, basePath, threadId };
     }

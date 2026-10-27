@@ -390,7 +390,6 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
-// A suspend lands as a row change; the cached pod must not outlive it.
 func TestDirectInvalidatedByARowChange(t *testing.T) {
 	pod, _, _ := fakePod(t)
 	tg := podTargetFor(t, pod)
@@ -408,7 +407,7 @@ func TestDirectInvalidatedByARowChange(t *testing.T) {
 	}
 
 	asleep.Store(true)
-	d.invalidate(directID) // what the conversations_changed listener does on a meta change
+	d.invalidate(directID)
 	rec := sandboxGet(t, h, "GET", "/files/", nil)
 	if rec.Header().Get("X-Served-By") != "agent-host" {
 		t.Fatalf("after the row change the cached pod still served: %d %q", rec.Code, rec.Body.String())
@@ -418,7 +417,6 @@ func TestDirectInvalidatedByARowChange(t *testing.T) {
 	}
 }
 
-// Activity bumps are frequent and never move the pod, so they leave the cache alone.
 func TestMovesPod(t *testing.T) {
 	for payload, want := range map[string]bool{
 		`{"id":"a","op":"upsert","kind":"meta"}`:     true,
@@ -433,7 +431,6 @@ func TestMovesPod(t *testing.T) {
 	}
 }
 
-// A lookup in flight when the conversation changes must not cache, or hand out, its stale answer.
 func TestDirectInvalidatedMidLookup(t *testing.T) {
 	pod, _, _ := fakePod(t)
 	tg := podTargetFor(t, pod)
@@ -458,7 +455,6 @@ func TestDirectInvalidatedMidLookup(t *testing.T) {
 	if rec := <-done; rec.Header().Get("X-Served-By") != "agent-host" {
 		t.Fatalf("a lookup invalidated mid-flight still went direct: %q", rec.Header().Get(DirectRouteHeader))
 	}
-	// Nothing was cached, so the next request asks again (and, now settled, goes direct).
 	if rec := sandboxGet(t, h, "GET", "/files/", nil); rec.Header().Get(DirectRouteHeader) != "direct" {
 		t.Fatalf("settled lookup not direct: %d", rec.Code)
 	}
@@ -474,5 +470,5 @@ func TestDirectInvalidatedMidLookup(t *testing.T) {
 
 func TestDirectInvalidateNil(t *testing.T) {
 	var d *directProxy
-	d.invalidate(directID) // sandbox-direct off: the listener still calls it
+	d.invalidate(directID)
 }

@@ -420,8 +420,6 @@ describe("web-service proxy", () => {
     });
 
     it("target: a suspended conversation is asleep even while its old pod still answers", async () => {
-      // Right after a suspend the pod is still Running and Ready; handing it to the router
-      // would have it cache a pod on its way out (test/e2e/suspended-web-service.spec.ts).
       const proxy = sandboxProxyAs(fakeRegistry(svc.port), { conv: { status: "suspended" } });
       const { status, body } = await proxyGet(proxy, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`);
       expect(status).toBe(503);
@@ -851,7 +849,6 @@ describe("web-service proxy", () => {
     const { proxy, lookups } = countingProxy(fakeRegistry(svc.port), conv);
     await proxyGet(proxy, "/c/conv-1/marimo/a");
     conv.status = "suspended";
-    // Suspended is asleep without asking for the pod, whatever the cache holds.
     expect((await proxyGet(proxy, "/c/conv-1/marimo/a")).status).toBe(503);
     expect(lookups()).toBe(1);
     conv.status = "running";

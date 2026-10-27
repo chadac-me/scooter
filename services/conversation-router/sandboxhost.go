@@ -150,7 +150,7 @@ func IsSandboxDomainHost(host, domain string) bool {
 // newSandboxRouter is the sandbox listener's whole handler: a valid sandbox host is
 // rewritten onto its conversation's /c/<id>/<service>/... and proxied to the owning
 // agent-host; anything else is a 404.
-// direct is the direct-to-pod path, nil when cfg.sandboxDirect is off.
+// direct is nil when sandbox-direct is off.
 func newSandboxRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, store *Store, direct *directProxy) http.Handler {
 	fallback := cfg.fallback
 	// A typed-nil *Store in an interface is not nil.

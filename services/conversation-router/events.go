@@ -116,7 +116,7 @@ func (h *sseHub) fanOut(owner *string, msg []byte) {
 }
 
 // runConversationListener owns the dedicated LISTEN connection, re-reading and fanning out each notified row, reconnecting after any drop and returning when ctx is cancelled.
-// onChange, when set, hears every non-activity change (a suspend's phase, a delete) before the push.
+// onChange, if set, gets the id of each change that movesPod.
 func runConversationListener(ctx context.Context, store *Store, links *LinkStore, hub *sseHub, onChange func(id string)) {
 	if store == nil {
 		return
@@ -150,9 +150,7 @@ func (c change) deleted() bool { return c.Op == "delete" }
 // activityOnly reports whether this change may be throttled; it mirrors the trigger's `kind` test.
 func (c change) activityOnly() bool { return c.Kind == "activity" }
 
-// movesPod reports whether the change may mean the conversation's pod went or is going
-// away (a suspend publishes its phase, a delete ends it), so the sandbox-host direct
-// cache must drop it. Activity bumps never move the pod and are far too frequent.
+// movesPod: a non-activity change, e.g. suspend or delete.
 func (c change) movesPod() bool { return !c.activityOnly() }
 
 // notifyDecision parses a NOTIFY payload ({id, op, kind, owner}), dropping unparseable payloads and those naming no conversation.

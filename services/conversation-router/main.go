@@ -187,7 +187,6 @@ func main() {
 	// out to SSE subscribers — conversation rows from agent_host (events.go), link changes from
 	// webhooks (linkevents.go), both re-read and pushed as the same upsert frame.
 	hub := newSSEHub()
-	// The sandbox listener's direct-to-pod cache, dropped per conversation on a row change.
 	var direct *directProxy
 	if cfg.sandboxDomain != "" && cfg.sandboxDirect {
 		direct = newDirectProxy()
