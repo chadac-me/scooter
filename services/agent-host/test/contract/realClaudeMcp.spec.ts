@@ -53,6 +53,7 @@ function localJobs(): JobManager {
       return { jobId, outcome: "unknown" as const };
     },
     async cleanup() {},
+    async markNotified() {},
     async pollCompletions() {
       return [];
     },

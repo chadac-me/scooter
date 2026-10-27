@@ -7,7 +7,15 @@
 
 import { describe, it, expect, vi } from "vitest";
 
-import { createJobManager, JOBS_DIR, type JobRecord } from "../../src/session/jobManager.js";
+import {
+  cleanOutput,
+  createJobManager,
+  DEFAULT_MAX_OUTPUT,
+  JOBS_DIR,
+  MAX_OUTPUT_CAP,
+  noticeTail,
+  type JobRecord,
+} from "../../src/session/jobManager.js";
 import type { SandboxApiClient } from "../../src/exec/sandboxExec.js";
 import type { ExecRequest, ExecResult } from "../../src/types.js";
 
@@ -157,7 +165,7 @@ describe("jobManager.check", () => {
 
   it("flags truncation when the log is larger than the tail cap", async () => {
     const { client } = fakeClient((cmd) =>
-      // 2 MiB exceeds the default 64 KiB tail cap.
+      // 2 MiB exceeds the default tail cap.
       cmd.includes("__STATUS__") ? { stdout: probeOut("0", 2 * 1024 * 1024, "…tail…") } : undefined,
     );
     const { registry } = fakeRegistry();
@@ -308,5 +316,84 @@ describe("jobManager — a job whose process DIED without writing status", () =>
     const done = await (await setup(probeOut("", 40, "building...\n", "n"))).pollCompletions("conv-1");
     expect(done).toHaveLength(1);
     expect(done[0].died).toBe(true);
+  });
+});
+
+describe("jobManager.check output window", () => {
+  const setup = async (size: number, log: string) => {
+    const { client, execs } = fakeClient((cmd) =>
+      cmd.includes("__STATUS__") ? { stdout: probeOut("0", size, log) } : undefined,
+    );
+    const { registry } = fakeRegistry();
+    await registry.saveJob("conv-1", { jobId: "job-1", command: "x", startedAt: 1 });
+    return { m: mgr(client, registry), execs, registry };
+  };
+
+  it("reads the default tail and clamps max_bytes to the cap", async () => {
+    const { m, execs } = await setup(10, "x");
+    await m.check("conv-1", "job-1");
+    await m.check("conv-1", "job-1", { maxBytes: 10 * 1024 * 1024 });
+    expect(execs[0]).toContain(`tail -c ${DEFAULT_MAX_OUTPUT} `);
+    expect(execs[1]).toContain(`tail -c ${MAX_OUTPUT_CAP} `);
+  });
+
+  it("reads a window from an offset without trimming lines", async () => {
+    const { m, execs } = await setup(1000, "rtial\nnext\n");
+    const st = await m.check("conv-1", "job-1", { offset: 100, maxBytes: 12 });
+    expect(execs[0]).toContain("tail -c +101 ");
+    expect(execs[0]).toContain("head -c 12");
+    expect(st.output).toBe("rtial\nnext\n");
+    expect(st.start).toBe(100);
+    expect(st.truncated).toBe(true);
+  });
+
+  it("starts a truncated tail at the next full line", async () => {
+    const { m } = await setup(DEFAULT_MAX_OUTPUT + 500, "8\n190639\n190640\n");
+    const st = await m.check("conv-1", "job-1");
+    expect(st.output).toBe("190639\n190640\n");
+    expect(st.start).toBe(500 + 2);
+  });
+
+  it("returns a small log whole and untruncated", async () => {
+    const { m } = await setup(6, "a\nb\nc\n");
+    const st = await m.check("conv-1", "job-1");
+    expect(st.output).toBe("a\nb\nc\n");
+    expect(st.truncated).toBe(false);
+  });
+
+  it("markNotified stops pollCompletions announcing the job", async () => {
+    const { m, registry } = await setup(1, "x");
+    await m.markNotified("conv-1", "job-1");
+    expect(await m.pollCompletions("conv-1")).toEqual([]);
+    expect((await registry.listJobs("conv-1"))[0].notifiedAt).toBeDefined();
+  });
+});
+
+describe("cleanOutput", () => {
+  it("keeps only the last frame of a carriage-return progress bar", () => {
+    expect(cleanOutput("10%\r50%\r100%\ndone\r\n")).toBe("100%\ndone\n");
+  });
+
+  it("strips ANSI colors and stray control bytes", () => {
+    expect(cleanOutput("\x1b[32mok\x1b[0m\x07 fine\ttab")).toBe("ok fine\ttab");
+  });
+
+  it("elides mostly-binary output", () => {
+    expect(cleanOutput("\x00\x01\uFFFD\uFFFDab")).toMatch(/^\[binary output, \d+ bytes not shown\]$/);
+  });
+});
+
+describe("noticeTail", () => {
+  it("leaves short output alone", () => {
+    expect(noticeTail("a\nb\n")).toEqual({ text: "a\nb", cut: false });
+  });
+
+  it("cuts long output to whole trailing lines", () => {
+    const out = Array.from({ length: 1000 }, (_, i) => `line ${i}`).join("\n");
+    const { text, cut } = noticeTail(out, 100);
+    expect(cut).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(100);
+    expect(text.startsWith("line ")).toBe(true);
+    expect(text.endsWith("line 999")).toBe(true);
   });
 });

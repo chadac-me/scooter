@@ -11,7 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 
-import type { JobManager } from "../session/jobManager.js";
+import { DEFAULT_MAX_OUTPUT, MAX_OUTPUT_CAP, type JobManager, type JobStatus } from "../session/jobManager.js";
 import {
   handleSpawnSubagent,
   handleListSubagents,
@@ -77,11 +77,11 @@ export async function handleRunBackground(
 export async function handleCheckBackground(
   jobs: JobManager,
   conversationId: string,
-  args: { job_id: string },
+  args: { job_id: string; max_bytes?: number; offset?: number },
 ): Promise<ToolResult> {
   const jobId = (args.job_id ?? "").trim();
   if (!jobId) return { isError: true, content: [{ type: "text", text: "job_id is required." }] };
-  const st = await jobs.check(conversationId, jobId);
+  const st = await jobs.check(conversationId, jobId, { maxBytes: args.max_bytes, offset: args.offset });
   if (st.state === "unknown") {
     return { isError: true, content: [{ type: "text", text: `Job \`${jobId}\` is unknown (its files were cleaned up or the pod was recreated).` }] };
   }
@@ -89,8 +89,21 @@ export async function handleCheckBackground(
     st.state === "running"
       ? `Job \`${jobId}\` is still RUNNING: ${st.command}`
       : `Job \`${jobId}\` EXITED with code ${st.exitCode}: ${st.command}`;
-  const more = st.truncated ? `\n(output truncated to the tail — full log in the pod at ${st.logPath})` : "";
-  return { content: [{ type: "text", text: `${header}\n\n${st.output}${more}` }] };
+  // Agent saw the result; skip its completion notice.
+  if (st.state === "exited") await jobs.markNotified(conversationId, jobId).catch(() => {});
+  return { content: [{ type: "text", text: `${header}\n\n${st.output}${pagingHint(st)}` }] };
+}
+
+/** Window position in the log, plus how to page. */
+function pagingHint(st: JobStatus): string {
+  if (!st.truncated) return "";
+  const size = st.size ?? 0;
+  const start = st.start ?? 0;
+  const end = Math.min(size, start + Buffer.byteLength(st.output));
+  return (
+    `\n\n(showing about bytes ${start}-${end} of ${size}. Page with check_background(job_id, offset, max_bytes ≤ ${MAX_OUTPUT_CAP}), ` +
+    `or grep/tail the full log at ${st.logPath} with your shell tool.)`
+  );
 }
 
 export async function handleListBackground(
@@ -178,8 +191,15 @@ export async function buildServer(
       "check_background",
       {
         title: "Check a background job",
-        description: "Report a background job's state (running / exited + exit code) and its recent output tail.",
-        inputSchema: { job_id: z.string().describe("The job id returned by run_background.") },
+        description:
+          `Report a background job's state (running / exited + exit code) and a window of its log: the last ` +
+          `${DEFAULT_MAX_OUTPUT} bytes by default, at most ${MAX_OUTPUT_CAP} per call (larger results break the ` +
+          `tool connection). Page earlier output with offset, or grep the log path it reports.`,
+        inputSchema: {
+          job_id: z.string().describe("The job id returned by run_background."),
+          max_bytes: z.number().int().positive().optional().describe(`Bytes of log to return (default ${DEFAULT_MAX_OUTPUT}, max ${MAX_OUTPUT_CAP}).`),
+          offset: z.number().int().nonnegative().optional().describe("Read from this byte offset instead of the tail."),
+        },
       },
       async (args) => handleCheckBackground(jobs, conversationId, args) as Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
     );

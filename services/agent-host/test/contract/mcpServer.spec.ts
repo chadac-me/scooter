@@ -21,6 +21,7 @@ function fakeJobs(over: Partial<JobManager> = {}): { jobs: JobManager; calls: st
     async check(id, jobId) { calls.push(`check:${id}:${jobId}`); return { jobId, command: "npm run build", state: "running", output: "building...", truncated: false, logPath: "/workspace/.scooter/jobs/job-1/log" } as JobStatus; },
     async list() { return [] as JobRecord[]; },
     async cleanup() {},
+    async markNotified(_id, jobId) { calls.push(`notified:${jobId}`); },
     async pollCompletions() { return []; },
     async kill(_id, jobId) { calls.push(`kill:${jobId}`); return { jobId, outcome: "killed" as const }; },
     ...over,
@@ -75,6 +76,33 @@ describe("check_background MCP tool handler", () => {
     });
     const res = await handleCheckBackground(jobs, "conv1", { job_id: "job-1" });
     expect(res.content[0].text).toContain("/workspace/.scooter/jobs/job-1/log");
+  });
+
+  it("passes paging args through and reports the byte range", async () => {
+    let seen: unknown;
+    const { jobs } = fakeJobs({
+      async check(_id, jobId, opts) {
+        seen = opts;
+        return { jobId, command: "x", state: "running", output: "abcd", truncated: true, size: 100, start: 10, logPath: "/p/log" };
+      },
+    });
+    const res = await handleCheckBackground(jobs, "conv1", { job_id: "job-1", max_bytes: 4, offset: 10 });
+    expect(seen).toEqual({ maxBytes: 4, offset: 10 });
+    expect(res.content[0].text).toContain("bytes 10-14 of 100");
+  });
+
+  it("marks an exited job notified so no completion notice repeats it", async () => {
+    const { jobs, calls } = fakeJobs({
+      async check(_id, jobId) { return { jobId, command: "x", state: "exited", exitCode: 0, output: "done", truncated: false, logPath: "/p/log" }; },
+    });
+    await handleCheckBackground(jobs, "conv1", { job_id: "job-1" });
+    expect(calls).toContain("notified:job-1");
+  });
+
+  it("does not mark a running job notified", async () => {
+    const { jobs, calls } = fakeJobs();
+    await handleCheckBackground(jobs, "conv1", { job_id: "job-1" });
+    expect(calls.some((c) => c.startsWith("notified:"))).toBe(false);
   });
 });
 
