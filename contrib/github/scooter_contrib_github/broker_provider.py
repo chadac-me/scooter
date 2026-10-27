@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from scooter_broker_lib.autolink import Link, rule
-from scooter_broker_lib.forge import ForgeHost, ForgeHosts, load_policy
+from scooter_broker_lib.forge import ForgeHosts, load_policy
 from scooter_broker_lib.registry import register_provider
 from scooter_broker_lib.types import Provider
 from scooter_broker_lib.sources.static_token import StaticTokenSource
@@ -11,6 +11,7 @@ from scooter_broker_lib.transports.http_proxy import HttpProxy
 from scooter_broker_lib.transports.mcp_tools import McpTools
 
 from .config import GitHubSettings
+from .forge import GitHubDialect, api_base, forge_hosts
 from .github_app import GitHubAppSource
 from .mcp_tools import github_mcp_server
 
@@ -18,11 +19,11 @@ from .mcp_tools import github_mcp_server
 # Auto-link the PRs and issues an agent creates via the proxy; the create responses carry `html_url` and `title`.
 _GITHUB_LINK_RULES = [
     rule(
-        "POST", r"^repos/[^/]+/[^/]+/pulls/?$",
+        "POST", r"^(?:api/v3/)?repos/[^/]+/[^/]+/pulls/?$",
         lambda r: Link(source="github", resource_type="pr", url=r.get("html_url", ""), title=r.get("title")),
     ),
     rule(
-        "POST", r"^repos/[^/]+/[^/]+/issues/?$",
+        "POST", r"^(?:api/v3/)?repos/[^/]+/[^/]+/issues/?$",
         lambda r: Link(source="github", resource_type="issue", url=r.get("html_url", ""), title=r.get("title")),
     ),
 ]
@@ -42,26 +43,17 @@ _GITHUB_GRAPHQL_LINK_RULES = {
     "createIssue": _graphql_link("issue", "issue"),
 }
 
-# git smart-HTTP on github.com; the REST/GraphQL API and release uploads on their own hosts.
-FORGE_HOSTS = [
-    ForgeHost("github.com", git=True),
-    ForgeHost("api.github.com", api_prefixes=("/",)),
-    ForgeHost("uploads.github.com", api_prefixes=("/",)),
-]
-
-
-UPSTREAM = "https://api.github.com"
-
-
 @register_provider
 def github() -> Provider:
     # Read at build time, like every provider factory.
     settings = GitHubSettings()
+    upstream = api_base(settings.github_host)
     if settings.github_app_id and settings.github_app_private_key:
         credential = GitHubAppSource(
             app_id=settings.github_app_id,
             private_key=settings.github_app_private_key,
             installation_id=settings.github_app_installation_id,
+            api_base=upstream,
         )
         enabled = True
     elif settings.github_token:
@@ -76,15 +68,15 @@ def github() -> Provider:
         credential=credential,
         transports=[
             HttpProxy(
-                upstream=UPSTREAM,
+                upstream=upstream,
                 link_rules=_GITHUB_LINK_RULES,
                 agent_host_url=settings.agent_host_url,
             ),
             # The agent tool shares the proxy's upstream so the two cannot drift.
-            McpTools(server=github_mcp_server(), upstream=UPSTREAM),
+            McpTools(server=github_mcp_server(), upstream=upstream),
             ForgeHosts(
-                hosts=FORGE_HOSTS,
-                dialect="github",
+                hosts=forge_hosts(settings.github_host),
+                dialect=GitHubDialect(),
                 git_username="x-access-token",
                 link_rules=_GITHUB_LINK_RULES,
                 graphql_link_rules=_GITHUB_GRAPHQL_LINK_RULES,

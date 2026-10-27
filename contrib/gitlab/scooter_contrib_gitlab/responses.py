@@ -10,7 +10,7 @@ from scooter_lib.logging_config import format_error
 logger = logging.getLogger(__name__)
 _C = {"component": "responses.gitlab"}
 
-GITLAB_API = "https://gitlab.com/api/v4"
+GITLAB_API = f"https://{settings.gitlab_host}/api/v4"
 
 
 async def post_gitlab_comment(

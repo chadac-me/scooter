@@ -526,7 +526,7 @@ async def _background_create_conversation(
         gh_kind = "pull" if res_type == "pull_request" else "issues"
         await push_link(
             conv_id, source="github", resource_type=res_type,
-            url=f"https://github.com/{owner}/{repo_name}/{gh_kind}/{issue_number}",
+            url=f"https://{settings.github_host}/{owner}/{repo_name}/{gh_kind}/{issue_number}",
             title=f"{owner}/{repo_name} #{issue_number}",
             ref={"owner": owner, "repo": repo_name, "number": issue_number},
         )

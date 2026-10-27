@@ -454,9 +454,6 @@ in
           { name = "CURL_CA_BUNDLE"; value = bundle; }
           { name = "REQUESTS_CA_BUNDLE"; value = bundle; }
           { name = "NODE_EXTRA_CA_CERTS"; value = "/etc/scooter/forge-ca/ca.crt"; }
-          # Placeholders so gh/glab consider themselves logged in; the proxy drops them and injects the real credential.
-          { name = "GH_TOKEN"; value = "scooter-forge-proxy"; }
-          { name = "GITLAB_TOKEN"; value = "scooter-forge-proxy"; }
         ];
     };
 

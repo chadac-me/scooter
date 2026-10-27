@@ -1,6 +1,17 @@
 { lib, ... }:
 {
   contribs.gitlab = {
+    options.host = lib.mkOption {
+      type = lib.types.str;
+      default = "gitlab.com";
+      example = "gitlab.example.com";
+      description = ''
+        The GitLab host: `gitlab.com`, or a self-hosted GitLab's hostname. The broker's
+        forge proxy and http-proxy, the webhooks' API calls, and `glab` in the sandbox
+        all target it.
+      '';
+    };
+
     options.forgePolicy = lib.mkOption {
       type = lib.types.str;
       default = "";
