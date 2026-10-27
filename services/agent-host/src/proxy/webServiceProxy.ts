@@ -399,6 +399,9 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     sessions.touchById(conversationId as never);
   };
 
+  /** A suspended pod may still look Ready; subagents share the parent's. */
+  const suspended = (c: Conversation) => c.status === "suspended" && !c.parentId;
+
   // The URL id may be the full threadId or the short hash; a full id this pod has not loaded is
   // hydrated (read-only) so a deep link to a cold conversation does not 404.
   async function lookup(urlId: string) {
@@ -420,6 +423,13 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     const basePath = requestBasePath(parsed, label !== undefined);
     await sessions.refreshSandbox?.(conv.id);
 
+    const current = sessions.get(conv.id) ?? conv;
+    // Before any exec: with no pod, exec waits for one.
+    if (suspended(current)) {
+      dropTarget(conv.id);
+      return { ok: false, kind: "asleep", conversationId: conv.id, service, basePath, threadId };
+    }
+
     const desc = await registry.get(conv.id, service);
     if (!desc) {
       // An unreadable manifest usually means the pod is down, not that the service is undeclared.
@@ -427,14 +437,6 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
         return { ok: false, kind: "asleep", conversationId: conv.id, service, basePath, threadId };
       }
       return { ok: false, kind: "error", status: 404, service, threadId };
-    }
-
-    // A suspended pod may still look Ready; subagents share the parent's.
-    const current = sessions.get(conv.id) ?? conv;
-    if (current.status === "suspended" && !current.parentId) {
-      // Resume brings a new pod.
-      dropTarget(conv.id);
-      return { ok: false, kind: "asleep", conversationId: conv.id, service, basePath, threadId };
     }
 
     // Deliberately no liveness check: a refused connection below is the answer, and
@@ -486,7 +488,7 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
 
     // The poll drives the whole bring-up: wake the sandbox until its pod is ready, then start the
     // unit, so a page opened on a cold conversation lands in the app without anyone clicking Start.
-    if (!(await registry.ready(conv.id).catch(() => false))) {
+    if (suspended(sessions.get(conv.id) ?? conv) || !(await registry.ready(conv.id).catch(() => false))) {
       wakeSandbox(conv.id);
       reply({ running: false, logs: "", phase: "sandbox" });
       return true;

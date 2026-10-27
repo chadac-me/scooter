@@ -638,6 +638,25 @@ describe("web-service proxy", () => {
     expect(registry.starts).toEqual(["marimo"]);
   });
 
+  it("a suspended sandbox with no pod wakes without waiting on a pod exec", async () => {
+    const woken: string[] = [];
+    // With no pod, an exec waits for one to become ready.
+    const hang = () => new Promise<never>(() => {});
+    const proxy = createWebServiceProxy({
+      sessions: { get: () => ({ id: "conv-1", threadId: "conv-1", status: "suspended" }), touchById: () => {} } as never,
+      resolvePodTarget: hang as never,
+      registry: { ...fakeRegistry(svc.port), get: hang, ready: hang },
+      publicHost: "scooter.example.com",
+      wake: async (id) => { woken.push(id); },
+    });
+    const nav = await proxyGet(proxy, "/c/conv-1/marimo/", { accept: "text/html" });
+    expect(nav.status).toBe(200);
+    expect(nav.body).toContain("__scooter_status");
+    const poll = JSON.parse((await proxyGet(proxy, "/c/conv-1/marimo/__scooter_status")).body);
+    expect(poll).toMatchObject({ running: false, phase: "sandbox" });
+    expect(woken).toEqual(["conv-1"]);
+  });
+
   it("a full conversation id this pod has not loaded is hydrated, not 404'd", async () => {
     let loaded = false;
     const proxy = createWebServiceProxy({
