@@ -624,8 +624,8 @@ let
     if sandboxNp == null then [ "networkPolicies.sandbox-isolation missing (networkPolicy.enable defaults to true)" ] else
     (if sandboxNp.spec.podSelector.matchExpressions or [ ] == [ { key = "agents.x-k8s.io/sandbox-name-hash"; operator = "Exists"; } ] then [ ]
      else [ "sandbox-isolation does not select sandbox pods by agents.x-k8s.io/sandbox-name-hash (the controller strips the template label)" ])
-    ++ (if npPortsTo "agent-broker" == [ "http" ] ++ (if platform.config.scooter.broker.forgeProxy.enable then [ "forge-proxy" ] else [ ]) then [ ]
-        else [ "sandbox-isolation must admit the broker's http (+ forge-proxy when on) ports, got ${builtins.toJSON (npPortsTo "agent-broker")}" ])
+    ++ (if npPortsTo "agent-broker" == [ "http" "forge-proxy" ] then [ ]
+        else [ "sandbox-isolation must admit the broker's http and forge-proxy ports, got ${builtins.toJSON (npPortsTo "agent-broker")}" ])
     ++ (if npPortsTo "conversation-router" == [ "self" ] then [ ]
         else [ "sandbox-isolation must admit the router's `self` port only, got ${builtins.toJSON (npPortsTo "conversation-router")}" ])
     ++ builtins.concatMap (n: if builtins.elem n (ctrPortNames "agent-broker") then [ ] else [ "sandbox-isolation names broker port `${n}`, which the broker does not declare" ]) (npPortsTo "agent-broker")
