@@ -42,7 +42,11 @@ function fakeKc(opts: FakeOpts = {}) {
     },
     listNamespacedPod: async () => {
       calls.push("pods");
-      return { items: podsLive-- > 0 ? [{}] : [] };
+      return { items: podsLive-- > 0 ? [{ metadata: { name: "conv-abc", uid: "old" } }] : [] };
+    },
+    deleteNamespacedPod: async () => {
+      calls.push("delete:pod");
+      return {};
     },
     readNamespacedPod: async () => {
       throw Object.assign(new Error("nf"), { code: 404 });
@@ -78,13 +82,14 @@ describe("k8sProvisioner — sandbox image skew after a platform upgrade", () =>
     expect(patchedModes(patches)).toEqual(["Running"]);
   });
 
-  it("a RUNNING sandbox on a stale image is cycled — a template patch alone never restarts a pod", async () => {
+  it("a RUNNING sandbox on a stale image has its pod replaced — a template patch alone never restarts one", async () => {
     const { kc, calls, patches } = fakeKc({ image: "sandbox-os:old", operatingMode: "Running", podsLive: 1 });
     await provisioner(kc).resume(ref);
     expect(patchedImages(patches)).toEqual(["sandbox-os:new"]);
-    expect(patchedModes(patches)).toEqual(["Suspended", "Running"]);
-    // The pod's disappearance is waited for in between, or the controller coalesces the two patches into no restart.
-    expect(calls).toContain("pods");
+    // Deleted, not suspended; the old pod is waited out.
+    expect(patchedModes(patches)).toEqual(["Running"]);
+    expect(calls).toContain("delete:pod");
+    expect(calls.filter((c) => c === "pods").length).toBeGreaterThan(1);
   });
 
   it("a current image is left alone — no image patch, no cycle", async () => {

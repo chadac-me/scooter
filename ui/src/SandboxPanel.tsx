@@ -357,8 +357,8 @@ export function UpdateBanner({
   restarting: boolean;
   onRestart?: () => void;
 }) {
-  const update = !!(pending.image || pending.env);
-  const what = [update ? "the latest sandbox image" : null, pending.size ? "your new size" : null]
+  const update = !!(pending.image || pending.env || pending.template?.length);
+  const what = [update ? "the latest sandbox image and settings" : null, pending.size ? "your new size" : null]
     .filter(Boolean)
     .join(" and ");
   return (
@@ -500,7 +500,7 @@ export function SandboxPanelView({
       </div>
 
       {/* Shown even when suspended; it applies on next start. */}
-      {pendingRestart && (pendingRestart.image || pendingRestart.env || pendingRestart.size) ? (
+      {pendingRestart && (pendingRestart.image || pendingRestart.env || pendingRestart.template?.length || pendingRestart.size) ? (
         <UpdateBanner
           pending={pendingRestart}
           running={state === "running"}

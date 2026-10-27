@@ -192,6 +192,7 @@ function pendingLine(p: PendingRestart | undefined): string {
     p.image ? `a newer sandbox image (${p.image.from} -> ${p.image.to})` : null,
     p.size ? "your recorded size change" : null,
     p.env ? "refreshed environment settings" : null,
+    p.template?.length ? `platform sandbox changes (${p.template.join(", ")})` : null,
   ].filter(Boolean);
   return parts.length ? parts.join(", ") : "";
 }

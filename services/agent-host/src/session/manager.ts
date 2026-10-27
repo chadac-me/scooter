@@ -64,13 +64,15 @@ export interface SandboxProvisioner {
   reconcile?(): Promise<Array<{ ref: SandboxRef; running: boolean }>>;
   /** Changes a restart would pick up; undefined when none. */
   pendingRestart?(ref: SandboxRef): Promise<PendingRestart | undefined>;
-  /** Cycles the pod onto the current image and size. */
-  restart?(ref: SandboxRef): Promise<SandboxRestartResult>;
+  /** Cycles the pod onto the current template and size. */
+  restart?(ref: SandboxRef, hooks?: { onRunning?: () => void }): Promise<SandboxRestartResult>;
 }
 
 export interface PendingRestart {
   /** Current and target image, when they differ. */
   image?: { from: string; to: string };
+  /** Platform pod-template fields a restart would change. */
+  template?: string[];
   /** Conversation env (CONVERSATION_URL etc.) is stale. */
   env?: boolean;
   /** The running pod lacks the recorded size. */
@@ -1215,7 +1217,17 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
       touch(root);
       clearDeferredStops(root);
-      const result = await provisioner.restart(root.sandbox);
+      const wasSuspended = root.status === "suspended";
+      const result = await provisioner.restart(root.sandbox, {
+        // Claim the row first, or the controller re-suspends it.
+        onRunning: () => {
+          if (!wasSuspended || !ownershipGuard.canWrite(root.id)) return;
+          void (async () => {
+            await conversationRegistry.register(root.id, { sandboxRef: root.sandbox.name, creatorPod: deps.selfPod });
+            await conversationRegistry.setPhase(root.id, "Assigned");
+          })().catch((err) => log.errorWith("restart: publishing the phase failed", err, { conversation_id: root.id }));
+        },
+      });
       deps.onSandboxCycled?.(root.sandbox);
       // Revive, not just flip status, so a bridge gets built.
       if (root.status === "suspended") await this.revive(root.id);

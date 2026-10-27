@@ -7,6 +7,7 @@
  * agent-host itself and managed by the ConversationStore.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
 import {
@@ -65,6 +66,52 @@ const RECONCILE_RETRY_DELAYS_MS = [3_000, 6_000];
 type EnvVar = { name: string; value?: string };
 /** The container env vars `conversationEnv` owns; resume reconciles exactly these. */
 const CONVERSATION_ENV = ["CONVERSATION_URL", "CONVERSATION_ID", "SCOOTER_SERVICES_ORIGIN"];
+/** Annotation: hash of the platform template the podTemplate came from. */
+export const TEMPLATE_HASH_ANNOTATION = "scooter.io/template-hash";
+
+/** Sorted-key JSON, so equal values serialize identically. */
+function canonical(v: unknown): string {
+  return JSON.stringify(v, (_k, x) =>
+    x && typeof x === "object" && !Array.isArray(x)
+      ? Object.fromEntries(Object.entries(x as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : x,
+  );
+}
+
+type PodTemplate = { metadata?: Record<string, unknown>; spec?: Record<string, any> };
+
+/** Template minus resources: size belongs to the conversation. */
+function platformPart(pt: PodTemplate | undefined): PodTemplate {
+  const copy = structuredClone(pt ?? {}) as PodTemplate;
+  for (const c of (copy.spec?.containers ?? []) as Array<Record<string, unknown>>) delete c.resources;
+  return copy;
+}
+
+/** A short hash of the platform's half of a pod template. */
+export function templateHash(pt: PodTemplate | undefined): string {
+  return createHash("sha256").update(canonical(platformPart(pt))).digest("hex").slice(0, 16);
+}
+
+/** Differing pod spec keys, and `container.<key>` for the sandbox. */
+export function templateDiff(have: PodTemplate | undefined, want: PodTemplate | undefined): string[] {
+  const a = platformPart(have);
+  const b = platformPart(want);
+  const differ = (x: unknown, y: unknown) => canonical(x) !== canonical(y);
+  const keys = (x: object | undefined, y: object | undefined) => [...new Set([...Object.keys(x ?? {}), ...Object.keys(y ?? {})])].sort();
+  const out: string[] = [];
+  if (differ(a.metadata, b.metadata)) out.push("metadata");
+  const as = a.spec ?? {};
+  const bs = b.spec ?? {};
+  for (const k of keys(as, bs)) if (k !== "containers" && differ(as[k], bs[k])) out.push(k);
+  const ac: Array<Record<string, unknown>> = as.containers ?? [];
+  const bc: Array<Record<string, unknown>> = bs.containers ?? [];
+  for (const k of keys(ac[0], bc[0])) if (differ(ac[0]?.[k], bc[0]?.[k])) out.push(`container.${k}`);
+  if (differ(ac.slice(1), bc.slice(1))) out.push("containers");
+  return out;
+}
+
+type ClaimTemplate = { metadata?: { name?: string } };
+const claimNames = (vcts: ClaimTemplate[] | undefined) => (vcts ?? []).map((v) => v.metadata?.name ?? "").sort().join(",");
 
 /** The tag portion of an OCI ref (the part after the last ':' that is not a registry port), or ""
  *  when untagged; agrees with the kubenix and controller derivations of the pool version key. */
@@ -258,21 +305,6 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     return [...env.filter((e) => !owned(e)), ...want];
   };
 
-  /** True once the Sandbox's pod is gone (both lookups the controller may use). */
-  const podGone = async (ref: SandboxRef): Promise<boolean> => {
-    const pods = await core.listNamespacedPod({
-      namespace: refNs(ref),
-      labelSelector: `${SANDBOX_NAME_LABEL}=${ref.name}`,
-    });
-    if (pods.items.length > 0) return false;
-    try {
-      await core.readNamespacedPod({ namespace: refNs(ref), name: ref.name });
-      return false;
-    } catch (e) {
-      return (e as { code?: number })?.code === 404;
-    }
-  };
-
   /**
    * Read and parse the consumer manifest-overlay ConfigMap on every create (no caching),
    * treating an absent ConfigMap as no overlay and a malformed payload as an OverlayError.
@@ -300,68 +332,132 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     return Object.keys(merged).length > 0 ? merged : undefined;
   };
 
-  /** Reconcile `ref`'s image and conversation env onto what the deployment would render now, cycling
-   *  the pod if it is up on stale ones; throws only a 404, and any other failure is logged and swallowed. */
-  const reconcileImage = async (ref: SandboxRef): Promise<void> => {
-    const sb = (await custom.getNamespacedCustomObject({
-      group: GROUP,
-      version: VERSION,
-      namespace: refNs(ref),
-      plural: PLURAL,
-      name: ref.name,
-    })) as { spec?: { operatingMode?: string; podTemplate?: { spec?: { containers?: Array<{ image?: string; env?: EnvVar[] }> } } } };
+  type SandboxCr = {
+    metadata?: { resourceVersion?: string; annotations?: Record<string, string> };
+    spec?: {
+      operatingMode?: string;
+      podTemplate?: PodTemplate & {
+        spec?: { containers?: Array<{ image?: string; env?: EnvVar[]; resources?: RenderedResources }> };
+      };
+      volumeClaimTemplates?: ClaimTemplate[];
+    };
+  };
+  const readCr = async (ref: SandboxRef): Promise<SandboxCr> =>
+    (await custom.getNamespacedCustomObject({
+      group: GROUP, version: VERSION, namespace: refNs(ref), plural: PLURAL, name: ref.name,
+    })) as SandboxCr;
+  const isRunning = (sb: SandboxCr) => (sb.spec?.operatingMode ?? "Running") !== "Suspended";
+
+  /** A fresh render keeping size and conversation; undefined if claims differ. */
+  const desiredTemplate = async (name: string, sb: SandboxCr, threadId?: string): Promise<PodTemplate | undefined> => {
+    const c0 = sb.spec?.podTemplate?.spec?.containers?.[0];
+    const id = convIdOf(name);
+    const thread = c0?.env?.find((e) => e.name === "CONVERSATION_ID")?.value ?? threadId ?? id;
+    const claims = sb.spec?.volumeClaimTemplates;
+    // Use the CR's own claims, so a PVC never detaches.
+    const overlayStore = (claims ?? []).some((v) => v.metadata?.name === "scooter-rw");
+    const m = await manifestFor(id, thread, c0?.resources ?? sandboxResources, "Running", { overlayStore });
+    if (claimNames(m.spec.volumeClaimTemplates) !== claimNames(claims)) return undefined;
+    return m.spec.podTemplate as PodTemplate;
+  };
+
+  /** Fallback when re-render is impossible: patch image and env only. */
+  const reconcileImageEnv = async (ref: SandboxRef, sb: SandboxCr): Promise<boolean> => {
     const containers = sb.spec?.podTemplate?.spec?.containers ?? [];
-    const wasRunning = (sb.spec?.operatingMode ?? "Running") !== "Suspended";
     const stale = staleImage(containers);
     const env = staleEnv(containers[0]);
-    if (stale || env) {
-      log.warn("sandbox template skew: adopting the deployment's current image and conversation env", {
-        sandbox: ref.name,
-        from_image: stale,
-        to_image: stale ? opts.sandboxImage : undefined,
-        env_changed: env ? CONVERSATION_ENV : undefined,
-        cycling_pod: wasRunning,
-      });
-      await custom.patchNamespacedCustomObject(
-        {
-          group: GROUP,
-          version: VERSION,
-          namespace: refNs(ref),
-          plural: PLURAL,
-          name: ref.name,
-          body: {
-            spec: {
-              podTemplate: {
-                spec: {
-                  containers: [
-                    { ...containers[0], ...(stale ? { image: opts.sandboxImage } : {}), ...(env ? { env } : {}) },
-                    ...containers.slice(1),
-                  ],
-                },
+    if (!stale && !env) return false;
+    log.warn("sandbox template skew: adopting the deployment's current image and conversation env", {
+      sandbox: ref.name,
+      from_image: stale,
+      to_image: stale ? opts.sandboxImage : undefined,
+      env_changed: env ? CONVERSATION_ENV : undefined,
+    });
+    await custom.patchNamespacedCustomObject(
+      {
+        group: GROUP, version: VERSION, namespace: refNs(ref), plural: PLURAL, name: ref.name,
+        body: {
+          spec: {
+            podTemplate: {
+              spec: {
+                containers: [
+                  { ...containers[0], ...(stale ? { image: opts.sandboxImage } : {}), ...(env ? { env } : {}) },
+                  ...containers.slice(1),
+                ],
               },
             },
           },
         },
-        setHeaderOptions("Content-Type", PatchStrategy.MergePatch),
-      );
-      if (wasRunning) {
-        // A template patch does not restart a running pod, and the controller coalesces an
-        // immediate flip-back into no restart, so wait for the pod to go before resuming.
-        await setOperatingMode(ref, "Suspended");
-        await waitPodGone(ref);
-      }
-    }
+      },
+      setHeaderOptions("Content-Type", PatchStrategy.MergePatch),
+    );
+    return true;
   };
 
-  /** Waits for the pod to go; a timeout only logs. */
-  const waitPodGone = async (ref: SandboxRef): Promise<void> => {
+  /** Re-renders the pod template if the platform half changed. */
+  const reconcileTemplate = async (ref: SandboxRef, threadId?: string): Promise<{ running: boolean; changed: boolean }> => {
+    const sb = await readCr(ref);
+    const running = isRunning(sb);
+    let want: PodTemplate | undefined;
+    try {
+      want = await desiredTemplate(ref.name, sb, threadId);
+      if (!want) log.warn("sandbox claims differ from the current render; adopting only image and env", { sandbox: ref.name });
+    } catch (e) {
+      log.warn("could not render the sandbox template; adopting only image and env", { sandbox: ref.name, error: formatError(e) });
+    }
+    if (!want) return { running, changed: await reconcileImageEnv(ref, sb) };
+
+    const hash = templateHash(want);
+    const annotations = sb.metadata?.annotations;
+    if (annotations?.[TEMPLATE_HASH_ANNOTATION] === hash) return { running, changed: false };
+    const current = sb.spec?.podTemplate;
+    const changed = templateDiff(current, want);
+    const ops: Array<{ op: string; path: string; value: unknown }> = [];
+    // Fails on a concurrent resize; the caller retries.
+    if (sb.metadata?.resourceVersion) ops.push({ op: "test", path: "/metadata/resourceVersion", value: sb.metadata.resourceVersion });
+    ops.push(
+      annotations
+        ? { op: "add", path: `/metadata/annotations/${TEMPLATE_HASH_ANNOTATION.replace(/~/g, "~0").replace(/\//g, "~1")}`, value: hash }
+        : { op: "add", path: "/metadata/annotations", value: { [TEMPLATE_HASH_ANNOTATION]: hash } },
+    );
+    // Never touch volumeClaimTemplates: that would detach existing PVCs.
+    if (changed.length) ops.push({ op: "add", path: "/spec/podTemplate", value: want });
+    await custom.patchNamespacedCustomObject(
+      { group: GROUP, version: VERSION, namespace: refNs(ref), plural: PLURAL, name: ref.name, body: ops },
+      setHeaderOptions("Content-Type", PatchStrategy.JsonPatch),
+    );
+    if (changed.length) {
+      log.info("sandbox template adopted", {
+        sandbox: ref.name,
+        changed,
+        from_image: current?.spec?.containers?.[0]?.image,
+        to_image: (want.spec?.containers as Array<{ image?: string }> | undefined)?.[0]?.image,
+        cycling_pod: running,
+      });
+    }
+    return { running, changed: changed.length > 0 };
+  };
+
+  /** Deletes the pod so the CR stays Running throughout. */
+  const cyclePod = async (ref: SandboxRef): Promise<void> => {
+    const namespace = refNs(ref);
+    const list = () => core.listNamespacedPod({ namespace, labelSelector: `${SANDBOX_NAME_LABEL}=${ref.name}` });
+    const pods = (await list()).items;
+    if (!pods.some((p) => p.metadata?.name === ref.name)) {
+      const byName = await core.readNamespacedPod({ namespace, name: ref.name }).catch(() => undefined);
+      if (byName) pods.push(byName);
+    }
+    const uids = new Set(pods.map((p) => p.metadata?.uid).filter(Boolean));
+    for (const p of pods) {
+      if (p.metadata?.name) await core.deleteNamespacedPod({ namespace, name: p.metadata.name }).catch(ignoreDeleteNotFound);
+    }
+    if (!uids.size) return;
     const deadline = Date.now() + POD_GONE_TIMEOUT_MS;
-    while (!(await podGone(ref).catch(() => false))) {
+    for (;;) {
+      const now = await list().catch(() => undefined);
+      if (now && !now.items.some((p) => uids.has(p.metadata?.uid))) return;
       if (Date.now() > deadline) {
-        log.warn("sandbox pod did not terminate before the deadline; resuming anyway", {
-          sandbox: ref.name,
-          timeout_ms: POD_GONE_TIMEOUT_MS,
-        });
+        log.warn("sandbox pod did not terminate before the deadline; continuing", { sandbox: ref.name, timeout_ms: POD_GONE_TIMEOUT_MS });
         return;
       }
       await sleep(podPollMs);
@@ -384,41 +480,33 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     }
   };
 
-  /** Resumes on the current image, retrying failed reconciles. */
-  const runOnCurrentImage = async (ref: SandboxRef): Promise<void> => {
+  /** Brings the Sandbox to Running on the current template. */
+  const runOnCurrentTemplate = async (ref: SandboxRef, o: { threadId?: string; forceCycle?: boolean } = {}): Promise<void> => {
+    let result: { running: boolean; changed: boolean } | undefined;
     for (let attempt = 0; ; attempt++) {
       try {
-        await reconcileImage(ref);
+        result = await reconcileTemplate(ref, o.threadId);
         break;
       } catch (e) {
         // 404: the Sandbox is gone; resume() recreates it.
         if ((e as { code?: number })?.code === 404) throw e;
         const delay = retryDelays[attempt];
         if (delay === undefined) {
-          log.warn("could not reconcile the sandbox image; running it as-is", {
+          log.warn("could not reconcile the sandbox template; running it as-is", {
             sandbox: ref.name,
             attempts: attempt + 1,
             error: formatError(e),
           });
           break;
         }
-        log.info("sandbox image reconcile failed; retrying", { sandbox: ref.name, attempt: attempt + 1, error: formatError(e) });
+        log.info("sandbox template reconcile failed; retrying", { sandbox: ref.name, attempt: attempt + 1, error: formatError(e) });
         await sleep(delay);
       }
     }
+    // A template patch never restarts a running pod.
+    if (o.forceCycle || (result?.running && result.changed)) await cyclePod(ref);
     await setOperatingMode(ref, "Running");
   };
-
-  type SandboxCr = {
-    spec?: {
-      operatingMode?: string;
-      podTemplate?: { spec?: { containers?: Array<{ image?: string; env?: EnvVar[]; resources?: RenderedResources }> } };
-    };
-  };
-  const readCr = async (ref: SandboxRef): Promise<SandboxCr> =>
-    (await custom.getNamespacedCustomObject({
-      group: GROUP, version: VERSION, namespace: refNs(ref), plural: PLURAL, name: ref.name,
-    })) as SandboxCr;
 
   /** The running pod's resources; null without a pod. */
   const podResources = async (ref: SandboxRef): Promise<RenderedResources | undefined | null> => {
@@ -445,6 +533,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     urlThread: string,
     resources: RenderedResources | undefined,
     operatingMode: "Running" | "Suspended" = "Running",
+    override: { overlayStore?: boolean } = {},
   ): Promise<Record<string, any>> => {
     const m = sandboxManifest(
       id, sandboxName(id), saName(id), opts.sandboxImage, ns, audience, storage,
@@ -454,7 +543,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         configFilesConfigMap: opts.configFilesConfigMap,
         extraTokenAudiences: opts.extraTokenAudiences ?? [],
         extraEnv: [...conversationEnv(urlThread), ...(opts.extraEnv ?? [])],
-        overlayStore: opts.overlayStore ?? false,
+        overlayStore: override.overlayStore ?? opts.overlayStore ?? false,
         overlayStorage: opts.overlayStorage,
         pullPolicy: opts.sandboxPullPolicy,
         sandboxRuntimeClass: opts.sandboxRuntimeClass,
@@ -464,6 +553,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       },
     ) as Record<string, any>;
     if (operatingMode !== "Running") m.spec.operatingMode = operatingMode;
+    m.metadata.annotations = { ...m.metadata.annotations, [TEMPLATE_HASH_ANNOTATION]: templateHash(m.spec.podTemplate) };
     return m;
   };
 
@@ -518,10 +608,9 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
           alreadyExisted = true;
         });
 
-      // An adopted Sandbox may be suspended and may carry a stale image, so bring it to Running on
-      // the current image.
+      // An adopted Sandbox may be suspended or stale.
       if (alreadyExisted) {
-        await runOnCurrentImage({ name, namespace: ns }).catch((e) => {
+        await runOnCurrentTemplate({ name, namespace: ns }, { threadId: urlThread }).catch((e) => {
           log.warn("adopted an existing Sandbox but resume failed (may already be running)", {
             sandbox: name,
             error: formatError(e),
@@ -542,8 +631,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       // A Sandbox that is gone cannot be patched, so recreate it: the conversation's work lives on
       // the workspace PVC, which outlives the Sandbox.
       try {
-        // Reconciles the image on the way up, so one suspend/resume adopts a new sandbox image.
-        await runOnCurrentImage(ref);
+        // Resume adopts any platform template change.
+        await runOnCurrentTemplate(ref, { threadId });
       } catch (e) {
         if ((e as { code?: number })?.code !== 404) throw e;
         log.warn("resume: the Sandbox is gone; recreating it", { sandbox: ref.name });
@@ -583,22 +672,25 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       const stale = staleImage(containers);
       if (stale) out.image = { from: stale, to: opts.sandboxImage };
       if (staleEnv(containers[0])) out.env = true;
+      const want = await desiredTemplate(ref.name, sb).catch(() => undefined);
+      if (want && sb.metadata?.annotations?.[TEMPLATE_HASH_ANNOTATION] !== templateHash(want)) {
+        const changed = templateDiff(sb.spec?.podTemplate, want);
+        if (changed.length) out.template = changed;
+      }
       // Suspended: no pod to compare; revive applies the size.
-      const running = (sb.spec?.operatingMode ?? "Running") !== "Suspended";
-      if (running && (await sizePending(ref, containers[0]?.resources))) out.size = true;
+      if (isRunning(sb) && (await sizePending(ref, containers[0]?.resources))) out.size = true;
       return Object.keys(out).length ? out : undefined;
     },
 
-    async restart(ref: SandboxRef): Promise<SandboxRestartResult> {
-      // Stop first so size-only changes also get a new pod.
+    async restart(ref: SandboxRef, hooks: { onRunning?: () => void } = {}): Promise<SandboxRestartResult> {
       const before = await readCr(ref);
       const beforeContainer = before.spec?.podTemplate?.spec?.containers?.[0];
-      const wasRunning = (before.spec?.operatingMode ?? "Running") !== "Suspended";
+      const wasRunning = isRunning(before);
       const sizeApplied = wasRunning && (await sizePending(ref, beforeContainer?.resources).catch(() => false));
       log.info("restarting sandbox", { sandbox: ref.name, from_image: beforeContainer?.image, size_pending: sizeApplied });
-      await setOperatingMode(ref, "Suspended");
-      await waitPodGone(ref);
-      await runOnCurrentImage(ref);
+      // Never suspend: the controller would drop the placement.
+      await runOnCurrentTemplate(ref, { forceCycle: true });
+      hooks.onRunning?.();
       const ready = await waitPodReady(ref);
       const toImage = (await readCr(ref).catch(() => before)).spec?.podTemplate?.spec?.containers?.[0]?.image;
       const imageCurrent = !opts.sandboxImage || toImage === opts.sandboxImage;
