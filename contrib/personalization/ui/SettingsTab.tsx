@@ -87,6 +87,7 @@ export default function PersonalizationSettingsTab() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState({ category: "preferences", note: "" });
+  const [requesting, setRequesting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -120,9 +121,15 @@ export default function PersonalizationSettingsTab() {
     await load();
   };
   const refresh = async () => {
-    await api("refresh", { method: "POST" });
-    await load();
+    setRequesting(true);
+    try {
+      await api("refresh", { method: "POST" });
+      await load();
+    } finally {
+      setRequesting(false);
+    }
   };
+  const queued = profile.refresh_requested_at !== null;
   const add = async () => {
     if (!draft.note.trim()) return;
     await api("notes", { method: "POST", json: draft });
@@ -153,10 +160,18 @@ export default function PersonalizationSettingsTab() {
           {profile.last_run_conversation ? (
             <> · <a className="underline" href={`/c/${profile.last_run_conversation}`}>latest run</a></>
           ) : null}
-          {profile.refresh_requested_at ? " · refresh requested" : ""}
+          {queued ? " · refresh queued, starts within the hour" : ""}
         </p>
         <div className="flex gap-2">
-          <Button size="sm" variant="outline" onClick={refresh} disabled={!profile.enabled}>Refresh now</Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={refresh}
+            disabled={!profile.enabled || queued || requesting}
+            title={queued ? "A refresh is already queued" : undefined}
+          >
+            {requesting ? "Requesting…" : queued ? "Refresh queued" : "Refresh now"}
+          </Button>
           <Button size="sm" variant="outline" onClick={deleteAll} disabled={notes.length === 0}>Delete all notes</Button>
         </div>
       </section>
