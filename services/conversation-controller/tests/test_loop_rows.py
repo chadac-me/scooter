@@ -101,12 +101,20 @@ def test_a_claimed_revive_gets_a_tick_to_resume_its_sandbox(pg):
     assert _placement(pg, "c1") == ("pod-a", 4, "Assigned")
 
 
-def test_drift_that_persists_is_still_repaired(pg):
+def test_drift_that_persists_is_still_repaired(pg, monkeypatch):
+    import conversation_controller.loop as loop_mod
+
+    now = [0.0]
+    monkeypatch.setattr(loop_mod, "_now", lambda: now[0])
     _row(pg, "c1", host="pod-a", gen=4, phase="Assigned", sandbox_ref="conv-c1")
     sb = SandboxRef("conv-c1", age_seconds=999, operating_mode="Suspended")
     k = FakeK8s(PODS, [], sandboxes=[sb])
     rows = ConversationRows(pg)
     reconcile_once(k, cap=10, rows=rows)
+    # pod-a is Ready, so the drift may be a revive until the grace runs out.
+    assert ("c1", "drift-revive-grace") in reconcile_once(k, cap=10, rows=rows)
+    assert _placement(pg, "c1") == ("pod-a", 4, "Assigned")
+    now[0] += loop_mod._DRIFT_REVIVE_GRACE_S
     assert ("c1", "mark-suspended") in reconcile_once(k, cap=10, rows=rows)
     assert _placement(pg, "c1") == (None, 4, "Suspended")
 

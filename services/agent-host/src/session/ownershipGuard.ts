@@ -55,17 +55,20 @@ export class OwnershipTracker implements OwnershipGuard {
   /** Fired when the feed shows this pod gaining a conversation it did not hold, the one signal
    *  that always fires on a reassignment; not fired on same-owner echoes. */
   onGained?: (id: string, generation: number) => void;
+  /** Fired when a held conversation moves away, unassigns or is deleted. */
+  onLost?: (id: string) => void;
 
   constructor(private readonly selfPod: string) {}
 
   /** Called by the feed when a conversation's assignment changes; null = unassigned or deleted. */
   observe(id: string, a: Assignment | null): void {
+    const prev = this.assignments.get(id);
     if (a === null) {
       this.assignments.delete(id);
       this.claimedGen.delete(id);
+      if (prev?.hostPod === this.selfPod) this.onLost?.(id);
       return;
     }
-    const prev = this.assignments.get(id);
     this.assignments.set(id, a);
     // The first time we see ourselves as the host, record the generation as our claim.
     if (a.hostPod === this.selfPod && !this.claimedGen.has(id)) {
@@ -75,6 +78,7 @@ export class OwnershipTracker implements OwnershipGuard {
     if (a.hostPod === this.selfPod && prev?.hostPod !== this.selfPod) {
       this.onGained?.(id, a.generation);
     }
+    if (a.hostPod !== this.selfPod && prev?.hostPod === this.selfPod) this.onLost?.(id);
   }
 
   observedGeneration(id: SessionId): number | undefined {

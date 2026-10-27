@@ -543,12 +543,15 @@ export async function main(
   // The append fence's claim source, late-bound because the ownership tracker is built
   // further down and nothing appends before boot finishes.
   let observedGeneration: ((id: SessionId) => number | undefined) | undefined;
+  // Late-bound: the tracker and session manager are built later.
+  let onAppendFenced: ((id: SessionId) => void) | undefined;
   const podName = process.env.POD_NAME;
   const eventStore = agentHostResourceDsn()
     ? createPgEventStore({
         dsn: agentHostResourceDsn(),
         // Single-replica (no POD_NAME) has no second writer to fence against.
         fence: podName ? { pod: podName, generation: (id) => observedGeneration?.(id) } : undefined,
+        onFenced: (id) => onAppendFenced?.(id),
       })
     : undefined;
   hostLog.info("conversation event log", { backend: eventStore ? "postgres" : "none" });
@@ -782,6 +785,7 @@ export async function main(
     // With selfPod set, hydrate() adopts every Conversation the controller assigned to this
     // pod instead of replaying the local store.
     selfPod: podName,
+    handoffGraceMs: Number(process.env.HANDOFF_GRACE_MS ?? 5_000),
     bridgeFactory: ({ conversationId, sandbox, model, pickedProvider, owner }) => {
       // Exec + ACP client are connected lazily/asynchronously; the bridge is
       // created synchronously and starts the connection in start().
@@ -821,6 +825,27 @@ export async function main(
       void sessions
         .reconcileDanglingRun(id as SessionId, generation)
         .catch((err) => hostLog.errorWith("ownership-gain settlement failed", err, { conversation_id: id }));
+    };
+    // The fence only stops writes; this stops the run itself.
+    ownership.guard.onLost = (id) => {
+      void sessions
+        .relinquish(id as SessionId)
+        .catch((err) => hostLog.errorWith("ownership-loss teardown failed", err, { conversation_id: id }));
+    };
+    // A refused append means the cache may have missed a loss.
+    const guard = ownership.guard;
+    const confirming = new Set<SessionId>();
+    onAppendFenced = (id) => {
+      if (confirming.has(id) || !sessions.get(id)?.bridge) return;
+      confirming.add(id);
+      void guard
+        .confirmOwns(id)
+        .then(async (owned) => {
+          // A failed read also answers false; require another pod's row.
+          if (!owned && guard.observedGeneration(id) !== undefined) await sessions.relinquish(id);
+        })
+        .catch((err) => hostLog.errorWith("ownership re-check after a fenced append failed", err, { conversation_id: id }))
+        .finally(() => confirming.delete(id));
     };
   }
 
