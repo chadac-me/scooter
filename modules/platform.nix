@@ -1252,13 +1252,6 @@ in
             the table for GET /conversations; conversation-controller writes `phase` and
             (re)assigns host_pod. A writer implies read, so none are also readers.'';
         };
-        conversation_awaiting_input = {
-          writers = [ "agent-host" ];
-          readers = [ "conversation-router" ];
-          note = ''
-            Which conversations are waiting on the user's answer, for the sidebar's "!". The
-            agent-host sets and clears it; the router SELECTs it for GET /conversations.'';
-        };
         conversation_events = {
           writers = [ "agent-host" ];
           note = ''

@@ -83,19 +83,6 @@ CREATE INDEX "conversations_by_sandbox_ref" ON "conversations" ("sandbox_ref");
 -- Per-owner filtering for the conversation list.
 CREATE INDEX "conversations_by_owner" ON "conversations" ("owner");
 
--- Conversations whose agent is waiting on the user's answer to an interrupt (a question or
--- an approval), for the sidebar's "!". Its own table rather than a column on conversations:
--- it is short-lived run state, not conversation metadata. A row exists only while the wait
--- does, and the cascade drops it with its conversation. Its NOTIFY trigger
--- (migrations/<ts>_notify_conversation_awaiting_input.sql) pushes on the conversations
--- channel, so the router needs no second LISTEN.
-CREATE TABLE "conversation_awaiting_input" (
-  "conversation_id" text NOT NULL REFERENCES "conversations" ("id") ON DELETE CASCADE,
-  -- When the wait began, epoch ms.
-  "since"           bigint NOT NULL,
-  PRIMARY KEY ("conversation_id")
-);
-
 -- LIVE CONVERSATION-LIST PUSH — a NOTIFY trigger on this table (channel
 -- 'conversations_changed') lets the conversation-router serve GET /conversations/events by
 -- LISTENing instead of fanning SSE out to every agent-host pod. It is NOT declared here:

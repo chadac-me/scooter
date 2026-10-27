@@ -48,7 +48,15 @@ let
       };
     }) others;
 
-  envName = name: "CONTRIB_${lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] name)}_DB_NAME";
+  envOf = s: lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] s);
+  envName = name: "CONTRIB_${envOf name}_DB_NAME";
+
+  # feature -> the contribs providing it; core reads `<FEATURE>_DB_NAME`.
+  providers = lib.zipAttrs (lib.concatLists (lib.mapAttrsToList
+    (name: c: map (f: { ${f} = name; }) c.db.provides) withDb));
+  providerProblems = lib.mapAttrsToList
+    (f: ns: "contribs.{${lib.concatStringsSep "," ns}}.db: only one contrib may provide ${f}.")
+    (lib.filterAttrs (_: ns: builtins.length ns > 1) providers);
 
   # The paths below are fixed so the module system never has to evaluate
   # `config.contribs` to learn which options this module defines.
@@ -89,7 +97,10 @@ in
   config.scooter.postgres.grants = lib.zipAttrsWith (_: lib.concatLists)
     (lib.concatMap (e: map (g: { ${g.service} = [ g.grant ]; }) e.grants) deployed);
 
-  config.scooter.contribDbEnv = lib.genAttrs wired (svc: map
-    (a: { name = envName a.e.name; value = a.e.c.db.name; })
+  # A `throw`, since kubenix has no `assertions` option.
+  config.scooter.contribDbEnv = if providerProblems != [ ] then throw (lib.head providerProblems) else lib.genAttrs wired (svc: lib.concatMap
+    (a: [{ name = envName a.e.name; value = a.e.c.db.name; }]
+      ++ map (f: { name = "${envOf f}_DB_NAME"; value = a.e.c.db.name; }) a.e.c.db.provides)
     (lib.filter (a: a.service == svc) access));
+
 }

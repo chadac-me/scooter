@@ -19,7 +19,7 @@ import type { SessionId, ThreadId } from "../types.js";
 
 const log = logger("metaStore");
 
-const { conversations, conversationAwaitingInput } = agent_host;
+const { conversations } = agent_host;
 
 /** The store seam the ConversationStore's meta methods delegate to. */
 export interface MetaStore {
@@ -28,8 +28,6 @@ export interface MetaStore {
   touchActivity(id: SessionId, at: number): Promise<void>;
   /** Record a run starting (`running`) or ending at `at`, for the sidebar's active/unread dot. */
   setRunState(id: SessionId, running: boolean, at: number): Promise<void>;
-  /** Mark the conversation as waiting on the user's answer (`at`) or clear it (null), for the sidebar's "!" dot. */
-  setAwaitingInput(id: SessionId, at: number | null): Promise<void>;
   /** The persisted lastActivityAt, or undefined when there is no row. */
   readLastActivity(id: SessionId): Promise<number | undefined>;
   listConversations(): Promise<ConversationMeta[]>;
@@ -165,22 +163,6 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
         }
       } catch (e) {
         log.error("setRunState failed (sidebar turn state not persisted)", { conversation_id: id, error: formatError(e) });
-      }
-    },
-
-    async setAwaitingInput(id, at) {
-      try {
-        if (at === null) {
-          await db.delete(conversationAwaitingInput).where(eq(conversationAwaitingInput.conversationId, id));
-        } else {
-          // INSERT ... SELECT so a conversation already deleted is a no-op, not a foreign-key error.
-          await db.execute(sql`
-            INSERT INTO conversation_awaiting_input (conversation_id, since)
-            SELECT id, ${at} FROM conversations WHERE id = ${id}
-            ON CONFLICT (conversation_id) DO UPDATE SET since = EXCLUDED.since`);
-        }
-      } catch (e) {
-        log.error("setAwaitingInput failed (sidebar question state not persisted)", { conversation_id: id, error: formatError(e) });
       }
     },
 

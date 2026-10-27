@@ -443,6 +443,17 @@ in
               `null` means the first of `broker`, `webhooks` this contrib plugs into.
             '';
           };
+          provides = mkOption {
+            type = types.listOf (types.enum [ "awaiting-input" ]);
+            default = [ ];
+            description = ''
+              Core features this database backs. Each puts `<FEATURE>_DB_NAME` (e.g.
+              `AWAITING_INPUT_DB_NAME`) on every pod with access, so core finds the
+              database without naming the contrib. At most one contrib may provide each.
+              `awaiting-input`: table `conversation_awaiting_input (conversation_id, since)`,
+              NOTIFY `conversation_awaiting_input_changed` with `{"conversationId"}`.
+            '';
+          };
           tables = mkOption {
             default = { };
             description = ''

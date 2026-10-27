@@ -528,7 +528,7 @@ service half sets `db.owner` to the service that should own it:
 contribs.ask-user.config.db = {
   enable = true;
   owner = "agent-host";
-  tables.questions = { writers = [ "agent-host" ]; readers = [ "conversation-router" ]; };
+  tables.conversation_awaiting_input = { writers = [ "agent-host" ]; readers = [ "conversation-router" ]; };
 };
 ```
 
@@ -538,6 +538,14 @@ credentials and `CONTRIB_<NAME>_DB_NAME` as the database. A deployer can widen o
 narrow the lists the same way, e.g. `contribs.aws.db.tables.<t>.readers`. Services
 that can be granted: `agent-host`, `broker`, `webhooks`, `scheduler`,
 `conversation-router`, `conversation-controller`.
+
+**Backing a core feature (`db.provides`).** Core must not name a contrib, so a core
+service that reads a contrib's table finds it by feature: `db.provides = [ "<feature>" ]`
+puts `<FEATURE>_DB_NAME` next to `CONTRIB_<NAME>_DB_NAME` on each pod with access, and
+at most one contrib may provide a feature. The one feature today is `awaiting-input`,
+the sidebar's "!": ask-user provides it, agent-host writes it and the router reads it.
+With no provider, core runs without it. The feature fixes the table's shape; see the
+option's description.
 
 **Another contrib's data.** Go through the owning contrib's Python store (a
 `pythonDeps` dependency, as below), never its SQL. There are no foreign keys

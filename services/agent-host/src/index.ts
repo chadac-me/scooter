@@ -38,7 +38,7 @@ import { parseContribUserApi } from "./api/contribApi.js";
 import type { SandboxProvisioner } from "./session/manager.js";
 import { createFileConversationStore } from "./session/fileStore.js";
 import { createPgEventStore, withPgEvents } from "./session/eventStore.js";
-import { agentHostDsnFromEnv } from "./db/agentHostDsn.js";
+import { agentHostDsnFromEnv, awaitingInputDsnFromEnv } from "./db/agentHostDsn.js";
 import { asSchemaMismatch, checkSchemaVersion, isSchemaMismatch } from "./db/schemaGate.js";
 import { createPgAssignmentSource, createPgOwnershipGuard } from "./session/pgOwnershipGuard.js";
 import { createPgPool } from "./db/pgPool.js";
@@ -46,6 +46,7 @@ import { createPgConversationRegistry } from "./session/pgConversationRegistry.j
 import type { ConversationStore, ConversationLink } from "./session/manager.js";
 import { createPgLinkStore } from "./session/linkStore.js";
 import { createPgMetaStore } from "./session/metaStore.js";
+import { createPgAwaitingInputStore } from "./session/awaitingInputStore.js";
 import { createPvcAssetStore } from "./session/assetStore.js";
 import { createHybridAssetStore } from "./session/hybridAssetStore.js";
 import { createSessionBridge, PRIORITY_INTERRUPT, type AguiEvent, type ApproverIdentity } from "./bridge.js";
@@ -580,6 +581,10 @@ export async function main(
       })
     : undefined;
   hostLog.info("conversation metadata store selected", { backend: metaStore ? "postgres" : "file" });
+  // The sidebar's "!" state, only when a contrib provides the awaiting-input database.
+  const awaitingDsn = awaitingInputDsnFromEnv();
+  const awaitingInput = awaitingDsn ? createPgAwaitingInputStore({ dsn: awaitingDsn }) : undefined;
+  hostLog.info("awaiting-input store selected", { backend: awaitingInput ? "postgres" : "none" });
 
   // Decorate rather than replace the file store, delegating everything else through the
   // original since several of its methods call siblings via `this`; saveMeta writes both
@@ -606,6 +611,8 @@ export async function main(
             // The shared PG resource_links table needs an explicit delete, or an orphaned row
             // collides with a later re-link.
             await linkStore?.deleteByConversation(id);
+            // No foreign key reaches the awaiting-input database, so its row goes here.
+            await awaitingInput?.set(id, null);
           },
         }
       : {}),
@@ -629,9 +636,14 @@ export async function main(
       if (event.type === "RUN_STARTED") void metaStore.setRunState(id, true, at);
       // An interrupt (awaiting approval) ends the turn too: the agent is waiting on the user.
       else if (event.type === "RUN_FINISHED" || event.type === "RUN_ERROR") void metaStore.setRunState(id, false, at);
+    });
+  }
+  if (awaitingInput) {
+    store.onAppend?.((id, { event }) => {
+      const at = typeof event.ts === "number" ? event.ts : Date.now();
       // A pending interrupt (a question or an approval) shows as "!" until it is answered or dismissed.
-      if (event.type === "RUN_FINISHED" && event.outcome?.type === "interrupt") void metaStore.setAwaitingInput(id, at);
-      else if (event.type === "PERMISSION_RESOLVED") void metaStore.setAwaitingInput(id, null);
+      if (event.type === "RUN_FINISHED" && event.outcome?.type === "interrupt") void awaitingInput.set(id, at);
+      else if (event.type === "PERMISSION_RESOLVED") void awaitingInput.set(id, null);
     });
   }
   // Image/media assets: metadata in Postgres and bytes on the assets PVC (ASSETS_PATH, else

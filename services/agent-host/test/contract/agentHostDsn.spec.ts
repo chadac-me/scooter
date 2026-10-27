@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { agentHostDsnFromEnv } from "../../src/db/agentHostDsn.js";
+import { agentHostDsnFromEnv, awaitingInputDsnFromEnv } from "../../src/db/agentHostDsn.js";
 
 describe("agentHostDsnFromEnv", () => {
   it("prefers an explicit AGENT_HOST_DB_DSN over the discrete vars", () => {
@@ -47,5 +47,19 @@ describe("agentHostDsnFromEnv", () => {
 
   it("returns '' when no password is present (Postgres not configured)", () => {
     expect(agentHostDsnFromEnv({} as NodeJS.ProcessEnv)).toBe("");
+  });
+});
+
+describe("awaitingInputDsnFromEnv", () => {
+  const base = { AGENT_HOST_DB_PASSWORD: "s3cret", AGENT_HOST_DB_SSLMODE: "require" };
+
+  it("is the agent_host DSN pointed at AWAITING_INPUT_DB_NAME", () => {
+    const dsn = awaitingInputDsnFromEnv({ ...base, AWAITING_INPUT_DB_NAME: "contrib_ask_user" } as NodeJS.ProcessEnv);
+    expect(dsn).toBe("postgresql://agent_host:s3cret@agent-shared-db:5432/contrib_ask_user?sslmode=require");
+  });
+
+  it("is empty when no contrib provides the database, or agent_host is unset", () => {
+    expect(awaitingInputDsnFromEnv(base as NodeJS.ProcessEnv)).toBe("");
+    expect(awaitingInputDsnFromEnv({ AWAITING_INPUT_DB_NAME: "x" } as NodeJS.ProcessEnv)).toBe("");
   });
 });

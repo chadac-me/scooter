@@ -23,27 +23,24 @@ owner = "agent-host"
 
 [agent_host.tables]
 # Asset metadata (bytes on dedicated PVC). Replaces in-memory blob URLs.
-conversation_assets         = { writers = ["agent-host"], readers = [] }
-# Which conversations are waiting on the user's answer, for the sidebar's "!". The
-# agent-host sets and clears it; the router SELECTs it for GET /conversations.
-conversation_awaiting_input = { writers = ["agent-host"], readers = ["conversation-router"] }
+conversation_assets = { writers = ["agent-host"], readers = [] }
 # The conversation event log. Replaces events.jsonl + the NFS mirror. Deliberately NO readers:
 # these are full transcripts; the router's grant is table-scoped to `conversations` so it can't
 # read them.
-conversation_events         = { writers = ["agent-host"], readers = [] }
+conversation_events = { writers = ["agent-host"], readers = [] }
 # The background-job registry. Was jobs.json on the emptyDir that every rollout wipes.
-conversation_jobs           = { writers = ["agent-host"], readers = [] }
+conversation_jobs   = { writers = ["agent-host"], readers = [] }
 # Conversation metadata: the sidebar list + rehydration fields. THREE writers, one table:
 # agent-host owns the row; conversation-router INSERTs it at create time, writes
 # title/starred for IDLE conversations, claims host_pod on first route, and SELECTs
 # the table for GET /conversations; conversation-controller writes `phase` and
 # (re)assigns host_pod. A writer implies read, so none are also readers.
-conversations               = { writers = ["agent-host", "conversation-router", "conversation-controller"], readers = [] }
+conversations       = { writers = ["agent-host", "conversation-router", "conversation-controller"], readers = [] }
 # Per-user skills authored in the settings page, injected into that user's conversations
 # next to the deployment-wide `agent-skills` ConfigMap. agent-host both serves the CRUD
 # and reads them at conversation start, so it is the only writer and there are no
 # readers: a skill body is user prose about their own repos, not shared config.
-user_skills                 = { writers = ["agent-host"], readers = [] }
+user_skills         = { writers = ["agent-host"], readers = [] }
 
 [broker]
 owner = "broker"

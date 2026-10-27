@@ -1048,6 +1048,20 @@ let
     let m = builtins.filter (e: e.name == "BLOCKING_TOOLS_JSON") env;
     in if m == [ ] then { } else builtins.fromJSON (builtins.head m).value;
   askUserOff = { contribs.ask-user.enable = nixpkgsLib.mkForce false; };
+  # ask-user provides awaiting-input: agent-host and the router find its database by feature.
+  awaitingOf = extra:
+    let
+      e = evalPlatform {
+        module = { ... }: {
+          imports = [ ./kubenix-config.nix ];
+          config = extra;
+        };
+      };
+      envOf = d: builtins.concatMap (c: c.env or [ ])
+        (builtins.attrValues (e.config.kubernetes.resources.deployments.${d}.spec.template.spec.containers or { }));
+      valueIn = d: map (x: x.value) (builtins.filter (x: x.name == "AWAITING_INPUT_DB_NAME") (envOf d));
+    in { host = valueIn "agent-host"; router = valueIn "conversation-router"; };
+  awaitingOn = awaitingOf { };
   askUserProblems =
     (if ((blockingOf hostEnv).AskUserQuestion.kind or null) == "ask-user.questions" then [ ]
      else [ "host.env.BLOCKING_TOOLS_JSON has no AskUserQuestion -> ask-user.questions row while ask-user is enabled" ])
@@ -1062,7 +1076,13 @@ let
     ++ (if renderersThrow { contribs.ask-user.ui.interruptRenderers."ask-user.more".entry = "ui/Missing.tsx"; } then [ ]
         else [ "an interrupt renderer whose entry does not exist rendered" ])
     ++ (if !(builtins.tryEval (builtins.deepSeq (hostEnvOf { contribs.ask-user.agent.blockingTools.Other.kind = "aws.x"; }) true)).success then [ ]
-        else [ "a blocking tool kind outside `<contrib>.` rendered" ]);
+        else [ "a blocking tool kind outside `<contrib>.` rendered" ])
+    ++ (if awaitingOn == { host = [ "contrib_ask_user" ]; router = [ "contrib_ask_user" ]; } then [ ]
+        else [ "AWAITING_INPUT_DB_NAME is not contrib_ask_user on agent-host and the router: ${builtins.toJSON awaitingOn}" ])
+    ++ (if awaitingOf askUserOff == { host = [ ]; router = [ ]; } then [ ]
+        else [ "AWAITING_INPUT_DB_NAME is set while ask-user is disabled" ])
+    ++ (if !(builtins.tryEval (builtins.deepSeq (awaitingOf { contribs.aws.db.provides = [ "awaiting-input" ]; }) true)).success then [ ]
+        else [ "two contribs providing awaiting-input rendered" ]);
 
   # The UI pod serves the DEPLOYMENT's contrib manifest, mounted from a ConfigMap, so a
   # contrib left off here shows no settings tab even though the image's built-in

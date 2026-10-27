@@ -18,6 +18,7 @@ buildGoModule {
   nativeCheckInputs = [ postgresql_16 ];
   env.AGENT_HOST_MIGRATIONS = "${../../lib/sql/agent_host/migrations}";
   env.WEBHOOKS_MIGRATIONS = "${../../lib/sql/webhooks/migrations}";
+  env.AWAITING_INPUT_MIGRATIONS = "${../../contrib/ask-user/sql/migrations}";
 
   meta.description = "Scooter conversation router (hostPod reverse-proxy)";
 }
