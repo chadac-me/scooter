@@ -8,6 +8,7 @@
 
 let
   resolveSettingsTabs = import ./settings-tabs.nix { inherit lib; };
+  resolveInterruptRenderers = import ./interrupt-renderers.nix { inherit lib; };
 
   # A malformed SVG is an author error, so it throws at eval rather than rendering a broken glyph.
   iconData = name: file:
@@ -53,9 +54,12 @@ let
   # Keyed by tab id; validated (and thrown on) in settings-tabs.nix.
   settingsTabs = resolveSettingsTabs contribs;
 
+  # Keyed by request kind; validated (and thrown on) in interrupt-renderers.nix.
+  interruptRenderers = resolveInterruptRenderers contribs;
+
   # The presentation half of each contrib's approval gate, not gated on `ui.enable` because a contrib may raise approvals while contributing no icon.
   approvals = lib.mapAttrs
     (_: c: { inherit (c.approvals) gatedOption blockedTitle blockedHint; })
     (lib.filterAttrs (_: c: c.approvals != null) contribs);
 in
-{ inherit sources toolCards toolTitles linkProviders approvals settingsTabs; }
+{ inherit sources toolCards toolTitles linkProviders approvals settingsTabs interruptRenderers; }

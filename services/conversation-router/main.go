@@ -173,6 +173,23 @@ func main() {
 		}
 	}
 
+	// Optional read-only handle on the awaiting-input database a contrib provides; without it no "!".
+	if dsn := awaitingStoreDSNFromEnv(); dsn != "" {
+		a, err := OpenAwaitingStore(ctx, dsn)
+		if err != nil {
+			log.Warn("awaiting-input read store unavailable (list served without the \"!\")", errAttr(err))
+		} else {
+			defer a.Close()
+			if store != nil {
+				store.awaiting = a
+			}
+			if writeStore != nil {
+				writeStore.awaiting = a
+			}
+			log.Info("awaiting-input read store connected")
+		}
+	}
+
 	var resolver ownerResolver
 	if pods != nil && writeStore != nil {
 		assigner := NewAssigner(&PgAssignStore{pool: writeStore.pool}, pods)
@@ -185,7 +202,7 @@ func main() {
 
 	// The live conversation-list push: one LISTEN connection per source database fans NOTIFYs
 	// out to SSE subscribers — conversation rows from agent_host (events.go), link changes from
-	// webhooks (linkevents.go), both re-read and pushed as the same upsert frame.
+	// webhooks (linkevents.go), waits from awaiting-input (awaiting.go), all pushed as one upsert frame.
 	hub := newSSEHub()
 	var direct *directProxy
 	if cfg.sandboxDomain != "" && cfg.sandboxDirect {
@@ -193,6 +210,7 @@ func main() {
 	}
 	go runConversationListener(ctx, store, links, hub, direct.invalidate)
 	go runLinkListener(ctx, store, links, hub)
+	go runAwaitingListener(ctx, store, links, hub)
 
 	handler := newRouter(ctx, cfg, resolver, creator, trusted, store, writeStore, links, hub)
 	mainGate, sandboxGate := buildGateways(kubeCfg, log)

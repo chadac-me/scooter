@@ -7,6 +7,7 @@
     ./spec.nix
 
     ./airtable/contrib.nix
+    ./ask-user/contrib.nix
     ./aws/contrib.nix
     ./brave/contrib.nix
     ./code-server/contrib.nix

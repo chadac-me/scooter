@@ -44,4 +44,13 @@ describe("container: parsing a permission answer from the controller", () => {
   it("a non-string optionId is rejected rather than coerced", () => {
     expect(parsePermissionAnswer({ optionId: 42 })).toEqual({ cancelled: true });
   });
+
+  it("carries a contrib request's result object through, in either shape", () => {
+    // BYOC blocking tools round-trip through this parser, so dropping `result` would lose the user's answer.
+    const result = { answers: { "Which database?": "Postgres" } };
+    expect(parsePermissionAnswer({ optionId: "answer", result })).toEqual({ optionId: "answer", result });
+    expect(parsePermissionAnswer({ result: { optionId: "answer", result } })).toEqual({ optionId: "answer", result });
+    expect(parsePermissionAnswer({ optionId: "allow", result: ["x"] })).toEqual({ optionId: "allow" });
+    expect(parsePermissionAnswer({ cancelled: true, result })).toEqual({ cancelled: true });
+  });
 });

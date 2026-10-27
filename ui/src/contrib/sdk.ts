@@ -1,8 +1,9 @@
 /**
- * The supported surface for contrib settings-tab code (contrib/<name>/ui/*.tsx). A tab
- * may import only from here, @/components/*, @/lib/* and ui/package.json deps; the
- * ESLint rule in ui/eslint.config.js enforces it. Anything a tab needs from the app
- * belongs here, so the app's internals can change without breaking contribs.
+ * The supported surface for contrib UI code (contrib/<name>/ui/*.tsx: settings tabs
+ * and interrupt renderers). Such a module may import only from here, @/components/*,
+ * @/lib/* and ui/package.json deps; the ESLint rule in ui/eslint.config.js enforces it.
+ * Anything a module needs from the app belongs here, so
+ * the app's internals can change without breaking contribs.
  */
 
 import { useCurrentUser } from "../sessions.js";
@@ -56,4 +57,18 @@ export function contribFetch(
     body: json !== undefined ? JSON.stringify(json) : rest.body,
     credentials: "same-origin",
   });
+}
+
+/** What an interrupt renderer (a contrib's `ui.interruptRenderers` entry) receives for one pending request. */
+export interface InterruptRendererProps {
+  /** The request's heading. */
+  message: string;
+  /** The request's data as the agent sent it, unvalidated: the renderer checks its own shape and throws on one it cannot draw. */
+  data: unknown;
+  /** True while an answer is being sent. */
+  busy: boolean;
+  /** Answer with a JSON object, which the agent receives as the request's result. */
+  resolve(result: Record<string, unknown>): void;
+  /** Dismiss without answering; the agent is told the user did not answer. */
+  dismiss(): void;
 }

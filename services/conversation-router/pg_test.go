@@ -28,6 +28,13 @@ func startPGWebhooks(t *testing.T) *pgxpool.Pool {
 	return startPGWith(t, "WEBHOOKS_MIGRATIONS", "../../lib/sql/webhooks/migrations")
 }
 
+// startPGAwaiting runs a throwaway Postgres with the awaiting-input migrations (the ask-user
+// contrib's database) replayed.
+func startPGAwaiting(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	return startPGWith(t, "AWAITING_INPUT_MIGRATIONS", "../../contrib/ask-user/sql/migrations")
+}
+
 // startPGWith runs a throwaway Postgres with one database's migrations replayed, taking the
 // directory from env (set by default.nix for the Nix build) or the in-repo path.
 func startPGWith(t *testing.T, migrationsEnv, defaultDir string) *pgxpool.Pool {
@@ -646,5 +653,64 @@ func TestPgConversationByLabel(t *testing.T) {
 	// LIKE wildcards are not interpreted.
 	if _, ok, _ := s.ConversationByLabel(ctx, "5a51%"); ok {
 		t.Error("a wildcard label matched")
+	}
+}
+
+// The sidebar's "!" comes from a second database, so both the row merge and the trigger's
+// payload are checked against the real migrations.
+func TestPgAwaitingInputFillsRowsAndNotifies(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conv, wait := startPG(t), startPGAwaiting(t)
+	s := &Store{pool: conv, awaiting: &AwaitingStore{pool: wait}}
+	insertConv(t, conv, "c-ask", "", "")
+	insertConv(t, conv, "c-calm", "", "")
+
+	listen, err := pgx.ConnectConfig(ctx, wait.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listen.Close(context.Background())
+	if _, err := listen.Exec(ctx, "listen "+awaitingChannel); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stmt := range []string{
+		`INSERT INTO conversation_awaiting_input (conversation_id, since) VALUES ('c-ask', 7)`,
+		`UPDATE conversation_awaiting_input SET since = 8 WHERE conversation_id = 'c-ask'`,
+	} {
+		if _, err := wait.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+		n, err := listen.WaitForNotification(ctx)
+		if err != nil {
+			t.Fatalf("%s: no notification: %v", stmt, err)
+		}
+		if id, ok := linkNotifyDecision(n.Payload); !ok || id != "c-ask" {
+			t.Fatalf("%s: payload %q must name c-ask", stmt, n.Payload)
+		}
+	}
+
+	rows, err := s.Conversations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		want := r.ID == "c-ask"
+		if got := r.AwaitingInputAt != nil && *r.AwaitingInputAt == 8; got != want {
+			t.Fatalf("%s: AwaitingInputAt = %v", r.ID, r.AwaitingInputAt)
+		}
+	}
+
+	if _, err := wait.Exec(ctx, `DELETE FROM conversation_awaiting_input WHERE conversation_id = 'c-ask'`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := listen.WaitForNotification(ctx); err != nil {
+		t.Fatalf("the clear must notify: %v", err)
+	} else if id, _ := linkNotifyDecision(n.Payload); id != "c-ask" {
+		t.Fatalf("the clear must name c-ask, got %q", n.Payload)
+	}
+	if c, err := s.ConversationByID(ctx, "c-ask"); err != nil || c == nil || c.AwaitingInputAt != nil {
+		t.Fatalf("a cleared wait must read as nil, got %+v %v", c, err)
 	}
 }

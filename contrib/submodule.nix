@@ -128,6 +128,43 @@ let
     };
   };
 
+  # The card that draws one kind of request in the Approvals tab.
+  interruptRendererModule = {
+    options.entry = mkOption {
+      type = types.str;
+      example = "ui/QuestionCard.tsx";
+      description = ''
+        The renderer's module, relative to this contrib's directory and inside its `ui/`.
+        Its default export is a React component taking `InterruptRendererProps` from
+        @/src/contrib/sdk. Same import rules as a settings tab's `entry`.
+      '';
+    };
+  };
+
+  # One agent tool that blocks until the user answers a request of `kind`.
+  blockingToolModule = {
+    options = {
+      kind = mkOption {
+        type = types.str;
+        example = "${name}.questions";
+        description = ''
+          The request kind the tool's input is sent as, which this contrib's
+          `ui.interruptRenderers` should draw. Must start with `${name}.`.
+        '';
+      };
+      title = mkOption {
+        type = types.str;
+        default = "The agent needs your input";
+        description = "The request's heading, used when the renderer draws none and in the fallback card.";
+      };
+      dismissed = mkOption {
+        type = types.str;
+        default = "The user dismissed this request without answering. Do not ask again: proceed with your best judgement and say what you assumed.";
+        description = "What the model is told when the user dismisses the request.";
+      };
+    };
+  };
+
   uiModule = { config, ... }: {
     options = {
       enable = mkOption {
@@ -175,10 +212,25 @@ let
           and a tab's id defaults to it.
         '';
       };
+
+      interruptRenderers = mkOption {
+        type = types.attrsOf (types.submodule interruptRendererModule);
+        default = { };
+        example = literalExpression ''
+          { "${name}.questions" = { entry = "ui/QuestionCard.tsx"; }; }
+        '';
+        description = ''
+          Cards this contrib draws in the Approvals tab, keyed by request kind. A
+          pending request whose `kind` is listed here renders with this module
+          instead of the plain option buttons, which stay underneath if it fails to
+          load. Every kind must start with `${name}.`. Checked by
+          contrib/interrupt-renderers.nix.
+        '';
+      };
     };
 
     config.enable = lib.mkDefault
-      (config.source != null || config.tools != { } || config.settingsTabs != [ ]);
+      (config.source != null || config.tools != { } || config.settingsTabs != [ ] || config.interruptRenderers != { });
   };
 
   # One recurring task this contrib ships, built by mkScooterTask (contrib/tasks.nix)
@@ -317,6 +369,26 @@ in
       '';
     };
 
+    agent = mkOption {
+      default = { };
+      description = "What this contrib changes about how the agent runs.";
+      type = types.submodule {
+        options.blockingTools = mkOption {
+          type = types.attrsOf (types.submodule blockingToolModule);
+          default = { };
+          example = literalExpression ''
+            { AskUserQuestion = { kind = "${name}.questions"; title = "The agent has a question"; }; }
+          '';
+          description = ''
+            Agent tools that block until the user answers, keyed by the tool's name.
+            The Claude provider sends the call's input as a request of `kind`, waits,
+            and merges the user's result object into the tool's input. Rendered into
+            the agent-host's `BLOCKING_TOOLS_JSON` by modules/platform.nix.
+          '';
+        };
+      };
+    };
+
     sandbox = mkOption {
       default = { };
       description = "What this contrib adds to the agent's sandbox image.";
@@ -369,6 +441,17 @@ in
               The service whose existing role owns this database and runs its
               migrations: any `scooter.postgres.consumers` key, e.g. `agent-host`.
               `null` means the first of `broker`, `webhooks` this contrib plugs into.
+            '';
+          };
+          provides = mkOption {
+            type = types.listOf (types.enum [ "awaiting-input" ]);
+            default = [ ];
+            description = ''
+              Core features this database backs. Each puts `<FEATURE>_DB_NAME` (e.g.
+              `AWAITING_INPUT_DB_NAME`) on every pod with access, so core finds the
+              database without naming the contrib. At most one contrib may provide each.
+              `awaiting-input`: table `conversation_awaiting_input (conversation_id, since)`,
+              NOTIFY `conversation_awaiting_input_changed` with `{"conversationId"}`.
             '';
           };
           tables = mkOption {

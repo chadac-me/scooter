@@ -19,6 +19,7 @@ import {
   contribToolTitles,
   contribLinkProviders,
   contribSettingsTabs,
+  contribInterruptRenderers,
 } from "./contribManifest.js";
 import { sourceLabel, SourceBadge } from "./sourceIcon.js";
 import { matchToolCall } from "./toolCallView.js";
@@ -254,5 +255,36 @@ describe("settings tabs", () => {
     serve({});
     await loadContribManifest();
     expect(contribSettingsTabs()).toEqual({});
+  });
+});
+
+describe("interrupt renderers", () => {
+  const CARD = { contrib: "ask-user", entry: "ask-user/ui/QuestionCard.tsx" };
+
+  it("keeps a well-formed row, keyed by its request kind", async () => {
+    serve({ interruptRenderers: { "ask-user.questions": CARD } });
+    await loadContribManifest();
+    expect(contribInterruptRenderers()).toEqual({ "ask-user.questions": CARD });
+  });
+
+  it("drops a row outside its contrib's namespace or ui/, without costing its neighbours", async () => {
+    serve({
+      interruptRenderers: {
+        "ask-user.questions": CARD,
+        // A kind another contrib owns, or an entry from another contrib's ui/, would hijack it.
+        "aws.questions": CARD,
+        "ask-user.foreign": { ...CARD, entry: "aws/ui/Card.tsx" },
+        "no-dot": { ...CARD, contrib: "no-dot" },
+        "ask-user.no-entry": { contrib: "ask-user" },
+      },
+    });
+    await loadContribManifest();
+    expect(Object.keys(contribInterruptRenderers())).toEqual(["ask-user.questions"]);
+  });
+
+  it("is empty when the manifest has no interruptRenderers key", async () => {
+    serve({});
+    await loadContribManifest();
+    expect(contribInterruptRenderers()).toEqual({});
   });
 });

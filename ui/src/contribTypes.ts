@@ -61,6 +61,14 @@ export interface ContribSettingsTab {
   entry: string;
 }
 
+/** A contrib's card for one request kind in the Approvals tab, keyed by that kind. */
+export interface ContribInterruptRenderer {
+  /** The contrib that declared it. */
+  contrib: string;
+  /** `<contrib>/ui/<file>.tsx`, the key into the lazy module table (contribTabs.tsx). */
+  entry: string;
+}
+
 /** The whole `/contrib/manifest.json` document, normalized: the loader fills every
  *  absent key with an empty value, so consumers never branch on undefined. */
 export interface ContribManifest {
@@ -76,4 +84,6 @@ export interface ContribManifest {
   approvals: Record<string, ContribApproval>;
   /** Contrib settings tabs, keyed by tab id. */
   settingsTabs: Record<string, ContribSettingsTab>;
+  /** Contrib interrupt renderers, keyed by request kind. */
+  interruptRenderers: Record<string, ContribInterruptRenderer>;
 }

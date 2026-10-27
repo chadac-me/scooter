@@ -205,6 +205,7 @@
   contribs = {
     # Opt in: `enable` defaults false, so a deployment names what it ships.
     aws.enable = true;
+    ask-user.enable = true;
     airtable.enable = true;
     brave.enable = true;
     datadog.enable = true;

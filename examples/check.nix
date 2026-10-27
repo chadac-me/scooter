@@ -1030,6 +1030,60 @@ let
     ++ (if builtins.match ".*:agent-scheduler" (brokerEnvVal "SYSTEM_TASK_SERVICE_ACCOUNTS") != null then [ ]
         else [ "broker.env.SYSTEM_TASK_SERVICE_ACCOUNTS does not name the scheduler, so a task's /system calls would 403" ]);
 
+  # ask-user: its blocking tool reaches the agent-host as BLOCKING_TOOLS_JSON and its card
+  # reaches the UI manifest, both only while it is enabled, and a kind outside the
+  # contrib's namespace or a missing entry fails the eval.
+  resolveInterruptRenderers = import ../contrib/interrupt-renderers.nix { lib = nixpkgsLib; };
+  renderersWith = extra:
+    let
+      e = evalPlatform {
+        module = { ... }: {
+          imports = [ ./kubenix-config.nix ];
+          config = extra;
+        };
+      };
+    in resolveInterruptRenderers (nixpkgsLib.filterAttrs (_: c: c.enable) e.config.contribs);
+  renderersThrow = extra: !(builtins.tryEval (builtins.deepSeq (renderersWith extra) true)).success;
+  blockingOf = env:
+    let m = builtins.filter (e: e.name == "BLOCKING_TOOLS_JSON") env;
+    in if m == [ ] then { } else builtins.fromJSON (builtins.head m).value;
+  askUserOff = { contribs.ask-user.enable = nixpkgsLib.mkForce false; };
+  # ask-user provides awaiting-input: agent-host and the router find its database by feature.
+  awaitingOf = extra:
+    let
+      e = evalPlatform {
+        module = { ... }: {
+          imports = [ ./kubenix-config.nix ];
+          config = extra;
+        };
+      };
+      envOf = d: builtins.concatMap (c: c.env or [ ])
+        (builtins.attrValues (e.config.kubernetes.resources.deployments.${d}.spec.template.spec.containers or { }));
+      valueIn = d: map (x: x.value) (builtins.filter (x: x.name == "AWAITING_INPUT_DB_NAME") (envOf d));
+    in { host = valueIn "agent-host"; router = valueIn "conversation-router"; };
+  awaitingOn = awaitingOf { };
+  askUserProblems =
+    (if ((blockingOf hostEnv).AskUserQuestion.kind or null) == "ask-user.questions" then [ ]
+     else [ "host.env.BLOCKING_TOOLS_JSON has no AskUserQuestion -> ask-user.questions row while ask-user is enabled" ])
+    ++ (if blockingOf (hostEnvOf askUserOff) == { } then [ ]
+        else [ "host.env.BLOCKING_TOOLS_JSON is set while ask-user is disabled — blocking tools are not gated on the contrib's `enable`" ])
+    ++ (if ((renderersWith { })."ask-user.questions".entry or null) == "ask-user/ui/QuestionCard.tsx" then [ ]
+        else [ "the ask-user.questions renderer is not in the manifest as ask-user/ui/QuestionCard.tsx" ])
+    ++ (if (renderersWith askUserOff) ? "ask-user.questions"
+        then [ "the ask-user.questions renderer is in the manifest while ask-user is disabled" ] else [ ])
+    ++ (if renderersThrow { contribs.ask-user.ui.interruptRenderers."other.questions".entry = "ui/QuestionCard.tsx"; } then [ ]
+        else [ "an interrupt renderer kind outside `<contrib>.` rendered — request kinds are no longer scoped by contrib" ])
+    ++ (if renderersThrow { contribs.ask-user.ui.interruptRenderers."ask-user.more".entry = "ui/Missing.tsx"; } then [ ]
+        else [ "an interrupt renderer whose entry does not exist rendered" ])
+    ++ (if !(builtins.tryEval (builtins.deepSeq (hostEnvOf { contribs.ask-user.agent.blockingTools.Other.kind = "aws.x"; }) true)).success then [ ]
+        else [ "a blocking tool kind outside `<contrib>.` rendered" ])
+    ++ (if awaitingOn == { host = [ "contrib_ask_user" ]; router = [ "contrib_ask_user" ]; } then [ ]
+        else [ "AWAITING_INPUT_DB_NAME is not contrib_ask_user on agent-host and the router: ${builtins.toJSON awaitingOn}" ])
+    ++ (if awaitingOf askUserOff == { host = [ ]; router = [ ]; } then [ ]
+        else [ "AWAITING_INPUT_DB_NAME is set while ask-user is disabled" ])
+    ++ (if !(builtins.tryEval (builtins.deepSeq (awaitingOf { contribs.aws.db.provides = [ "awaiting-input" ]; }) true)).success then [ ]
+        else [ "two contribs providing awaiting-input rendered" ]);
+
   # The UI pod serves the DEPLOYMENT's contrib manifest, mounted from a ConfigMap, so a
   # contrib left off here shows no settings tab even though the image's built-in
   # manifest (built from the repo's list) has one.
@@ -1090,7 +1144,7 @@ let
     ++ (if bodyAnn overrideRes == "1g" then [ ]
         else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
 
-  allProblems = uploadsProblems ++ sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

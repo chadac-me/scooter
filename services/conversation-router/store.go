@@ -32,6 +32,8 @@ type ConversationRow struct {
 	// Turn state for the sidebar dot; both NULL until the first run.
 	RunStartedAt *int64
 	LastReplyAt  *int64
+	// Set while the agent waits on the user's answer, from AwaitingStore; nil otherwise.
+	AwaitingInputAt *int64
 }
 
 // conversationColumns is the one projection list, shared by the SELECTs and the write path's RETURNING so they cannot drift.
@@ -55,6 +57,8 @@ type Store struct {
 	pool *pgxpool.Pool
 	// connConfig is the read-only-pinned single-connection config the LISTEN loop opens a dedicated connection from, since a LISTEN would otherwise starve the tiny request pool.
 	connConfig *pgx.ConnConfig
+	// awaiting fills AwaitingInputAt on every row read, nil when no contrib provides it.
+	awaiting *AwaitingStore
 }
 
 // storeDSNFromEnv assembles the agent_host connection string from AGENT_HOST_DB_DSN or the AGENT_HOST_DB_* parts, returning "" when no password is set.
@@ -138,7 +142,11 @@ func (s *Store) Conversations(ctx context.Context) ([]ConversationRow, error) {
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.awaiting.fill(ctx, out)
+	return out, nil
 }
 
 // ConversationByID reads one conversation's durable metadata, returning (nil, nil) when the row is gone.
@@ -154,6 +162,7 @@ func (s *Store) ConversationByID(ctx context.Context, id string) (*ConversationR
 	if err != nil {
 		return nil, err
 	}
+	s.awaiting.fillOne(ctx, &c)
 	return &c, nil
 }
 
@@ -167,6 +176,8 @@ func (s *Store) Close() {
 // WriteStore writes conversations: idle metadata, creates, assignment claims.
 type WriteStore struct {
 	pool *pgxpool.Pool
+	// awaiting fills AwaitingInputAt on RETURNING rows, nil when no contrib provides it.
+	awaiting *AwaitingStore
 }
 
 // buildWritePoolConfig pins the pool read-write, overriding the role's read-only default.
@@ -202,15 +213,25 @@ const writeColumns = conversationColumns
 
 // SetStarred sets the star flag and returns the updated row, (nil, nil) if the row raced a delete.
 func (s *WriteStore) SetStarred(ctx context.Context, id string, starred bool) (*ConversationRow, error) {
-	return scanUpdated(s.pool.QueryRow(ctx,
-		`UPDATE conversations SET starred = $2 WHERE id = $1 RETURNING `+writeColumns, id, starred))
+	return s.withAwaiting(ctx)(scanUpdated(s.pool.QueryRow(ctx,
+		`UPDATE conversations SET starred = $2 WHERE id = $1 RETURNING `+writeColumns, id, starred)))
 }
 
 // SetUserTitle sets the title and locks it with user_titled=true, mirroring agent-host's setUserTitle.
 func (s *WriteStore) SetUserTitle(ctx context.Context, id, title string) (*ConversationRow, error) {
-	return scanUpdated(s.pool.QueryRow(ctx,
+	return s.withAwaiting(ctx)(scanUpdated(s.pool.QueryRow(ctx,
 		`UPDATE conversations SET title = $2, user_titled = true WHERE id = $1 RETURNING `+writeColumns,
-		id, title))
+		id, title)))
+}
+
+// withAwaiting fills an updated row's AwaitingInputAt, so a PATCH reply keeps the "!".
+func (s *WriteStore) withAwaiting(ctx context.Context) func(*ConversationRow, error) (*ConversationRow, error) {
+	return func(c *ConversationRow, err error) (*ConversationRow, error) {
+		if err == nil {
+			s.awaiting.fillOne(ctx, c)
+		}
+		return c, err
+	}
 }
 
 // CreateConversation inserts the create-time row, which is the conversation: it lists before its first prompt and the controller assigns it from there.

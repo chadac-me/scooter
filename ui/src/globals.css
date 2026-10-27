@@ -54,6 +54,8 @@
   --color-brand: var(--brand);
   --color-brand-foreground: var(--brand-foreground);
   --color-status-active: var(--status-active);
+  /* --status-question = the "agent is waiting on you" mark in the sidebar. */
+  --color-status-question: var(--status-question);
   --color-header: var(--header);
   /* --chat = the conversation pane surface, kept a step lighter than the body
      (--background) so the chat reads as the focal surface. */
@@ -92,6 +94,7 @@
   --brand: #145d8f; /* darkened blue: 6.8:1 as link text */
   --brand-foreground: #fffefa;
   --status-active: #145d8f;
+  --status-question: #b0246a; /* darkened magenta: 6.0:1 on --background */
   --header: #f3f0e7;
   --chat: #fdfcf8; /* the conversation pane, lightest surface */
   --chart-1: #145d8f; /* blue   */
@@ -137,6 +140,7 @@
   --brand: #268bd2;
   --brand-foreground: #fdf6e3;
   --status-active: #268bd2;
+  --status-question: #d33682; /* solarized magenta: 3.3:1 on --background */
   --header: #073642;
   --chat: #002b36;
   --chart-1: #268bd2;

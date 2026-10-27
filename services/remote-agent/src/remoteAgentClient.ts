@@ -14,7 +14,7 @@ import { selectBackend } from "./agentBackend.js";
 import "./echoBackend.js"; // self-registers
 
 import { REMOTE_PROTOCOL_VERSION, type WireFrame } from "./protocol.js";
-import { parsePermissionAnswer } from "./permissionAnswer.js";
+import { parsePermissionAnswer, type PermissionAnswer } from "./permissionAnswer.js";
 import { nextReconnectDelay, closeDisposition } from "./reconnect.js";
 import { generateDeviceKey, loadDeviceIdentity, saveDeviceIdentity, signChallenge } from "./deviceKey.js";
 import { createTunnelExecBackend } from "./tunnelExec.js";
@@ -140,7 +140,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
     };
 
     // Permission answers route by unique frame id, so one shared waiter map serves every per-session client.
-    const permissionWaiters = new Map<string, (ans: { optionId: string } | { cancelled: true }) => void>();
+    const permissionWaiters = new Map<string, (ans: PermissionAnswer) => void>();
 
     /** Build one SDK-backed brain per ACP session, stamping its outbound frames with the session id (known only after newSession returns) so the relay can route concurrent conversations on one container. */
     const buildClient = async (
@@ -219,7 +219,7 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
         send({ ch: "acp", type: "session_update", sid: sessionId, payload: { sessionId, update } }));
       sdk.onTerminalCreated((terminalId, command, args) => stampedSend({ ch: "acp", type: "terminal_created", payload: { terminalId, command, args } }));
       sdk.onPermissionRequest((req) => {
-        return new Promise<{ optionId: string } | { cancelled: true }>((resolve) => {
+        return new Promise<PermissionAnswer>((resolve) => {
           const id = req.toolCallId + ":" + Math.random().toString(36).slice(2);
           permissionWaiters.set(id, resolve);
           send({ ch: "acp", type: "permission_request", id, sid: req.sessionId, payload: { request: req } });

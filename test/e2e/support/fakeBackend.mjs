@@ -135,6 +135,17 @@ must("atlas", ["migrate", "apply", "--dir", "file://webhooks/migrations", "--url
   cwd: join(REPO_ROOT, "lib/sql"),
 });
 
+// ask-user's database backs the sidebar's "!" (awaiting-input); both services find it by name.
+const AWAITING_DB = "contrib_ask_user";
+log(`createdb ${AWAITING_DB}`);
+must("createdb", ["-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", AWAITING_DB], PG_AS);
+
+log(`atlas migrate apply (${AWAITING_DB})`);
+must("atlas", ["migrate", "apply", "--dir", "file://migrations", "--url",
+  `postgres://postgres@127.0.0.1:${PG_PORT}/${AWAITING_DB}?sslmode=disable`], {
+  cwd: join(REPO_ROOT, "contrib/ask-user/sql"),
+});
+
 // Spawn a long-lived child and tear the whole stack down if it dies unexpectedly, so
 // Playwright fails fast rather than hanging.
 function spawnService(name, cmd, args, env) {
@@ -174,6 +185,7 @@ spawnService("agent-host", "node", [join(REPO_ROOT, "services/agent-host/dist/in
   // Switches agent-host's link store from files to the shared PG resource_links table, so a link
   // POSTed here is visible to the router's list enrichment (see WEBHOOKS_DSN).
   WEBHOOKS_DB_DSN: WEBHOOKS_DSN,
+  AWAITING_INPUT_DB_NAME: AWAITING_DB,
 });
 
 const routerBin = process.env.ROUTER_BIN ?? "conversation-router";
@@ -188,6 +200,7 @@ spawnService("conversation-router", routerBin, [], {
   AGENT_HOST_DB_DSN: DSN,
   // Read-only handle on the same resource_links table agent-host writes, for list enrichment.
   WEBHOOKS_DB_DSN: WEBHOOKS_DSN,
+  AWAITING_INPUT_DB_NAME: AWAITING_DB,
 });
 
 await waitForHealth(`http://127.0.0.1:${ROUTER_PORT}/healthz`, "conversation-router");

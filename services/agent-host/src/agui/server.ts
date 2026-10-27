@@ -122,6 +122,16 @@ export interface ResumeOutcome {
   reason?: string;
 }
 
+/** The largest result one resume may carry, serialized. */
+const MAX_RESULT_BYTES = 16 * 1024;
+
+/** The `result` object from a resume payload, or undefined when there is none or it is too large. */
+export function interruptResult(payload: unknown): Record<string, unknown> | undefined {
+  const raw = (payload as { result?: unknown } | undefined)?.result;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  return JSON.stringify(raw).length <= MAX_RESULT_BYTES ? (raw as Record<string, unknown>) : undefined;
+}
+
 /** What the ingress identity resolver returns; `email`/`name` must be carried when present, since an approval is authorized against a configured claim. */
 export interface ResolvedUser {
   id: string;

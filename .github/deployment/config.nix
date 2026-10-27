@@ -6,6 +6,7 @@
 {
   contribs = {
     airtable.enable = true;
+    ask-user.enable = true;
     aws.enable = true;
     brave.enable = true;
     code-server.enable = true;

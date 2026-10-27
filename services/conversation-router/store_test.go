@@ -72,3 +72,15 @@ func TestBuildPoolConfigIsReadOnly(t *testing.T) {
 		t.Errorf("want MinConns=0 for an idle-cheap proxy pool, got %d", cfg.MinConns)
 	}
 }
+
+// awaitingStoreDSNFromEnv swaps only the database name, keeping credentials and options.
+func TestAwaitingStoreDSNFromEnv(t *testing.T) {
+	t.Setenv("AGENT_HOST_DB_DSN", "postgres://postgres@127.0.0.1:55432/agent_host?sslmode=disable")
+	if dsn := awaitingStoreDSNFromEnv(); dsn != "" {
+		t.Fatalf("no AWAITING_INPUT_DB_NAME must mean no DSN, got %q", dsn)
+	}
+	t.Setenv("AWAITING_INPUT_DB_NAME", "contrib_ask_user")
+	if dsn, want := awaitingStoreDSNFromEnv(), "postgres://postgres@127.0.0.1:55432/contrib_ask_user?sslmode=disable"; dsn != want {
+		t.Fatalf("got %q, want %q", dsn, want)
+	}
+}

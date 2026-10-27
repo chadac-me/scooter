@@ -29,6 +29,16 @@ export interface InitializeParams {
 export interface NewSessionParams {
   cwd: string;
   mcpServers?: unknown[];
+  /** Agent tools that block on the user's answer, by tool name. */
+  blockingTools?: Record<string, BlockingTool>;
+}
+/** One tool that waits on the user: its input is sent as a request of `kind`. */
+export interface BlockingTool {
+  kind: string;
+  /** The request's heading. */
+  title: string;
+  /** What the model is told when the user dismisses it. */
+  dismissed: string;
 }
 export interface PromptParams {
   sessionId: string;
@@ -39,8 +49,11 @@ export interface PermissionRequest {
   toolCallId: string;
   title: string;
   options: Array<{ optionId: string; name: string; kind: string }>;
+  /** Set when the agent asks for input a contrib renders rather than a plain choice. */
+  request?: { kind: string; data: unknown };
 }
-export type PermissionAnswer = { optionId: string } | { cancelled: true };
+/** `result` is the user's answer to a contrib-rendered request. */
+export type PermissionAnswer = { optionId: string; result?: Record<string, unknown> } | { cancelled: true };
 
 export interface AcpClient {
   initialize(params: InitializeParams): Promise<{ protocolVersion: number }>;

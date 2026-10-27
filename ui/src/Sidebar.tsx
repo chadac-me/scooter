@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 const DOT: Record<TurnDot, { cls: string; label: string; hint: string }> = {
+  question: { cls: "text-status-question", label: "Waiting on you", hint: "The agent asked a question or needs an approval." },
   active: { cls: "bg-success", label: "Agent working", hint: "A turn is in progress." },
   unread: { cls: "bg-status-active", label: "Unread reply", hint: "The agent replied since you last looked." },
   "unread-idle": { cls: "bg-warning", label: "Unread reply, sandbox suspended", hint: "The agent replied, then its sandbox was suspended." },
@@ -48,7 +49,16 @@ function StatusDot({ dot }: { dot: TurnDot }) {
             aria-label={label}
             className="-m-1.5 flex shrink-0 items-center justify-center p-1.5"
           >
-            <span className={cn("h-1 w-1 rounded-full", cls)} />
+            {dot === "question" ? (
+              <span
+                aria-hidden
+                className={cn("flex h-3 w-3 items-center justify-center rounded-full bg-red-500/25 text-[10px] font-bold leading-none", cls)}
+              >
+                !
+              </span>
+            ) : (
+              <span className={cn("h-1 w-1 rounded-full", cls)} />
+            )}
           </span>
         </TooltipTrigger>
         <TooltipContent side="right" sideOffset={6}>

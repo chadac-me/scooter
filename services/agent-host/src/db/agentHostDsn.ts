@@ -19,3 +19,16 @@ export function agentHostDsnFromEnv(env: NodeJS.ProcessEnv = process.env): strin
   const query = sslmode ? `?sslmode=${encodeURIComponent(sslmode)}` : "";
   return `postgresql://${user}:${encodeURIComponent(pw)}@${host}:${port}/${name}${query}`;
 }
+
+/**
+ * The awaiting-input database (AWAITING_INPUT_DB_NAME, set when a contrib provides it) on
+ * agent-host's own credentials, or "" when no contrib provides it or agent_host is unset.
+ */
+export function awaitingInputDsnFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  const name = env.AWAITING_INPUT_DB_NAME;
+  const base = agentHostDsnFromEnv(env);
+  if (!name || !base) return "";
+  const url = new URL(base);
+  url.pathname = `/${name}`;
+  return url.toString();
+}

@@ -16,7 +16,7 @@ import type {
   SessionConfig,
   ExecBackend,
 } from "./types.js";
-import type { AcpClient, SessionUpdate, ContentBlock } from "./acp/client.js";
+import type { AcpClient, SessionUpdate, ContentBlock, InterruptRequest } from "./acp/client.js";
 import {
   pickAcpProvider,
   type AcpProvider,
@@ -288,8 +288,13 @@ export interface SessionBridge {
 
   /** Answer a pending permission/option request, returning true if one matched; an
    *  unknown optionId cancels, and `approver` identifies the answering human for an
-   *  external interrupt. */
-  answerPermission(toolCallId: string, optionId: string, approver?: ApproverIdentity): boolean;
+   *  external interrupt; `result` is the user's answer to a contrib-rendered request. */
+  answerPermission(
+    toolCallId: string,
+    optionId: string,
+    approver?: ApproverIdentity,
+    result?: Record<string, unknown>,
+  ): boolean;
 
   /** Raise an AG-UI interrupt not tied to an agent run; `onAnswer` fires with the chosen
    *  optionId (or null) and the answering user's identity. */
@@ -389,6 +394,21 @@ export interface BridgeDeps {
 // Event ids must stay unique across agent-host restarts, so each is a UUID with a
 // readable prefix.
 const nextId = (prefix: string) => `${prefix}-${randomUUID()}`;
+
+/** The largest request data the bridge forwards to the UI, serialized. */
+const MAX_REQUEST_DATA_BYTES = 64 * 1024;
+
+/** `req` when its data is small enough to forward, else undefined, which draws the plain option card. */
+function boundedRequest(req: InterruptRequest | undefined): InterruptRequest | undefined {
+  if (!req) return undefined;
+  try {
+    if ((JSON.stringify(req.data ?? null) ?? "").length <= MAX_REQUEST_DATA_BYTES) return req;
+  } catch {
+    /* unserializable data is dropped like oversized data */
+  }
+  log.warn("dropping an interrupt request's data: too large or unserializable", { kind: req.kind });
+  return undefined;
+}
 
 export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   const sessionId = nextId("sess");
@@ -499,7 +519,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   // tool-permission blocks on `resolve`, while an external one (a broker AWS request)
   // fires `onExternal` with the chosen optionId.
   interface Pending {
-    resolve: (optionId: string | null) => void;
+    resolve: (optionId: string | null, result?: Record<string, unknown>) => void;
     validOptions: Set<string>;
     onExternal?: (optionId: string | null, approver?: ApproverIdentity) => void;
     /** Set when the asking session is gone, so the answer is not treated as the user's. */
@@ -1268,6 +1288,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         systemPrompt: provider.needsSystemPrompt
           ? sdkPrompt({ name: deps.config.agentName ?? "Scooter" })
           : undefined,
+        // A provider that runs the tools itself (the Claude SDK) makes these wait on the user.
+        blockingTools: deps.config.blockingTools,
       });
       debug("[bridge] readyProvider(%s): newSession -> %s", provider.id, sid);
       // Subscribe once per client and route updates to the current run.
@@ -1293,9 +1315,10 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           closeOpenText(run);
           closeOpenReasoning(run);
         }
-        const optionId = await new Promise<string | null>((resolve) => {
+        const request = boundedRequest(req.request);
+        const { optionId, result } = await new Promise<{ optionId: string | null; result?: Record<string, unknown> }>((resolve) => {
           pendingPermissions.set(req.toolCallId, {
-            resolve,
+            resolve: (optionId, result) => resolve({ optionId, result }),
             validOptions: new Set(req.options.map((o) => o.optionId)),
           });
           emit({
@@ -1310,7 +1333,10 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
                   reason: "confirmation",
                   message: req.title ?? "The agent needs your choice",
                   toolCallId: req.toolCallId,
-                  metadata: { options: req.options },
+                  // A contrib request's kind picks the UI card that draws its data.
+                  metadata: request
+                    ? { options: req.options, kind: request.kind, data: request.data }
+                    : { options: req.options },
                 },
               ],
             },
@@ -1325,7 +1351,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           emit({ type: "RUN_STARTED", threadId: run.threadId, runId: run.runId });
           run.ended = false;
         }
-        return optionId ? { optionId } : { cancelled: true as const };
+        if (!optionId) return { cancelled: true as const };
+        return result ? { optionId, result } : { optionId };
       });
       return { client, acpSessionId: sid, historySeeded: false, mcpFingerprint };
     })();
@@ -1534,7 +1561,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       titleListeners.add(cb);
       return () => titleListeners.delete(cb);
     },
-    answerPermission(toolCallId, optionId, approver) {
+    answerPermission(toolCallId, optionId, approver, result) {
       const pending = pendingPermissions.get(toolCallId);
       if (!pending) return false; // no such pending request (or already answered)
       // An unknown optionId cancels rather than forwarding a garbage selection.
@@ -1546,7 +1573,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         persist({ type: "PERMISSION_RESOLVED", toolCallId, optionId: chosen });
         pending.onExternal(chosen, approver);
       } else {
-        pending.resolve(chosen); // unblocks the goose ACP requestPermission call
+        pending.resolve(chosen, chosen ? result : undefined); // unblocks the agent's permission request
       }
       return true;
     },

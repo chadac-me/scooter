@@ -19,10 +19,11 @@ import type {
   SessionUpdate,
   ContentBlock,
 } from "./types.js";
-import type { ExecBackend } from "./types.js";
+import type { BlockingTool, ExecBackend } from "./types.js";
 import { sdkMessageToUpdates, type SdkMessage } from "./sdkAdapter.js";
 import { createSandboxMcpServer } from "./sandboxMcp.js";
 import { decideTool } from "./toolPolicy.js";
+import { BLOCKING_TOOL_TIMEOUT_S, blockingToolHook } from "./blockingToolHook.js";
 import { debug, debugError } from "./debug.js";
 
 // Stream text/thinking as deltas, threaded into sdkMessageToUpdates so the final assistant message does not re-emit the text.
@@ -140,6 +141,8 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
   let permissionSeq = 0;
 
   let sessionId = "";
+  /** Tools that wait on the user, set by newSession (contribs' `agent.blockingTools`). */
+  let blockingTools: Record<string, BlockingTool> = {};
   let active: SdkQuery | undefined; // the in-flight query() for cancel()
   let closed = false; // the SDK runs in-process, so alive means not closed
 
@@ -198,9 +201,22 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
     hooks: {
       PreToolUse: [
         {
+          // A blocking tool waits here until the user answers; the other tools return at once.
+          timeout: BLOCKING_TOOL_TIMEOUT_S,
           hooks: [
-            async (input: unknown) => {
+            async (input: unknown, toolUseId?: string, opts?: { signal?: AbortSignal }) => {
               const name = (input as { tool_name?: string })?.tool_name ?? "";
+              const blocking = Object.hasOwn(blockingTools, name) ? blockingTools[name] : undefined;
+              if (blocking && permissionHandler) {
+                return blockingToolHook({
+                  tool: blocking,
+                  sessionId,
+                  toolCallId: toolUseId ?? `block-${permissionNonce}-${++permissionSeq}`,
+                  toolInput: (input as { tool_input?: unknown }).tool_input,
+                  ask: permissionHandler,
+                  signal: opts?.signal,
+                });
+              }
               const decision = decideTool(name, Object.values(toolAliases));
               if (decision.allow) return { continue: true };
               debugError("[sdk:tool-denied]", `${name}: ${decision.reason}`);
@@ -257,7 +273,8 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
       return { protocolVersion: 1 };
     },
 
-    async newSession(_p: NewSessionParams) {
+    async newSession(p: NewSessionParams) {
+      blockingTools = p?.blockingTools ?? {};
       // The SDK mints its own session id on first query; this is a stable handle.
       sessionId = `sdk_${Date.now()}`;
       // Clear any resume id so the first prompt starts a fresh SDK session.
