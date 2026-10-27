@@ -1098,6 +1098,30 @@ describe("SessionManager", () => {
       expect(provisioner.destroy).not.toHaveBeenCalled();
     });
 
+    it("EXEMPTS a conversation the router starred behind this replica's back", async () => {
+      const provisioner = fakeProvisioner();
+      const store = { ...inMemoryStore(), readStarred: vi.fn(async () => true) };
+      const sessions = createSessionManager({ provisioner, store });
+      const conv = await sessions.start("starred-elsewhere"); // memory says unstarred
+
+      const reaped = await sessions.sweepRetention(30 * DAY, conv.lastActivityAt + 365 * DAY);
+
+      expect(reaped).toEqual([]);
+      expect(store.readStarred).toHaveBeenCalledWith(conv.id);
+      expect(sessions.get(conv.id)?.starred).toBe(true);
+      expect(provisioner.destroy).not.toHaveBeenCalled();
+    });
+
+    it("setStarred persists through the targeted store write", async () => {
+      const store = { ...inMemoryStore(), setStarred: vi.fn(async () => {}) };
+      const sessions = createSessionManager({ provisioner: fakeProvisioner(), store });
+      const conv = await sessions.start("star-write");
+
+      await sessions.setStarred(conv.id, true);
+
+      expect(store.setStarred).toHaveBeenCalledWith(conv.id, true);
+    });
+
     it("leaves a RECENTLY-active conversation alone (age is lastActivityAt, not createdAt)", async () => {
       const provisioner = fakeProvisioner();
       const sessions = createSessionManager({ provisioner, store: inMemoryStore() });

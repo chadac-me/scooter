@@ -184,6 +184,12 @@ export interface ConversationStore {
   gooseStatePath(id: SessionId): string;
   /** Persist conversation metadata so the list survives a restart; optional. */
   saveMeta?(meta: ConversationMeta): Promise<void>;
+  /** Persist the star; saveMeta deliberately never writes it. */
+  setStarred?(id: SessionId, starred: boolean): Promise<void>;
+  /** Persist a user rename and its lock. */
+  setUserTitle?(id: SessionId, title: string): Promise<void>;
+  /** The durable star, which the router may have changed. */
+  readStarred?(id: SessionId): Promise<boolean | undefined>;
   /** Set the visibility of `rootId` and every descendant in one write; optional. */
   setVisibility?(rootId: SessionId, visibility: Visibility): Promise<void>;
   /** Read a conversation's owner and visibility fresh from the shared store, since another
@@ -1455,19 +1461,21 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       return saveMeta(entry);
     },
 
-    setUserTitle(id, title) {
+    async setUserTitle(id, title) {
       const entry = entries.get(id);
-      if (!entry) return Promise.resolve();
+      if (!entry) return;
       entry.title = title;
       entry.userTitled = true; // lock it against the agent's <title>
-      return saveMeta(entry);
+      await saveMeta(entry);
+      await store.setUserTitle?.(id, title);
     },
 
-    setStarred(id, starred) {
+    async setStarred(id, starred) {
       const entry = entries.get(id);
-      if (!entry) return Promise.resolve();
+      if (!entry) return;
       entry.starred = starred;
-      return saveMeta(entry);
+      await saveMeta(entry);
+      await store.setStarred?.(id, starred);
     },
 
     async setVisibility(id, visibility) {
@@ -1733,6 +1741,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       });
       for (const entry of candidates) {
         try {
+          // The router stars without telling this replica.
+          if (await store.readStarred?.(entry.id)) {
+            entry.starred = true;
+            continue;
+          }
           await this.end(entry.id);
           reaped.push(entry.id);
         } catch (err) {

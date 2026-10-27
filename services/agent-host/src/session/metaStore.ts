@@ -31,6 +31,12 @@ export interface MetaStore {
   setRunState(id: SessionId, running: boolean, at: number): Promise<void>;
   /** The persisted lastActivityAt, or undefined when there is no row. */
   readLastActivity(id: SessionId): Promise<number | undefined>;
+  /** Star or unstar, writing only that column. */
+  setStarred(id: SessionId, starred: boolean): Promise<void>;
+  /** Rename and lock the title against the agent's <title>. */
+  setUserTitle(id: SessionId, title: string): Promise<void>;
+  /** The persisted star; undefined without a row, throws on failure. */
+  readStarred(id: SessionId): Promise<boolean | undefined>;
   /** Set the visibility of `rootId` and all its descendants in one statement; throws on failure. */
   setVisibility(rootId: SessionId, visibility: Visibility): Promise<void>;
   /** The row's owner and visibility, undefined when there is no row; throws on a failed read. */
@@ -124,14 +130,15 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
   };
 
   return {
-    /** UPDATE, so a straggler save cannot resurrect a removed row; lastActivityAt only moves
-     *  forward, so a replica holding a stale copy cannot erase activity another one recorded. */
+    /** UPDATE only; a stale copy never unstars or unrenames. */
     async saveMeta(meta) {
+      const { starred: _starred, userTitled: _userTitled, ...values } = rowValues(meta);
       try {
         await db
           .update(conversations)
           .set({
-            ...rowValues(meta),
+            ...values,
+            title: sql`CASE WHEN ${conversations.userTitled} IS TRUE THEN ${conversations.title} ELSE ${values.title} END`,
             lastActivityAt: sql`GREATEST(${conversations.lastActivityAt}, ${meta.lastActivityAt})`,
           })
           .where(eq(conversations.id, meta.id));
@@ -141,6 +148,31 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
           error: formatError(e),
         });
       }
+    },
+
+    async setStarred(id, starred) {
+      try {
+        await db.update(conversations).set({ starred }).where(eq(conversations.id, id));
+      } catch (e) {
+        log.error("setStarred failed (star not persisted)", { conversation_id: id, error: formatError(e) });
+      }
+    },
+
+    async setUserTitle(id, title) {
+      try {
+        await db.update(conversations).set({ title, userTitled: true }).where(eq(conversations.id, id));
+      } catch (e) {
+        log.error("setUserTitle failed (title not persisted)", { conversation_id: id, error: formatError(e) });
+      }
+    },
+
+    async readStarred(id) {
+      const rows = await db
+        .select({ starred: conversations.starred })
+        .from(conversations)
+        .where(eq(conversations.id, id))
+        .limit(1);
+      return rows.length ? rows[0].starred === true : undefined;
     },
 
     async touchActivity(id, at) {
