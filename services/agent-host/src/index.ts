@@ -1278,21 +1278,7 @@ export async function main(
   const brokerAuth = async (): Promise<{ url: string; headers: Record<string, string> } | null> => {
     const url = (process.env.BROKER_URL ?? "").replace(/\/$/, "");
     if (!url) return null;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const tokenPath = process.env.BROKER_TOKEN_PATH ?? "/var/run/secrets/broker/token";
-    try {
-      const { readFileSync } = await import("node:fs");
-      headers["Authorization"] = `Bearer ${readFileSync(tokenPath, "utf8").trim()}`;
-    } catch (e) {
-      if ((e as { code?: string })?.code !== "ENOENT") {
-        throw new Error(
-          `failed to read broker token at ${tokenPath}: ${(e as Error)?.message ?? e}`,
-          { cause: e },
-        );
-      }
-      /* ENOENT -> no token (local/dev) */
-    }
-    return { url, headers };
+    return { url, headers: await brokerAuthHeaders() };
   };
 
   // In-pod web-service registry shared by the management API and the reverse proxy;
