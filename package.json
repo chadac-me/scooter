@@ -7,6 +7,7 @@
   "description": "Nix-powered agent platform over the Kubernetes agent-sandbox controller.",
   "workspaces": [
     "lib/ts/scooter-schema",
+    "lib/ts/scooter-svcauth",
     "services/agent-host",
     "services/claude-sdk-provider",
     "services/remote-agent",
@@ -14,9 +15,9 @@
     "ui"
   ],
   "scripts": {
-    "test": "vitest run --project agent-host --project claude-sdk-provider --project ui --project remote-agent --project vscode-ahp --project byoc-controller --project integration --project scooter-schema --project ci-scripts --project cluster-support",
+    "test": "vitest run --project agent-host --project claude-sdk-provider --project ui --project remote-agent --project vscode-ahp --project byoc-controller --project integration --project scooter-schema --project scooter-svcauth --project ci-scripts --project cluster-support",
     "test:cluster": "vitest run --project cluster",
-    "pretest:e2e": "npm -w services/claude-sdk-provider run build && npm -w @scooter/schema run build && npm --prefix services/agent-host run build",
+    "pretest:e2e": "npm -w services/claude-sdk-provider run build && npm -w @scooter/schema run build && npm -w @scooter/svcauth run build && npm --prefix services/agent-host run build",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

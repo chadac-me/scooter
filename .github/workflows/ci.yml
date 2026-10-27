@@ -62,7 +62,7 @@ jobs:
       # Building .#agentHost under nix resolves @scooter/schema through the nix
       # symlink, which the workspace-resolving `just typecheck` cannot exercise.
       - name: agent-host + byoc-controller + generated Drizzle schema + sandbox VS Code pieces (nix)
-        run: nix build .#scooter-schema-js .#agentHost .#byoc-controller .#scooter-vscode-ahp .#code-server-bin --print-build-logs
+        run: nix build .#scooter-schema-js .#scooter-svcauth-js .#agentHost .#byoc-controller .#scooter-vscode-ahp .#code-server-bin --print-build-logs
 
       # This job is the 'fast' gate and reports itself; always() so a red run still
       # resolves the gate for `ci-summary`.
@@ -654,7 +654,7 @@ jobs:
           # Listing the cluster project imports agent-host sources, and those resolve
           # @scooter/schema through its built dist/, which a fresh checkout does not have.
           nix develop --command bash -c \
-            "npm install --silent && npm -w @scooter/schema run build --silent && PRIOR_REPORT_DIR=prior SHARDS='$E2E_FULL_SHARDS' REPEAT='$E2E_FULL_REPEAT' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
+            "npm install --silent && npm -w @scooter/schema run build --silent && npm -w @scooter/svcauth run build --silent && PRIOR_REPORT_DIR=prior SHARDS='$E2E_FULL_SHARDS' REPEAT='$E2E_FULL_REPEAT' node test/e2e/support/shard-tests.mjs > /tmp/matrix.json"
           matrix=$(cat /tmp/matrix.json)
           # Fail now on a banner or stray log line rather than downstream.
           echo "$matrix" | jq -e 'has("include")' >/dev/null \

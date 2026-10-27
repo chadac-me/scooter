@@ -82,9 +82,12 @@
           # The generated @scooter/schema package: Drizzle tables plus guards.
           scooterSchemaJs = pkgs.callPackage ./lib/ts/scooter-schema { };
 
+          # @scooter/svcauth: ServiceAccount token auth shared by the TS services.
+          scooterSvcauthJs = pkgs.callPackage ./lib/ts/scooter-svcauth { };
+
           # agent-host runs `goose acp` per conversation outside the sandbox; it takes the
           # same `agent` derivation the image's goose layer bakes so the closure ships goose once.
-          agentHost = pkgs.callPackage ./services/agent-host { inherit agent claudeSdkProvider scooterSchemaJs; };
+          agentHost = pkgs.callPackage ./services/agent-host { inherit agent claudeSdkProvider scooterSchemaJs scooterSvcauthJs; };
 
           # Bring-your-own-Claude container app
           remoteAgent = pkgs.callPackage ./services/remote-agent {
@@ -591,6 +594,9 @@
 
             # nix build .#scooter-schema-js  ->  generated Drizzle schema package (tsc)
             scooter-schema-js = scooterSchemaJs;
+
+            # nix build .#scooter-svcauth-js  ->  shared ServiceAccount token auth (tsc)
+            scooter-svcauth-js = scooterSvcauthJs;
 
             # nix build .#remote-agent  ->  the BYO-Claude container app (bin)
             remote-agent = remoteAgent;

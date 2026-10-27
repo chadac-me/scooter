@@ -36,6 +36,14 @@ export default defineConfig({
         },
       },
       {
+        // @scooter/svcauth, the shared ServiceAccount token auth.
+        test: {
+          name: "scooter-svcauth",
+          include: ["lib/ts/scooter-svcauth/src/**/*.spec.ts"],
+          environment: "node",
+        },
+      },
+      {
         // The BYO-Claude container, whose wire handling is contract-tested against the frames
         // the controller emits.
         test: {

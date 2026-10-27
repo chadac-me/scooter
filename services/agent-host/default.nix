@@ -1,4 +1,4 @@
-{ lib, buildNpmPackage, nodejs, makeWrapper, goose-cli, agent ? goose-cli, claudeSdkProvider ? null, scooterSchemaJs ? null, ... }:
+{ lib, buildNpmPackage, nodejs, makeWrapper, goose-cli, agent ? goose-cli, claudeSdkProvider ? null, scooterSchemaJs ? null, scooterSvcauthJs, ... }:
 
 # Builds the agent-host TypeScript app (tsc -> dist/) into a node application with
 # the ACP agent wrapped onto PATH. `agent` must be the same goose derivation the
@@ -20,8 +20,10 @@ buildNpmPackage {
   nativeBuildInputs = [ makeWrapper ];
 
   # Link the isolated packages into node_modules after npm ci and before `tsc` runs.
-  postConfigure = lib.optionalString (claudeSdkProvider != null) ''
+  postConfigure = ''
     mkdir -p node_modules/@scooter
+    ln -s ${scooterSvcauthJs}/lib/node_modules/@scooter/svcauth node_modules/@scooter/svcauth
+  '' + lib.optionalString (claudeSdkProvider != null) ''
     ln -s ${claudeSdkProvider}/lib/node_modules/@scooter/claude-sdk-provider \
       node_modules/@scooter/claude-sdk-provider
   '' + lib.optionalString (scooterSchemaJs != null) ''
@@ -35,7 +37,7 @@ buildNpmPackage {
   postInstall = ''
     wrapProgram $out/bin/agent-host \
       --prefix PATH : ${lib.makeBinPath [ agent nodejs ]}
-  '' + lib.optionalString (claudeSdkProvider != null || scooterSchemaJs != null) ''
+
     # The runtime `import("@scooter/...")` must resolve from the installed app's own package dir.
     appdir="$out/lib/node_modules/${appName}"
     if [ ! -d "$appdir/dist" ]; then
@@ -43,6 +45,7 @@ buildNpmPackage {
       exit 1
     fi
     mkdir -p "$appdir/node_modules/@scooter"
+    ln -sf ${scooterSvcauthJs}/lib/node_modules/@scooter/svcauth "$appdir/node_modules/@scooter/svcauth"
   '' + lib.optionalString (claudeSdkProvider != null) ''
     echo "linking claude-sdk-provider into $appdir/node_modules"
     ln -sf ${claudeSdkProvider}/lib/node_modules/@scooter/claude-sdk-provider \

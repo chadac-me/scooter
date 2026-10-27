@@ -422,10 +422,11 @@ e2e-full-run *ARGS:
 
 typecheck:
     npm install
-    # agent-host imports @scooter/claude-sdk-provider and @scooter/schema, so build
-    # them first for its NodeNext resolution.
+    # agent-host imports @scooter/claude-sdk-provider, @scooter/schema and @scooter/svcauth,
+    # so build them first for its NodeNext resolution.
     npm -w services/claude-sdk-provider run build
     npm -w @scooter/schema run build
+    npm -w @scooter/svcauth run build
     npm -w services/agent-host run typecheck
     npm -w ui run typecheck
     npm -w contrib/code-server/ahp run typecheck
@@ -454,9 +455,10 @@ check-lockfiles:
     npm install --package-lock-only --prefix services/agent-host --workspaces=false
     npm install --package-lock-only --prefix services/byoc-controller --workspaces=false
     npm install --package-lock-only --prefix lib/ts/scooter-schema --workspaces=false
+    npm install --package-lock-only --prefix lib/ts/scooter-svcauth --workspaces=false
     npm install --package-lock-only --prefix contrib/files/viewer-ui --workspaces=false
     npm install --package-lock-only --prefix contrib/code-server/ahp --workspaces=false
-    @git diff --exit-code -- package-lock.json ui/package-lock.json services/agent-host/package-lock.json services/byoc-controller/package-lock.json lib/ts/scooter-schema/package-lock.json contrib/files/viewer-ui/package-lock.json contrib/code-server/ahp/package-lock.json \
+    @git diff --exit-code -- package-lock.json ui/package-lock.json services/agent-host/package-lock.json services/byoc-controller/package-lock.json lib/ts/scooter-schema/package-lock.json lib/ts/scooter-svcauth/package-lock.json contrib/files/viewer-ui/package-lock.json contrib/code-server/ahp/package-lock.json \
       || (echo "❌ lockfile drift: a package.json changed without regenerating the lockfile. Run 'nix develop -c just check-lockfiles' and commit the result." && exit 1)
     @echo "✅ lockfiles are in sync with package.json"
 
@@ -479,6 +481,7 @@ check-npm-hashes:
     check services/agent-host/package-lock.json services/agent-host/default.nix
     check services/byoc-controller/package-lock.json services/byoc-controller/default.nix
     check lib/ts/scooter-schema/package-lock.json lib/ts/scooter-schema/default.nix
+    check lib/ts/scooter-svcauth/package-lock.json lib/ts/scooter-svcauth/default.nix
     check contrib/files/viewer-ui/package-lock.json contrib/files/viewer-ui/default.nix
     check contrib/code-server/ahp/package-lock.json contrib/code-server/ahp/default.nix
     [ "$fail" -eq 0 ] && echo "✅ npmDepsHash values match their lockfiles"
