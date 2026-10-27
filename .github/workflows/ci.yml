@@ -540,11 +540,24 @@ jobs:
           nix run ".#sandbox-os-image.copyTo" -- docker-daemon:agent-sandbox-os:latest
           nix shell nixpkgs#k3d -c k3d image import agent-sandbox-os:latest -c scooter-userns
 
-      - name: user-namespace spec
+      - name: user-namespace spec (crun)
         env:
           RUN_CLUSTER_TESTS: "1"
           CLUSTER_PROVIDER: existing
           SANDBOX_OS_IMAGE: agent-sandbox-os:latest
+          SANDBOX_RUNTIME_CLASS: crun
+          CI: "1"
+          KEEP_TEST_PODS: "1"
+        run: nix develop --command bash -c 'npm install && npm run test:cluster -- nix-build-sandbox'
+
+      # The platform default: sandboxUserNamespace on, sandboxRuntimeClass unset (runc).
+      - name: user-namespace spec (runc, the default runtime)
+        if: ${{ !cancelled() }}
+        env:
+          RUN_CLUSTER_TESTS: "1"
+          CLUSTER_PROVIDER: existing
+          SANDBOX_OS_IMAGE: agent-sandbox-os:latest
+          SANDBOX_RUNTIME_CLASS: ""
           CI: "1"
           KEEP_TEST_PODS: "1"
         run: nix develop --command bash -c 'npm install && npm run test:cluster -- nix-build-sandbox'
@@ -552,13 +565,15 @@ jobs:
       - name: dump pod state on failure
         if: failure()
         run: |
-          nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test describe pod nix-build-sandbox || true
-          nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test logs nix-build-sandbox --tail=200 || true
-          nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test logs nix-build-sandbox --previous --tail=200 || true
-          nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test get pod nix-build-sandbox -o yaml || true
-          nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test get events --sort-by=.lastTimestamp || true
+          k() { nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test "$@" || true; }
+          k get pods -o wide
+          for pod in $(k get pods -o name); do
+            k describe "$pod"
+            k logs "$pod" --tail=200
+            k logs "$pod" --previous --tail=200
+          done
+          k get events --sort-by=.lastTimestamp
           nix shell nixpkgs#kubectl -c kubectl get runtimeclass || true
-          docker exec k3d-scooter-userns-server-0 sh -c 'uname -r; ls /bin/crun /usr/bin/crun 2>&1; mount | grep -E " /var/lib/kubelet| / " | head' || true
 
       - name: tear down k3d
         if: always()

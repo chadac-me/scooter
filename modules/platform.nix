@@ -372,7 +372,7 @@ in
     };
     sandboxUserNamespace = mkOption {
       type = types.bool;
-      default = false;
+      default = true;
       description = ''
         Run each sandbox pod, and the warm-store seed Job, in its own Kubernetes user
         namespace (`hostUsers: false`) with an unmasked /proc (`procMount: Unmasked`).
@@ -381,7 +381,8 @@ in
         build sandbox (see `devEnvNix.autoBuildSandbox`). Needs Kubernetes >= 1.33,
         a runtime with user-namespace support (containerd >= 2.0 or CRI-O, with
         runc >= 1.2 or crun >= 1.9), and volumes on a filesystem that supports
-        idmapped mounts (ext4, xfs, btrfs, tmpfs, overlayfs).
+        idmapped mounts (ext4, xfs, btrfs, tmpfs, overlayfs). On an older cluster
+        sandbox pods are rejected; set this to false there to keep host-uid sandboxes.
       '';
     };
     sandboxSizes = mkOption {

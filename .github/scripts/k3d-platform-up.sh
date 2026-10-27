@@ -63,7 +63,8 @@ nix shell nixpkgs#k3d nixpkgs#kubectl -c bash -c '
     k3d registry create scooter-reg.localhost --port 5800 $reg_vol
   fi
   # shellcheck disable=SC2086  # intentional word-split: empty means "no flag"
-  k3d cluster create scooter-ci --no-lb --wait --registry-use k3d-scooter-reg.localhost:5800 $ctd_vol
+  # k3s >= 1.33 for user-namespaced sandboxes (sandboxUserNamespace, default on).
+  k3d cluster create scooter-ci --no-lb --wait --image rancher/k3s:v1.35.4-k3s1 --registry-use k3d-scooter-reg.localhost:5800 $ctd_vol
   k3d kubeconfig merge scooter-ci --kubeconfig-merge-default
 '
 
