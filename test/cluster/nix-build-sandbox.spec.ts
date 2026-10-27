@@ -131,19 +131,19 @@ maybe("sandbox image in a user-namespaced pod runs Nix builds in Nix's build san
 
   // Directory outputs are renamed into the store; without userxattr that's EXDEV.
   it("a build with a directory output lands in the store", async () => {
+    // The sandbox's /bin/sh has no mkdir; take coreutils from the image's store.
     const expr = [
-      "derivation {",
+      'let cu = builtins.storePath (builtins.getEnv "CU"); in derivation {',
       `  name = "userns-dir-output-\${toString builtins.currentTime}";`,
       "  system = builtins.currentSystem;",
       '  builder = "/bin/sh";',
-      '  args = [ "-c" "mkdir -p $out/sub; echo ok > $out/sub/f" ];',
+      '  args = [ "-c" "${cu}/bin/mkdir -p $out/sub; echo ok > $out/sub/f" ];',
       "}",
     ].join("\n");
-    const r = await cluster.exec(
-      SELECTOR,
-      ["sh", "-c", 'out=$(nix-build --no-out-link -E "$1") && cat "$out/sub/f"', "_", expr],
-      NS,
-    );
+    const script =
+      'export CU=$(dirname "$(dirname "$(readlink -f "$(command -v mkdir)")")"); ' +
+      'out=$(nix-build --no-out-link -E "$1") && cat "$out/sub/f"';
+    const r = await cluster.exec(SELECTOR, ["sh", "-c", script, "_", expr], NS);
     expect(r.exitCode, r.stderr).toBe(0);
     expect(r.stdout.trim()).toBe("ok");
   }, 300_000);
