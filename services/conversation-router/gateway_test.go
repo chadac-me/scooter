@@ -338,17 +338,22 @@ func TestGatewayShadowServesAndLogs(t *testing.T) {
 		msgs = append(msgs, m["msg"].(string))
 		switch m["msg"] {
 		case "auth identity mismatch":
-			if m["claimed_user"] != "mallory" || m["user"] != "alice" {
+			if m["claimed_user"] != "mallory" || m["user"] != "alice" || m["has_cookie"] != true {
 				t.Fatalf("mismatch fields: %v", m)
 			}
 		case "auth would reject":
-			if m["status"] != float64(401) || m["path"] != "/conversations" {
+			if m["status"] != float64(401) || m["path"] != "/conversations" ||
+				m["remote_addr"] != "192.0.2.1:1234" || m["has_cookie"] != false || m["has_authorization"] != false {
 				t.Fatalf("reject fields: %v", m)
 			}
 		}
 	}
 	if strings.Join(msgs, ",") != "auth identity mismatch,auth would reject" {
 		t.Fatalf("logged %v", msgs)
+	}
+	// Credentials are flagged as present, never logged.
+	if strings.Contains(l.buf.String(), "dark") {
+		t.Fatalf("cookie value leaked into the log: %s", l.buf.String())
 	}
 }
 
