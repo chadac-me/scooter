@@ -693,6 +693,13 @@
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
             contrib-files = contribs.packages.files.broker;
             contrib-personalization = contribs.packages.personalization.broker;
+            # Every shipped handler and provider imports in its service's runtime env.
+            webhooks-entrypoints = import ./nix/check-entrypoints.nix {
+              inherit pkgs; name = "webhooks-entrypoints"; package = webhooks; bin = "agent-webhooks"; group = "scooter_webhooks.handlers";
+            };
+            broker-entrypoints = import ./nix/check-entrypoints.nix {
+              inherit pkgs; name = "broker-entrypoints"; package = broker; bin = "agent-broker"; group = "agent_broker.providers";
+            };
             # The shared Python libraries.
             inherit scooterLib scooterBrokerLib scooterWebhooksLib scooterTask scooterPrompt;
             scooter-prompt-tests = scooterPrompt.tests;

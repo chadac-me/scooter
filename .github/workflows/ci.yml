@@ -57,7 +57,7 @@ jobs:
       # with the buildPythonApplication services); `.#contribs-all` aggregates every
       # contrib variant, including `example = true` ones no service build ships.
       - name: python service tests (nix build runs pytest)
-        run: nix build .#broker .#webhooks .#scheduler .#scooter-task .#scooter-prompt .#checks.x86_64-linux.scooter-prompt-tests .#conversation-controller .#warm-store-controller .#scooter-schema .#contribs-all --print-build-logs
+        run: nix build .#broker .#webhooks .#checks.x86_64-linux.webhooks-entrypoints .#checks.x86_64-linux.broker-entrypoints .#scheduler .#scooter-task .#scooter-prompt .#checks.x86_64-linux.scooter-prompt-tests .#conversation-controller .#warm-store-controller .#scooter-schema .#contribs-all --print-build-logs
 
       # Building .#agentHost under nix resolves @scooter/schema through the nix
       # symlink, which the workspace-resolving `just typecheck` cannot exercise.
