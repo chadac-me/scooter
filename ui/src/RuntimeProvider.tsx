@@ -28,6 +28,7 @@ import {
   describeSendError,
   type IntegrityAgent,
   type PendingInterrupt,
+  type QueuedItem,
   type ResumeEntry,
 } from "./integrityAgent.js";
 import { ATTR, record } from "./telemetry.js";
@@ -149,7 +150,7 @@ export interface InterruptContextValue {
   /** True while the live stream is rejected with 401/403, self-clearing once a reconnect succeeds. */
   streamAuthError: boolean;
   /** Messages queued behind the active run, from the integrity stream's QUEUE_UPDATED snapshots. */
-  queuedMessages: ReadonlyArray<{ id: string; text: string; priority: number; source?: string }>;
+  queuedMessages: ReadonlyArray<QueuedItem>;
   /** Bumps on every render-pump push, used as the Thread error boundary's reset key. */
   renderTick: number;
 }
@@ -241,7 +242,7 @@ function ConversationRuntime({
 
   // Optimistic pending sends, shown as queued items until the server's queue or log confirms them.
   const [optimisticSends, setOptimisticSends] = useState<
-    ReadonlyArray<{ id: string; text: string; priority: number; source?: string }>
+    ReadonlyArray<QueuedItem>
   >([]);
   // A refused or failed POST /agui starts no run, so nothing on the stream reports it; the banner is the user's only signal.
   const [sendError, setSendError] = useState<string | null>(null);
@@ -295,12 +296,12 @@ function ConversationRuntime({
           agent.setConversationId(serverId);
         });
         if (text) sessionStore.titleFromFirstMessage(conversationKey, text);
-        // A send during an active run carries priority so the agent-host interrupts the running turn instead of queueing behind it.
+        // A mid-run send interrupts the turn once in-flight tools finish ("thinking" policy server-side).
         const priority = agent.runIsActive() ? 10 : undefined;
         // Show the message as a pending queued item until the server confirms it (text only).
         const optId = text ? `optimistic-${crypto.randomUUID()}` : null;
         if (optId) {
-          setOptimisticSends((cur) => [...cur, { id: optId, text, priority: priority ?? 0 }]);
+          setOptimisticSends((cur) => [...cur, { id: optId, text, priority: priority ?? 0, ...(priority ? { interrupt: "thinking" as const } : {}) }]);
         }
         try {
           await agent.send(text, {
@@ -357,7 +358,7 @@ function ConversationRuntime({
   const [runRetrying, setRunRetrying] = useState<{ attempt: number; max: number } | null>(null);
   const [streamAuthError, setStreamAuthError] = useState(false);
   const [queuedMessages, setQueuedMessages] = useState<
-    ReadonlyArray<{ id: string; text: string; priority: number; source?: string }>
+    ReadonlyArray<QueuedItem>
   >([]);
   const [renderTick, setRenderTick] = useState(0);
   const [hasOlder, setHasOlder] = useState(false);

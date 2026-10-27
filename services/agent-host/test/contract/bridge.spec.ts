@@ -820,6 +820,34 @@ describe("bridge run queue + cancel", () => {
     await tick();
   });
 
+  it("tags a queued priority prompt with its interrupt policy in the QUEUE_UPDATED snapshot", async () => {
+    const agent = createFakeAcpAgent();
+    agent.setScript([{ finish: { stopReason: "end_turn" } }]);
+    agent.gate();
+    const bridge = mkBridge(agent);
+    const events = collect(bridge);
+
+    await bridge.start();
+    void bridge.prompt({ threadId: "t1", text: "first (running)" });
+    await tick();
+    // "timeout" with the fallback disabled queues without preempting the gated run.
+    void bridge.prompt({ threadId: "t1", text: "urgent" }, { priority: PRIORITY_INTERRUPT, interrupt: "timeout" });
+    void bridge.prompt({ threadId: "t1", text: "normal" });
+    await tick();
+
+    const snap = (events.filter((e) => e.type === "QUEUE_UPDATED") as Array<{
+      items: Array<{ text: string; interrupt?: string }>;
+    }>).at(-1)!;
+    // The UI tells a tool-killing interrupt apart from one that waits for tools.
+    expect(snap.items.find((i) => i.text === "urgent")?.interrupt).toBe("timeout");
+    expect(snap.items.find((i) => i.text === "normal")).not.toHaveProperty("interrupt");
+
+    agent.releaseGate();
+    await tick();
+    await tick();
+    await tick();
+  });
+
   it("shouldYieldToQueue() is true when a PRIORITY_INTERRUPT item is queued, false for a normal/empty queue", async () => {
     const agent = createFakeAcpAgent();
     agent.setScript([{ finish: { stopReason: "end_turn" } }]);

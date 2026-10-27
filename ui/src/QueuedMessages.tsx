@@ -6,8 +6,10 @@
  * — it stays where the user expects it and solidifies into a real message once the agent
  * picks it up.
  *
- * A message with priority > 0 interrupts the current turn and sorts to the top; priority-0
- * messages keep their arrival order. The list is read from the QUEUE_UPDATED snapshots on
+ * How a message waits decides how it looks: one that kills the running tool call gets the
+ * warning "Priority" treatment and sorts to the top; one that interrupts the turn once its
+ * tools finish is an ordinary queued bubble; one that waits for the whole run to end stays
+ * hidden until it is sent (optimistic sends always show as "Sending…"). The list is read from the QUEUE_UPDATED snapshots on
  * the integrity stream (via RuntimeProvider context) plus optimistic pending sends, so it
  * survives a refresh and clears itself as the queue drains. A platform-injected message
  * (one with a `source`) renders as the same collapsed system-event line it becomes once
@@ -19,10 +21,11 @@ import { FiZap } from "react-icons/fi";
 import { Loader2Icon } from "lucide-react";
 
 import { useConversationInterrupts } from "./RuntimeProvider.js";
+import type { QueuedItem } from "./integrityAgent.js";
 import { Button } from "@/components/ui/button";
 import { SystemEventMessage } from "@/components/assistant-ui/system-event-message";
 
-type QueuedMessage = { id: string; text: string; priority: number; source?: string };
+type QueuedMessage = QueuedItem;
 
 /** Lines to show before clamping; spelled out literally so Tailwind's JIT scanner emits the utility. */
 const CLAMP_CLASS = "line-clamp-6";
@@ -30,13 +33,21 @@ const CLAMP_CLASS = "line-clamp-6";
 /** RuntimeProvider tags not-yet-acknowledged sends with this id prefix. */
 const OPTIMISTIC_PREFIX = "optimistic-";
 
+const isOptimistic = (m: QueuedMessage) => m.id.startsWith(OPTIMISTIC_PREFIX);
+
+/** Only a message that kills the running tool call gets the priority treatment. */
+const interruptsTool = (m: QueuedMessage) => m.priority > 0 && m.interrupt === "tool-call";
+
+/** A message waiting for the whole run to end is not shown until it is sent. */
+const isVisible = (m: QueuedMessage) => isOptimistic(m) || m.priority > 0;
+
 function statusLabel(m: QueuedMessage): string {
-  if (m.id.startsWith(OPTIMISTIC_PREFIX)) return "Sending…";
-  return m.priority > 0 ? "Interrupting current turn…" : "Queued — waiting for the current turn";
+  if (isOptimistic(m)) return "Sending…";
+  return interruptsTool(m) ? "Interrupting current tool call…" : "Queued — sends once running tools finish";
 }
 
 function QueuedMessageRow({ m }: { m: QueuedMessage }) {
-  const priority = m.priority > 0;
+  const priority = interruptsTool(m);
   const textRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   // The toggle is offered only when the clamped text actually overflows.
@@ -113,12 +124,13 @@ function QueuedMessageRow({ m }: { m: QueuedMessage }) {
 
 export function QueuedMessages() {
   const { queuedMessages } = useConversationInterrupts();
-  if (queuedMessages.length === 0) return null;
+  const visible = queuedMessages.filter(isVisible);
+  if (visible.length === 0) return null;
 
-  // Priority messages float to the top, highest first; ties and normal messages keep arrival order.
-  const ordered = queuedMessages
+  // Tool-call interrupts float to the top; everything else keeps arrival order.
+  const ordered = visible
     .map((m, i) => ({ m, i }))
-    .sort((a, b) => b.m.priority - a.m.priority || a.i - b.i)
+    .sort((a, b) => Number(interruptsTool(b.m)) - Number(interruptsTool(a.m)) || a.i - b.i)
     .map(({ m }) => m);
 
   return (
@@ -128,7 +140,7 @@ export function QueuedMessages() {
         // line as its persisted form, so a burst of queued events doesn't flood the thread.
         m.source ? (
           <div key={m.id} data-testid="queued-message" data-role="system-queued" title={statusLabel(m)}>
-            <SystemEventMessage source={m.source} text={m.text} status={m.priority > 0 ? "Interrupting…" : "Queued"} />
+            <SystemEventMessage source={m.source} text={m.text} status={interruptsTool(m) ? "Interrupting…" : "Queued"} />
           </div>
         ) : (
           <QueuedMessageRow key={m.id} m={m} />

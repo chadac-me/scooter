@@ -75,8 +75,17 @@ export interface PendingInterrupt {
 /** Result of reading one integrity SSE connection to completion. */
 type ConnectionOutcome = "not-found" | "closed" | "error" | "auth-error";
 
+/** One queued message from QUEUE_UPDATED; `interrupt` is set only on a priority item. */
+export interface QueuedItem {
+  id: string;
+  text: string;
+  priority: number;
+  interrupt?: "timeout" | "thinking" | "tool-call";
+  source?: string;
+}
+
 /** A stable empty-queue reference so getQueuedMessages keeps the same identity across idle calls. */
-const EMPTY_QUEUE: ReadonlyArray<{ id: string; text: string; priority: number; source?: string }> = [];
+const EMPTY_QUEUE: ReadonlyArray<QueuedItem> = [];
 const EMPTY_INTERRUPTS: readonly PendingInterrupt[] = [];
 
 export class IntegrityAgent extends AbstractAgent {
@@ -262,11 +271,11 @@ export class IntegrityAgent extends AbstractAgent {
   }
 
   /** The messages queued behind the active run, from the server's latest QUEUE_UPDATED snapshot. */
-  private queued: ReadonlyArray<{ id: string; text: string; priority: number; source?: string }> = [];
+  private queued: ReadonlyArray<QueuedItem> = [];
   /** Where the painted window starts in the log (1 = the whole log is loaded). */
   private historyCursor = 1;
   private olderInFlight: Promise<number> | undefined;
-  getQueuedMessages(): ReadonlyArray<{ id: string; text: string; priority: number; source?: string }> {
+  getQueuedMessages(): ReadonlyArray<QueuedItem> {
     // The queue only holds items while a run is draining them, so an idle run reports empty even if the clearing QUEUE_UPDATED never arrived.
     return this.running ? this.queued : EMPTY_QUEUE;
   }
@@ -319,7 +328,7 @@ export class IntegrityAgent extends AbstractAgent {
 
   /** Update `queued` from a QUEUE_UPDATED snapshot; returns true if it changed. */
   private trackQueue(e: BaseEvent): boolean {
-    const ev = e as unknown as { type?: string; items?: Array<{ id: string; text: string; priority: number; source?: string }> };
+    const ev = e as unknown as { type?: string; items?: Array<QueuedItem> };
     if (ev.type !== "QUEUE_UPDATED") return false;
     const next = ev.items ?? [];
     const same =
