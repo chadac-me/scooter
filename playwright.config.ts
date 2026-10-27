@@ -93,6 +93,8 @@ export default defineConfig({
           // → conversation-router (ROUTER_DEV_MODE), all as one process; the UI targets the
           // router on 8080, which proxies to agent-host on 8079.
           command: "node test/e2e/support/fakeBackend.mjs",
+          // SIGTERM so cleanup() stops the pg_ctl-daemonized Postgres.
+          gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
           env: {
             E2E_ROUTER_PORT: "8080",
             E2E_AGENT_HOST_PORT: "8079",

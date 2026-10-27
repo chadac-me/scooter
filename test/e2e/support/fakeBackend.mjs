@@ -97,7 +97,8 @@ function cleanup() {
 
 // ---- boot sequence -----------------------------------------------------------------------------
 
-tmp = mkdtempSync(join(tmpdir(), "scooter-e2e-pg-"));
+// nix develop's TMPDIR is root-only 0700, so PG_AS can't traverse it.
+tmp = mkdtempSync(join(runningAsRoot ? "/tmp" : tmpdir(), "scooter-e2e-pg-"));
 const pgData = join(tmp, "data");
 const pgSock = join(tmp, "sock");
 mkdirSync(pgSock, { recursive: true });
