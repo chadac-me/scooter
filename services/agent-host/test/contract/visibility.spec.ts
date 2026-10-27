@@ -112,6 +112,7 @@ function setup(initial: Partial<Conversation> = {}, opts: { readAccessFails?: bo
       return c;
     }),
     setTitle: vi.fn(async () => {}),
+    refreshRouterMeta: vi.fn(async () => {}),
     setVisibility: vi.fn(async (id: string, visibility: Visibility) => {
       convs.set(id, { ...convs.get(id)!, visibility });
     }),
