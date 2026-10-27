@@ -262,14 +262,17 @@ let
   allNamespaces = builtins.attrNames (platform.options.scooter or { });
   exampleText = builtins.readFile ./kubenix-config.nix;
   # Exempt: on-by-default or implicitly provisioned services, a one-shot upgrade
-  # path, deployment-specific image/identity/runtime knobs, readOnly derived options
+  # path, deployment-specific image/identity/runtime knobs (incl. the cluster-dependent
+  # sandboxUserNamespace, which needs Kubernetes >= 1.33), readOnly derived options
   # (defaultSandboxSizeName, dbSpec), and the contrib seams (db, sandboxPod,
   # approvals) that the seam checks below cover more strongly.
   coverageExempt = [
     "conversationController" "postgres" "legacyStateMigration"
-    "sandboxRuntimeClass" "serviceAccountRoleArn"
+    "sandboxRuntimeClass" "sandboxUserNamespace" "serviceAccountRoleArn"
     "agentHostImage" "sandboxImage" "uiImage" "defaultSandboxSizeName"
     "db" "dbSpec" "sandboxPod" "approvals"
+    # internal output of modules/contrib-db.nix, not a deployer setting
+    "contribDbEnv"
     # declared per-service module; a deployer overrides a ref, not the tree
     "images" "imagesContentTag"
   ];
@@ -507,6 +510,13 @@ let
         else [ "router.env.WEBHOOKS_SERVICE_ACCOUNT omits the scheduler SA (scheduled-task owners are dropped)" ])
     ++ (if routerEnvVal "WEBHOOKS_TOKEN_AUDIENCE" != "" then [ ]
         else [ "router.env.WEBHOOKS_TOKEN_AUDIENCE (TokenReview rejects the caller's projected token)" ])
+    # The gateway must admit the broker's router calls.
+    ++ (if builtins.match ".*:agent-broker" (routerEnvVal "ROUTER_SERVICE_ACCOUNTS") != null then [ ]
+        else [ "router.env.ROUTER_SERVICE_ACCOUNTS omits the broker SA (its /links calls look unauthenticated)" ])
+    ++ (if builtins.any (v: v.name == "scooter-router-token"
+            && builtins.any (s: (s.serviceAccountToken.audience or "") == routerEnvVal "ROUTER_TOKEN_AUDIENCE") (v.projected.sources or [ ]))
+          (res.deployments.agent-broker.spec.template.spec.volumes or [ ]) then [ ]
+        else [ "broker.volumes scooter-router-token must be minted for ROUTER_TOKEN_AUDIENCE" ])
     ++ (if (res.clusterRoleBindings or { }) ? conversation-router-tokenreview then [ ]
         else [ "clusterRoleBindings.conversation-router-tokenreview (TokenReview 403s, so every webhook conversation is unowned)" ])
     ++ (if builtins.any (e: e.name == "AUTH_MODE" && e.value == "alb-oidc") albRouterEnv then [ ]
@@ -712,6 +722,52 @@ let
     # Unshipping aws drops its database entirely.
     ++ (if (awsOffPlatform.config.scooter.db or { }) ? contrib_aws
         then [ "aws-off: scooter.db.contrib_aws still declared — a database for a contrib no image contains" ] else [ ]);
+
+  # A contrib database grants other services table-scoped access on their own roles,
+  # and `db.owner` moves it onto another service's role.
+  grantPlatform = evalPlatform {
+    module = { ... }: {
+      imports = [ ./kubenix-config.nix ];
+      contribs.aws.db.tables.permission_requests = {
+        writers = [ "broker" "agent-host" ];
+        readers = [ "conversation-router" ];
+      };
+    };
+  };
+  ownerPlatform = evalPlatform {
+    module = { lib, ... }: {
+      imports = [ ./kubenix-config.nix ];
+      contribs.aws.db.owner = "agent-host";
+      contribs.aws.db.tables.permission_requests.copyFrom = lib.mkForce null;
+    };
+  };
+  scriptOf = r: let c = r.jobs.agent-postgres-init.spec.template.spec.containers.sql.command; in
+    builtins.elemAt c (builtins.length c - 1);
+  deployEnv = r: d: builtins.concatMap (c: c.env or [ ])
+    (builtins.attrValues (r.deployments.${d}.spec.template.spec.containers or { }));
+  grantRes = grantPlatform.config.kubernetes.resources;
+  grantScript = scriptOf grantRes;
+  has = re: str: builtins.match ".*${re}.*" str != null;
+  contribGrantProblems =
+    (if has ''GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."permission_requests" TO "agent_host"'' grantScript then [ ]
+     else [ "contrib grants: agent-host is a writer of contrib_aws.permission_requests but its role gets no read-write grant" ])
+    ++ (if has ''GRANT SELECT ON TABLE public."permission_requests" TO "conversation_router"'' grantScript then [ ]
+        else [ "contrib grants: conversation-router is a reader of contrib_aws.permission_requests but its role gets no SELECT" ])
+    ++ (if has ''GRANT CONNECT ON DATABASE "contrib_aws" TO "conversation_router"'' grantScript then [ ]
+        else [ "contrib grants: conversation_router cannot CONNECT to contrib_aws" ])
+    ++ (if contribEnvValue (deployEnv grantRes "agent-host") "CONTRIB_AWS_DB_NAME" == "contrib_aws" then [ ]
+        else [ "contrib grants: agent-host.env.CONTRIB_AWS_DB_NAME missing — granted access but cannot find the database" ])
+    ++ (if contribEnvValue (deployEnv grantRes "conversation-router") "CONTRIB_AWS_DB_NAME" == "contrib_aws" then [ ]
+        else [ "contrib grants: conversation-router.env.CONTRIB_AWS_DB_NAME missing" ])
+    # Without the grant, neither the role nor the pod learns about the database.
+    ++ (if has ''TO "agent_host"'' initScript then [ "contrib grants: the example grants agent_host on a contrib database nobody listed it for" ] else [ ])
+    ++ (if contribEnvValue hostEnv "CONTRIB_AWS_DB_NAME" == null then [ ]
+        else [ "contrib grants: agent-host.env.CONTRIB_AWS_DB_NAME set though agent-host has no access" ])
+    ++ (if has ''CREATE DATABASE "contrib_aws" OWNER "agent_host"'' (scriptOf ownerPlatform.config.kubernetes.resources) then [ ]
+        else [ "db.owner = agent-host: contrib_aws is not created on the agent_host role" ])
+    ++ (if hasWord "contrib_aws:agent_host" (toString (contribEnvValue
+          ownerPlatform.config.kubernetes.resources.jobs.agent-db-migrate.spec.template.spec.containers.migrate.env "DB_ENVS")) then [ ]
+        else [ "db.owner = agent-host: contrib_aws is not migrated as agent_host" ]);
 
   # `broker.fga` is a core option, so the render proving it is fga on with aws off.
   fgaNoAwsPlatform = evalPlatform {
@@ -1068,7 +1124,7 @@ let
     ++ (if bodyAnn overrideRes == "1g" then [ ]
         else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
 
-  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

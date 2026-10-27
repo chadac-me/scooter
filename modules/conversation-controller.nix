@@ -338,7 +338,8 @@ in
                   { name = "AGENT_HOST_DB_USER"; value = "conversation_controller"; }
                   { name = "AGENT_HOST_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-conversation-controller"; key = "password"; }; }
                 ]
-                ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; };
+                ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; }
+                ++ cfg.contribDbEnv.conversation-controller;
                 ports = [{ name = "metrics"; containerPort = ccfg.metricsPort; }];
                 # requests == limits so the leader is never an eviction candidate.
                 resources = lib.mkDefault {
@@ -435,6 +436,7 @@ in
                   { name = "WEBHOOKS_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-conversation-router"; key = "password"; }; }
                 ]
                 ++ lib.optional (cfg.webhooks.enable && cfg.postgres.sslmode != null) { name = "WEBHOOKS_DB_SSLMODE"; value = cfg.postgres.sslmode; }
+                ++ cfg.contribDbEnv.conversation-router
                 # The router must read identity exactly as the agent-host does.
                 ++ lib.optional (cfg.auth.mode != "header")
                   { name = "AUTH_MODE"; value = cfg.auth.mode; }
@@ -450,7 +452,20 @@ in
                     ); }
                   # The audience the callers' projected tokens are minted for.
                   { name = "WEBHOOKS_TOKEN_AUDIENCE"; value = "agent-host"; }
+                  # The gateway's own audience; `agent-host` is still accepted meanwhile.
+                  { name = "ROUTER_TOKEN_AUDIENCE"; value = "scooter-router"; }
                 ]
+                # Services that may call the router without asserting a user.
+                ++ lib.optional cfg.broker.enable
+                  { name = "ROUTER_SERVICE_ACCOUNTS"; value = "system:serviceaccount:${cfg.namespace}:agent-broker"; }
+                ++ lib.optional (cfg.auth.sessionCheckUrl != null)
+                  { name = "AUTH_SESSION_CHECK_URL"; value = cfg.auth.sessionCheckUrl; }
+                ++ lib.optional (cfg.auth.sandboxSessionCheckUrl != null)
+                  { name = "AUTH_SANDBOX_SESSION_CHECK_URL"; value = cfg.auth.sandboxSessionCheckUrl; }
+                ++ lib.optional (cfg.auth.albRegion != null)
+                  { name = "AUTH_ALB_REGION"; value = cfg.auth.albRegion; }
+                ++ lib.optional (cfg.auth.sessionCookies != [ "_oauth2_proxy" "AWSELBAuthSessionCookie" ])
+                  { name = "AUTH_SESSION_COOKIES"; value = lib.concatStringsSep "," cfg.auth.sessionCookies; }
                 ++ lib.optionals ccfg.selfAccess.enable [
                   { name = "SELF_LISTEN_ADDR"; value = ":${toString ccfg.selfAccess.port}"; }
                   { name = "SELF_TOKEN_AUDIENCE"; value = ccfg.selfAccess.audience; }

@@ -25,6 +25,7 @@ def run(cfg: Config, stop: threading.Event) -> None:
         warm_golden_expr=cfg.warm_golden_expr,
         overlay_storage=cfg.overlay_storage,
         runtime_class=cfg.runtime_class,
+        user_namespace=cfg.user_namespace,
         pool_storage_class=cfg.pool_storage_class,
     )
     # The hold TTL spans several reconcile intervals so a binding has time to appear.

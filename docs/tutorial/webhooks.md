@@ -84,7 +84,7 @@ kubectl -n scooter rollout restart deploy/agent-webhooks
 
 **Triggers:** a mention in an issue or PR comment, a review or a review comment, or adding
 the trigger label to an issue or PR. Once a conversation is linked, later comments and
-reviews are forwarded to it, and so are CI results on its PRs (`workflow_run`: a failure, and the first success after one).
+reviews are forwarded to it, and so are CI results on its PRs (`workflow_run`: a failure, and the first success after one) and a PR being merged or closed.
 
 1. **Generate a webhook secret** and add it to the Secret as `GITHUB_WEBHOOK_SECRET`.
 

@@ -38,6 +38,12 @@ let
   # Both consumers and readers need a generated password secret.
   secretNames = consumerNames ++ readerNames;
 
+  # Extra table grants to an existing consumer or reader role, keyed by service.
+  # A service with no role here is not deployed, so its grants are dropped.
+  roleOf = svc: consumers.${svc}.user or (readers.${svc}.user or null);
+  grants = lib.filterAttrs (svc: _: roleOf svc != null) pcfg.grants;
+  needWait = readers != { } || grants != { };
+
   # The provisioning Job is a kubectl initContainer that writes each password to
   # /shared/<name>.pw and a psql container that creates the roles and databases.
 
@@ -74,7 +80,7 @@ let
       if pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" >/dev/null 2>&1; then break; fi
       sleep 2
     done
-  '' + lib.optionalString (readers != { }) ''
+  '' + lib.optionalString needWait ''
     # Reader tables come from agent-db-migrate, which runs alongside this Job, so
     # wait for each in-process rather than crash-looping through kubelet backoff.
     wait_table() {
@@ -142,7 +148,20 @@ let
     psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."${t}" TO "${r.user}"'
   '') g.writeTables + ''
     echo "[${name}] granted SELECT on ${g.db}.{${lib.concatStringsSep "," g.tables}}${lib.optionalString (g.writeTables != []) " + read-write on {${lib.concatStringsSep "," g.writeTables}}"} to ${r.user}"
-  '') r.grants) readerNames;
+  '') r.grants) readerNames
+  # Grants to existing roles come last: they need the reader roles and every database.
+  + lib.concatMapStrings (svc:
+    let role = roleOf svc; in lib.concatMapStrings (g: ''
+    # ---- grant ${svc}: role=${role} on ${g.db} ----
+    psql -v ON_ERROR_STOP=1 -c 'GRANT CONNECT ON DATABASE "${g.db}" TO "${role}"'
+    psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT USAGE ON SCHEMA public TO "${role}"'
+  '' + lib.concatMapStrings (t: ''
+    wait_table "${g.db}" "${t}"
+    psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT SELECT ON TABLE public."${t}" TO "${role}"'
+  '') g.tables + lib.concatMapStrings (t: ''
+    wait_table "${g.db}" "${t}"
+    psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."${t}" TO "${role}"'
+  '') g.writeTables) grants.${svc}) (builtins.attrNames grants);
 
   # Stable identity for selectors and logs, independent of the hashed name.
   initJobLabels = {
@@ -269,6 +288,23 @@ in
           description = "The `consumers` key whose role owns this database.";
         };
       });
+    };
+    # Populated by the contrib glue (modules/contrib-db.nix).
+    grants = mkOption {
+      internal = true;
+      default = { };
+      description = ''
+        Per service, extra table-scoped grants on its EXISTING role (a `consumers` or
+        `readers` key) in a database it does not own. No role or Secret is created.
+        Grants for a service with no role (not deployed) are skipped.
+      '';
+      type = types.attrsOf (types.listOf (types.submodule {
+        options = {
+          db = mkOption { type = types.str; description = "The database holding the tables."; };
+          tables = mkOption { type = types.listOf types.str; default = [ ]; description = "Tables to grant SELECT on."; };
+          writeTables = mkOption { type = types.listOf types.str; default = [ ]; description = "Tables to grant SELECT/INSERT/UPDATE/DELETE on."; };
+        };
+      }));
     };
     # Populated by platform.nix.
     readers = mkOption {

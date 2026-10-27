@@ -285,6 +285,8 @@ in
                   # Where the broker POSTs auto-linked PRs/issues and approval
                   # interrupts.
                   { name = "AGENT_HOST_URL"; value = bcfg.agentHostUrl; }
+                  # The token the router checks on those calls.
+                  { name = "SCOOTER_ROUTER_TOKEN_PATH"; value = "/var/run/secrets/scooter-router/token"; }
 
                   # Every broker store resolves its DSN from these, and a store that
                   # finds no password silently falls back to a SQLite dev path.
@@ -336,12 +338,17 @@ in
                 ]
                 # k8s silently keeps the last of a duplicated env name, so
                 # examples/check.nix asserts this container has none.
-                ++ bcfg.extraEnv;
-                volumeMounts = bcfg.extraVolumeMounts;
+                ++ cfg.contribDbEnv.broker ++ bcfg.extraEnv;
+                volumeMounts = [
+                  { name = "scooter-router-token"; mountPath = "/var/run/secrets/scooter-router"; readOnly = true; }
+                ] ++ bcfg.extraVolumeMounts;
                 readinessProbe.httpGet = { path = "/health"; port = "http"; };
                 livenessProbe.httpGet = { path = "/health"; port = "http"; };
               };
-              volumes = bcfg.extraVolumes;
+              volumes = [{
+                name = "scooter-router-token";
+                projected.sources = [{ serviceAccountToken = { audience = "scooter-router"; path = "token"; expirationSeconds = 3600; }; }];
+              }] ++ bcfg.extraVolumes;
             };
           };
         };

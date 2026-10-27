@@ -27,8 +27,11 @@ pkgs.testers.runNixOSTest {
     assert "nix-profile" in hello, f"hello not under the nix profile: {hello!r}"
     machine.succeed("bash -l -c 'hello' >/dev/null")
 
-    # The build sandbox must be off (see nix-config.nix); the VM has namespaces, so only the config can show it.
+    # The base config keeps the build sandbox off (see nix-config.nix); only nix-sandbox-probe turns it on.
+    machine.succeed("grep -qx 'sandbox = false' /etc/nix/nix.conf")
+    # The VM has user namespaces and an unmasked /proc, so the probe passes and turns the sandbox on.
+    machine.wait_for_unit("nix-sandbox-probe.service")
     sandbox = machine.succeed("nix config show sandbox").strip()
-    assert sandbox == "false", f"nix build sandbox must be disabled, got {sandbox!r}"
+    assert sandbox == "true", f"nix-sandbox-probe should enable the build sandbox in a VM, got {sandbox!r}"
   '';
 }

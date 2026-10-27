@@ -57,7 +57,7 @@ jobs:
       # with the buildPythonApplication services); `.#contribs-all` aggregates every
       # contrib variant, including `example = true` ones no service build ships.
       - name: python service tests (nix build runs pytest)
-        run: nix build .#broker .#webhooks .#scheduler .#scooter-task .#scooter-prompt .#checks.x86_64-linux.scooter-prompt-tests .#conversation-controller .#warm-store-controller .#scooter-schema .#contribs-all --print-build-logs
+        run: nix build .#broker .#webhooks .#checks.x86_64-linux.webhooks-entrypoints .#checks.x86_64-linux.broker-entrypoints .#scheduler .#scooter-task .#scooter-prompt .#checks.x86_64-linux.scooter-prompt-tests .#conversation-controller .#warm-store-controller .#scooter-schema .#contribs-all --print-build-logs
 
       # Building .#agentHost under nix resolves @scooter/schema through the nix
       # symlink, which the workspace-resolving `just typecheck` cannot exercise.
@@ -353,6 +353,7 @@ jobs:
               - 'test/cluster/sandbox-os.spec.ts'
               - 'test/cluster/overlay-store.spec.ts'
               - 'test/cluster/scooter-converge.spec.ts'
+              - 'test/cluster/nix-build-sandbox.spec.ts'
               # The warm-seed unit lives in the sandbox image and the warm-store spec
               # needs only that image.
               - 'test/cluster/warm-store.spec.ts'
@@ -498,6 +499,73 @@ jobs:
         run: |
           nix shell nixpkgs#k3d -c k3d cluster delete scooter-ci || true
           nix shell nixpkgs#k3d -c k3d registry delete scooter-reg.localhost || true
+
+  # The image in a user-namespaced pod (`sandboxUserNamespace`): systemd boots with namespaced
+  # SYS_ADMIN, the overlay store mounts through idmapped volumes, and Nix builds run in Nix's own
+  # build sandbox. Pinned to the production k3s line, since user namespaces need Kubernetes >= 1.33.
+  cluster-userns:
+    name: cluster user-namespace sandbox (k3d)
+    needs: cluster-changes
+    if: needs.cluster-changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: nixbuild/nix-quick-install-action@v30
+      - uses: cachix/cachix-action@v15
+        with:
+          name: scooter
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      # The rancher/k3s image ships only runc, which gives non-privileged systemd no writable cgroup,
+      # and a user-namespaced pod cannot fall back to `privileged`. So hand the node a crun (plus the
+      # store it links against). k3s detects it on PATH and registers the `crun` RuntimeClass.
+      - name: create k3d cluster (k3s 1.35, with crun)
+        run: |
+          set -euo pipefail
+          crun=$(readlink -f "$(nix build --no-link --print-out-paths nixpkgs#crun)/bin/crun")
+          nix shell nixpkgs#k3d nixpkgs#kubectl -c k3d cluster create scooter-userns --no-lb --wait \
+            --image rancher/k3s:v1.35.4-k3s1 \
+            -v /nix/store:/nix/store:ro@server:0 \
+            -v "$crun:/usr/local/bin/crun:ro@server:0"
+          nix shell nixpkgs#k3d -c k3d kubeconfig merge scooter-userns --kubeconfig-merge-default
+          for _ in $(seq 60); do
+            nix shell nixpkgs#kubectl -c kubectl get runtimeclass crun >/dev/null 2>&1 && break
+            sleep 2
+          done
+          nix shell nixpkgs#kubectl -c kubectl get runtimeclass crun
+
+      - name: build + import sandbox image
+        run: |
+          set -euo pipefail
+          nix run ".#sandbox-os-image.copyTo" -- docker-daemon:agent-sandbox-os:latest
+          nix shell nixpkgs#k3d -c k3d image import agent-sandbox-os:latest -c scooter-userns
+
+      - name: user-namespace spec (crun)
+        env:
+          RUN_CLUSTER_TESTS: "1"
+          CLUSTER_PROVIDER: existing
+          SANDBOX_OS_IMAGE: agent-sandbox-os:latest
+          SANDBOX_RUNTIME_CLASS: crun
+          CI: "1"
+          KEEP_TEST_PODS: "1"
+        run: nix develop --command bash -c 'npm install && npm run test:cluster -- nix-build-sandbox'
+
+      - name: dump pod state on failure
+        if: failure()
+        run: |
+          k() { nix shell nixpkgs#kubectl -c kubectl -n agent-sandbox-test "$@" || true; }
+          k get pods -o wide
+          for pod in $(k get pods -o name); do
+            k describe "$pod"
+            k logs "$pod" --tail=200
+            k logs "$pod" --previous --tail=200
+          done
+          k get events --sort-by=.lastTimestamp
+          nix shell nixpkgs#kubectl -c kubectl get runtimeclass || true
+
+      - name: tear down k3d
+        if: always()
+        run: nix shell nixpkgs#k3d -c k3d cluster delete scooter-userns || true
 
   # Validates the example's rendered YAML against a real k3d apiserver with a
   # server-side dry-run, which runs the real schema and admission validation that

@@ -41,3 +41,10 @@ def test_no_image_no_tag():
     with env(SANDBOX_IMAGE=None, SANDBOX_IMAGE_TAG=None):
         cfg = Config.from_env()
     assert cfg.current_image_tag == ""
+
+
+def test_user_namespace_from_env():
+    with env(SANDBOX_USER_NAMESPACE="1"):
+        assert Config.from_env().user_namespace is True
+    with env(SANDBOX_USER_NAMESPACE=None):
+        assert Config.from_env().user_namespace is False

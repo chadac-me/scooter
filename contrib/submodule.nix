@@ -433,6 +433,16 @@ in
             defaultText = literalExpression ''"contrib_''${name}"'';
             description = "Database name (also the Atlas env name).";
           };
+          owner = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "agent-host";
+            description = ''
+              The service whose existing role owns this database and runs its
+              migrations: any `scooter.postgres.consumers` key, e.g. `agent-host`.
+              `null` means the first of `broker`, `webhooks` this contrib plugs into.
+            '';
+          };
           tables = mkOption {
             default = { };
             description = ''
@@ -450,7 +460,10 @@ in
                 readers = mkOption {
                   type = types.listOf types.str;
                   default = [ ];
-                  description = "Services granted SELECT only (see `scooter.db`).";
+                  description = ''
+                    Services granted SELECT only (see `scooter.db`). A service other
+                    than the owner gets table-scoped grants on its own role.
+                  '';
                 };
                 note = mkOption {
                   type = types.nullOr types.lines;

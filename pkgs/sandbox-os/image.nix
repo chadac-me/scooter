@@ -141,14 +141,33 @@ let
     # the outcome without ever failing the boot, then exec the NixOS stage-2 init.
     cg_err=$(${pkgs.util-linux}/bin/mount -o remount,rw /sys/fs/cgroup 2>&1)
     cg_rc=$?
-    if [ "$cg_rc" -eq 0 ]; then
-      echo "sandbox-init: remount rw /sys/fs/cgroup OK"
+    if [ "$cg_rc" -ne 0 ]; then
+      # In a user-namespaced pod (hostUsers: false) the inherited mount's read-only flag is
+      # locked and cannot be remounted away, but the pod owns its cgroup namespace, so a fresh
+      # cgroup2 mount over it is allowed and comes up writable.
+      cg_err="$cg_err; fresh mount: $(${pkgs.util-linux}/bin/mount -t cgroup2 -o nsdelegate cgroup2 /sys/fs/cgroup 2>&1)"
+      cg_rc=$?
+      [ "$cg_rc" -eq 0 ] && echo "sandbox-init: mounted a fresh cgroup2 at /sys/fs/cgroup (user namespace)"
+      # systemd needs the subtree owned by our root; report what we got.
+      echo "sandbox-init: cgroup owner=$(${pkgs.busybox}/bin/stat -c %u:%g /sys/fs/cgroup) procs=$(${pkgs.busybox}/bin/stat -c %u:%g /sys/fs/cgroup/cgroup.procs 2>&1) self=$(${pkgs.busybox}/bin/cat /proc/self/cgroup)"
+      if ${pkgs.busybox}/bin/mkdir /sys/fs/cgroup/.probe 2>/tmp/cg-probe; then
+        ${pkgs.busybox}/bin/rmdir /sys/fs/cgroup/.probe; echo "sandbox-init: cgroup subtree writable"
+      else
+        echo "sandbox-init: cgroup subtree NOT writable: $(${pkgs.busybox}/bin/cat /tmp/cg-probe)"
+      fi
     else
+      echo "sandbox-init: remount rw /sys/fs/cgroup OK"
+    fi
+    if [ "$cg_rc" -ne 0 ]; then
       echo "sandbox-init: remount rw /sys/fs/cgroup FAILED rc=$cg_rc -- systemd will exit 255"
       echo "sandbox-init: mount said: $cg_err"
       echo "sandbox-init: CapEff=$(${pkgs.busybox}/bin/grep ^CapEff /proc/self/status 2>/dev/null)"
       ${pkgs.busybox}/bin/grep cgroup /proc/mounts 2>/dev/null \
         | ${pkgs.busybox}/bin/sed "s/^/sandbox-init: /" || true
+    fi
+    # Opt-in verbose systemd boot, for tests chasing a silent exit.
+    if [ "''${SANDBOX_INIT_DEBUG:-}" = 1 ]; then
+      export SYSTEMD_LOG_LEVEL=debug SYSTEMD_LOG_TARGET=console
     fi
     exec ${toplevel}/init "$@"
   '';
