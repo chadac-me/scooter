@@ -1,4 +1,4 @@
-// Router-served star/title writes for an idle conversation (newRouter gates on no owner pod).
+// Router-served star/title/visibility writes for an idle conversation (newRouter gates on no owner pod).
 package main
 
 import (
@@ -18,6 +18,7 @@ type metaReader interface {
 type metaWriter interface {
 	SetStarred(ctx context.Context, id string, starred bool) (*ConversationRow, error)
 	SetUserTitle(ctx context.Context, id, title string) (*ConversationRow, error)
+	SetVisibility(ctx context.Context, id, visibility string) (*ConversationRow, error)
 }
 
 // serveConversationMetadataPatch mirrors agent-host's mutableFor auth and view() response.
@@ -32,7 +33,8 @@ func serveConversationMetadataPatch(w http.ResponseWriter, r *http.Request, fiel
 		writeJSONError(w, http.StatusBadGateway, "could not read conversation")
 		return
 	}
-	if row == nil {
+	// A private conversation the caller may not see answers like a missing one.
+	if row == nil || !canAccess(row.Owner, row.Visibility, caller) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -74,6 +76,33 @@ func serveConversationMetadataPatch(w http.ResponseWriter, r *http.Request, fiel
 			return
 		}
 		updated, err = writeStore.SetUserTitle(r.Context(), id, title)
+	case "visibility":
+		var body struct {
+			Visibility string `json:"visibility"`
+			Confirm    bool   `json:"confirm"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if body.Visibility != VisibilityShared && body.Visibility != VisibilityPrivate {
+			writeJSONError(w, http.StatusBadRequest, "visibility must be shared or private")
+			return
+		}
+		// Owner only, both ways, unlike star/title: an anonymous caller may not.
+		if caller == "" || row.Owner == nil || *row.Owner != caller {
+			writeJSONError(w, http.StatusForbidden, "only the owner can change visibility")
+			return
+		}
+		if row.ParentID != nil {
+			writeJSONError(w, http.StatusConflict, "a subagent takes its parent's visibility")
+			return
+		}
+		if body.Visibility == VisibilityShared && visibilityOf(row.Visibility) == VisibilityPrivate && !body.Confirm {
+			writeJSONError(w, http.StatusConflict, "making a private conversation shared needs confirm: true")
+			return
+		}
+		updated, err = writeStore.SetVisibility(r.Context(), id, body.Visibility)
 	default:
 		writeJSONError(w, http.StatusNotFound, "not found")
 		return

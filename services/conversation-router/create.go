@@ -62,15 +62,18 @@ type createRequest struct {
 	ParentID string `json:"parentId"`
 	// Owner is honored only for a TokenReview-verified in-cluster caller (see trustedcaller.go) and ignored from anyone else.
 	Owner string `json:"owner"`
+	// Visibility is "shared" (the default) or "private"; private needs an owner to be private for.
+	Visibility string `json:"visibility"`
 }
 
 type createResponse struct {
 	// The conversation id, which is also the thread id.
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Title     string `json:"title"`
-	CreatedAt int64  `json:"createdAt"`
-	Owner     string `json:"owner,omitempty"`
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	Title      string `json:"title"`
+	CreatedAt  int64  `json:"createdAt"`
+	Owner      string `json:"owner,omitempty"`
+	Visibility string `json:"visibility"`
 }
 
 // IsConversationCreate reports whether to handle here rather than proxy.
@@ -107,6 +110,19 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 		}
 	}
 
+	visibility := req.Visibility
+	if visibility == "" {
+		visibility = VisibilityShared
+	}
+	if visibility != VisibilityShared && visibility != VisibilityPrivate {
+		writeJSONError(w, http.StatusBadRequest, "visibility must be shared or private")
+		return
+	}
+	if visibility == VisibilityPrivate && owner == "" {
+		writeJSONError(w, http.StatusBadRequest, "a private conversation needs a signed-in owner")
+		return
+	}
+
 	id := uuid.NewString()
 	spec := map[string]interface{}{}
 	if owner != "" {
@@ -117,6 +133,9 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 	}
 	if req.ParentID != "" {
 		spec["parentId"] = req.ParentID
+	}
+	if visibility == VisibilityPrivate {
+		spec["visibility"] = visibility
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -137,6 +156,8 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 		Title:     req.Title,
 		CreatedAt: time.Now().UnixMilli(),
 		Owner:     owner,
+		// As requested; a subagent of a private parent is stored private regardless.
+		Visibility: visibility,
 	})
 }
 

@@ -42,6 +42,7 @@ type RecordRow = {
   phase: string | null;
   hostPod: string | null;
   hostGeneration: number | string | null;
+  visibility: string | null;
 };
 
 const columns = {
@@ -54,6 +55,7 @@ const columns = {
   phase: conversations.phase,
   hostPod: conversations.hostPod,
   hostGeneration: conversations.hostGeneration,
+  visibility: conversations.visibility,
 };
 
 function toRecord(r: RecordRow): ConversationRecord {
@@ -65,6 +67,7 @@ function toRecord(r: RecordRow): ConversationRecord {
       ...(r.parentId ? { parentId: r.parentId } : {}),
       ...(r.sandboxRef ? { sandboxRef: r.sandboxRef } : {}),
       ...(r.creatorPod ? { creatorPod: r.creatorPod } : {}),
+      ...(r.visibility === "private" ? { visibility: "private" as const } : {}),
     },
     // Only the phases agent-host acts on; Pending/Failed read as "not reconciled to a host".
     ...(r.phase && PHASES.has(r.phase) ? { phase: r.phase as ConversationPhase } : {}),

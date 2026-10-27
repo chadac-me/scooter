@@ -61,7 +61,7 @@ func MetadataPatch(method, path string) (field, id string, ok bool) {
 	if len(parts) != 3 || parts[0] != "conversations" {
 		return "", "", false
 	}
-	if parts[2] != "starred" && parts[2] != "title" {
+	if parts[2] != "starred" && parts[2] != "title" && parts[2] != "visibility" {
 		return "", "", false
 	}
 	return parts[2], parts[1], true

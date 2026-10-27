@@ -1,0 +1,13 @@
+{
+  "_comment": "canAccess cases, kept identical in services/agent-host/test/fixtures and services/conversation-router/testdata. A null caller is anonymous.",
+  "cases": [
+    { "name": "shared, anonymous",          "owner": "alice", "visibility": "shared",  "caller": null,    "allowed": true },
+    { "name": "shared, other user",         "owner": "alice", "visibility": "shared",  "caller": "bob",   "allowed": true },
+    { "name": "shared, unowned",            "owner": null,    "visibility": "shared",  "caller": "bob",   "allowed": true },
+    { "name": "private, owner",             "owner": "alice", "visibility": "private", "caller": "alice", "allowed": true },
+    { "name": "private, other user",        "owner": "alice", "visibility": "private", "caller": "bob",   "allowed": false },
+    { "name": "private, anonymous",         "owner": "alice", "visibility": "private", "caller": null,    "allowed": false },
+    { "name": "private, unowned (invalid)", "owner": null,    "visibility": "private", "caller": "bob",   "allowed": false },
+    { "name": "legacy row, no visibility",  "owner": "alice", "visibility": "",        "caller": "bob",   "allowed": true }
+  ]
+}

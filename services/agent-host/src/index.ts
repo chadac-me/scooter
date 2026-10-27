@@ -104,6 +104,8 @@ import type { SandboxRef, SessionId } from "./types.js";
 import { resumeUnlessEnded } from "./session/resumeGuard.js";
 import { formatError, logger, type Logger } from "./log.js";
 import { assertFileCount, uploadLimitsFromEnv } from "./config/uploads.js";
+import type { Visibility } from "./session/visibility.js";
+import { createAccessCheck } from "./session/access.js";
 
 const hostLog = logger("agent-host");
 
@@ -607,6 +609,8 @@ export async function main(
           },
           touchActivity: (id: SessionId, at: number) => metaStore.touchActivity(id, at),
           readLastActivity: (id: SessionId) => metaStore.readLastActivity(id),
+          setVisibility: (id: SessionId, v: Visibility) => metaStore.setVisibility(id, v),
+          readAccess: (id: SessionId) => metaStore.readAccess(id),
           listConversations: () => metaStore.listConversations(),
           removeConversation: async (id: SessionId) => {
             await metaStore.removeConversation(id);
@@ -1046,6 +1050,17 @@ export async function main(
   // Own a UI-created conversation to its ingress-authenticated creator, the same resolver
   // /whoami uses.
   server.useIdentityResolver(resolveUser);
+  // Who may see and drive a conversation (session/visibility.ts), checked by the management
+  // API, POST /agui and the web-service proxy. The webhooks SA delivers into any conversation.
+  const accessCheck = createAccessCheck({
+    readAccess: store.readAccess ? (id) => store.readAccess!(id as SessionId) : undefined,
+    memory: (id) => {
+      const c = sessions.get(id as SessionId);
+      return c ? { owner: c.owner, visibility: c.visibility } : undefined;
+    },
+    trustedService: ownerVerifier,
+  });
+  server.useAccessCheck(accessCheck);
   // Only the web tools' injectable fetch remains here, and nothing overrides it in
   // production.
   const agentToolsWiring: { fetchImpl?: typeof fetch } | undefined = undefined;
@@ -1353,6 +1368,7 @@ export async function main(
   server.use(
     createManagementApi({
     uploadLimits,
+    accessCheck,
     // Live appends only reach the owner's local store, so the integrity stream reports
     // whether this pod owns the conversation.
     streamOwnership: conversationRegistry && podName
@@ -1473,6 +1489,7 @@ export async function main(
     server.useProxy(
       createWebServiceProxy({
         sessions,
+        accessCheck,
         resolvePodTarget: (ref) => resolvePodTarget(ref),
         registry: webServices,
         wake: createWake({ sessions, provisioner, registry: webServices }),

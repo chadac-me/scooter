@@ -315,6 +315,7 @@ export function createFileConversationStore(root: string): ConversationStore {
           parentId: meta.parentId,
           userTitled: meta.userTitled,
           starred: meta.starred,
+          ...(meta.visibility === "private" ? { visibility: "private" as const } : {}),
           // Carried through because hydrate rebuilds the Entry from this object, so dropping it
           // would lose the queued message across a restart.
           pendingQueue: meta.pendingQueue,

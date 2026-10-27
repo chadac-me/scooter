@@ -125,6 +125,7 @@ const SessionRow = memo(function SessionRow({
       data-pending-create={s.serverId === undefined ? "true" : undefined}
       data-active={active}
       data-starred={s.starred ? "true" : undefined}
+      data-private={s.visibility === "private" ? "true" : undefined}
       data-subagent={depth > 0 ? "true" : undefined}
       className={
         "group relative mb-0.5 flex items-center gap-1 rounded-lg ps-1.5 pe-1 text-sm " +
@@ -146,6 +147,16 @@ const SessionRow = memo(function SessionRow({
       >
         {depth > 0 && <span className="me-1 text-muted-foreground" aria-hidden>↳</span>}
         <span data-testid="session-title">{sessionLabel(s, labelMode)}</span>
+        {s.visibility === "private" && (
+          <span
+            data-testid="session-private"
+            className="ms-1.5 text-xs text-muted-foreground"
+            title="Private: only you can see it"
+            aria-label="Private"
+          >
+            🔒
+          </span>
+        )}
         {childCount > 0 && (
           <span data-testid="subagent-count" className="ms-1.5 text-xs text-muted-foreground">
             ▸ {childCount} subagent{childCount === 1 ? "" : "s"}

@@ -15,6 +15,7 @@ import { formatError, logger } from "../log.js";
 import { createPgPool } from "../db/pgPool.js";
 
 import type { ConversationMeta } from "./manager.js";
+import type { AccessFacts, Visibility } from "./visibility.js";
 import type { SessionId, ThreadId } from "../types.js";
 
 const log = logger("metaStore");
@@ -30,6 +31,10 @@ export interface MetaStore {
   setRunState(id: SessionId, running: boolean, at: number): Promise<void>;
   /** The persisted lastActivityAt, or undefined when there is no row. */
   readLastActivity(id: SessionId): Promise<number | undefined>;
+  /** Set the visibility of `rootId` and all its descendants in one statement; throws on failure. */
+  setVisibility(rootId: SessionId, visibility: Visibility): Promise<void>;
+  /** The row's owner and visibility, undefined when there is no row; throws on a failed read. */
+  readAccess(id: SessionId): Promise<AccessFacts | undefined>;
   listConversations(): Promise<ConversationMeta[]>;
   removeConversation(id: SessionId): Promise<void>;
   close(): Promise<void>;
@@ -57,6 +62,7 @@ type MetaRow = {
   parentId: string | null;
   userTitled: boolean | null;
   starred: boolean | null;
+  visibility?: string | null;
   pendingQueue: unknown;
 };
 
@@ -78,6 +84,7 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
     ...(row.parentId == null ? {} : { parentId: row.parentId as SessionId }),
     ...(row.userTitled == null ? {} : { userTitled: row.userTitled }),
     ...(row.starred == null ? {} : { starred: row.starred }),
+    ...(row.visibility === "private" ? { visibility: "private" as const } : {}),
     ...(row.pendingQueue == null
       ? {}
       : {
@@ -164,6 +171,31 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
       } catch (e) {
         log.error("setRunState failed (sidebar turn state not persisted)", { conversation_id: id, error: formatError(e) });
       }
+    },
+
+    async setVisibility(rootId, visibility) {
+      // One statement over the whole subtree: a subagent shares its root's pod, so it can never
+      // be less private. Not best-effort like saveMeta, since a lost write here fails open.
+      await db.execute(sql`
+        WITH RECURSIVE tree(id) AS (
+          SELECT ${rootId}::text
+          UNION SELECT c.id FROM ${conversations} c JOIN tree t ON c.parent_id = t.id
+        )
+        UPDATE ${conversations} SET visibility = ${visibility}
+         WHERE id IN (SELECT id FROM tree)`);
+    },
+
+    async readAccess(id) {
+      const rows = await db
+        .select({ owner: conversations.owner, visibility: conversations.visibility })
+        .from(conversations)
+        .where(eq(conversations.id, id))
+        .limit(1);
+      if (!rows.length) return undefined;
+      return {
+        ...(rows[0].owner == null ? {} : { owner: rows[0].owner }),
+        visibility: rows[0].visibility === "private" ? "private" : "shared",
+      };
     },
 
     async readLastActivity(id) {

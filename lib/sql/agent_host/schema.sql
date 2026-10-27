@@ -58,6 +58,8 @@ CREATE TABLE "conversations" (
   "run_started_at"   bigint NULL,
   -- When the last run ended; the UI compares it to its last-seen mark for "unread".
   "last_reply_at"    bigint NULL,
+  -- shared (anyone signed in) | private (the owner only). A private row always has an owner.
+  "visibility"       text NOT NULL DEFAULT 'shared' CHECK ("visibility" IN ('shared', 'private')),
   -- ASSIGNMENT / FENCING. host_*, not owner_*: "owner" above is the end user.
   --
   -- host_pod is a pod NAME, never an IP: a name is stable identity, an IP is a mutable
@@ -72,6 +74,8 @@ CREATE TABLE "conversations" (
   "phase"            text NULL,
   "sandbox_ref"      text NULL,
   "creator_pod"      text NULL,
+  -- Private for nobody is meaningless: canAccess would let no one in.
+  CONSTRAINT "conversations_private_has_owner" CHECK ("visibility" = 'shared' OR "owner" IS NOT NULL),
   PRIMARY KEY ("id")
 );
 

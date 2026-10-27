@@ -272,6 +272,33 @@ export async function setConversationStarred(
   }
 }
 
+/** Make a conversation private or shared; `confirm` acknowledges that going shared exposes it. Returns the updated view, or null on error. */
+export async function setConversationVisibility(
+  config: AgentHostConfig,
+  conversationId: string,
+  visibility: "shared" | "private",
+  confirm = false,
+): Promise<ConversationView | null> {
+  try {
+    const res = await fetch(
+      `${config.baseUrl.replace(/\/$/, "")}/conversations/${encodeURIComponent(conversationId)}/visibility`,
+      {
+        method: "PATCH",
+        headers: { ...authHeaders(config), "content-type": "application/json" },
+        body: JSON.stringify({ visibility, ...(confirm ? { confirm: true } : {}) }),
+      },
+    );
+    if (!res.ok) {
+      console.warn(`[client] setConversationVisibility ${conversationId}: HTTP ${res.status}`);
+      return null;
+    }
+    return (await res.json()) as ConversationView;
+  } catch (e) {
+    console.warn(`[client] setConversationVisibility ${conversationId} failed:`, e);
+    return null;
+  }
+}
+
 /** One published static share as the Shares tab shows it, mapped to camelCase by loadShares. */
 export interface ShareView {
   uuid: string;

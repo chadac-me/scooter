@@ -7,6 +7,8 @@
  * agent-host (POD_NAME unset) uses noopRegistry.
  */
 
+import type { Visibility } from "./visibility.js";
+
 export interface ConversationSpec {
   /** The model the conversation runs (the row's model). */
   model?: string;
@@ -19,6 +21,8 @@ export interface ConversationSpec {
   /** The pod that created the conversation (creator_pod), a placement hint the controller
    *  prefers while that pod is ready, since the run physically lives there. */
   creatorPod?: string;
+  /** Read-only here: the router's insert and setVisibility write it (visibility). */
+  visibility?: Visibility;
 }
 
 /** Conversation liveness folded into the row's `phase`: the controller owns the assignment
