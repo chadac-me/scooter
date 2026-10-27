@@ -242,6 +242,17 @@ describe("management API", () => {
   // GET /conversations and the /conversations/events stream are served by the conversation-router and covered in its tests.
 
   // Star and title PATCHes are served by the conversation-router, which owns those columns.
+  it("GET /conversations/:id serves the star the router wrote, not the stale memory copy", async () => {
+    const sessions = fakeSessions();
+    sessions.refreshRouterMeta = vi.fn(async (id: string) => {
+      (sessions.get(id) as { starred?: boolean }).starred = true;
+    });
+    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
+    const { status, json } = await call(api, "GET", "/conversations/c1");
+    expect(status).toBe(200);
+    expect((json as any).starred).toBe(true);
+  });
+
 
   it("GET /conversations/:id/resources returns the sandbox size when wired", async () => {
     const size = { requests: { cpu: "500m", memory: "1Gi" }, limits: { memory: "4Gi" } };

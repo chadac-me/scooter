@@ -472,7 +472,10 @@ export function createManagementApi(deps: ManagementDeps): Router {
     // Hydrate-if-absent (read-only) so a reconnect after a pod move resolves instead of 404ing.
     let conv = sessions.get(ctx.params.id);
     if (!conv && (await sessions.ensureReadable(ctx.params.id))) conv = sessions.get(ctx.params.id);
-    return conv ? { json: view(conv) } : { status: 404, json: { error: "not found" } };
+    if (!conv) return { status: 404, json: { error: "not found" } };
+    // Star and title are router-written; serve the durable values.
+    await sessions.refreshRouterMeta(conv.id).catch(() => {});
+    return { json: view(sessions.get(conv.id) ?? conv) };
   });
 
   r.del("/conversations/:id", async (ctx) => {
