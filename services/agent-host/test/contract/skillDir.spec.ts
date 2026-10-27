@@ -247,3 +247,15 @@ describe("skillPayloads — what a BYO container receives", () => {
   });
 });
 
+
+describe("writeSkillDir — rewriting for a newer set", () => {
+  it("drops a skill that left the set, so a deploy can retire one", () => {
+    writeSkill("keep", "description: k", "K");
+    writeSkill("gone", "description: g", "G");
+    writeSkillDir(cwd, skillsDir);
+    rmSync(join(skillsDir, "gone.md"));
+    writeSkillDir(cwd, skillsDir);
+    expect(existsSync(join(cwd, ".claude", "skills", "keep", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(cwd, ".claude", "skills", "gone"))).toBe(false);
+  });
+});

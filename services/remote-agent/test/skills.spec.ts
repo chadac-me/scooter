@@ -71,3 +71,27 @@ describe("failure is survivable", () => {
     expect(() => writeSkillPayloads(notADir, [{ name: "a", content: "A" }])).toThrow();
   });
 });
+
+describe("pruneSkillDirs", () => {
+  /** A `skills-<i>` dir aged `i` minutes, so a higher index is older. */
+  const aged = (i: number): string => {
+    const p = join(cwd, `skills-${i}`);
+    mkdirSync(p);
+    const t = new Date(Date.now() - i * 60_000);
+    utimesSync(p, t, t);
+    return p;
+  };
+
+  it("keeps the newest dirs and drops the rest", () => {
+    const dirs = [0, 1, 2, 3].map(aged);
+    expect(pruneSkillDirs(cwd, 2)).toBe(2);
+    expect(dirs.map((d) => existsSync(d))).toEqual([true, true, false, false]);
+  });
+
+  it("never drops a dir a live session still reads its skills from", () => {
+    const dirs = [0, 1, 2, 3].map(aged);
+    pruneSkillDirs(cwd, 2, new Set([dirs[3]]));
+    expect(existsSync(dirs[3]), "the oldest dir belongs to a live session").toBe(true);
+    expect(existsSync(dirs[2])).toBe(false);
+  });
+});

@@ -139,6 +139,9 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
       log(`DROPPED ${f.ch}/${f.type} frame — socket ${ws ? "state " + ws.readyState : "absent"}`);
     };
 
+    // Live sessions' skill dirs, which pruning must keep.
+    const liveSkillDirs = new Set<string>();
+
     // Permission answers route by unique frame id, so one shared waiter map serves every per-session client.
     const permissionWaiters = new Map<string, (ans: PermissionAnswer) => void>();
 
@@ -169,8 +172,9 @@ export function runRemoteAgentClient(deps: RemoteAgentClientDeps): RemoteAgentCl
           const parent = join(process.env.CLAUDE_CONFIG_DIR ?? "/root/.claude", "sessions");
           mkdirSync(parent, { recursive: true });
           // The volume is persistent, so keep only the most recent few session dirs.
-          pruneSkillDirs(parent, 5);
+          pruneSkillDirs(parent, 5, liveSkillDirs);
           skillCwd = mkdtempSync(join(parent, "skills-"));
+          liveSkillDirs.add(skillCwd);
           const written = writeSkillPayloads(skillCwd, skills);
           log(`skills: wrote ${written} to ${skillCwd}/.claude/skills`);
         } catch (err) {

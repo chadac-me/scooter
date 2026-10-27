@@ -13,6 +13,7 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, symlinkSync, rmSync, lstatSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 export interface AgentIdentity {
   /** Display name the agent goes by. */
@@ -234,6 +235,11 @@ export function skillPayloads(skillsDir: string, personal: readonly Skill[] = []
   return mergeSkills(loadSkills(skillsDir), personal).map((s) => ({ name: s.name, content: renderSkillFile(s) }));
 }
 
+/** A stable hash of a skill set, to detect stale sessions. */
+export function skillsFingerprint(skills: readonly SkillPayload[]): string {
+  return createHash("sha256").update(JSON.stringify(skills.map((s) => [s.name, s.content]))).digest("hex");
+}
+
 /** Write received payloads as `.claude/skills/<name>/SKILL.md` under `cwd`, the container-side counterpart of writeSkillDir, returning the number written. */
 export function writeSkillPayloads(cwd: string, skills: readonly SkillPayload[]): number {
   if (!skills.length) return 0;
@@ -255,8 +261,10 @@ export function writeSkillDir(
   personal: readonly Skill[] = [],
 ): number {
   const skills = mergeSkills(loadSkills(skillsDir), personal);
-  if (!skills.length) return 0;
   const base = join(cwd, ".claude", "skills");
+  // A retired skill must not stay discoverable.
+  rmSync(base, { recursive: true, force: true });
+  if (!skills.length) return 0;
   for (const s of skills) {
     const dir = join(base, s.name);
     mkdirSync(dir, { recursive: true });
