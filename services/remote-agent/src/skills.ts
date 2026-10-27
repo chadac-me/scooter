@@ -30,8 +30,8 @@ export function writeSkillPayloads(cwd: string, skills: readonly SkillPayload[])
   return n;
 }
 
-/** Drop all but the `keep` newest `skills-*` dirs under `parent`, best-effort because a failure must never break a session. */
-export function pruneSkillDirs(parent: string, keep: number): number {
+/** Drop all but the `keep` newest `skills-*` dirs under `parent`, never one in `inUse`, best-effort because a failure must never break a session. */
+export function pruneSkillDirs(parent: string, keep: number, inUse: ReadonlySet<string> = new Set()): number {
   let removed = 0;
   try {
     const entries = readdirSync(parent, { withFileTypes: true })
@@ -42,6 +42,8 @@ export function pruneSkillDirs(parent: string, keep: number): number {
       })
       .sort((a, b) => b.mtime - a.mtime);
     for (const { p } of entries.slice(keep)) {
+      // A live session's SDK re-reads skills every turn.
+      if (inUse.has(p)) continue;
       try {
         rmSync(p, { recursive: true, force: true });
         removed += 1;

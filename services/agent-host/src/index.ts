@@ -1730,32 +1730,26 @@ export async function main(
     // sandbox.
     const cwd = join(config.scratchPath, conversationId, "agent-cwd");
     mkdirSync(cwd, { recursive: true });
-    // The skills are re-read on every conversation start, so editing the skills ConfigMap
-    // takes effect for new conversations with no image rebuild.
-    // Write the agent's skills once per conversation, answering the owner's personal ones.
-    // Memoized and deferred: makeBridge is sync and these come from the database. Why: PR #767.
-    let skillsOnce: Promise<readonly Skill[]> | undefined;
-    const prepareSkills = (): Promise<readonly Skill[]> =>
-      (skillsOnce ??= (async () => {
-        const personal = await personalSkillsFor(owner);
-        // Provider-specific: goose reads .goosehints with every body inlined; the
-        // SDK discovers .claude/skills itself and gets no bodies in its prompt.
-        const skillCount = usingClaude
-          ? writeSkillDir(cwd, config.skillsDir, personal)
-          : writeHints(cwd, config.skillsDir, { name: config.agentName }, personal);
-        if (skillCount)
-          hostLog.info("wrote skills", {
-            conversation_id: conversationId,
-            skills: skillCount,
-            personal: personal.length,
-            // Named when non-empty so a surprising prompt is traceable to the user's own copy.
-            ...(personal.length
-              ? { shadowed: shadowedNames(loadSkills(config.skillsDir), personal) }
-              : {}),
-            via: usingClaude ? ".claude/skills" : ".goosehints",
-          });
-        return personal;
-      })());
+    // Rewritten per client build so a rebuilt session sees current skills.
+    const prepareSkills = async (): Promise<void> => {
+      const personal = await personalSkillsFor(owner);
+      // Provider-specific: goose reads .goosehints with every body inlined; the
+      // SDK discovers .claude/skills itself and gets no bodies in its prompt.
+      const skillCount = usingClaude
+        ? writeSkillDir(cwd, config.skillsDir, personal)
+        : writeHints(cwd, config.skillsDir, { name: config.agentName }, personal);
+      if (skillCount)
+        hostLog.info("wrote skills", {
+          conversation_id: conversationId,
+          skills: skillCount,
+          personal: personal.length,
+          // Named when non-empty so a surprising prompt is traceable to the user's own copy.
+          ...(personal.length
+            ? { shadowed: shadowedNames(loadSkills(config.skillsDir), personal) }
+            : {}),
+          via: usingClaude ? ".claude/skills" : ".goosehints",
+        });
+    };
     const metricModel = resolved ?? cfg.model ?? "unknown";
     // The agent is offered two MCP servers split by who owns the tools: scooter-env for the
     // control-plane tools and scooter-broker for the contrib provider tools, both carrying
@@ -1930,9 +1924,8 @@ export async function main(
       recorder: transcriptRecorder,
       provider: usingClaude ? "claude" : "goose",
       owner,
-      // The same memoized set the in-pod write uses, so a BYO container is handed exactly
-      // what a cloud run of this conversation would see.
-      personalSkills: prepareSkills,
+      // Same source as the in-pod write, so BYO matches cloud.
+      personalSkills: () => personalSkillsFor(owner),
       acpProviders,
       // Per-provider model resolution: the conversation's choice when the run's provider
       // offers it, else that provider's default.

@@ -6,7 +6,7 @@
  * the permission UI.
  */
 
-import { skillPayloads, sdkPrompt, type Skill } from "./agent/skills.js";
+import { skillPayloads, skillsFingerprint, sdkPrompt, type Skill } from "./agent/skills.js";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -158,6 +158,8 @@ interface ReadySession {
   client: AcpClient;
   acpSessionId: string;
   mcpFingerprint: string;
+  /** Skills the session started with, compared every run. */
+  skillsFingerprint: string;
   /** Shown the conversation's history at least once. */
   historySeeded: boolean;
   /** Last run served; later events were missed. */
@@ -373,7 +375,7 @@ export interface BridgeDeps {
 
   /** The conversation owner, part of the per-run RunContext an owner-bound provider selects on. */
   owner?: string;
-  /** The owner's personal skills, resolved once per conversation; the same set the in-pod skill files are written from. */
+  /** The owner's personal skills, re-read every run. */
   personalSkills?: () => Promise<readonly Skill[]>;
 
   /** Run-completion hook for metrics, called once per run with the ACP session id, duration
@@ -1283,6 +1285,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     let ready = readySessions.get(provider.id);
     if (ready) return ready;
     ready = (async () => {
+      // Read before createClient: a racing edit errs toward rebuilding.
+      const skills = await currentSkills();
       debug("[bridge] readyProvider(%s): createClient + initialize", provider.id);
       const client = await provider.createClient(defaultRunContext());
       await client.initialize({
@@ -1312,9 +1316,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         model,
         // A provider that cannot read this pod's filesystem takes the skills as data and
         // writes its own .claude/skills.
-        skills: provider.needsSkillPayloads
-          ? skillPayloads(deps.config.skillsDir, (await deps.personalSkills?.()) ?? [])
-          : undefined,
+        skills: provider.needsSkillPayloads ? skills : undefined,
         // One that builds no identity of its own takes the host's prompt, without which it
         // runs anonymous and never emits the <title> marker.
         systemPrompt: provider.needsSystemPrompt
@@ -1386,7 +1388,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         if (!optionId) return { cancelled: true as const };
         return result ? { optionId, result } : { optionId };
       });
-      return { client, acpSessionId: sid, historySeeded: false, mcpFingerprint };
+      return { client, acpSessionId: sid, historySeeded: false, mcpFingerprint, skillsFingerprint: skillsFingerprint(skills) };
     })();
     readySessions.set(provider.id, ready);
     ready.catch(() => readySessions.delete(provider.id));
@@ -1440,6 +1442,40 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     }
   };
 
+  /** Deployment skills merged with the owner's personal ones, read fresh. */
+  const currentSkills = async () => skillPayloads(deps.config.skillsDir, (await deps.personalSkills?.()) ?? []);
+
+  /** Drop a session whose skills changed; agents read them only at start. */
+  const dropSessionIfSkillsChanged = async (providerId: string): Promise<void> => {
+    const cached = readySessions.get(providerId);
+    if (!cached) return;
+    let settled: ReadySession;
+    try {
+      settled = await cached;
+    } catch {
+      return; // readyProvider already dropped it
+    }
+    let next: string;
+    try {
+      next = skillsFingerprint(await currentSkills());
+    } catch (err) {
+      log.warn("could not read skills; keeping the current agent session", {
+        conversation_id: conversationId,
+        error: formatError(err),
+      });
+      return;
+    }
+    if (next === settled.skillsFingerprint) return;
+    log.info("skills changed; rebuilding the agent session", { conversation_id: conversationId, provider: providerId });
+    readySessions.delete(providerId);
+    await settled.client.close().catch((err) =>
+      log.warn("failed to close the superseded agent client; rebuilding anyway", {
+        conversation_id: conversationId,
+        provider: providerId,
+        error: formatError(err),
+      }));
+  };
+
   /** Drop a dead client's session; the run reconnects and re-seeds. */
   const dropSessionIfDead = async (providerId: string): Promise<void> => {
     const cached = readySessions.get(providerId);
@@ -1467,6 +1503,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     }
     await dropSessionIfDead(provider.id);
     await dropSessionIfMcpChanged(provider.id);
+    await dropSessionIfSkillsChanged(provider.id);
     const ready = await readyProvider(provider);
     acpClient = ready.client;
     acpSessionId = ready.acpSessionId;
