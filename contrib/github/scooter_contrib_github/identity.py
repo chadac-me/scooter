@@ -10,11 +10,12 @@ from scooter_lib.logging_config import format_error, pseudonym
 from scooter_webhooks_lib.identity import register_email_resolver
 
 from .config import settings
+from .forge import api_base
 
 logger = logging.getLogger(__name__)
 _C = {"component": "contrib.github.identity"}
 
-_GITHUB_API = "https://api.github.com"
+_GITHUB_API = api_base(settings.github_host)
 
 
 @register_email_resolver("github")

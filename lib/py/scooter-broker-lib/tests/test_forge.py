@@ -18,6 +18,7 @@ from scooter_broker_lib.forge import (
     ForgeHost,
     ForgeHosts,
     ForgeRequest,
+    GenericDialect,
     PushHeadReader,
     api_forge_request,
     classify,
@@ -31,9 +32,22 @@ from scooter_broker_lib.transports.http_proxy import HttpProxy
 from scooter_broker_lib.types import Identity, Provider
 
 IDENT = Identity(conversation_id="c1", namespace="ns", service_account="system:serviceaccount:ns:sandbox-c1")
-GH_GIT = dict(dialect="github", git=True, api_prefixes=())
-GH_API = dict(dialect="github", git=False, api_prefixes=("/",))
-GL = dict(dialect="gitlab", git=True, api_prefixes=("/api/",))
+
+
+class _Dialect:
+    """A stand-in for a contrib's dialect: `/repos/<o>/<r>` and `/graphql`."""
+
+    def api_repo(self, path: str) -> str | None:
+        parts = path.strip("/").split("/")
+        return f"{parts[1]}/{parts[2]}" if len(parts) >= 3 and parts[0] == "repos" else None
+
+    def is_graphql(self, path: str) -> bool:
+        return path == "/graphql"
+
+
+GH_GIT = dict(dialect=_Dialect(), git=True, api_prefixes=())
+GH_API = dict(dialect=_Dialect(), git=False, api_prefixes=("/",))
+GL = dict(dialect=GenericDialect(), git=True, api_prefixes=("/api/",))
 
 
 # -- classify ---------------------------------------------------------------
@@ -60,12 +74,11 @@ def test_github_api_repo():
     assert classify(path="/graphql", **GH_API).repo is None
 
 
-def test_gitlab_nested_git_and_api():
+def test_nested_git_and_generic_api():
     c = classify(path="/g/sub/p.git/git-receive-pack", **GL)
     assert (c.kind, c.repo, c.git_service) == ("git", "g/sub/p", "git-receive-pack")
-    c = classify(path="/api/v4/projects/g%2Fsub%2Fp/merge_requests", **GL)
-    assert (c.kind, c.repo) == ("api", "g/sub/p")
-    assert classify(path="/api/v4/projects/42", **GL).repo == "42"
+    c = classify(path="/api/v4/projects/42", **GL)
+    assert (c.kind, c.repo) == ("api", None)
     assert classify(path="/g/p/-/merge_requests", **GL).kind == "web"
 
 
@@ -198,7 +211,7 @@ def _github_provider(policy) -> Provider:
         name="github",
         credential=StaticTokenSource(token="ghs_real"),
         transports=[
-            ForgeHosts(hosts=[ForgeHost("api.github.com", api_prefixes=("/",))], dialect="github"),
+            ForgeHosts(hosts=[ForgeHost("api.github.com", api_prefixes=("/",))], dialect=_Dialect()),
             HttpProxy(upstream="https://api.github.com"),
         ],
         forge_policy=policy,

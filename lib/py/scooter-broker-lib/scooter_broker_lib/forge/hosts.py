@@ -18,7 +18,7 @@ from fastapi import APIRouter
 
 from ..autolink import Link, LinkRule
 from ..types import AuthDependency, Credential, Provider, Transport
-from .parse import Dialect
+from .parse import ForgeDialect, GenericDialect
 
 if TYPE_CHECKING:
     from ..types import Identity
@@ -42,7 +42,8 @@ GraphQLLinkRule = Callable[[dict], Link | None]
 @dataclass
 class ForgeHosts(Transport):
     hosts: list[ForgeHost] = field(default_factory=list)
-    dialect: Dialect = "github"
+    # Repo and GraphQL parsing for this forge's API.
+    dialect: ForgeDialect = field(default_factory=GenericDialect)
     # The basic-auth username git smart-HTTP pairs with the token.
     git_username: str = "x-access-token"
     # Auto-linking for creates made through the proxy: REST rules match the path without its leading "/".
@@ -73,7 +74,7 @@ def api_forge_request(
     body: bytes | None = None,
 ) -> "ForgeRequest | None":
     """The ForgeRequest for an API call the broker makes for a provider, or None when the provider is not a forge."""
-    from .parse import classify, is_graphql_path, parse_graphql_body
+    from .parse import classify, parse_graphql_body
     from .policy import ForgeRequest
 
     forge = find_forge_hosts(provider)
@@ -90,7 +91,7 @@ def api_forge_request(
         query=query,
     )
     graphql = None
-    if method.upper() == "POST" and is_graphql_path(forge.dialect, path):
+    if method.upper() == "POST" and forge.dialect.is_graphql(path):
         graphql = parse_graphql_body(body or b"")
     return ForgeRequest(
         identity=identity,

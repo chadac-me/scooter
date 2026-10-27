@@ -6,19 +6,38 @@ import json
 import re
 import zlib
 from dataclasses import dataclass
-from typing import Literal
+from typing import Protocol, runtime_checkable
 from urllib.parse import parse_qs, unquote
 
 from .policy import GraphQLOperation, Kind, RefUpdate
 
-Dialect = Literal["github", "gitlab"]
+
+@runtime_checkable
+class ForgeDialect(Protocol):
+    """A forge's API shape, supplied by the contrib that owns the forge."""
+
+    def api_repo(self, path: str) -> str | None:
+        """The repo an API path names, or None."""
+        ...
+
+    def is_graphql(self, path: str) -> bool:
+        ...
+
+
+@dataclass(frozen=True)
+class GenericDialect:
+    """No repo or GraphQL knowledge: requests classify by path alone."""
+
+    def api_repo(self, path: str) -> str | None:
+        return None
+
+    def is_graphql(self, path: str) -> bool:
+        return False
 
 # `/<repo>[.git]/<smart-HTTP or LFS endpoint>`; <repo> may be nested (GitLab groups).
 _GIT_PATH = re.compile(
     r"^/(?P<repo>[^?]+?)(?:\.git)?/(?P<rest>info/refs|git-upload-pack|git-receive-pack|info/lfs(?:/.*)?)$"
 )
-_GITHUB_API_REPO = re.compile(r"^(?:/api/v3)?/repos/(?P<owner>[^/]+)/(?P<name>[^/]+)")
-_GITLAB_API_PROJECT = re.compile(r"^/api/v4/projects/(?P<id>[^/]+)")
 
 
 @dataclass(frozen=True)
@@ -29,7 +48,7 @@ class Classified:
 
 
 def classify(
-    *, dialect: Dialect, git: bool, api_prefixes: tuple[str, ...], path: str, query: str = ""
+    *, dialect: ForgeDialect, git: bool, api_prefixes: tuple[str, ...], path: str, query: str = ""
 ) -> Classified:
     """Classify one request on a forge host from its path; `git`/`api_prefixes` say what the host serves."""
     if git:
@@ -44,25 +63,8 @@ def classify(
                 service = rest
             return Classified("git", unquote(m.group("repo")).strip("/"), service)
     if any(path.startswith(p) for p in api_prefixes):
-        return Classified("api", api_repo(dialect, path))
+        return Classified("api", dialect.api_repo(path))
     return Classified("web")
-
-
-def api_repo(dialect: Dialect, path: str) -> str | None:
-    """The repo an API path names: `owner/repo` on GitHub, the decoded project path or id on GitLab."""
-    if not path.startswith("/"):
-        path = "/" + path
-    if dialect == "github":
-        m = _GITHUB_API_REPO.match(path)
-        return f"{unquote(m.group('owner'))}/{unquote(m.group('name'))}" if m else None
-    m = _GITLAB_API_PROJECT.match(path)
-    return unquote(m.group("id")) if m else None
-
-
-def is_graphql_path(dialect: Dialect, path: str) -> bool:
-    if not path.startswith("/"):
-        path = "/" + path
-    return path in ("/graphql", "/api/graphql") if dialect == "github" else path == "/api/graphql"
 
 
 # ---------------------------------------------------------------------------

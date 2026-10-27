@@ -7,12 +7,13 @@ import httpx
 import jwt
 
 from .config import settings
+from .forge import api_base
 from scooter_lib.logging_config import format_error
 
 logger = logging.getLogger(__name__)
 _C = {"component": "responses.github"}
 
-GITHUB_API = "https://api.github.com"
+GITHUB_API = api_base(settings.github_host)
 
 # Installation tokens last an hour and are refreshed at 50 minutes.
 _token_cache: dict[int, tuple[str, float]] = {}

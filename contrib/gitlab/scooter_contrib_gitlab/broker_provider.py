@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from .config import GitlabSettings
+from .forge import GitLabDialect, forge_hosts
 from .mcp_tools import gitlab_mcp_server
 from scooter_broker_lib.autolink import Link, rule
-from scooter_broker_lib.forge import ForgeHost, ForgeHosts, load_policy
+from scooter_broker_lib.forge import ForgeHosts, load_policy
 from scooter_broker_lib.registry import register_provider
 from scooter_broker_lib.types import Provider
 from scooter_broker_lib.sources.static_token import StaticTokenSource
@@ -26,13 +27,11 @@ _GITLAB_LINK_RULES = [
 ]
 
 
-UPSTREAM = "https://gitlab.com"
-
-
 @register_provider
 def gitlab() -> Provider:
     # Read at build time, like every provider factory.
     settings = GitlabSettings()
+    upstream = f"https://{settings.gitlab_host}"
     return Provider(
         name="gitlab",
         credential=StaticTokenSource(
@@ -41,15 +40,15 @@ def gitlab() -> Provider:
         transports=[
             # A bare-host upstream, so agents call the full API path through the proxy.
             HttpProxy(
-                upstream=UPSTREAM,
+                upstream=upstream,
                 link_rules=_GITLAB_LINK_RULES,
                 agent_host_url=settings.agent_host_url,
             ),
-            McpTools(server=gitlab_mcp_server(), upstream=UPSTREAM),
+            McpTools(server=gitlab_mcp_server(), upstream=upstream),
             # One host for git and the API; the REST link rules already match `api/v4/...` paths.
             ForgeHosts(
-                hosts=[ForgeHost("gitlab.com", git=True, api_prefixes=("/api/",))],
-                dialect="gitlab",
+                hosts=forge_hosts(settings.gitlab_host),
+                dialect=GitLabDialect(),
                 git_username="oauth2",
                 link_rules=_GITLAB_LINK_RULES,
             ),

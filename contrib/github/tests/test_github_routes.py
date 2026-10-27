@@ -27,6 +27,7 @@ def test_app_settings_select_the_app_source(monkeypatch):
 
 
 def test_forge_proxy_intercepts_github_hosts():
+    from scooter_contrib_github.forge import GitHubDialect
     from scooter_broker_lib.forge import ALLOW_ALL, find_forge_hosts
 
     provider = github()
@@ -34,8 +35,22 @@ def test_forge_proxy_intercepts_github_hosts():
     assert forge is not None
     assert {h.host for h in forge.hosts} == {"github.com", "api.github.com", "uploads.github.com"}
     assert [h.host for h in forge.hosts if h.git] == ["github.com"]
-    assert forge.dialect == "github"
+    assert isinstance(forge.dialect, GitHubDialect)
+    assert forge.dialect.api_repo("/repos/o/r/pulls") == "o/r"
+    assert forge.dialect.api_repo("/api/v3/repos/o/r") == "o/r"
+    assert forge.dialect.is_graphql("/graphql")
     assert provider.forge_policy is ALLOW_ALL
+
+
+def test_github_host_setting_points_everything_at_ghes(monkeypatch):
+    from scooter_broker_lib.forge import find_forge_hosts
+
+    monkeypatch.setenv("GITHUB_HOST", "ghe.example.com")
+    provider = github()
+    [host] = find_forge_hosts(provider).hosts
+    assert (host.host, host.git, host.api_prefixes) == ("ghe.example.com", True, ("/api/",))
+    [proxy] = [t for t in provider.transports if isinstance(t, HttpProxy)]
+    assert proxy.upstream == "https://ghe.example.com/api/v3"
 
 
 def test_gh_graphql_creates_are_linked():

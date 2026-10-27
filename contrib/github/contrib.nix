@@ -14,6 +14,17 @@
         description = "GitHub App installation ID (GITHUB_APP_INSTALLATION_ID).";
       };
 
+      host = lib.mkOption {
+        type = lib.types.str;
+        default = "github.com";
+        example = "github.example.com";
+        description = ''
+          The GitHub host: `github.com`, or a GitHub Enterprise Server hostname. The
+          broker's forge proxy, http-proxy and App token minting, the webhooks' API
+          calls, and `gh` in the sandbox all target it.
+        '';
+      };
+
       forgePolicy = lib.mkOption {
         type = lib.types.str;
         default = "";

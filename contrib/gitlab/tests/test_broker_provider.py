@@ -98,5 +98,17 @@ def test_forge_proxy_intercepts_gitlab_com(monkeypatch):
     assert forge is not None
     [host] = forge.hosts
     assert (host.host, host.git, host.api_prefixes) == ("gitlab.com", True, ("/api/",))
-    assert (forge.dialect, forge.git_username) == ("gitlab", "oauth2")
+    assert forge.git_username == "oauth2"
+    assert forge.dialect.api_repo("/api/v4/projects/g%2Fsub%2Fp/merge_requests") == "g/sub/p"
+    assert forge.dialect.api_repo("/api/v4/projects/42") == "42"
+    assert forge.dialect.is_graphql("/api/graphql")
     assert provider.forge_policy is ALLOW_ALL
+
+
+def test_gitlab_host_setting(monkeypatch):
+    from scooter_broker_lib.forge import find_forge_hosts
+
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat-xxx")
+    monkeypatch.setenv("GITLAB_HOST", "gitlab.example.com")
+    [host] = find_forge_hosts(gitlab()).hosts
+    assert host.host == "gitlab.example.com"

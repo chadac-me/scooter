@@ -31,7 +31,6 @@ from scooter_broker_lib.forge import (
     classify,
     denial_message,
     enforce,
-    is_graphql_path,
     parse_graphql_body,
 )
 from scooter_broker_lib.types import Identity, Provider
@@ -240,7 +239,7 @@ class ForgeProxy:
                 if head.feed(chunk) is not None or head.failed or size > _PUSH_HEAD_LIMIT:
                     break
             ref_updates = head.updates
-        elif has_body and method == "POST" and c.kind == "api" and is_graphql_path(forge.dialect, path):
+        elif has_body and method == "POST" and c.kind == "api" and forge.dialect.is_graphql(path):
             size = 0
             async for chunk in io.body():
                 prefix.append(chunk)

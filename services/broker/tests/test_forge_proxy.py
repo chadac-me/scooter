@@ -17,6 +17,29 @@ from scooter_broker_lib.forge import Decision, ForgeHost, ForgeHosts
 from scooter_broker_lib.sources.static_token import StaticTokenSource
 from scooter_broker_lib.types import Identity, Provider
 
+
+class _GitHubish:
+    """Stand-in contrib dialect: `/repos/<o>/<r>` and `/graphql`."""
+
+    def api_repo(self, path):
+        p = path.strip("/").split("/")
+        return f"{p[1]}/{p[2]}" if len(p) >= 3 and p[0] == "repos" else None
+
+    def is_graphql(self, path):
+        return path == "/graphql"
+
+
+class _GitLabish:
+    """Stand-in contrib dialect: `/api/v4/projects/<id>`."""
+
+    def api_repo(self, path):
+        from urllib.parse import unquote
+        p = path.strip("/").split("/")
+        return unquote(p[3]) if len(p) >= 4 and p[:3] == ["api", "v4", "projects"] else None
+
+    def is_graphql(self, path):
+        return path == "/api/graphql"
+
 HOSTS = ["api.github.com", "github.com", "gitlab.com"]
 IDENT = Identity(conversation_id="conv-1", namespace="ns", service_account="system:serviceaccount:ns:sandbox-conv-1")
 A, B = "a" * 40, "b" * 40
@@ -90,7 +113,7 @@ def world(ca, monkeypatch):
         credential=StaticTokenSource(token="ghs_real"),
         transports=[ForgeHosts(
             hosts=[ForgeHost("github.com", git=True), ForgeHost("api.github.com", api_prefixes=("/",))],
-            dialect="github",
+            dialect=_GitHubish(),
             graphql_link_rules={"createPullRequest": lambda d: Link("github", "pr", d["pullRequest"]["url"])},
         )],
         forge_policy=gh_policy,
@@ -100,7 +123,7 @@ def world(ca, monkeypatch):
         credential=StaticTokenSource(token="glpat-real", kind="header", header_name="PRIVATE-TOKEN"),
         transports=[ForgeHosts(
             hosts=[ForgeHost("gitlab.com", git=True, api_prefixes=("/api/",))],
-            dialect="gitlab", git_username="oauth2",
+            dialect=_GitLabish(), git_username="oauth2",
             link_rules=[rule("POST", r"^api/v4/projects/[^/]+/merge_requests/?$",
                              lambda r: Link("gitlab", "mr", r["web_url"]))],
         )],
