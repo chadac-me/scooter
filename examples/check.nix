@@ -510,6 +510,23 @@ let
         else [ "router.env.WEBHOOKS_SERVICE_ACCOUNT omits the scheduler SA (scheduled-task owners are dropped)" ])
     ++ (if routerEnvVal "WEBHOOKS_TOKEN_AUDIENCE" != "" then [ ]
         else [ "router.env.WEBHOOKS_TOKEN_AUDIENCE (TokenReview rejects the caller's projected token)" ])
+    # Owner-asserting callers' tokens must pass both owner checks.
+    ++ builtins.concatMap (dep:
+        let
+          vols = res.deployments.${dep}.spec.template.spec.volumes or [ ];
+          auds = builtins.concatMap (v: map (s: s.serviceAccountToken.audience or "") (v.projected.sources or [ ]))
+            (builtins.filter (v: v.name == "agent-host-token") vols);
+          hostEnv = builtins.concatMap (c: c.env or [ ])
+            (builtins.attrValues (res.deployments.agent-host.spec.template.spec.containers or { }));
+          hostAuds = nixpkgsLib.splitString "," (let m = builtins.filter (e: e.name == "WEBHOOKS_TOKEN_AUDIENCE") hostEnv;
+            in if m == [ ] then "agent-host" else (builtins.head m).value);
+          routerAuds = [ (routerEnvVal "WEBHOOKS_TOKEN_AUDIENCE") (routerEnvVal "ROUTER_TOKEN_AUDIENCE") ];
+        in if !(res.deployments ? ${dep}) then [ ]
+           else if auds == [ ] then [ "${dep}: no agent-host-token volume (owners are dropped)" ]
+           else builtins.concatMap (a:
+             nixpkgsLib.optional (!(builtins.elem a hostAuds)) "${dep}: token audience ${a} not accepted by agent-host WEBHOOKS_TOKEN_AUDIENCE"
+             ++ nixpkgsLib.optional (!(builtins.elem a routerAuds)) "${dep}: token audience ${a} not accepted by the router's owner check") auds)
+      [ "agent-webhooks" "agent-scheduler" ]
     # The gateway must admit the broker's router calls.
     ++ (if builtins.match ".*:agent-broker" (routerEnvVal "ROUTER_SERVICE_ACCOUNTS") != null then [ ]
         else [ "router.env.ROUTER_SERVICE_ACCOUNTS omits the broker SA (its /links calls look unauthenticated)" ])
