@@ -86,7 +86,6 @@
   # container restart.
   services.scooterJournalPersist.enable = true;
 
-  # Broker tools, the brokered git credential helper and HOME on the workspace
-  # for exec'd commands.
+  # Broker tools, and cleanup of the legacy git credential helper.
   programs.scooterCarryOver.enable = true;
 }

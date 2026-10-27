@@ -66,7 +66,7 @@
 
     broker = {
       enable = true;
-      testProvider = true; # whoami + test git-credential transports
+      testProvider = true; # the whoami test transport
 
       # The agent-facing MCP endpoint, on by default and stated here because the
       # coverage check requires the example to exercise every option namespace.

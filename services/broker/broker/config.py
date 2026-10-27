@@ -79,9 +79,7 @@ class BrokerSettings(ScooterBaseSettings):
     shares_frame_ancestors: str = "'self'"
 
     # --- The forge egress proxy (broker/forge/) --------------------------------
-    # Sandboxes reach git/gh/glab hosts through this CONNECT proxy, which injects the
-    # provider credential; while on, /{provider}/git-credentials is not served.
-    forge_proxy_enabled: bool = False
+    # Sandboxes reach git/gh/glab hosts through this CONNECT proxy, which injects the provider credential.
     forge_proxy_port: int = 3128
 
     port: int = 8080

@@ -1,9 +1,8 @@
 # The sandbox half of the broker's forge proxy (scooter.broker.forgeProxy): the
 # local shim HTTPS_PROXY points at, and trust in the forge CA.
 #
-# Both are inert unless the pod mounts the broker's `scooter-forge-ca` ConfigMap
-# at /etc/scooter/forge-ca and sets FORGE_PROXY_ADDR, so one image serves
-# deployments with the proxy on and off.
+# Both are inert until the pod mounts the broker's `scooter-forge-ca` ConfigMap at
+# /etc/scooter/forge-ca and sets FORGE_PROXY_ADDR (modules/broker.nix does both).
 
 { config, lib, pkgs, ... }:
 

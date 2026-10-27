@@ -809,12 +809,6 @@ export function sandboxManifest(
                 // The image has no /etc/passwd, so pin HOME to the writable workspace so git config
                 // and the agent's git commands agree.
                 { name: "HOME", value: "/workspace" },
-                // git host -> broker provider map for git-credential-broker; test-git.local lets
-                // the cluster e2e exercise the path via the gated-off test provider.
-                {
-                  name: "GIT_BROKER_HOST_MAP",
-                  value: "github.com=github,gitlab.com=gitlab,test-git.local=test",
-                },
                 // Deployment-supplied env, including the CONVERSATION_ID the caller injects.
                 ...extraEnv,
               ],

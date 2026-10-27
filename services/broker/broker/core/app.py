@@ -76,16 +76,14 @@ def create_app() -> FastAPI:
             for p in providers:
                 if p.on_startup is not None:
                     await p.on_startup()
-            forge_proxy = None
-            if settings.forge_proxy_enabled:
-                from ..forge import start_forge_proxy
+            from ..forge import start_forge_proxy
 
-                forge_proxy = await start_forge_proxy(
-                    providers,
-                    port=settings.forge_proxy_port,
-                    namespace=settings.sandbox_namespace,
-                    agent_host_url=settings.agent_host_url,
-                )
+            forge_proxy = await start_forge_proxy(
+                providers,
+                port=settings.forge_proxy_port,
+                namespace=settings.sandbox_namespace,
+                agent_host_url=settings.agent_host_url,
+            )
             yield
             if forge_proxy is not None:
                 await forge_proxy.close()
@@ -143,9 +141,6 @@ def create_app() -> FastAPI:
 
     for provider in providers:
         for transport in provider.transports:
-            # The forge proxy replaces handing the raw token to the sandbox, so the two never coexist.
-            if settings.forge_proxy_enabled and transport.name == "git-credential":
-                continue
             app.include_router(
                 transport.routes(provider, authed=authenticate),
                 prefix=f"/{provider.name}",

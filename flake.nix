@@ -176,7 +176,7 @@
 
           # Shared-DB migration Job image
 
-          # Broker tools (agent-broker / git-credential-broker), prebuilt
+          # Broker tools (agent-broker), prebuilt
           brokerTools = pkgs.callPackage ./pkgs/broker-tools { };
 
           # stubs.nix's arguments beyond `pkgs`, also vendored for the in-pod re-converge.
@@ -559,7 +559,7 @@
             # nix build .#sandbox-os-image -> the NixOS systemd-PID-1 dev sandbox image.
             sandbox-os-image = builtImages.agent-sandbox-os.package;
 
-            # The broker tools (agent-broker / git-credential-broker)
+            # The broker tools (agent-broker)
             broker-tools = brokerTools.agent-broker;
 
             # nix build .#forge-shim  ->  the sandbox's local forge proxy shim (runs go test)

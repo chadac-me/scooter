@@ -74,7 +74,7 @@ catch-all.
 | Transport | What it mounts |
 |---|---|
 | `HttpProxy(upstream=…)` | `/<name>/<path>`, forwarded to `upstream/<path>` with the credential |
-| `GitCredential(host=…)` | A git credential helper, so `git clone https://<host>/…` works in the sandbox |
+| `ForgeHosts(hosts=…)` | Nothing under the prefix: registers hosts with the forge proxy, so `git`/`gh`/`glab` against them are authenticated in the sandbox |
 | `McpTools(server=…, upstream=…)` | Typed agent tools ([Agent tools](tools.md)) |
 | Your own `Transport` | Any FastAPI router: implement `routes(provider, authed) -> APIRouter` |
 

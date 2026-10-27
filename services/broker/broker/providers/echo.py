@@ -13,14 +13,7 @@ from ..config import settings
 from scooter_broker_lib.registry import register_provider
 from scooter_broker_lib.types import Identity, Provider
 from scooter_broker_lib.sources.static_token import StaticTokenSource
-from scooter_broker_lib.transports.git_credential import GitCredential
 from scooter_broker_lib.transports.whoami import WhoAmI
-
-# A deterministic fake git credential, for a sentinel host that GIT_BROKER_HOST_MAP in the
-# sandbox maps to the `test` provider.
-TEST_GIT_HOST = "test-git.local"
-TEST_GIT_USERNAME = "test-user"
-TEST_GIT_PASSWORD = "test-broker-token"  # noqa: S105
 
 
 @dataclass
@@ -39,13 +32,12 @@ recorder = CallRecorder()
 
 @register_provider
 def echo() -> Provider:
-    """The test provider, carrying a `whoami` transport and a `git-credential` transport that vends a fixed fake credential for TEST_GIT_HOST."""
+    """The test provider, carrying a `whoami` transport."""
     return Provider(
         name="test",
         transports=[
             WhoAmI(recorder=recorder),
-            GitCredential(host=TEST_GIT_HOST, username=TEST_GIT_USERNAME),
         ],
-        credential=StaticTokenSource(token=TEST_GIT_PASSWORD),
+        credential=StaticTokenSource(token="test-broker-token"),  # noqa: S106
         enabled=settings.test_provider_enabled,
     )

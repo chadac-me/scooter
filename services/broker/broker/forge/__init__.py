@@ -35,7 +35,7 @@ async def start_forge_proxy(providers: list[Provider], *, port: int, namespace: 
 
     routes = build_routes([p for p in providers if p.enabled])
     if not routes:
-        logger.warning("forge proxy enabled but no enabled provider declares forge hosts")
+        logger.info("forge proxy not started: no enabled provider declares forge hosts")
         return None
     try:
         config.load_incluster_config()
