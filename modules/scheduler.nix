@@ -251,7 +251,8 @@ in
                   { name = "DB_USER"; value = "scheduler"; }
                   { name = "DB_NAME"; value = "scheduler"; }
                   { name = "DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-scheduler"; key = "password"; }; }
-                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; };
+                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; }
+                ++ cfg.contribDbEnv.scheduler;
                 volumeMounts = [
                   { name = "data"; mountPath = "/data"; }
                   # Projected SA token (audience agent-host) for /agui owner trust.

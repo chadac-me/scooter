@@ -1667,7 +1667,8 @@ in
                   { name = "AGENT_HOST_DB_NAME"; value = "agent_host"; }
                   { name = "AGENT_HOST_DB_USER"; value = "agent_host"; }
                   { name = "AGENT_HOST_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-agent-host"; key = "password"; }; }
-                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; });
+                ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; })
+                ++ cfg.contribDbEnv."agent-host";
                 volumeMounts = [
                   # Per-pod hot history cache.
                   { name = "state"; mountPath = "/var/lib/agent-host"; }

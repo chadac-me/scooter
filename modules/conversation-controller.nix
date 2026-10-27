@@ -338,7 +338,8 @@ in
                   { name = "AGENT_HOST_DB_USER"; value = "conversation_controller"; }
                   { name = "AGENT_HOST_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-conversation-controller"; key = "password"; }; }
                 ]
-                ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; };
+                ++ lib.optional (cfg.postgres.sslmode != null) { name = "AGENT_HOST_DB_SSLMODE"; value = cfg.postgres.sslmode; }
+                ++ cfg.contribDbEnv.conversation-controller;
                 ports = [{ name = "metrics"; containerPort = ccfg.metricsPort; }];
                 # requests == limits so the leader is never an eviction candidate.
                 resources = lib.mkDefault {
@@ -435,6 +436,7 @@ in
                   { name = "WEBHOOKS_DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-conversation-router"; key = "password"; }; }
                 ]
                 ++ lib.optional (cfg.webhooks.enable && cfg.postgres.sslmode != null) { name = "WEBHOOKS_DB_SSLMODE"; value = cfg.postgres.sslmode; }
+                ++ cfg.contribDbEnv.conversation-router
                 # The router must read identity exactly as the agent-host does.
                 ++ lib.optional (cfg.auth.mode != "header")
                   { name = "AUTH_MODE"; value = cfg.auth.mode; }

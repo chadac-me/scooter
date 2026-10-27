@@ -277,7 +277,7 @@ in
                   { name = "DB_USER"; value = "webhooks"; }
                   { name = "DB_PASSWORD"; valueFrom.secretKeyRef = { name = "agent-pg-webhooks"; key = "password"; }; }
                 ] ++ lib.optional (cfg.postgres.sslmode != null) { name = "DB_SSLMODE"; value = cfg.postgres.sslmode; }
-                  ++ wcfg.extraEnv;
+                  ++ cfg.contribDbEnv.webhooks ++ wcfg.extraEnv;
                 # Provider signing secrets come from a Secret whose keys match the
                 # env var names.
                 envFrom = lib.optionals (wcfg.secretName != "") [

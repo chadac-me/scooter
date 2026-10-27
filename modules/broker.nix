@@ -338,7 +338,7 @@ in
                 ]
                 # k8s silently keeps the last of a duplicated env name, so
                 # examples/check.nix asserts this container has none.
-                ++ bcfg.extraEnv;
+                ++ cfg.contribDbEnv.broker ++ bcfg.extraEnv;
                 volumeMounts = [
                   { name = "scooter-router-token"; mountPath = "/var/run/secrets/scooter-router"; readOnly = true; }
                 ] ++ bcfg.extraVolumeMounts;
