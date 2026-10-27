@@ -262,12 +262,13 @@ let
   allNamespaces = builtins.attrNames (platform.options.scooter or { });
   exampleText = builtins.readFile ./kubenix-config.nix;
   # Exempt: on-by-default or implicitly provisioned services, a one-shot upgrade
-  # path, deployment-specific image/identity/runtime knobs, readOnly derived options
+  # path, deployment-specific image/identity/runtime knobs (incl. the cluster-dependent
+  # sandboxUserNamespace, which needs Kubernetes >= 1.33), readOnly derived options
   # (defaultSandboxSizeName, dbSpec), and the contrib seams (db, sandboxPod,
   # approvals) that the seam checks below cover more strongly.
   coverageExempt = [
     "conversationController" "postgres" "legacyStateMigration"
-    "sandboxRuntimeClass" "serviceAccountRoleArn"
+    "sandboxRuntimeClass" "sandboxUserNamespace" "serviceAccountRoleArn"
     "agentHostImage" "sandboxImage" "uiImage" "defaultSandboxSizeName"
     "db" "dbSpec" "sandboxPod" "approvals"
     # declared per-service module; a deployer overrides a ref, not the tree

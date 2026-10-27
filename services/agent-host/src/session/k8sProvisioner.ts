@@ -147,6 +147,9 @@ export interface K8sProvisionerOptions {
   reconcileRetryDelaysMs?: number[];
   /** Pod poll interval for restart (default 1.5s). */
   podPollMs?: number;
+  /** Run the systemd sandbox in its own user namespace (hostUsers: false) with an unmasked /proc, so
+   *  its root and SYS_ADMIN map to an unprivileged host uid and Nix's build sandbox can run. */
+  sandboxUserNamespace?: boolean;
   kubeConfig?: KubeConfig;
 }
 
@@ -455,6 +458,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         overlayStorage: opts.overlayStorage,
         pullPolicy: opts.sandboxPullPolicy,
         sandboxRuntimeClass: opts.sandboxRuntimeClass,
+        userNamespace: opts.sandboxUserNamespace ?? false,
         resources,
         overlay: await loadManifestOverlay(),
       },
@@ -720,6 +724,8 @@ export function sandboxManifest(
     /** RuntimeClass for the systemd sandbox pod (e.g. "crun"), a cgroup-delegating runtime so
      *  systemd PID 1 gets a writable cgroup subtree without `privileged`. */
     sandboxRuntimeClass?: string;
+    /** hostUsers: false + procMount: Unmasked on the systemd sandbox; ignored for the generic image. */
+    userNamespace?: boolean;
     /** The already-rendered k8s resources block, with arbitrary keys per side because a GPU renders
      *  under its extended-resource name. */
     resources?: {
@@ -740,6 +746,7 @@ export function sandboxManifest(
   // The overlay store's writable upper: a disk-backed PVC at /nix/.scooter-rw.
   const overlayStore = deploy.overlayStore ?? false;
   const overlayStorage = deploy.overlayStorage ?? "20Gi";
+  const userNamespace = systemdImage && (deploy.userNamespace ?? false);
   const base = {
     apiVersion: `${GROUP}/${VERSION}`,
     kind: "Sandbox",
@@ -756,6 +763,8 @@ export function sandboxManifest(
           ...(systemdImage && deploy.sandboxRuntimeClass
             ? { runtimeClassName: deploy.sandboxRuntimeClass }
             : {}),
+          // Pod root and its SYS_ADMIN apply only inside the pod's user namespace, never on the host.
+          ...(userNamespace ? { hostUsers: false } : {}),
           containers: [
             {
               name: "sandbox",
@@ -770,7 +779,14 @@ export function sandboxManifest(
               // calls in NixOS stage-2 activation; under crun the cap does not re-introduce the
               // host cgroup namespace.
               ...(systemdImage
-                ? { securityContext: { capabilities: { add: ["SYS_ADMIN"] } } }
+                ? {
+                  securityContext: {
+                    capabilities: { add: ["SYS_ADMIN"] },
+                    // Unmasked only under a user namespace (the apiserver rejects it otherwise); a
+                    // masked /proc is what stops a nested build sandbox mounting its own.
+                    ...(userNamespace ? { procMount: "Unmasked" } : {}),
+                  },
+                }
                 : {}),
               volumeMounts: [
                 { name: "workspace", mountPath: "/workspace" },

@@ -370,6 +370,25 @@ in
         cluster (`kubectl get runtimeclass`).
       '';
     };
+    sandboxUserNamespace = mkOption {
+      type = types.bool;
+      default = config.scooter.sandboxRuntimeClass != null;
+      defaultText = literalExpression "config.scooter.sandboxRuntimeClass != null";
+      description = ''
+        Run each sandbox pod, and the warm-store seed Job, in its own Kubernetes user
+        namespace (`hostUsers: false`) with an unmasked /proc (`procMount: Unmasked`).
+        The sandbox's root and its CAP_SYS_ADMIN then map to an unprivileged host uid,
+        so systemd in the pod cannot act on the host, and the image turns on Nix's
+        build sandbox (see `devEnvNix.autoBuildSandbox`). Needs Kubernetes >= 1.33,
+        a runtime with user-namespace support (containerd >= 2.0 or CRI-O, with
+        runc >= 1.2 or crun >= 1.9), and volumes on a filesystem that supports
+        idmapped mounts (ext4, xfs, btrfs, tmpfs, overlayfs). On by default when
+        `sandboxRuntimeClass` is set, since systemd needs that runtime class to delegate
+        a writable cgroup to the user-namespaced pod. crun is one such runtime; any
+        runtime class that does this works. Plain runc (no runtime class) does not, so
+        leave this off without one.
+      '';
+    };
     sandboxSizes = mkOption {
       type = types.attrsOf (types.submodule {
         options = {
@@ -1434,6 +1453,8 @@ in
                   # run non-privileged in a private cgroup namespace; unset means the
                   # cluster default.
                   { name = "SANDBOX_RUNTIME_CLASS"; value = cfg.sandboxRuntimeClass; }
+                ++ lib.optional cfg.sandboxUserNamespace
+                  { name = "SANDBOX_USER_NAMESPACE"; value = "1"; }
                 ++ lib.optional (cfg.retentionMaxAgeMs > 0)
                   # Auto-delete unstarred conversations inactive past the window (absent
                   # unless a deployment opts in).

@@ -33,6 +33,7 @@ class Config:
     overlay_storage: str = "20Gi"
     pool_storage_class: str = ""
     runtime_class: str = ""
+    user_namespace: bool = False
     reconcile_interval: float = 10.0
     lease_seconds: int = 30
     lease_name: str = "warm-store-controller-leader"
@@ -56,6 +57,7 @@ class Config:
             overlay_storage=os.environ.get("WARM_STORE_STORAGE", "20Gi"),
             pool_storage_class=os.environ.get("WARM_STORE_STORAGE_CLASS", ""),
             runtime_class=os.environ.get("SANDBOX_RUNTIME_CLASS", ""),
+            user_namespace=os.environ.get("SANDBOX_USER_NAMESPACE", "") == "1",
             reconcile_interval=float(os.environ.get("RECONCILE_INTERVAL_SECONDS", "10")),
             lease_seconds=int(os.environ.get("LEASE_DURATION_SECONDS", "30")),
             lease_name=os.environ.get("LEASE_NAME", "warm-store-controller-leader"),

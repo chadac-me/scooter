@@ -11,6 +11,7 @@ import { sandboxManifest } from "../../src/session/k8sProvisioner.js";
 
 type SecCtx = {
   privileged?: boolean;
+  procMount?: string;
   capabilities?: { add?: string[]; drop?: string[] };
 };
 type Manifest = {
@@ -18,6 +19,7 @@ type Manifest = {
     podTemplate: {
       spec: {
         runtimeClassName?: string;
+        hostUsers?: boolean;
         containers: Array<{ securityContext?: SecCtx }>;
       };
     };
@@ -56,5 +58,28 @@ describe("sandboxManifest cgroup isolation", () => {
     expect(ctxOf(m)?.privileged).not.toBe(true);
     expect(ctxOf(m)?.capabilities?.add ?? []).not.toContain("SYS_ADMIN");
     expect(podSpec(m).runtimeClassName).toBeUndefined();
+  });
+});
+
+describe("sandboxManifest user namespace (sandboxUserNamespace)", () => {
+  it("runs the systemd sandbox with hostUsers: false and an unmasked /proc, keeping SYS_ADMIN", () => {
+    const m = render(true, { sandboxRuntimeClass: "crun", userNamespace: true });
+    expect(podSpec(m).hostUsers).toBe(false);
+    expect(ctxOf(m)?.procMount).toBe("Unmasked");
+    expect(ctxOf(m)?.capabilities?.add ?? []).toContain("SYS_ADMIN");
+    expect(ctxOf(m)?.privileged).not.toBe(true);
+    expect(podSpec(m).runtimeClassName).toBe("crun");
+  });
+
+  it("leaves hostUsers and procMount unset when off (the apiserver rejects Unmasked on host users)", () => {
+    const m = render(true, { sandboxRuntimeClass: "crun" });
+    expect(podSpec(m).hostUsers).toBeUndefined();
+    expect(ctxOf(m)?.procMount).toBeUndefined();
+  });
+
+  it("ignores the flag for the generic (non-systemd) image", () => {
+    const m = render(false, { userNamespace: true });
+    expect(podSpec(m).hostUsers).toBeUndefined();
+    expect(ctxOf(m)?.procMount).toBeUndefined();
   });
 });
