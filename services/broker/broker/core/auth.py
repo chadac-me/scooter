@@ -4,18 +4,16 @@ SA username `system:serviceaccount:{ns}:sandbox-{conversationId}` into an Identi
 from __future__ import annotations
 
 import logging
-import re
 
 from fastapi import HTTPException, Request
 from kubernetes import client, config
+from scooter_lib.svcauth import Review, Verifier, bearer_token, parse_allowlist, sandbox_id
 
 from scooter_broker_lib.types import Identity
 from ..config import settings
 from .conv_token import CONV_TOKEN_HEADER, ConvTokenError, verify_conv_token
 
 logger = logging.getLogger(__name__)
-
-_SA_PATTERN = re.compile(r"^system:serviceaccount:([^:]+):sandbox-(.+)$")
 
 _authn_api: client.AuthenticationV1Api | None = None
 
@@ -31,38 +29,50 @@ def _api() -> client.AuthenticationV1Api:
     return _authn_api
 
 
+async def _kube_review(token: str) -> Review:
+    review = client.V1TokenReview(
+        spec=client.V1TokenReviewSpec(token=token, audiences=[settings.token_audience])
+    )
+    status = _api().create_token_review(review).status
+    if not status or not status.authenticated:
+        return Review(ok=False)
+    return Review(ok=True, username=status.user.username if status.user else "")
+
+
+_verifier = Verifier(_kube_review)
+
+
 def _bearer(request: Request) -> str:
-    header = request.headers.get("authorization", "")
-    if not header.lower().startswith("bearer "):
+    token = bearer_token(request.headers)
+    if not token:
         raise HTTPException(status_code=401, detail="missing bearer token")
-    return header[len("bearer "):].strip()
+    return token
 
 
 async def _review(token: str) -> str:
     """Validate a projected SA token via TokenReview, pinned to the broker audience, and return its SA username."""
-    review = client.V1TokenReview(
-        spec=client.V1TokenReviewSpec(
-            token=token,
-            audiences=[settings.token_audience],
-        )
-    )
     try:
-        result = _api().create_token_review(review)
+        verdict = await _verifier.verify(token)
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=502, detail="token review failed") from exc
-
-    status = result.status
-    if not status or not status.authenticated:
+    if not verdict.ok:
         raise HTTPException(status_code=401, detail="token not authenticated")
+    return verdict.username
 
-    return status.user.username if status.user else ""
+
+def _sandbox_conversation(username: str) -> str:
+    """The conversation a sandbox SA is bound to; 403 for anything else."""
+    conversation_id = sandbox_id(username, settings.sandbox_namespace)
+    if not conversation_id:
+        raise HTTPException(status_code=403, detail=f"not a sandbox SA in this namespace: {username}")
+    return conversation_id
 
 
 RELAYED_USER_HEADER = "x-scooter-user"
 
 
-def _csv(raw: str) -> set[str]:
-    return {s.strip() for s in raw.split(",") if s.strip()}
+def _csv(raw: str) -> frozenset[str]:
+    return parse_allowlist(raw)
 
 
 def _relayed_user(request: Request, username: str) -> str | None:
@@ -98,17 +108,10 @@ async def authenticate(request: Request) -> Identity:
         return Identity(conversation_id="", namespace=settings.sandbox_namespace,
                         service_account=username, relayed_user=relayed_user)
 
-    m = _SA_PATTERN.match(username or "")
-    if not m:
-        raise HTTPException(status_code=403, detail=f"not a sandbox SA: {username}")
-
-    namespace, conversation_id = m.group(1), m.group(2)
-    if namespace != settings.sandbox_namespace:
-        raise HTTPException(status_code=403, detail="wrong namespace")
-
+    conversation_id = _sandbox_conversation(username)
     return Identity(
         conversation_id=conversation_id,
-        namespace=namespace,
+        namespace=settings.sandbox_namespace,
         service_account=username,
     )
 
@@ -164,12 +167,9 @@ async def authenticate_mcp(request: Request) -> Identity:
         )
 
     # The sandbox itself: the SA name is the binding.
-    m = _SA_PATTERN.match(username or "")
-    if not m:
+    conversation_id = sandbox_id(username, settings.sandbox_namespace)
+    if not conversation_id:
         raise HTTPException(status_code=403, detail=f"not permitted on the MCP endpoint: {username}")
-    namespace, conversation_id = m.group(1), m.group(2)
-    if namespace != settings.sandbox_namespace:
-        raise HTTPException(status_code=403, detail="wrong namespace")
 
     # A conversation token naming a different conversation than the SA is refused.
     conv_token = request.headers.get(CONV_TOKEN_HEADER, "").strip()
@@ -186,7 +186,7 @@ async def authenticate_mcp(request: Request) -> Identity:
 
     return Identity(
         conversation_id=conversation_id,
-        namespace=namespace,
+        namespace=settings.sandbox_namespace,
         service_account=username,
     )
 
@@ -195,27 +195,11 @@ async def authenticate_mcp(request: Request) -> Identity:
 # The forge proxy: a sandbox SA token presented as Proxy-Authorization on CONNECT
 # ---------------------------------------------------------------------------
 
-# git opens several connections per operation, so a validated token is reused briefly.
-_SANDBOX_TOKEN_TTL = 60.0
-_sandbox_tokens: dict[str, tuple[Identity, float]] = {}
-
 
 async def sandbox_identity(token: str) -> Identity:
     """Validate a sandbox's SA token outside a FastAPI request; only sandboxes (not approvers) are admitted."""
-    import hashlib
-    import time
-
-    key = hashlib.sha256(token.encode()).hexdigest()
-    now = time.monotonic()
-    cached = _sandbox_tokens.get(key)
-    if cached and cached[1] > now:
-        return cached[0]
     username = await _review(token)
-    m = _SA_PATTERN.match(username or "")
-    if not m or m.group(1) != settings.sandbox_namespace:
+    conversation_id = sandbox_id(username, settings.sandbox_namespace)
+    if not conversation_id:
         raise HTTPException(status_code=403, detail="the forge proxy serves sandboxes only")
-    identity = Identity(conversation_id=m.group(2), namespace=m.group(1), service_account=username)
-    if len(_sandbox_tokens) > 10_000:
-        _sandbox_tokens.clear()
-    _sandbox_tokens[key] = (identity, now + _SANDBOX_TOKEN_TTL)
-    return identity
+    return Identity(conversation_id=conversation_id, namespace=settings.sandbox_namespace, service_account=username)
