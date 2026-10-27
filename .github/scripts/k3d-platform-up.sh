@@ -207,12 +207,13 @@ nix shell nixpkgs#kubectl -c bash -c "
     --dry-run=client -o yaml | kubectl apply -f -
   # Postgres accepts TCP before it is usable (roles from agent-postgres-init,
   # schema from agent-db-migrate), so wait on both Jobs, selected by label since
-  # their names carry a spec hash.
+  # their names carry a spec hash. The init Job's reader grants wait on the
+  # migrated tables, so it completes after agent-db-migrate.
   kubectl -n agent-sandbox rollout status deployment/agent-shared-db --timeout=180s
   kubectl -n agent-sandbox wait --for=condition=complete job \
-    -l app.kubernetes.io/name=agent-postgres-init --timeout=180s
+    -l app.kubernetes.io/name=agent-db-migrate --timeout=300s
   kubectl -n agent-sandbox wait --for=condition=complete job \
-    -l app.kubernetes.io/name=agent-db-migrate --timeout=180s
+    -l app.kubernetes.io/name=agent-postgres-init --timeout=120s
   # podCap=1 lands each conversation on a different pod so per-pod-view bugs are
   # visible; AGENT_HOST_MIN_REPLICAS because the controller is the autoscaler and
   # would otherwise scale the fleet back down before the tests create anything.

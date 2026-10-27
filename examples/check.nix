@@ -680,6 +680,15 @@ let
   initScript = let c = res.jobs.agent-postgres-init.spec.template.spec.containers.sql.command; in
     builtins.elemAt c (builtins.length c - 1);
   hasWord = w: s: builtins.elem w (builtins.filter builtins.isString (builtins.split "[ \n]+" s));
+  # Every reader table grant waits for agent-db-migrate's table first, since the
+  # two Jobs run concurrently and a crash-looping init stalls behind kubelet backoff.
+  initLines = nixpkgsLib.splitString "\n" initScript;
+  initGrantIdx = builtins.filter (i: builtins.match ".*ON TABLE public[.].*" (builtins.elemAt initLines i) != null)
+    (nixpkgsLib.range 1 (builtins.length initLines - 1));
+  initGrantProblems =
+    (if initGrantIdx != [ ] then [ ] else [ "agent-postgres-init grants on no reader table — the wait_table check below is vacuous" ])
+    ++ map (i: "agent-postgres-init grants before waiting for the table: ${nixpkgsLib.trim (builtins.elemAt initLines i)}")
+      (builtins.filter (i: builtins.match ''[[:space:]]*wait_table .*'' (builtins.elemAt initLines (i - 1)) == null) initGrantIdx);
   contribDbProblems =
     (if hasWord "contrib_aws:broker" (toString (contribEnvValue migrateEnv "DB_ENVS")) then [ ]
      else [ "migrate.env.DB_ENVS lacks contrib_aws:broker — aws's own database is never migrated, or not as the broker's role" ])
@@ -1018,7 +1027,7 @@ let
     ++ (if bodyAnn overrideRes == "1g" then [ ]
         else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
 
-  allProblems = uploadsProblems ++ sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = uploadsProblems ++ sysTaskProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

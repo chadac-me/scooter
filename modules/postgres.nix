@@ -74,6 +74,20 @@ let
       if pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" >/dev/null 2>&1; then break; fi
       sleep 2
     done
+  '' + lib.optionalString (readers != { }) ''
+    # Reader tables come from agent-db-migrate, which runs alongside this Job, so
+    # wait for each in-process rather than crash-looping through kubelet backoff.
+    wait_table() {
+      n=0
+      until [ "$(psql -d "$1" -tAc "SELECT to_regclass('public.\"$2\"') IS NOT NULL" 2>/dev/null)" = "t" ]; do
+        n=$((n + 1))
+        if [ "$n" -ge 300 ]; then
+          echo "[$1] table $2 still missing after ~10m (has agent-db-migrate run?), giving up" >&2
+          exit 1
+        fi
+        sleep 2
+      done
+    }
   '' + lib.concatMapStrings (name:
     let c = consumers.${name}; in ''
     # ---- consumer ${name}: db=${c.db} user=${c.user} ----
@@ -120,9 +134,11 @@ let
     psql -v ON_ERROR_STOP=1 -c 'GRANT CONNECT ON DATABASE "${g.db}" TO "${r.user}"'
     psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT USAGE ON SCHEMA public TO "${r.user}"'
   '' + lib.concatMapStrings (t: ''
+    wait_table "${g.db}" "${t}"
     psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT SELECT ON TABLE public."${t}" TO "${r.user}"'
   '') g.tables + lib.concatMapStrings (t: ''
     # A writer of this table per owners.toml.
+    wait_table "${g.db}" "${t}"
     psql -v ON_ERROR_STOP=1 -d "${g.db}" -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public."${t}" TO "${r.user}"'
   '') g.writeTables + ''
     echo "[${name}] granted SELECT on ${g.db}.{${lib.concatStringsSep "," g.tables}}${lib.optionalString (g.writeTables != []) " + read-write on {${lib.concatStringsSep "," g.writeTables}}"} to ${r.user}"
