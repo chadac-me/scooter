@@ -31,6 +31,7 @@ function fakeKc(env: EnvVar[] | undefined, operatingMode = "Suspended") {
       return {};
     },
     listNamespacedPod: async () => ({ items: [] }),
+    deleteNamespacedPod: async () => ({}),
     readNamespacedPod: async () => {
       throw Object.assign(new Error("nf"), { code: 404 });
     },
@@ -74,11 +75,11 @@ describe("k8sProvisioner: resume reconciles the conversation env", () => {
     expect(modes(patches)).toEqual(["Running"]);
   });
 
-  it("cycles a running pod, since env only reaches a new one", async () => {
+  it("replaces a running pod without suspending, since env only reaches a new one", async () => {
     const { kc, patches } = fakeKc([...OTHER_ENV, { name: "CONVERSATION_ID", value: THREAD }], "Running");
     await provisioner(kc).resume(ref);
     expect(byName(patchedEnvs(patches)[0]).SCOOTER_SERVICES_ORIGIN).toBe(ORIGIN);
-    expect(modes(patches)).toEqual(["Suspended", "Running"]);
+    expect(modes(patches)).toEqual(["Running"]);
   });
 
   it("leaves an up-to-date sandbox alone, whatever order its env is in", async () => {

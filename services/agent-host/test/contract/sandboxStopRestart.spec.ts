@@ -5,6 +5,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createSessionManager, type SandboxProvisioner, type ConversationStore } from "../../src/session/manager.js";
 import type { AguiEvent, SessionBridge } from "../../src/bridge.js";
 import type { SandboxRef, SessionId } from "../../src/types.js";
+import { noopRegistry, type ConversationRegistry } from "../../src/session/conversationRegistry.js";
 
 const fakeProvisioner = () =>
   ({
@@ -61,7 +62,7 @@ function controllableBridges() {
 
 const settle = () => new Promise((r) => setTimeout(r, 20));
 
-function setup() {
+function setup(registry?: ConversationRegistry) {
   const provisioner = fakeProvisioner();
   const b = controllableBridges();
   const cycled: SandboxRef[] = [];
@@ -70,6 +71,8 @@ function setup() {
     store: inMemoryStore(),
     bridgeFactory: b.factory,
     onSandboxCycled: (ref) => cycled.push(ref),
+    conversationRegistry: registry,
+    selfPod: "agent-host-0",
   });
   return { provisioner, sessions, cycled, ...b };
 }
@@ -142,7 +145,7 @@ describe("SessionManager.restartSandbox", () => {
     bridges.get(conv.id)!.running = true;
     const r = await sessions.restartSandbox!(conv.id);
     expect(r).toMatchObject({ fromImage: "os:old", toImage: "os:new", ready: true });
-    expect(provisioner.restart).toHaveBeenCalledWith(conv.sandbox);
+    expect(provisioner.restart).toHaveBeenCalledWith(conv.sandbox, expect.anything());
     expect(bridges.get(conv.id)!.stop).not.toHaveBeenCalled();
     expect(cycled).toEqual([conv.sandbox]);
   });
@@ -162,5 +165,52 @@ describe("SessionManager.restartSandbox", () => {
     await sessions.suspend(conv.id);
     await sessions.restartSandbox!(conv.id);
     expect(sessions.get(conv.id)?.status).toBe("running");
+  });
+});
+
+describe("SessionManager.restartSandbox — the controller's view of the row", () => {
+  /** A registry recording every row write in order. */
+  const recordingRegistry = () => {
+    const writes: string[] = [];
+    const registry: ConversationRegistry = {
+      ...noopRegistry,
+      register: async (_id, spec) => void writes.push(`register:${spec.creatorPod ?? ""}`),
+      setPhase: async (_id, phase) => void writes.push(`phase:${phase}`),
+    };
+    return { registry, writes };
+  };
+
+  it("claims a suspended conversation's row as soon as its sandbox is Running, before the pod is ready", async () => {
+    const { registry, writes } = recordingRegistry();
+    const { provisioner, sessions } = setup(registry);
+    const conv = await sessions.start("t1", undefined, "alice");
+    await sessions.suspend(conv.id);
+    let atRunning: string[] = [];
+    provisioner.restart.mockImplementationOnce(async (_ref: SandboxRef, hooks?: { onRunning?: () => void }) => {
+      hooks?.onRunning?.();
+      await settle();
+      // The row is claimed before the sandbox reports Running.
+      atRunning = [...writes];
+      return { fromImage: "os:old", toImage: "os:new", imageCurrent: true, sizeApplied: false, ready: true };
+    });
+    writes.length = 0;
+    await sessions.restartSandbox!(conv.id);
+    expect(atRunning).toEqual(["register:agent-host-0", "phase:Assigned"]);
+    expect(sessions.get(conv.id)?.status).toBe("running");
+  });
+
+  it("leaves a running conversation's row alone", async () => {
+    const { registry, writes } = recordingRegistry();
+    const { provisioner, sessions } = setup(registry);
+    const conv = await sessions.start("t1", undefined, "alice");
+    provisioner.restart.mockImplementationOnce(async (_ref: SandboxRef, hooks?: { onRunning?: () => void }) => {
+      hooks?.onRunning?.();
+      return { fromImage: "os:old", toImage: "os:new", imageCurrent: true, sizeApplied: false, ready: true };
+    });
+    await settle();
+    writes.length = 0;
+    await sessions.restartSandbox!(conv.id);
+    await settle();
+    expect(writes).toEqual([]);
   });
 });

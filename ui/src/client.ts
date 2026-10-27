@@ -408,6 +408,8 @@ export interface PendingRestart {
   image?: { from: string; to: string };
   size?: boolean;
   env?: boolean;
+  /** Platform pod-template fields a restart would change. */
+  template?: string[];
 }
 
 /** Sandbox size and pending restart; nulls on failure. */

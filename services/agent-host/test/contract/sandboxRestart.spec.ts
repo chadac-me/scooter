@@ -12,14 +12,16 @@ interface ClusterState {
   /** The CR's recorded resources. */
   resources?: Resources;
   /** The live pod and its resources, if any. */
-  pod?: { resources?: Resources };
+  pod?: { resources?: Resources; uid?: string };
 }
 
-/** Fake apiserver: Suspended removes the pod, Running starts one. */
+/** Fake apiserver mimicking the agent-sandbox controller's pod lifecycle. */
 function fakeCluster(init: ClusterState, opts: { failImagePatches?: number; failCode?: number } = {}) {
   const state: ClusterState = structuredClone(init);
   const modes: string[] = [];
   let imagePatchAttempts = 0;
+  let deletes = 0;
+  let uid = 0;
   let failuresLeft = opts.failImagePatches ?? 0;
   const api = {
     getNamespacedCustomObject: async () => ({
@@ -46,7 +48,7 @@ function fakeCluster(init: ClusterState, opts: { failImagePatches?: number; fail
         modes.push(spec.operatingMode);
         state.mode = spec.operatingMode;
         if (state.mode === "Suspended") state.pod = undefined;
-        else state.pod ??= { resources: structuredClone(state.resources) };
+        else state.pod ??= { resources: structuredClone(state.resources), uid: `pod-${++uid}` };
       }
       return {};
     },
@@ -54,12 +56,18 @@ function fakeCluster(init: ClusterState, opts: { failImagePatches?: number; fail
       items: state.pod
         ? [
             {
+              metadata: { name: "conv-abc", uid: state.pod.uid ?? "pod-0" },
               spec: { containers: [{ name: "sandbox", resources: state.pod.resources }] },
               status: { phase: "Running", containerStatuses: [{ ready: true }] },
             },
           ]
         : [],
     }),
+    deleteNamespacedPod: async () => {
+      deletes++;
+      state.pod = state.mode === "Running" ? { resources: structuredClone(state.resources), uid: `pod-${++uid}` } : undefined;
+      return {};
+    },
     readNamespacedPod: async () => {
       throw Object.assign(new Error("nf"), { code: 404 });
     },
@@ -69,6 +77,7 @@ function fakeCluster(init: ClusterState, opts: { failImagePatches?: number; fail
     state,
     modes,
     imagePatchAttempts: () => imagePatchAttempts,
+    deletes: () => deletes,
   };
 }
 
@@ -121,7 +130,9 @@ describe("k8sProvisioner.restart", () => {
     const cluster = fakeCluster({ image: "sandbox-os:old", mode: "Running", resources: big, pod: { resources: small } });
     const r = await provisioner(cluster.kc).restart(ref);
     expect(r).toEqual({ fromImage: "sandbox-os:old", toImage: "sandbox-os:new", imageCurrent: true, sizeApplied: true, ready: true });
-    expect(cluster.modes[0]).toBe("Suspended");
+    // The CR never leaves Running.
+    expect(cluster.modes).not.toContain("Suspended");
+    expect(cluster.deletes()).toBe(1);
     expect(cluster.modes.at(-1)).toBe("Running");
     expect(cluster.state.pod?.resources).toEqual(big);
     expect(await provisioner(cluster.kc).pendingRestart(ref)).toBeUndefined();
@@ -131,7 +142,8 @@ describe("k8sProvisioner.restart", () => {
     const cluster = fakeCluster({ image: "sandbox-os:new", mode: "Running", resources: big, pod: { resources: small } });
     const r = await provisioner(cluster.kc).restart(ref);
     expect(r.sizeApplied).toBe(true);
-    expect(cluster.modes).toEqual(["Suspended", "Running"]);
+    expect(cluster.modes).toEqual(["Running"]);
+    expect(cluster.deletes()).toBe(1);
     expect(cluster.state.pod?.resources).toEqual(big);
   });
 });
