@@ -32,7 +32,7 @@ improvements and new features.
 To enter the dev shell:
 
 ```bash
-nix develop --no-sandbox  # or use direnv (already configured via .envrc)
+nix develop  # or use direnv (already configured via .envrc)
 ```
 
 Once in the shell, all test commands, builds, and playwright runs will work correctly. Running tests outside the dev shell will fail with missing dependencies or version mismatches.
