@@ -92,6 +92,11 @@ export class Conversation {
     return this.#id !== undefined;
   }
 
+  /** Whether a create is in flight: the server may be about to issue an id though `serverId()` is still undefined. */
+  get creating(): boolean {
+    return this.#creating !== undefined;
+  }
+
   snapshot(): ConversationSnapshot {
     return { key: this.key, id: this.#id, created: this.created };
   }

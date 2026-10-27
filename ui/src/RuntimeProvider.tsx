@@ -325,7 +325,7 @@ function ConversationRuntime({
       // assistant-ui's thread identity is the stable key, not a server address.
       threadId: conversationKey,
       onSwitchToNewThread: async () => {
-        sessionStore.newSession();
+        sessionStore.startFresh();
       },
       onSwitchToThread: async (threadId: string) => {
         // Selection only, since the component remounts on currentId and renders from the repository snapshot.
