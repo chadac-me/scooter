@@ -478,9 +478,40 @@ async def _handle_issue_event(payload: dict):
     )
 
 
+async def _handle_pr_closed(payload: dict):
+    """pull_request closed: tell the linked conversation it was merged or closed."""
+    pr = payload.get("pull_request", {})
+    number = pr.get("number")
+    repo_data = payload.get("repository", {})
+    owner = repo_data.get("owner", {}).get("login", "")
+    repo = repo_data.get("name", "")
+    sender = payload.get("sender", {}).get("login", "unknown")
+
+    if pr.get("merged"):
+        by = (pr.get("merged_by") or {}).get("login") or sender
+        base = pr.get("base", {}).get("ref", "")
+        sha = pr.get("merge_commit_sha") or ""
+        message = (
+            f"PR #{number} in {owner}/{repo} was MERGED by @{by}"
+            + (f" into `{base}`" if base else "")
+            + (f" ({sha[:12]})" if sha else "")
+            + ".\n\n---\n\nThe branch is done: do not push more commits to it. "
+            f"Follow-up work needs a new branch off the updated `{base or 'base'}`."
+        )
+    else:
+        message = (
+            f"PR #{number} in {owner}/{repo} was CLOSED WITHOUT MERGING by @{sender}.\n\n---\n\n"
+            f"Stop work on this PR unless asked otherwise. Check the thread for why it was closed."
+        )
+    await _forward_or_ignore(_resource_id(owner, repo, number), message)
+
+
 async def _handle_pr_event(payload: dict):
-    """Handle pull_request event (labeled)."""
+    """Handle pull_request event (labeled, closed)."""
     action = payload.get("action", "")
+    if action == "closed":
+        await _handle_pr_closed(payload)
+        return
     if action != "labeled":
         return
 

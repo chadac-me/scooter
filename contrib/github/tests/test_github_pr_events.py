@@ -150,3 +150,44 @@ class TestWorkflowRun:
     async def test_cancelled_is_not_actionable(self, forwarded):
         await gh._handle_workflow_run(self._run("cancelled"))
         assert not forwarded.called
+
+
+class TestPrClosed:
+    def _closed(self, merged, **pr):
+        return {
+            "action": "closed",
+            "pull_request": {
+                "number": 431, "merged": merged, "base": {"ref": "main"},
+                "merge_commit_sha": "abcdef1234567890" if merged else None,
+                "merged_by": {"login": "chadac"} if merged else None, **pr,
+            },
+            "sender": {"login": "chadac"},
+            "repository": _repo(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_MERGE_reaches_the_agent(self, forwarded):
+        await gh._handle_pr_event(self._closed(merged=True))
+        msg = forwarded.call_args[0][1]
+        assert "MERGED by @chadac" in msg and "`main`" in msg and "abcdef123456" in msg
+
+    @pytest.mark.asyncio
+    async def test_closed_WITHOUT_merging_is_told_apart_from_a_merge(self, forwarded):
+        await gh._handle_pr_event(self._closed(merged=False))
+        msg = forwarded.call_args[0][1]
+        assert "CLOSED WITHOUT MERGING" in msg and "MERGED by" not in msg
+
+    @pytest.mark.asyncio
+    async def test_an_UNLINKED_pr_merge_is_ignored(self):
+        with patch.object(gh, "send_message", new=AsyncMock()) as send, \
+             patch.object(gh.db, "lookup_conversation", new=AsyncMock(return_value=None)), \
+             patch.object(gh.db, "get_conversation_for_resource", new=AsyncMock(return_value=None)):
+            await gh._handle_pr_event(self._closed(merged=True))
+            assert not send.called
+
+    @pytest.mark.asyncio
+    async def test_other_actions_are_still_ignored(self, forwarded):
+        payload = self._closed(merged=True)
+        payload["action"] = "synchronize"
+        await gh._handle_pr_event(payload)
+        assert not forwarded.called
