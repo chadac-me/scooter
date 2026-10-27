@@ -53,8 +53,9 @@ in
       # The pod env reaches PID 1, not services, so it is read from there.
       script = ''
         env_of() { tr '\0' '\n' < /proc/1/environ | sed -n "s/^$1=//p" | head -1; }
-        addr=$(env_of FORGE_PROXY_ADDR)
-        token=$(env_of BROKER_TOKEN_PATH)
+        # The unit's own environment wins, for VM tests.
+        addr=''${FORGE_PROXY_ADDR:-$(env_of FORGE_PROXY_ADDR)}
+        token=''${BROKER_TOKEN_PATH:-$(env_of BROKER_TOKEN_PATH)}
         exec ${lib.getExe shim} -listen 127.0.0.1:3128 -broker "$addr" \
           -token "''${token:-/var/run/secrets/broker/token}" -hosts /etc/scooter/forge-ca/hosts
       '';
