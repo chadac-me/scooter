@@ -17,16 +17,17 @@ const CACHE_MAX = 4096;
 
 const SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount";
 
-/** TokenReview against the in-cluster apiserver, pinned to `audience` ("" = apiserver default). */
+/** In-cluster TokenReview pinned to comma-separated audiences, or the default. */
 export function inClusterReviewer(audience: string, saDir = SA_DIR): ReviewFunc {
   return async (token) => {
     const host = process.env.KUBERNETES_SERVICE_HOST;
     const port = process.env.KUBERNETES_SERVICE_PORT ?? "443";
     if (!host) throw new Error("tokenreview: not running in a cluster");
+    const audiences = audience.split(",").map((a) => a.trim()).filter(Boolean);
     const body = JSON.stringify({
       apiVersion: "authentication.k8s.io/v1",
       kind: "TokenReview",
-      spec: { token, ...(audience ? { audiences: [audience] } : {}) },
+      spec: { token, ...(audiences.length ? { audiences } : {}) },
     });
     const own = readFileSync(`${saDir}/token`, "utf8").trim();
     const ca = readFileSync(`${saDir}/ca.crt`);

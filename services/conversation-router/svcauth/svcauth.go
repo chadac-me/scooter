@@ -55,7 +55,7 @@ type tokenReviewResult struct {
 	} `json:"status"`
 }
 
-// NewTokenReviewer pins reviews to audience; "" means the apiserver default.
+// NewTokenReviewer pins reviews to comma-separated audiences, or the apiserver default.
 func NewTokenReviewer(cfg *rest.Config, audience string) (ReviewFunc, error) {
 	client, err := rest.HTTPClientFor(cfg)
 	if err != nil {
@@ -63,8 +63,10 @@ func NewTokenReviewer(cfg *rest.Config, audience string) (ReviewFunc, error) {
 	}
 	url := strings.TrimSuffix(cfg.Host, "/") + "/apis/authentication.k8s.io/v1/tokenreviews"
 	var auds []string
-	if audience != "" {
-		auds = []string{audience}
+	for _, a := range strings.Split(audience, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			auds = append(auds, a)
+		}
 	}
 	return func(ctx context.Context, token string) (string, bool, error) {
 		body, err := json.Marshal(tokenReviewBody{

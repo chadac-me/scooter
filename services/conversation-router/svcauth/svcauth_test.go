@@ -2,13 +2,17 @@ package svcauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/rest"
 )
 
 const (
@@ -154,5 +158,27 @@ func TestTokenSourceRereadsRotatedTokens(t *testing.T) {
 	}
 	if r.Header.Get("Authorization") != "Bearer two" || r.Header.Get(UserHeader) != "chadac" || r.Header.Get(EmailHeader) != "" {
 		t.Fatalf("headers = %v", r.Header)
+	}
+}
+
+func TestTokenReviewerSendsEveryAudience(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body tokenReviewBody
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got = body.Spec.Audiences
+		_, _ = w.Write([]byte(`{"status":{"authenticated":true,"user":{"username":"` + webhooks + `"}}}`))
+	}))
+	defer srv.Close()
+	review, err := NewTokenReviewer(&rest.Config{Host: srv.URL}, "agent-host, scooter-router,")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, ok, err := review(context.Background(), "tok")
+	if err != nil || !ok || user != webhooks {
+		t.Fatalf("review = %q %v %v", user, ok, err)
+	}
+	if strings.Join(got, ",") != "agent-host,scooter-router" {
+		t.Fatalf("audiences = %q", got)
 	}
 }

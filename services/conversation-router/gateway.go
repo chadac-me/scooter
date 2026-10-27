@@ -172,7 +172,7 @@ func (g *gateway) observe(r *http.Request, p gatewayPrincipal, err error) {
 	case errors.Is(err, errUnverifiable):
 		return
 	case err != nil:
-		g.log.Warn("auth would reject", append(fields,
+		g.log.Warn("auth would reject", append(append(fields, callerFields(r)...),
 			slog.Int("status", gatewayStatus(err)), slog.String("reason", err.Error()))...)
 		return
 	}
@@ -182,7 +182,7 @@ func (g *gateway) observe(r *http.Request, p gatewayPrincipal, err error) {
 	}
 	// A header naming someone else is forgery or misconfiguration.
 	if claimed != "" && claimed != p.user {
-		g.log.Warn("auth identity mismatch", append(fields,
+		g.log.Warn("auth identity mismatch", append(append(fields, callerFields(r)...),
 			slog.String("reason", "identity header does not match the proven caller"))...)
 		return
 	}
@@ -205,4 +205,15 @@ func healthPaths(r *http.Request) bool {
 		return true
 	}
 	return false
+}
+
+// callerFields identify a refused caller without logging its credentials.
+func callerFields(r *http.Request) []any {
+	return []any{
+		slog.String("remote_addr", r.RemoteAddr),
+		slog.String("forwarded_for", r.Header.Get("X-Forwarded-For")),
+		slog.String("user_agent", r.UserAgent()),
+		slog.Bool("has_cookie", r.Header.Get("Cookie") != ""),
+		slog.Bool("has_authorization", r.Header.Get("Authorization") != ""),
+	}
 }

@@ -535,7 +535,9 @@ func buildTrustedCaller(kubeCfg *rest.Config, log *slog.Logger) TrustedCaller {
 		log.Warn("WEBHOOKS_SERVICE_ACCOUNT unset: an owner resolved by webhooks/scheduler cannot be honored")
 		return nil
 	}
-	review, err := newTokenReviewer(kubeCfg, env("WEBHOOKS_TOKEN_AUDIENCE", "agent-host"))
+	// Both audiences, so callers can move to the router's own.
+	audiences := env("WEBHOOKS_TOKEN_AUDIENCE", "agent-host") + "," + env("ROUTER_TOKEN_AUDIENCE", "scooter-router")
+	review, err := newTokenReviewer(kubeCfg, audiences)
 	if err != nil {
 		log.Warn("TokenReview client init failed: webhook-resolved conversation owners will be dropped", errAttr(err))
 		return nil
