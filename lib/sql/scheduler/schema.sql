@@ -31,10 +31,12 @@ CREATE TABLE "scheduled_tasks" (
   "model"            character varying NULL,
   -- Why a system task cannot run in this image (its command is missing), else NULL.
   "unavailable"      text NULL,
+  -- User tasks only: the existing conversation each firing prompts; NULL spawns a new one.
+  "conversation_id"  character varying NULL,
   PRIMARY KEY ("id")
 );
 
--- One firing. A user task's run is spawning|spawned|failed; a system task's is
+-- One firing. A user task's run is spawning|spawned|delivered|failed; a system task's is
 -- running|succeeded|failed|timed_out.
 CREATE TABLE "task_runs" (
   "id"                  character varying NOT NULL,

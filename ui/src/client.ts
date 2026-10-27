@@ -541,6 +541,8 @@ export interface ScheduledTaskView {
   enabled: boolean;
   next_run_at: string | null;
   last_run_at: string | null;
+  /** Conversation each run prompts; null spawns a new one. */
+  conversation_id?: string | null;
 }
 
 /** One run record for a scheduled task. */
@@ -560,6 +562,8 @@ export interface ScheduledTaskInput {
   cron: string;
   timezone?: string;
   enabled?: boolean;
+  /** Conversation to prompt instead of spawning; fixed at creation. */
+  conversation_id?: string | null;
 }
 
 /** Result of a scheduled-tasks fetch, where `configured` distinguishes a missing scheduler (501) from no tasks. */
@@ -651,7 +655,7 @@ export async function createScheduledTask(
 export async function updateScheduledTask(
   config: AgentHostConfig,
   id: string,
-  patch: Partial<ScheduledTaskInput>,
+  patch: Partial<Omit<ScheduledTaskInput, "conversation_id">>,
 ): Promise<ScheduledTaskView> {
   const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/scheduled-tasks/${encodeURIComponent(id)}`, {
     method: "PATCH",

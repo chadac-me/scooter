@@ -1,7 +1,7 @@
 """Scheduler service: a REST API for scheduled tasks plus a background loop that fires due tasks.
 
-A due user task spawns a fresh conversation; a due system task (scooter.systemTasks) runs
-as a subprocess through systasks.Runner.
+A due user task spawns a fresh conversation or prompts its target one; a due system
+task (scooter.systemTasks) runs as a subprocess through systasks.Runner.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .cron import InvalidSchedule
 from .logging_config import configure_logging, get_logger
 from .metrics import MetricsSink, create_metrics
 from .models import Run, RunConversation, Task, TaskCreate, TaskPatch
-from .spawn import SpawnResult, spawn
+from .spawn import SpawnResult, deliver, spawn
 from .store import Store
 from .systasks import Runner, load as load_system_tasks
 
@@ -44,12 +44,25 @@ async def _fire(store: Store, task, metrics: MetricsSink) -> None:
     result = SpawnResult(None, "spawn did not run")
     try:
         run_id = await store.start_run(task.id)
-        result = await spawn(task.prompt, title=task.title, owner=task.owner)
+        if task.conversation_id:
+            result = await deliver(task.conversation_id, task.prompt, owner=task.owner)
+        else:
+            result = await spawn(task.prompt, title=task.title, owner=task.owner)
     except Exception as e:  # noqa: BLE001 — the claim already consumed this window
         result = SpawnResult(None, f"spawn errored: {type(e).__name__}: {e}")
         logger.exception("spawn errored", extra={"task_id": task.id})
-    status = "spawned" if result.conversation_id else "failed"
+    if not result.conversation_id:
+        status = "failed"
+    else:
+        status = "delivered" if task.conversation_id else "spawned"
     await _record_run(store, task.id, run_id, result, status)
+    if result.gone:
+        # Its conversation was deleted, so further firings can only fail.
+        try:
+            await store.disable_task(task.id)
+            logger.warning("disabled task: target conversation gone", extra={"task_id": task.id})
+        except Exception:  # noqa: BLE001
+            logger.exception("could not disable task", extra={"task_id": task.id})
 
     duration_ms = (time.perf_counter() * 1000) - start_ms
     metrics.fire_completed(status=status, duration_ms=duration_ms)
@@ -196,6 +209,7 @@ async def create_task(body: TaskCreate, owner: str = Depends(_owner)) -> Task:
         row = await app.state.store.create_task(
             title=body.title, prompt=body.prompt, cron=body.cron,
             timezone_=body.timezone, owner=owner, enabled=body.enabled,
+            conversation_id=body.conversation_id,
         )
     except InvalidSchedule as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -218,6 +232,9 @@ async def get_task(task_id: str, owner: str = Depends(_owner)) -> Task:
 
 @app.patch("/tasks/{task_id}", response_model=Task, dependencies=[Depends(require_relay_key)])
 async def patch_task(task_id: str, body: TaskPatch, owner: str = Depends(_owner)) -> Task:
+    # Target is fixed so ownership is checked only at creation.
+    if "conversation_id" in body.model_fields_set:
+        raise HTTPException(status_code=422, detail="conversation_id cannot be changed; recreate the task")
     try:
         row = await app.state.store.patch_task(
             task_id, owner, title=body.title, prompt=body.prompt, cron=body.cron,

@@ -18,6 +18,7 @@ the variables the scheduler sets for a system task.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Any, Generator
@@ -47,6 +48,14 @@ class SpawnError(RuntimeError):
     def __init__(self, message: str, conversation_id: str | None = None) -> None:
         super().__init__(message)
         self.conversation_id = conversation_id
+
+
+class ConversationGone(SpawnError):
+    """The conversation to prompt no longer exists on the agent-host."""
+
+
+# The RUN_ERROR code /agui sends for an unknown thread (services/agent-host/src/agui/server.ts).
+UNKNOWN_CONVERSATION_CODE = "UNKNOWN_CONVERSATION"
 
 
 class _TokenAuth(httpx.Auth):
@@ -223,6 +232,82 @@ class ScooterClient:
             raise SpawnError(
                 f"{stage} failed: {type(e).__name__}: {e}".rstrip(": "), conversation_id
             ) from e
+
+    async def prompt_conversation(
+        self,
+        conversation_id: str,
+        prompt: str,
+        *,
+        owner: str | None = None,
+        source: str = "scheduler",
+        accept_wait_seconds: float = 30.0,
+    ) -> None:
+        """Queue a prompt on an existing conversation, returning once the agent-host accepted it.
+
+        Raises ConversationGone when the conversation no longer exists, SpawnError otherwise.
+        The run itself is not awaited: it may queue behind a busy turn or a revive.
+        """
+        body: dict[str, Any] = {
+            "threadId": conversation_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "source": source,
+        }
+        if owner:
+            body["owner"] = owner
+        url = self._agent_host("/agui")
+        for attempt in range(1, self.attempts + 1):
+            last = attempt == self.attempts
+            try:
+                async with self.http.stream(
+                    "POST", url, json=body, auth=self.auth, headers={"accept": "text/event-stream"}
+                ) as resp:
+                    if resp.status_code in _REFUSED_STATUSES and not last:
+                        logger.warning(
+                            f"prompt returned {resp.status_code}; retrying",
+                            extra={"attempt": attempt, "conversation_id": conversation_id},
+                        )
+                    elif resp.status_code >= 300:
+                        raise SpawnError(f"prompt failed: HTTP {resp.status_code}", conversation_id)
+                    else:
+                        await self._await_acceptance(resp, conversation_id, accept_wait_seconds)
+                        return
+            except _NOT_SENT as e:
+                if last:
+                    raise SpawnError(f"prompt failed: {type(e).__name__}: {e}", conversation_id) from e
+                logger.warning(
+                    "prompt failed; retrying",
+                    extra={"attempt": attempt, "conversation_id": conversation_id, "error": format_error(e)},
+                )
+            except httpx.HTTPError as e:
+                # Possibly delivered, so never re-sent.
+                raise SpawnError(f"prompt failed: {type(e).__name__}: {e}", conversation_id) from e
+            await asyncio.sleep(self.backoff_seconds * 2 ** (attempt - 1))
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    async def _await_acceptance(resp: httpx.Response, conversation_id: str, wait: float) -> None:
+        """Read the stream until its first event; quiet past `wait` means queued."""
+
+        async def first_event() -> dict | None:
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    try:
+                        return json.loads(line[5:].strip())
+                    except json.JSONDecodeError:
+                        continue
+            return None
+
+        try:
+            event = await asyncio.wait_for(first_event(), timeout=wait)
+        except (asyncio.TimeoutError, httpx.ReadTimeout):
+            # A 2xx with a quiet stream means the prompt queued.
+            return
+        if not event or event.get("type") != "RUN_ERROR":
+            return
+        message = str(event.get("message") or "agent run error")
+        if event.get("code") == UNKNOWN_CONVERSATION_CODE:
+            raise ConversationGone(message, conversation_id)
+        raise SpawnError(f"prompt failed: {message}", conversation_id)
 
     async def list_users(self) -> list[dict[str, Any]]:
         """The users the agent-host knows (signed in, or mapped by a webhook)."""

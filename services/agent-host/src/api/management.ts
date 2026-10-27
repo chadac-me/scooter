@@ -25,7 +25,7 @@ import type { AguiServer } from "../agui/server.js";
 import type { WebServiceRegistry } from "../proxy/webServiceProxy.js";
 import type { IdentityStore } from "../auth/identityStore.js";
 import type { AssetStore } from "../session/assetStore.js";
-import type { SchedulerClient } from "../agent/schedulerTools.js";
+import { targetError, type ConversationOwnerLookup, type SchedulerClient } from "../agent/schedulerTools.js";
 import { mountContribApi, type ContribApiDeps } from "./contribApi.js";
 import { UserSkillError, type UserSkill, type UserSkillStore } from "../session/userSkillStore.js";
 import type { SandboxResources } from "../session/resources.js";
@@ -126,6 +126,8 @@ export interface ManagementDeps {
   assets?: AssetStore;
   /** Scheduler client for the settings page's scheduled-tasks CRUD, always scoped to the caller; absent means the routes report it unconfigured. */
   scheduler?: SchedulerClient;
+  /** Owner lookup for task targets; absent refuses any target. */
+  conversationOwner?: ConversationOwnerLookup;
   /** Personal-skills store for the settings page's CRUD, always scoped to the caller; absent (no agent_host DSN) means the routes report it unconfigured. */
   userSkills?: UserSkillStore;
   /** The /contrib-api relay for contrib settings tabs; absent means the routes are not mounted. */
@@ -1076,6 +1078,13 @@ export function createManagementApi(deps: ManagementDeps): Router {
   const scopeOwner = (ctx: { user: { anonymous: boolean; id: string } }) =>
     ctx.user.anonymous ? null : ctx.user.id;
   const noScheduler = { status: 501, json: { error: "scheduler not configured" } };
+  // Why the caller can't target this; undefined if allowed.
+  const badTarget = async (owner: string | null, target: unknown): Promise<string | undefined> => {
+    if (target === undefined || target === null || target === "") return undefined;
+    if (typeof target !== "string") return "conversation_id must be a string";
+    if (!deps.conversationOwner) return "targeting a conversation is not supported here";
+    return targetError(deps.conversationOwner, owner, target);
+  };
 
   r.get("/scheduled-tasks", async (ctx) => {
     if (!scheduler) return noScheduler;
@@ -1084,13 +1093,16 @@ export function createManagementApi(deps: ManagementDeps): Router {
 
   r.post("/scheduled-tasks", async (ctx) => {
     if (!scheduler) return noScheduler;
-    const body = await ctx.body<{ title?: string; prompt?: string; cron?: string; timezone?: string; enabled?: boolean }>();
+    const body = await ctx.body<{ title?: string; prompt?: string; cron?: string; timezone?: string; enabled?: boolean; conversation_id?: string | null }>();
     if (!body.title || !body.prompt || !body.cron) {
       return { status: 400, json: { error: "title, prompt, and cron are required" } };
     }
+    const bad = await badTarget(scopeOwner(ctx), body.conversation_id);
+    if (bad) return { status: 400, json: { error: bad } };
     try {
       const task = await scheduler.create(scopeOwner(ctx), {
         title: body.title, prompt: body.prompt, cron: body.cron, timezone: body.timezone, enabled: body.enabled,
+        conversation_id: body.conversation_id || null,
       });
       return { status: 201, json: task };
     } catch (e) {
@@ -1110,6 +1122,10 @@ export function createManagementApi(deps: ManagementDeps): Router {
   r.patch("/scheduled-tasks/:id", async (ctx) => {
     if (!scheduler) return noScheduler;
     const body = await ctx.body<Partial<{ title: string; prompt: string; cron: string; timezone: string; enabled: boolean }>>();
+    // Target is fixed, so ownership is checked only at creation.
+    if ("conversation_id" in body) {
+      return { status: 400, json: { error: "conversation_id cannot be changed; recreate the task" } };
+    }
     try {
       const task = await scheduler.patch(scopeOwner(ctx), ctx.params.id, body);
       if (!task) return { status: 404, json: { error: "not found" } };

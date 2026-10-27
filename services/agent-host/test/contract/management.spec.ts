@@ -1211,6 +1211,46 @@ describe("management API", () => {
       expect(nope.status).toBe(404); // bob's task isn't visible to alice
     });
 
+    describe("target conversation", () => {
+      const owners: Record<string, string | null> = { "conv-a": "alice", "conv-b": "bob" };
+      const conversationOwner = async (id: string) => (id in owners ? { owner: owners[id] } : undefined);
+      const mkT = (client: ReturnType<typeof fakeScheduler>["client"]) =>
+        createManagementApi({
+          sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {},
+          scheduler: client, conversationOwner,
+        });
+      const body = { title: "t", prompt: "p", cron: "0 8 * * *" };
+
+      it("POST accepts the caller's own conversation", async () => {
+        const res = await call(mkT(fakeScheduler().client), "POST", "/scheduled-tasks", { ...body, conversation_id: "conv-a" }, { "x-auth-user": "alice" });
+        expect(res.status).toBe(201);
+        expect((res.json as { conversation_id: string }).conversation_id).toBe("conv-a");
+      });
+
+      it("POST 400s another user's or an unknown conversation, before reaching the scheduler", async () => {
+        for (const target of ["conv-b", "conv-x"]) {
+          const { client, calls } = fakeScheduler();
+          const res = await call(mkT(client), "POST", "/scheduled-tasks", { ...body, conversation_id: target }, { "x-auth-user": "alice" });
+          expect(res.status).toBe(400);
+          expect(calls.filter((c) => c.method === "create")).toEqual([]);
+        }
+      });
+
+      it("PATCH 400s any conversation_id, even the caller's own or null, since the target is fixed", async () => {
+        for (const target of ["conv-a", "conv-b", null]) {
+          const { client, calls } = fakeScheduler([task({ conversation_id: "conv-a" })]);
+          const res = await call(mkT(client), "PATCH", "/scheduled-tasks/t1", { conversation_id: target }, { "x-auth-user": "alice" });
+          expect(res.status).toBe(400);
+          expect(calls.filter((c) => c.method === "patch")).toEqual([]);
+        }
+      });
+
+      it("refuses any target when no owner lookup is wired", async () => {
+        const res = await call(mk(fakeScheduler().client), "POST", "/scheduled-tasks", { ...body, conversation_id: "conv-a" }, { "x-auth-user": "alice" });
+        expect(res.status).toBe(400);
+      });
+    });
+
     it("DELETE removes a scoped task (204); 404 for another owner's", async () => {
       const gone = await call(mk(fakeScheduler([task()]).client), "DELETE", "/scheduled-tasks/t1", undefined, { "x-auth-user": "alice" });
       expect(gone.status).toBe(204);

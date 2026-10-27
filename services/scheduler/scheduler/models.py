@@ -42,6 +42,8 @@ class TaskRow(Base):
     model: Mapped[str | None] = mapped_column(String)
     # Why this image cannot run the task (its command is missing), else None.
     unavailable: Mapped[str | None] = mapped_column(Text)
+    # User tasks: conversation to prompt; None spawns a new one.
+    conversation_id: Mapped[str | None] = mapped_column(String)
 
 
 class RunRow(Base):
@@ -50,7 +52,7 @@ class RunRow(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     task_id: Mapped[str] = mapped_column(String, ForeignKey("scheduled_tasks.id", ondelete="CASCADE"), nullable=False)
     conversation_id: Mapped[str | None] = mapped_column(String)
-    # User task: spawning|spawned|failed. System task: running|succeeded|failed|timed_out.
+    # User task: spawning|spawned|delivered|failed. System task: running|succeeded|failed|timed_out.
     status: Mapped[str] = mapped_column(String, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     fired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -79,6 +81,8 @@ class TaskCreate(BaseModel):
     cron: str
     timezone: str = "UTC"
     enabled: bool = True
+    # Conversation to prompt instead of spawning; caller checks ownership.
+    conversation_id: str | None = None
     # owner is the authenticated request identity, never accepted from the body.
 
 
@@ -88,6 +92,8 @@ class TaskPatch(BaseModel):
     cron: str | None = None
     timezone: str | None = None
     enabled: bool | None = None
+    # Declared only so a patch naming it is refused.
+    conversation_id: str | None = None
 
 
 class Task(BaseModel):
@@ -100,12 +106,14 @@ class Task(BaseModel):
     enabled: bool
     next_run_at: datetime | None
     last_run_at: datetime | None
+    conversation_id: str | None = None
 
     @classmethod
     def of(cls, r: TaskRow) -> "Task":
         return cls(
             id=r.id, title=r.title, prompt=r.prompt, cron=r.cron, timezone=r.timezone,
             owner=r.owner, enabled=r.enabled, next_run_at=r.next_run_at, last_run_at=r.last_run_at,
+            conversation_id=r.conversation_id,
         )
 
 

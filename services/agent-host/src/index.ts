@@ -89,7 +89,7 @@ import { createRouterSubagentCreator } from "./session/routerSubagents.js";
 import { lastRunCompleted } from "./session/danglingRun.js";
 import { randomUUID } from "node:crypto";
 import { createHttpSchedulerClient } from "./agent/schedulerClient.js";
-import type { SchedulerToolsWiring } from "./agent/schedulerTools.js";
+import type { ConversationOwnerLookup, SchedulerToolsWiring } from "./agent/schedulerTools.js";
 import { createResourceLookup } from "./agent/resourceMapping.js";
 import { parseScooterEnv } from "./config/scooterEnv.js";
 import { resolverFromEnv, type AsyncIdentityResolver } from "./auth/identity.js";
@@ -1069,10 +1069,21 @@ export async function main(
         relayKey: process.env.SCHEDULER_RELAY_KEY || undefined,
       })
     : undefined;
+  // Target owner: memory, then registry, then hydrate from storage.
+  const conversationOwner: ConversationOwnerLookup = async (id) => {
+    const local = sessions.get(id as SessionId);
+    if (local) return { owner: local.owner ?? null };
+    const rec = await conversationRegistry?.get(id);
+    if (rec) return { owner: rec.spec.owner ?? null };
+    if (!(await sessions.ensureReadable(id as SessionId))) return undefined;
+    const hydrated = sessions.get(id as SessionId);
+    return hydrated ? { owner: hydrated.owner ?? null } : undefined;
+  };
   const schedulerToolsWiring: SchedulerToolsWiring | undefined = schedulerClient
     ? {
         client: schedulerClient,
         owner: async (id: string) => sessions.get(id as SessionId)?.owner ?? null,
+        conversationOwner,
       }
     : undefined;
 
@@ -1335,6 +1346,7 @@ export async function main(
       identityStore,
       assets,
       scheduler: schedulerClient,
+      conversationOwner,
       userSkills: userSkillStore,
       // Settings tabs reach their contrib's broker half as the signed-in user.
       contribApi: {
