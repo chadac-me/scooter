@@ -379,9 +379,9 @@ describe("web-service proxy", () => {
     const target = (q: string, headers: Record<string, string> = {}) =>
       proxyGet(sandboxProxyAs(fakeRegistry(svc.port)), `/internal/web-services/target?${q}`, { headers });
 
-    function sandboxProxyAs(registry: WebServiceRegistry, opts: { user?: { id: string; email?: string; anonymous: boolean }; touched?: string[]; podDown?: boolean; sandboxDomain?: string } = {}) {
+    function sandboxProxyAs(registry: WebServiceRegistry, opts: { user?: { id: string; email?: string; anonymous: boolean }; touched?: string[]; podDown?: boolean; sandboxDomain?: string; conv?: { status?: string; parentId?: string } } = {}) {
       return createWebServiceProxy({
-        sessions: { get: () => ({ id: ID, threadId: ID }), touchById: (id: string) => opts.touched?.push(id) } as never,
+        sessions: { get: () => ({ id: ID, threadId: ID, ...opts.conv }), touchById: (id: string) => opts.touched?.push(id) } as never,
         resolvePodTarget: (async () => {
           if (opts.podDown) throw new Error("no ready pod");
           return { name: "pod", podIP: "127.0.0.1" };
@@ -417,6 +417,19 @@ describe("web-service proxy", () => {
       const { status, body } = await proxyGet(proxy, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`);
       expect(status).toBe(503);
       expect(JSON.parse(body).reason).toBe("asleep");
+    });
+
+    it("target: a suspended conversation is asleep even while its old pod still answers", async () => {
+      const proxy = sandboxProxyAs(fakeRegistry(svc.port), { conv: { status: "suspended" } });
+      const { status, body } = await proxyGet(proxy, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`);
+      expect(status).toBe(503);
+      expect(JSON.parse(body).reason).toBe("asleep");
+    });
+
+    it("target: a suspended subagent still answers, since the pod is its parent's", async () => {
+      const proxy = sandboxProxyAs(fakeRegistry(svc.port), { conv: { status: "suspended", parentId: "parent-1" } });
+      const { status } = await proxyGet(proxy, `/internal/web-services/target?conversation=${ID}&service=marimo&label=5a515e73`);
+      expect(status).toBe(200);
     });
 
     it("target: refuses a wrong label, an unknown service, a missing label and sandbox hosts off", async () => {
@@ -836,7 +849,10 @@ describe("web-service proxy", () => {
     const { proxy, lookups } = countingProxy(fakeRegistry(svc.port), conv);
     await proxyGet(proxy, "/c/conv-1/marimo/a");
     conv.status = "suspended";
-    await proxyGet(proxy, "/c/conv-1/marimo/a");
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/a")).status).toBe(503);
+    expect(lookups()).toBe(1);
+    conv.status = "running";
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/a")).status).toBe(200);
     expect(lookups()).toBe(2);
   });
 

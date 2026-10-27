@@ -8,6 +8,10 @@ from scooter_lib.settings import ScooterBaseSettings
 class GitlabSettings(ScooterBaseSettings):
     # The PAT the proxy injects, which also gates the provider.
     gitlab_token: str = ""
+    # gitlab.com, or a self-hosted GitLab's hostname.
+    gitlab_host: str = "gitlab.com"
+    # A `module:attr` ForgePolicy (scooter_broker_lib.forge) checked on every request the broker makes to GitLab; empty allows all.
+    gitlab_forge_policy: str = ""
 
     gitlab_enabled: bool = True
     gitlab_webhook_secret: str = ""

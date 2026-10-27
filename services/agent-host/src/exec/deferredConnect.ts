@@ -25,3 +25,30 @@ export function createDeferredConnector<T>(connect: () => Promise<T>): () => Pro
     return pending;
   };
 }
+
+/** A deferred connector that reconnects when the epoch changes. */
+export function createEpochConnector<T>(connect: () => Promise<T>, epoch: () => number): () => Promise<T> {
+  let seen = epoch();
+  let ensure = createDeferredConnector(connect);
+  return () => {
+    const now = epoch();
+    if (now !== seen) {
+      seen = now;
+      ensure = createDeferredConnector(connect);
+    }
+    return ensure();
+  };
+}
+
+/** Connection generation per sandbox, keyed namespace/name. */
+const sandboxEpochs = new Map<string, number>();
+const epochKey = (ref: { namespace: string; name: string }) => `${ref.namespace}/${ref.name}`;
+
+export function sandboxEpoch(ref: { namespace: string; name: string }): number {
+  return sandboxEpochs.get(epochKey(ref)) ?? 0;
+}
+
+/** Invalidates cached connections; call after stopping or cycling the pod. */
+export function bumpSandboxEpoch(ref: { namespace: string; name: string }): void {
+  sandboxEpochs.set(epochKey(ref), sandboxEpoch(ref) + 1);
+}

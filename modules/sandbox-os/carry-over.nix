@@ -1,6 +1,6 @@
-# The broker tooling in the sandbox image: the broker tools (agent-broker,
-# git-credential-broker) as packages on PATH, and a oneshot that points git's
-# credential helper at the broker at boot. The pod env (HOME, BROKER_URL,
+# The broker tooling in the sandbox image: agent-broker on PATH, and a oneshot that
+# drops the `broker` git credential helper older images wrote (git is authenticated
+# by the forge proxy, modules/sandbox-os/forge-proxy.nix). The pod env (HOME, BROKER_URL,
 # BROKER_TOKEN_PATH) and the token mount are set by the provisioner; these
 # units only consume them. `home` is also read by contrib/aws/sandbox.nix.
 
@@ -27,22 +27,19 @@ in
   config = lib.mkIf cfg.enable {
     environment.systemPackages = brokerTools.all ++ [ pkgs.git ];
 
-    # Points git's credential helper at the broker, best-effort, once the broker URL is known.
+    # The workspace PVC keeps .gitconfig across restarts, so a helper an older image set
+    # would outlive git-credential-broker; --file targets the agent's HOME, not /root.
     systemd.services.scooter-git-broker = {
-      description = "Configure git credential helper -> broker";
+      description = "Remove the legacy git credential helper -> broker";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
       };
-      # BROKER_URL is read from PID 1's environ, and --file targets the agent's HOME where --global would hit /root.
       script = ''
-        broker_url=$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^BROKER_URL=//p' | head -1 || true)
-        if [ -n "$broker_url" ]; then
-          mkdir -p ${lib.escapeShellArg cfg.home}
-          ${pkgs.git}/bin/git config --file ${lib.escapeShellArg "${cfg.home}/.gitconfig"} credential.helper broker || true
-          echo "git credential helper -> broker ($broker_url) in ${cfg.home}/.gitconfig"
+        gitconfig=${lib.escapeShellArg "${cfg.home}/.gitconfig"}
+        if [ -e "$gitconfig" ]; then
+          ${pkgs.git}/bin/git config --file "$gitconfig" --unset-all credential.helper '^broker$' || true
         fi
       '';
     };

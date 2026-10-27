@@ -55,6 +55,9 @@ let
         # /agui and /conversations carry SSE, so they disable buffering and use
         # HTTP/1.1 keep-alive.
         location /agui {
+          # Sized by the platform from scooter.uploads (maxFilesPerMessage files at
+          # maxFileBytes, base64-encoded, plus headroom for the rest of the request).
+          client_max_body_size ''${UPLOAD_MAX_BODY};
           proxy_pass ''${AGENT_HOST_PROXY};
           proxy_set_header Host $host;
           proxy_http_version 1.1;
@@ -192,6 +195,11 @@ let
     : "''${OTEL_COLLECTOR_URL:=http://127.0.0.1:1}"
     : "''${TELEMETRY_SAMPLE_RATIO:=1}"
     export TELEMETRY_ENABLED TELEMETRY_SAMPLE_RATIO OTEL_COLLECTOR_URL BROKER_URL
+    # The /agui body limit. 144m is what modules/platform.nix derives for the default
+    # scooter.uploads (4 files of 25MB), so an image run without the env var still
+    # accepts what the UI allows.
+    : "''${UPLOAD_MAX_BODY:=144m}"
+    export UPLOAD_MAX_BODY
     # Who may frame /chat/<id>: its own sandbox origin, or the UI's own without a sandbox
     # domain. $chat_label is nginx's capture of the id's first 8 hex characters.
     sandbox_domain="''${SANDBOX_DOMAIN:-}"
@@ -210,7 +218,7 @@ let
       CONTRIB_MANIFEST=${builtinManifest}
     fi
     export CONTRIB_MANIFEST
-    ${pkgs.gettext}/bin/envsubst '$AGENT_HOST_SERVER $AGENT_HOST_PROXY $BROKER_URL $OTEL_COLLECTOR_URL $TELEMETRY_ENABLED $TELEMETRY_SAMPLE_RATIO $CHAT_FRAME_ANCESTORS $CONTRIB_MANIFEST' \
+    ${pkgs.gettext}/bin/envsubst '$AGENT_HOST_SERVER $AGENT_HOST_PROXY $BROKER_URL $OTEL_COLLECTOR_URL $TELEMETRY_ENABLED $TELEMETRY_SAMPLE_RATIO $CHAT_FRAME_ANCESTORS $CONTRIB_MANIFEST $UPLOAD_MAX_BODY' \
       < ${confTemplate} > "$1"
   '';
 in

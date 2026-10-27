@@ -61,6 +61,8 @@ export function gooseAddendum(): string {
     `different machine's filesystem, not your sandbox, so their results are wrong.`,
     `To list or explore directories, use the \`shell\` tool with \`ls\`, \`ls -R\`,`,
     `or \`find\` instead — those run in your sandbox and see the real workspace.`,
+    `To look at an image in your sandbox (e.g. a screenshot you took), use the`,
+    `\`view_image\` tool instead of \`read_image\`.`,
     `For a long job (a build, a test suite), use the \`run_background\` tool so it`,
     `doesn't block your turn or hit the timeout.`,
   ].join("\n");

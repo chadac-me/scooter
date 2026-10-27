@@ -365,6 +365,46 @@ describe("management API", () => {
     expect((json as any).resources).toBeNull();
   });
 
+  it("GET /conversations/:id/resources carries pendingRestart, null when nothing is pending", async () => {
+    const sessions = fakeSessions();
+    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
+    expect((await call(api, "GET", "/conversations/c1/resources")).json).toMatchObject({ pendingRestart: null });
+    sessions.pendingRestart = vi.fn(async () => ({ image: { from: "os:old", to: "os:new" } }));
+    const { json } = await call(api, "GET", "/conversations/c1/resources");
+    expect((json as any).pendingRestart).toEqual({ image: { from: "os:old", to: "os:new" } });
+  });
+
+  it("POST /conversations/:id/restart returns the restart result", async () => {
+    const sessions = fakeSessions();
+    const result = { fromImage: "os:old", toImage: "os:new", imageCurrent: true, sizeApplied: false, ready: true };
+    sessions.restartSandbox = vi.fn(async () => result);
+    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
+    const { status, json } = await call(api, "POST", "/conversations/c1/restart");
+    expect(status).toBe(200);
+    expect(json).toEqual(result);
+  });
+
+  it("POST /conversations/:id/restart maps a run in flight to 409", async () => {
+    const sessions = fakeSessions();
+    sessions.restartSandbox = vi.fn(async () => {
+      throw Object.assign(new Error("conversation c2 is running in this sandbox"), { code: 409 });
+    });
+    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
+    const { status, json } = await call(api, "POST", "/conversations/c1/restart");
+    expect(status).toBe(409);
+    expect((json as any).error).toContain("c2 is running");
+  });
+
+  it("POST /conversations/:id/restart 403s for another user's conversation", async () => {
+    const sessions = fakeSessions();
+    (sessions.get("c1") as any).owner = "bob";
+    sessions.restartSandbox = vi.fn();
+    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
+    const { status } = await call(api, "POST", "/conversations/c1/restart", undefined, { "x-auth-user": "alice" });
+    expect(status).toBe(403);
+    expect(sessions.restartSandbox).not.toHaveBeenCalled();
+  });
+
   it("GET /whoami returns the caller's identity (header)", async () => {
     const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
     const me = await call(api, "GET", "/whoami", undefined, { "x-auth-user": "alice", "x-auth-email": "a@x.io" });
@@ -375,6 +415,23 @@ describe("management API", () => {
     const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
     const me = await call(api, "GET", "/whoami");
     expect(me.json).toEqual({ id: "anonymous", email: null, anonymous: true });
+  });
+
+  it("GET /whoami carries the upload caps in a separate limits block", async () => {
+    const api = createManagementApi({
+      sessions: fakeSessions(),
+      store: fakeStore([]),
+      server: stubServer,
+      answerPermission: async () => {},
+      uploadLimits: { maxFileBytes: 100 * 1024 * 1024, maxFilesPerMessage: 2 },
+    });
+    const me = await call(api, "GET", "/whoami", undefined, { "x-auth-user": "alice" });
+    expect(me.json).toEqual({
+      id: "alice",
+      email: null,
+      anonymous: false,
+      limits: { maxFileBytes: 100 * 1024 * 1024, maxFilesPerMessage: 2 },
+    });
   });
 
   // --- GET /users/by-email (external-user identity mapping) --------------------

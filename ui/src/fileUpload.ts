@@ -20,9 +20,43 @@ export interface OutboundFile {
   mimeType: string;
 }
 
-/** Default client cap (~25MB), tracking the agent-host FILE_MAX_BYTES; a larger file
- *  is rejected at add() time. */
-export const CLIENT_FILE_MAX_BYTES = 25 * 1024 * 1024;
+/** The upload caps (scooter.uploads), served by the agent-host in /whoami's `limits`. */
+export interface UploadLimits {
+  maxFileBytes: number;
+  maxFilesPerMessage: number;
+}
+
+/** Used until /whoami answers (or if it carries no limits), matching the platform's
+ *  defaults so attachments are never blocked on the fetch. */
+export const DEFAULT_UPLOAD_LIMITS: UploadLimits = Object.freeze({
+  maxFileBytes: 25 * 1024 * 1024,
+  maxFilesPerMessage: 4,
+});
+
+let currentLimits: UploadLimits = DEFAULT_UPLOAD_LIMITS;
+
+const positiveInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+
+/** Adopt the server's caps; a missing or malformed field keeps its default. */
+export function setUploadLimits(limits: Partial<UploadLimits> | null | undefined): void {
+  currentLimits = {
+    maxFileBytes: positiveInt(limits?.maxFileBytes) ? limits.maxFileBytes : DEFAULT_UPLOAD_LIMITS.maxFileBytes,
+    maxFilesPerMessage: positiveInt(limits?.maxFilesPerMessage)
+      ? limits.maxFilesPerMessage
+      : DEFAULT_UPLOAD_LIMITS.maxFilesPerMessage,
+  };
+}
+
+/** The caps in effect now. */
+export function uploadLimits(): UploadLimits {
+  return currentLimits;
+}
+
+/** Bytes as a short MB label for error messages ("25MB", "1.5MB"). */
+function mbLabel(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return `${Number.isInteger(mb) ? mb : Number(mb.toFixed(1))}MB`;
+}
 
 /** base64 length -> byte size (0.75 ratio, minus '=' padding). */
 export function base64Bytes(b64: string): number {
@@ -102,21 +136,34 @@ let attachmentSeq = 0;
  * CompositeAttachmentAdapter placed after the image adapter it is the wildcard
  * fallback; send() reads the File into a `{type:"file"}` content part, which
  * RuntimeProvider forwards and the agent-host materializes into the sandbox. A file
- * over the client cap is rejected at add() time.
+ * over maxFileBytes, or one past maxFilesPerMessage pending files, is rejected at
+ * add() time. The caps are read on each add(), so /whoami arriving later applies.
+ *
+ * The pending count is the adapter's own: assistant-ui calls remove() for every
+ * pending attachment it drops (remove, reset, clear) and send() for every one it
+ * sends, so the set tracks the composer. A failed send() keeps its id, since the
+ * composer puts that attachment back.
  */
 export class SandboxFileAttachmentAdapter implements AttachmentAdapter {
   // "*" is the composite's match-all sentinel ("*/*" is not).
   accept = "*";
 
-  constructor(private readonly maxBytes: number = CLIENT_FILE_MAX_BYTES) {}
+  private readonly pending = new Set<string>();
+
+  constructor(private readonly limits: () => UploadLimits = uploadLimits) {}
 
   async add({ file }: { file: File }): Promise<PendingAttachment> {
-    if (file.size > this.maxBytes) {
-      const mb = Math.round(this.maxBytes / (1024 * 1024));
-      throw new Error(`"${file.name}" is too large to attach (max ${mb}MB).`);
+    const { maxFileBytes, maxFilesPerMessage } = this.limits();
+    if (file.size > maxFileBytes) {
+      throw new Error(`"${file.name}" is too large to attach (max ${mbLabel(maxFileBytes)}).`);
     }
+    if (this.pending.size >= maxFilesPerMessage) {
+      throw new Error(`"${file.name}" wasn't attached: a message can carry at most ${maxFilesPerMessage} files.`);
+    }
+    const id = `file-${++attachmentSeq}`;
+    this.pending.add(id);
     return {
-      id: `file-${++attachmentSeq}`,
+      id,
       type: "document",
       name: file.name,
       contentType: file.type || "application/octet-stream",
@@ -128,6 +175,7 @@ export class SandboxFileAttachmentAdapter implements AttachmentAdapter {
   async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
     const data = await fileToBase64(attachment.file);
     const mimeType = attachment.file.type || "application/octet-stream";
+    this.pending.delete(attachment.id);
     return {
       ...attachment,
       status: { type: "complete" },
@@ -135,7 +183,9 @@ export class SandboxFileAttachmentAdapter implements AttachmentAdapter {
     };
   }
 
-  async remove(): Promise<void> {
-    // No held resource — the bytes live only in the composer state until send().
+  async remove(attachment: { id: string }): Promise<void> {
+    // No held resource (the bytes live only in the composer state until send()), just
+    // the slot in the per-message count.
+    this.pending.delete(attachment.id);
   }
 }

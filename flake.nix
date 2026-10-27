@@ -82,9 +82,12 @@
           # The generated @scooter/schema package: Drizzle tables plus guards.
           scooterSchemaJs = pkgs.callPackage ./lib/ts/scooter-schema { };
 
+          # @scooter/svcauth: ServiceAccount token auth shared by the TS services.
+          scooterSvcauthJs = pkgs.callPackage ./lib/ts/scooter-svcauth { };
+
           # agent-host runs `goose acp` per conversation outside the sandbox; it takes the
           # same `agent` derivation the image's goose layer bakes so the closure ships goose once.
-          agentHost = pkgs.callPackage ./services/agent-host { inherit agent claudeSdkProvider scooterSchemaJs; };
+          agentHost = pkgs.callPackage ./services/agent-host { inherit agent claudeSdkProvider scooterSchemaJs scooterSvcauthJs; };
 
           # Bring-your-own-Claude container app
           remoteAgent = pkgs.callPackage ./services/remote-agent {
@@ -176,7 +179,7 @@
 
           # Shared-DB migration Job image
 
-          # Broker tools (agent-broker / git-credential-broker), prebuilt
+          # Broker tools (agent-broker), prebuilt
           brokerTools = pkgs.callPackage ./pkgs/broker-tools { };
 
           # stubs.nix's arguments beyond `pkgs`, also vendored for the in-pod re-converge.
@@ -308,7 +311,7 @@
           # Tier-1-style config-correctness tests for the dev-environment sandbox
           devEnvTests =
             if pkgs.stdenv.isLinux
-            then import ./nixos-tests { inherit pkgs lib stubOverlay deploymentModules byocController agentHost; }
+            then import ./nixos-tests { inherit pkgs lib stubOverlay deploymentModules byocController agentHost broker; }
             else { };
 
           # The contrib sandbox surface, without building an image
@@ -466,6 +469,11 @@
           };
         in
         {
+          # fastmcp 3.4.x is marked broken against mcp>=2; pin mcp_1 until fastmcp supports it (PR #906).
+          _module.args.pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ (_: prev: { pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [ (pf: _: { mcp = pf.mcp_1; }) ]; }) ];
+          };
           # Deprecated alias of `lib.evalPlatform` (which reads it); kept for existing deploys.
           legacyPackages.evalPlatform = evalPlatform;
           legacyPackages.imageModules = imageModules;
@@ -554,8 +562,11 @@
             # nix build .#sandbox-os-image -> the NixOS systemd-PID-1 dev sandbox image.
             sandbox-os-image = builtImages.agent-sandbox-os.package;
 
-            # The broker tools (agent-broker / git-credential-broker)
+            # The broker tools (agent-broker)
             broker-tools = brokerTools.agent-broker;
+
+            # nix build .#forge-shim  ->  the sandbox's local forge proxy shim (runs go test)
+            forge-shim = pkgs.callPackage ./pkgs/forge-shim { };
 
             # nix build .#broker-image  ->  broker OCI image
             broker-image = builtImages.agent-broker.package;
@@ -583,6 +594,9 @@
 
             # nix build .#scooter-schema-js  ->  generated Drizzle schema package (tsc)
             scooter-schema-js = scooterSchemaJs;
+
+            # nix build .#scooter-svcauth-js  ->  shared ServiceAccount token auth (tsc)
+            scooter-svcauth-js = scooterSvcauthJs;
 
             # nix build .#remote-agent  ->  the BYO-Claude container app (bin)
             remote-agent = remoteAgent;

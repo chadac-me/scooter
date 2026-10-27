@@ -61,6 +61,8 @@ describe("provider-split prompts", () => {
     expect(a).toContain("tree");
     expect(a).toContain("read_image");
     expect(a).toContain("run_background");
+    // The sandbox-side replacement for read_image, so a screenshot is still viewable.
+    expect(a).toContain("view_image");
   });
 
   it("sdkAddendum explains system reminders (a custom prompt replaces the preset)", () => {

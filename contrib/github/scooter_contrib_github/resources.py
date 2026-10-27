@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from .config import settings
 from scooter_webhooks_lib.resources import (
     ResourceShapes,
     canonical_resource_type,
@@ -17,12 +18,12 @@ _GITHUB_URL_RE = re.compile(
 
 
 def _id_variants(resource_type: str, resource_id: str) -> list[str]:
-    """`owner/repo#N` <-> `https://github.com/owner/repo/(pull|issues)/N`."""
+    """`owner/repo#N` <-> `https://<github_host>/owner/repo/(pull|issues)/N`."""
     short = _GITHUB_SHORT_RE.match(resource_id)
     if short:
         owner, repo, number = short.groups()
         path = "issues" if canonical_resource_type("github", resource_type) == "issue" else "pull"
-        return [resource_id, f"https://github.com/{owner}/{repo}/{path}/{number}"]
+        return [resource_id, f"https://{settings.github_host}/{owner}/{repo}/{path}/{number}"]
     url = _GITHUB_URL_RE.match(resource_id)
     if url:
         owner, repo, _kind, number = url.groups()

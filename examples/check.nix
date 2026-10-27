@@ -560,7 +560,7 @@ let
         else [ "aws-off: broker.env.AWS_ENABLED present — contrib env is not gated on the contrib's own enable" ]);
 
   # A contrib's platform module reaches the sandbox pod through the manifest-overlay
-  # ConfigMap, and with aws off none of it does (an unsatisfiable volume would leave
+  # ConfigMap, and with aws off none of aws's does (an unsatisfiable volume would leave
   # every sandbox Pending).
   contribOverlayOf = e:
     let cms = e.config.kubernetes.resources.configMaps or { };
@@ -586,9 +586,16 @@ let
         else [ "sandboxPod.extraVolumes aws-accounts missing — the mount above has no source, so every sandbox pod stays Pending" ])
     ++ (if contribCtr == null || hasName (contribCtr.env or [ ]) "AWS_ACCOUNTS_FILE" then [ ]
         else [ "sandboxPod.extraEnv AWS_ACCOUNTS_FILE missing — the mount is there but nothing tells the sandbox where it is" ])
-    ++ (if contribOverlayOf awsOffPlatform == null then [ ]
-        else [ ("aws-off: sandbox-manifest-overlay still carries contrib.yaml — the sandbox seam is"
-                + " wired unconditionally, so every sandbox mounts a ConfigMap that is not rendered") ]);
+    ++ (let off = contribOverlayOf awsOffPlatform; in
+        if off == null || !(hasName (off.volumes or [ ]) "aws-accounts") then [ ]
+        else [ ("aws-off: sandbox-manifest-overlay still mounts aws-accounts — the sandbox seam is"
+                + " wired unconditionally, so every sandbox mounts a ConfigMap that is not rendered") ])
+    # The forge proxy is always on: every sandbox trusts the forge CA (optional, so pods start
+    # before the broker first publishes it) and sends HTTPS through the in-pod shim.
+    ++ (if contribPodSpec != null && builtins.any (v: v.name == "forge-ca" && (v.configMap.optional or false)) (contribPodSpec.volumes or [ ]) then [ ]
+        else [ "sandboxPod.extraVolumes forge-ca (optional ConfigMap scooter-forge-ca) missing — no sandbox trusts the forge CA" ])
+    ++ (if contribCtr != null && hasName (contribCtr.env or [ ]) "HTTPS_PROXY" && hasName (contribCtr.env or [ ]) "FORGE_PROXY_ADDR" then [ ]
+        else [ "sandboxPod.extraEnv HTTPS_PROXY / FORGE_PROXY_ADDR missing — sandbox git/gh/glab bypass the forge proxy" ]);
 
   # Sandbox self-access: the router serves the listener, a Service fronts it, and every sandbox
   # gets the token audience and the URL to reach it.
@@ -604,6 +611,30 @@ let
         else [ "host.env.SCOOTER_TOKEN_AUDIENCES lacks scooter-self — sandboxes get no token for the listener" ])
     ++ (if (builtins.fromJSON (if hostEnvVal "SCOOTER_ENV" == "" then "{}" else hostEnvVal "SCOOTER_ENV")) ? SCOOTER_SELF_URL then [ ]
         else [ "host.env.SCOOTER_ENV lacks SCOOTER_SELF_URL — the sandbox cannot find the listener" ]);
+
+  # Sandbox isolation renders by default, admits only the SA-token surfaces, and turns off.
+  sandboxNp = (res.networkPolicies or { }).sandbox-isolation or null;
+  npEgress = if sandboxNp == null then [ ] else sandboxNp.spec.egress;
+  npPeerApps = rule: map (p: p.podSelector.matchLabels.app or null) (rule.to or [ ]);
+  npPortsTo = app: builtins.concatMap (r: if builtins.elem app (npPeerApps r) then map (p: p.port) (r.ports or [ ]) else [ ]) npEgress;
+  ctrPortNames = dep: builtins.concatMap (c: map (p: p.name or "") (c.ports or [ ]))
+    (builtins.attrValues (res.deployments.${dep}.spec.template.spec.containers or { }));
+  npInternet = builtins.concatMap (r: builtins.filter (p: p ? ipBlock) (r.to or [ ])) npEgress;
+  npProblems =
+    if sandboxNp == null then [ "networkPolicies.sandbox-isolation missing (networkPolicy.enable defaults to true)" ] else
+    (if sandboxNp.spec.podSelector.matchExpressions or [ ] == [ { key = "agents.x-k8s.io/sandbox-name-hash"; operator = "Exists"; } ] then [ ]
+     else [ "sandbox-isolation does not select sandbox pods by agents.x-k8s.io/sandbox-name-hash (the controller strips the template label)" ])
+    ++ (if npPortsTo "agent-broker" == [ "http" "forge-proxy" ] then [ ]
+        else [ "sandbox-isolation must admit the broker's http and forge-proxy ports, got ${builtins.toJSON (npPortsTo "agent-broker")}" ])
+    ++ (if npPortsTo "conversation-router" == [ "self" ] then [ ]
+        else [ "sandbox-isolation must admit the router's `self` port only, got ${builtins.toJSON (npPortsTo "conversation-router")}" ])
+    ++ builtins.concatMap (n: if builtins.elem n (ctrPortNames "agent-broker") then [ ] else [ "sandbox-isolation names broker port `${n}`, which the broker does not declare" ]) (npPortsTo "agent-broker")
+    ++ (if hasName routerPorts "self" then [ ] else [ "sandbox-isolation names router port `self`, which the router does not declare" ])
+    ++ builtins.concatMap (app: if npPortsTo app == [ ] then [ ] else [ "sandbox-isolation lets sandboxes reach ${app}" ]) [ "agent-host" "agent-shared-db" "agent-webhooks" "agent-scheduler" "ui" ]
+    ++ (if builtins.all (b: b.ipBlock.cidr == "0.0.0.0/0" && builtins.all (c: builtins.elem c b.ipBlock.except) [ "10.0.0.0/8" "100.64.0.0/10" "169.254.0.0/16" ]) npInternet && npInternet != [ ] then [ ]
+        else [ "sandbox-isolation internet egress must except the pod/tailnet/metadata ranges" ])
+    ++ (if ((evalPlatform { module = { lib, ... }: { imports = [ ./kubenix-config.nix ]; scooter.networkPolicy.enable = lib.mkForce false; }; }).config.kubernetes.resources.networkPolicies or { }) ? sandbox-isolation
+        then [ "networkPolicy.enable = false still renders sandbox-isolation" ] else [ ]);
 
   # A contrib's approval declaration reaches the agent-host, and with aws off it does not.
   approvalsJson =
@@ -656,6 +687,15 @@ let
   initScript = let c = res.jobs.agent-postgres-init.spec.template.spec.containers.sql.command; in
     builtins.elemAt c (builtins.length c - 1);
   hasWord = w: s: builtins.elem w (builtins.filter builtins.isString (builtins.split "[ \n]+" s));
+  # Every reader table grant waits for agent-db-migrate's table first, since the
+  # two Jobs run concurrently and a crash-looping init stalls behind kubelet backoff.
+  initLines = nixpkgsLib.splitString "\n" initScript;
+  initGrantIdx = builtins.filter (i: builtins.match ".*ON TABLE public[.].*" (builtins.elemAt initLines i) != null)
+    (nixpkgsLib.range 1 (builtins.length initLines - 1));
+  initGrantProblems =
+    (if initGrantIdx != [ ] then [ ] else [ "agent-postgres-init grants on no reader table — the wait_table check below is vacuous" ])
+    ++ map (i: "agent-postgres-init grants before waiting for the table: ${nixpkgsLib.trim (builtins.elemAt initLines i)}")
+      (builtins.filter (i: builtins.match ''[[:space:]]*wait_table .*'' (builtins.elemAt initLines (i - 1)) == null) initGrantIdx);
   contribDbProblems =
     (if hasWord "contrib_aws:broker" (toString (contribEnvValue migrateEnv "DB_ENVS")) then [ ]
      else [ "migrate.env.DB_ENVS lacks contrib_aws:broker — aws's own database is never migrated, or not as the broker's role" ])
@@ -989,7 +1029,46 @@ let
     else (if off.settingsTabs ? echo then [ "the UI manifest has the echo settings tab while echo is disabled" ] else [ ])
       ++ (if on.settingsTabs ? echo then [ ] else [ "enabling echo did not put its settings tab in the UI's mounted manifest" ]);
 
-  allProblems = sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ sandboxOriginProblems;
+  # scooter.uploads: the body-limit formula, and that every layer gets it. The example
+  # sets 50MB x 4 on an nginx-class Ingress.
+  uploadBody = import ../modules/upload-max-body.nix;
+  uploadsEval = extra:
+    (evalPlatform {
+      module = { ... }: {
+        imports = [ ./kubenix-config.nix ];
+        config = extra;
+      };
+    }).config.kubernetes.resources;
+  envOf = r: dep: name:
+    let
+      ctrs = builtins.attrValues (r.deployments.${dep}.spec.template.spec.containers or { });
+      m = builtins.filter (e: e.name == name) (builtins.concatMap (c: c.env or [ ]) ctrs);
+    in if m == [ ] then null else (builtins.head m).value;
+  bodyAnn = r: r.ingresses.agent-host.metadata.annotations."nginx.ingress.kubernetes.io/proxy-body-size" or null;
+  traefikRes = uploadsEval { scooter.ingress.className = nixpkgsLib.mkForce "traefik"; };
+  overrideRes = uploadsEval {
+    scooter.ingress.annotations."nginx.ingress.kubernetes.io/proxy-body-size" = "1g";
+  };
+  uploadsProblems =
+    (if uploadBody { maxFileBytes = 25 * 1024 * 1024; maxFilesPerMessage = 4; } == "144m" then [ ]
+     else [ "upload-max-body: 4 x 25MB should give 144m (the ui image's render default)" ])
+    ++ (if uploadBody { maxFileBytes = 50 * 1024 * 1024; maxFilesPerMessage = 1; } == "72m" then [ ]
+        else [ "upload-max-body: 1 x 50MB should give 72m" ])
+    ++ (if uploadBody { maxFileBytes = 1024; maxFilesPerMessage = 1; } == "2m" then [ ]
+        else [ "upload-max-body: a tiny cap should still get the 1MiB headroom (2m)" ])
+    ++ (if envOf res "agent-host" "FILE_MAX_BYTES" == toString (50 * 1024 * 1024)
+          && envOf res "agent-host" "FILE_MAX_PER_MESSAGE" == "4" then [ ]
+        else [ "agent-host.env FILE_MAX_BYTES / FILE_MAX_PER_MESSAGE do not carry scooter.uploads" ])
+    ++ (if envOf res "ui" "UPLOAD_MAX_BODY" == "287m" then [ ]
+        else [ "ui.env UPLOAD_MAX_BODY should be 287m for 4 x 50MB (got ${toString (envOf res "ui" "UPLOAD_MAX_BODY")})" ])
+    ++ (if bodyAnn res == "287m" then [ ]
+        else [ "the nginx-class Ingress lacks proxy-body-size = UPLOAD_MAX_BODY, so ingress-nginx's 1m default would 413 uploads" ])
+    ++ (if bodyAnn traefikRes == null then [ ]
+        else [ "a non-nginx Ingress got the ingress-nginx proxy-body-size annotation" ])
+    ++ (if bodyAnn overrideRes == "1g" then [ ]
+        else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
+
+  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

@@ -2,19 +2,19 @@
   "version": 1,
   "inputs": {
     "nixpkgs": {
-      "lastModified": 1792094642,
-      "narHash": "sha256-zp8ToDMnqZcu4o4IH9pdwXFXGp7yLm/M0dEnNWnyd7I=",
+      "lastModified": 1792773339,
+      "narHash": "sha256-rZLrzrC6i+jnTAlvPZHogKDulY7WWDEv9hJeHieO7Zw=",
       "owner": "NixOS",
       "repo": "nixpkgs",
-      "rev": "fe13242281a67641c0102cdb1087f0ebe586c7df",
+      "rev": "3ec636362e1816bc2f0888fa0fa2c69f1bc9e504",
       "type": "github"
     },
     "uv-nix": {
-      "lastModified": 1792516773,
-      "narHash": "sha256-zmbm+4jhTj3etEvaDFW7NarJzxiizQ8ezaKqt+iSnM8=",
+      "lastModified": 1792678206,
+      "narHash": "sha256-HTDN09Bb/NGwfCnBFuIIuS7bsKb6YRgMwKnlLtiakps=",
       "owner": "chadac",
       "repo": "uv-nix",
-      "rev": "97c73b7e7c53b75f0c7d9159623a4e7720c0fc5f",
+      "rev": "d45e9a75eabadaf1fcb8107fcb2bcad40d4492cb",
       "type": "github"
     }
   },
@@ -22,26 +22,44 @@
     "aarch64-linux": {
       "awscli2": {
         "attr": "awscli2",
-        "drv": "/nix/store/dw4is4dm9r5irpi36qfifxc4fzbzrd69-awscli2-2.35.11.drv",
+        "drv": "/nix/store/8pf1153682y1yj5lcm121m3lg6p80608-awscli2-2.36.31.drv",
         "output": "out",
         "bins": [
           "aws",
           "aws_completer"
         ],
-        "name": "awscli2-2.35.11"
+        "name": "awscli2-2.36.31"
       },
       "code-server": {
         "attr": "code-server",
-        "drv": "/nix/store/sdh8pbxy5kkm2lb7vp1ks4qkd7wp6jgk-code-server-4.141.0.drv",
+        "drv": "/nix/store/s5c8vcgbjlnmys6pmln9p27h5dj0k2mb-code-server-4.141.0.drv",
         "output": "out",
         "bins": [
           "code-server"
         ],
         "name": "code-server-4.141.0"
       },
+      "gh": {
+        "attr": "gh",
+        "drv": "/nix/store/2dyzvf15igds1a4qldhd2yp5zbvb8874-gh-2.103.0.drv",
+        "output": "out",
+        "bins": [
+          "gh"
+        ],
+        "name": "gh-2.103.0"
+      },
+      "glab": {
+        "attr": "glab",
+        "drv": "/nix/store/dahaf0inpj52dw5z4pj2dl0l8hiqf95r-glab-1.114.0.drv",
+        "output": "out",
+        "bins": [
+          "glab"
+        ],
+        "name": "glab-1.114.0"
+      },
       "marimo": {
         "attr": "marimo",
-        "drv": "/nix/store/yldxq9qbhb5xr52r9f5wrm0jbw4171ab-python3.14-marimo-0.25.1.drv",
+        "drv": "/nix/store/5gqr5q7wnqs22j9sf0pj37y461d5aw57-python3.14-marimo-0.25.1.drv",
         "output": "out",
         "bins": [
           "marimo"
@@ -50,7 +68,7 @@
       },
       "scooter-vscode-ahp": {
         "attr": "scooter-vscode-ahp",
-        "drv": "/nix/store/3q7ysgp2k6xx7dfyjjy0l3diw27c1jdp-scooter-vscode-ahp-0.0.0.drv",
+        "drv": "/nix/store/3bi963j5ab3v4zgkhmfc0j604zbjd4bg-scooter-vscode-ahp-0.0.0.drv",
         "output": "out",
         "bins": [
           "scooter-vscode-ahp"
@@ -59,7 +77,7 @@
       },
       "tree": {
         "attr": "tree",
-        "drv": "/nix/store/in5pip9xfch9rb11kidb7ky21jafrlz8-tree-2.3.2.drv",
+        "drv": "/nix/store/q3f3gk416p17m14y2h1l3ydf5l9i7bwh-tree-2.3.2.drv",
         "output": "out",
         "bins": [
           "tree"
@@ -68,7 +86,7 @@
       },
       "ttyd": {
         "attr": "ttyd",
-        "drv": "/nix/store/n9m19hjvakypimr0kcsivsjqx7pckjkc-ttyd-1.7.7.drv",
+        "drv": "/nix/store/wzdl2p4i78bgissplfzwqkn77bl1pgzg-ttyd-1.7.7.drv",
         "output": "out",
         "bins": [
           "ttyd"
@@ -77,37 +95,55 @@
       },
       "uv": {
         "attr": "uv",
-        "drv": "/nix/store/6gli2ncsyi8ydwk7d2xkn7rdiny4sn8r-uv-nix-bin-0.13.1-nix.drv",
+        "drv": "/nix/store/ry3r18nag7nzifsrylfwk3cpz4ykxwcd-uv-nix-bin-0.13.5-nix.1.drv",
         "output": "out",
         "bins": [
           "uv"
         ],
-        "name": "uv-nix-bin-0.13.1-nix"
+        "name": "uv-nix-bin-0.13.5-nix.1"
       }
     },
     "x86_64-linux": {
       "awscli2": {
         "attr": "awscli2",
-        "drv": "/nix/store/9vw08lvbfrzh2rjyfzqvlvrvldwg96i1-awscli2-2.35.11.drv",
+        "drv": "/nix/store/4ljgwfivvpfkycqmv5g20dplxx3lw4ng-awscli2-2.36.31.drv",
         "output": "out",
         "bins": [
           "aws",
           "aws_completer"
         ],
-        "name": "awscli2-2.35.11"
+        "name": "awscli2-2.36.31"
       },
       "code-server": {
         "attr": "code-server",
-        "drv": "/nix/store/wza784sj8gg3nchddgdpx8w27clxs030-code-server-4.141.0.drv",
+        "drv": "/nix/store/bpxayhmvzdc8xqid0p8ibyf5h293qa1n-code-server-4.141.0.drv",
         "output": "out",
         "bins": [
           "code-server"
         ],
         "name": "code-server-4.141.0"
       },
+      "gh": {
+        "attr": "gh",
+        "drv": "/nix/store/vjpz45dp51acbahazxd9gjn9ii3mdprr-gh-2.103.0.drv",
+        "output": "out",
+        "bins": [
+          "gh"
+        ],
+        "name": "gh-2.103.0"
+      },
+      "glab": {
+        "attr": "glab",
+        "drv": "/nix/store/qc76zm9j4g054xhmjhw3pv1fyhsb71jf-glab-1.114.0.drv",
+        "output": "out",
+        "bins": [
+          "glab"
+        ],
+        "name": "glab-1.114.0"
+      },
       "marimo": {
         "attr": "marimo",
-        "drv": "/nix/store/pnc96k8s41w6samhf9nwyaf55c1ibcmz-python3.14-marimo-0.25.1.drv",
+        "drv": "/nix/store/jrczi9zn1bcw731ph6y2abs42naancpc-python3.14-marimo-0.25.1.drv",
         "output": "out",
         "bins": [
           "marimo"
@@ -116,7 +152,7 @@
       },
       "scooter-vscode-ahp": {
         "attr": "scooter-vscode-ahp",
-        "drv": "/nix/store/7ybxydj5nav21v987g29sd9ahn8bfxx6-scooter-vscode-ahp-0.0.0.drv",
+        "drv": "/nix/store/y9rc000501m0q3a7q99jk5xkfwzgy8zg-scooter-vscode-ahp-0.0.0.drv",
         "output": "out",
         "bins": [
           "scooter-vscode-ahp"
@@ -125,7 +161,7 @@
       },
       "tree": {
         "attr": "tree",
-        "drv": "/nix/store/nzpc4lbzb10qv59sngyjpgqm559mapbr-tree-2.3.2.drv",
+        "drv": "/nix/store/q130wfsall0p81mrqdqqzagcirw7azga-tree-2.3.2.drv",
         "output": "out",
         "bins": [
           "tree"
@@ -134,7 +170,7 @@
       },
       "ttyd": {
         "attr": "ttyd",
-        "drv": "/nix/store/af8ap7xj682rrrrdqs30bklng8yyp501-ttyd-1.7.7.drv",
+        "drv": "/nix/store/yh4i65hl9g9flls4w54rmkjphbxzgk20-ttyd-1.7.7.drv",
         "output": "out",
         "bins": [
           "ttyd"
@@ -143,12 +179,12 @@
       },
       "uv": {
         "attr": "uv",
-        "drv": "/nix/store/3axcdi0asn8c41zlqmbhpmlzcnq1n3aj-uv-nix-bin-0.13.1-nix.drv",
+        "drv": "/nix/store/bqw00nbvsjf13a1szkkcjvylpv7skpyn-uv-nix-bin-0.13.5-nix.1.drv",
         "output": "out",
         "bins": [
           "uv"
         ],
-        "name": "uv-nix-bin-0.13.1-nix"
+        "name": "uv-nix-bin-0.13.5-nix.1"
       }
     }
   }

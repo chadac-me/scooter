@@ -6,7 +6,12 @@
 
 import { describe, it, expect, vi } from "vitest";
 
-import { createDeferredConnector } from "../../src/exec/deferredConnect.js";
+import {
+  bumpSandboxEpoch,
+  createDeferredConnector,
+  createEpochConnector,
+  sandboxEpoch,
+} from "../../src/exec/deferredConnect.js";
 
 describe("deferred connect — in-flight dedupe", () => {
   it("a burst of concurrent first uses connects exactly ONCE", async () => {
@@ -49,5 +54,32 @@ describe("deferred connect — in-flight dedupe", () => {
     const ok = await ensure();
     expect(ok.tag).toBe("client");
     expect(connect).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("epoch connector — reconnect after a stop or restart", () => {
+  it("reuses the cached client until the sandbox's epoch is bumped, then reconnects once", async () => {
+    const ref = { namespace: "ns", name: "conv-epoch" };
+    let n = 0;
+    const connect = vi.fn(async () => ({ tag: `client-${++n}` }));
+    const ensure = createEpochConnector(connect, () => sandboxEpoch(ref));
+
+    expect((await ensure()).tag).toBe("client-1");
+    expect((await ensure()).tag).toBe("client-1");
+    bumpSandboxEpoch(ref); // stop_sandbox / restart_sandbox under a live bridge
+    expect((await ensure()).tag).toBe("client-2");
+    expect((await ensure()).tag).toBe("client-2");
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("a bump on one sandbox leaves another's cached client alone", async () => {
+    const a = { namespace: "ns", name: "conv-a" };
+    const b = { namespace: "ns", name: "conv-b" };
+    const connect = vi.fn(async () => ({}));
+    const ensure = createEpochConnector(connect, () => sandboxEpoch(b));
+    await ensure();
+    bumpSandboxEpoch(a);
+    await ensure();
+    expect(connect).toHaveBeenCalledOnce();
   });
 });

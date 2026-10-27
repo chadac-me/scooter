@@ -10,7 +10,9 @@ import { RotateCw } from "lucide-react";
 import {
   resumeConversation,
   loadSandboxReady,
-  loadSandboxResources,
+  loadSandboxInfo,
+  restartSandbox,
+  suspendConversation,
   loadSandboxSizes,
   setSandboxSize,
   loadWebServices,
@@ -19,6 +21,7 @@ import {
   type WebService,
   type SandboxResources,
   type SandboxSizePreset,
+  type PendingRestart,
 } from "./client.js";
 import { agentHostConfig } from "./config.js";
 import { useSessions, currentConversation } from "./sessions.js";
@@ -151,6 +154,7 @@ export function useSandboxStatus() {
     rescanning,
     conversationId: currentId ?? undefined,
     startSandbox,
+    refreshStatus,
     startService: (name: string) => void act(name, startWebService),
     stopService: (name: string) => void act(name, stopWebService),
     hasConversation: !!currentId,
@@ -278,10 +282,13 @@ export interface SizeSectionProps {
   error?: string | null;
   /** A size was recorded and is waiting for the next restart to take effect. */
   pendingRestart?: boolean;
+  /** Apply the pending size now; absent hides the button. */
+  onRestart?: () => void;
+  restarting?: boolean;
 }
 
 /** The sandbox size picker over the deployment's named presets. */
-export function SizeSection({ sizes, resources, onSelect, saving, error, pendingRestart }: SizeSectionProps) {
+export function SizeSection({ sizes, resources, onSelect, saving, error, pendingRestart, onRestart, restarting }: SizeSectionProps) {
   const names = Object.keys(sizes);
   const selected = matchPreset(sizes, resources);
   // Absent for "Custom" and for presets without a hint.
@@ -319,10 +326,66 @@ export function SizeSection({ sizes, resources, onSelect, saving, error, pending
           {error}
         </p>
       ) : pendingRestart ? (
-        <p className="mt-1 text-xs text-muted-foreground" data-testid="sandbox-size-pending">
+        <p className="mt-1 flex items-center gap-2 text-xs text-muted-foreground" data-testid="sandbox-size-pending">
           Takes effect when the sandbox next restarts.
+          {onRestart ? (
+            <Button
+              variant="outline"
+              size="xs"
+              data-testid="sandbox-size-restart"
+              disabled={restarting}
+              onClick={onRestart}
+            >
+              {restarting ? "Restarting…" : "Restart now"}
+            </Button>
+          ) : null}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+/** The "Update available" banner with a restart button. */
+export function UpdateBanner({
+  pending,
+  running,
+  restarting,
+  onRestart,
+}: {
+  pending: PendingRestart;
+  running: boolean;
+  restarting: boolean;
+  onRestart?: () => void;
+}) {
+  const update = !!(pending.image || pending.env);
+  const what = [update ? "the latest sandbox image" : null, pending.size ? "your new size" : null]
+    .filter(Boolean)
+    .join(" and ");
+  return (
+    <div
+      data-testid="sandbox-update-banner"
+      className="flex flex-col gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2.5"
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">{update ? "Update available" : "Size change pending"}</span>
+        {running && onRestart ? (
+          <Button
+            variant="default"
+            size="xs"
+            data-testid="sandbox-restart"
+            disabled={restarting}
+            onClick={onRestart}
+            className="ml-auto"
+          >
+            {restarting ? "Restarting…" : "Restart sandbox"}
+          </Button>
+        ) : null}
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {running
+          ? `A restart picks up ${what}. /workspace, installed modules and /nix/store builds persist; running processes, background jobs and web services stop.`
+          : `The sandbox picks up ${what} when it next starts.`}
+      </p>
     </div>
   );
 }
@@ -342,6 +405,14 @@ export interface SandboxPanelViewProps {
   sizeSaving?: boolean;
   sizeError?: string | null;
   sizePendingRestart?: boolean;
+  /** Pending restart changes; drives the update banner. */
+  pendingRestart?: PendingRestart | null;
+  /** A restart is in flight. */
+  restarting?: boolean;
+  /** A failed restart or stop, shown inline. */
+  lifecycleError?: string | null;
+  onRestartSandbox?: () => void;
+  onStopSandbox?: () => void;
   onStartSandbox: () => void;
   onStartService: (name: string) => void;
   onStopService: (name: string) => void;
@@ -363,6 +434,11 @@ export function SandboxPanelView({
   sizeSaving,
   sizeError,
   sizePendingRestart,
+  pendingRestart,
+  restarting,
+  lifecycleError,
+  onRestartSandbox,
+  onStopSandbox,
   onStartSandbox,
   onStartService,
   onStopService,
@@ -409,7 +485,34 @@ export function SandboxPanelView({
             {rescanning ? <span className="text-xs">Rescanning…</span> : <RotateCw className="size-4" aria-hidden />}
           </Button>
         ) : null}
+        {state === "running" && onStopSandbox && !restarting ? (
+          <Button
+            variant="ghost"
+            size="xs"
+            data-testid="sandbox-stop"
+            onClick={onStopSandbox}
+            title="Stop the sandbox pod to free its capacity; /workspace persists"
+            className={cn("text-muted-foreground hover:text-foreground", onRescanServices ? "" : "ml-auto")}
+          >
+            Stop
+          </Button>
+        ) : null}
       </div>
+
+      {/* Shown even when suspended; it applies on next start. */}
+      {pendingRestart && (pendingRestart.image || pendingRestart.env || pendingRestart.size) ? (
+        <UpdateBanner
+          pending={pendingRestart}
+          running={state === "running"}
+          restarting={!!restarting}
+          onRestart={onRestartSandbox}
+        />
+      ) : null}
+      {lifecycleError ? (
+        <p className="text-xs text-destructive" data-testid="sandbox-lifecycle-error">
+          {lifecycleError}
+        </p>
+      ) : null}
 
       {/* Hidden when unowned. */}
       {owner ? (
@@ -431,6 +534,8 @@ export function SandboxPanelView({
           saving={sizeSaving}
           error={sizeError}
           pendingRestart={sizePendingRestart}
+          onRestart={state === "running" ? onRestartSandbox : undefined}
+          restarting={restarting}
         />
       ) : null}
 
@@ -485,21 +590,67 @@ export function SandboxPanel() {
 
   // Re-fetched when the pod comes up, since the broker applies a pending size on restart.
   const [resources, setResources] = useState<SandboxResources | null>(null);
+  const [pendingRestart, setPendingRestart] = useState<PendingRestart | null>(null);
+  // Bumped after a restart to re-read the info.
+  const [infoNonce, setInfoNonce] = useState(0);
+  useEffect(() => {
+    setPendingRestart(null); // reset on conversation switch
+  }, [currentId]);
   useEffect(() => {
     if (!currentId) return;
     let alive = true;
     void currentConversation()
       ?.ifCreated(
-        (id) => loadSandboxResources({ baseUrl: BASE_URL }, id),
-        null as Awaited<ReturnType<typeof loadSandboxResources>>,
+        (id) => loadSandboxInfo({ baseUrl: BASE_URL }, id),
+        null as Awaited<ReturnType<typeof loadSandboxInfo>> | null,
       )
       .then((r) => {
-      if (alive) setResources(r);
-    });
+        if (!alive || !r) return;
+        setResources(r.resources);
+        setPendingRestart(r.pendingRestart);
+      });
     return () => {
       alive = false;
     };
-  }, [currentId, s.state]);
+  }, [currentId, s.state, infoNonce]);
+
+  const [restarting, setRestarting] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  useEffect(() => {
+    setLifecycleError(null);
+    setRestarting(false);
+  }, [currentId]);
+
+  const onRestart = () => {
+    const conv = currentConversation();
+    if (!conv || restarting) return;
+    setRestarting(true);
+    setLifecycleError(null);
+    void conv
+      .ifCreated((id) => restartSandbox({ baseUrl: BASE_URL }, id), "no conversation" as string | null)
+      .then((err) => {
+        setRestarting(false);
+        if (err) {
+          setLifecycleError(err);
+          return;
+        }
+        setSizePendingRestart(false);
+        setInfoNonce((n) => n + 1);
+        void s.refreshStatus();
+      });
+  };
+
+  const onStop = () => {
+    const conv = currentConversation();
+    if (!conv) return;
+    setLifecycleError(null);
+    void conv
+      .ifCreated((id) => suspendConversation({ baseUrl: BASE_URL }, id), "no conversation" as string | null)
+      .then((err) => {
+        if (err) setLifecycleError(err);
+        void s.refreshStatus();
+      });
+  };
 
   // The preset table is deployment-wide, so it is fetched once.
   const [sizes, setSizes] = useState<Record<string, SandboxSizePreset>>({});
@@ -556,6 +707,11 @@ export function SandboxPanel() {
       sizeSaving={sizeSaving}
       sizeError={sizeError}
       sizePendingRestart={sizePendingRestart}
+      pendingRestart={pendingRestart}
+      restarting={restarting}
+      lifecycleError={lifecycleError}
+      onRestartSandbox={onRestart}
+      onStopSandbox={onStop}
       onStartSandbox={() => void s.startSandbox()}
       onStartService={s.startService}
       onStopService={s.stopService}

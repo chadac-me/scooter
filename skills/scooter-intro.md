@@ -26,6 +26,5 @@ running commands rather than guessing.
   don't put big files there.
 - Packages: use **Nix** (`nix profile install nixpkgs#<pkg>`), not apt/brew —
   see the package-management skill.
-- Git over HTTPS just works: credentials are vended automatically by the
-  broker (`git config credential.helper broker` is preconfigured), so
-  `git clone https://github.com/...` authenticates without you handling tokens.
+- Git over HTTPS just works: the broker's forge proxy authenticates it, so
+  `git clone https://github.com/...` works without you handling tokens.

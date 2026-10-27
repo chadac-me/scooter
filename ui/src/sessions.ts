@@ -135,6 +135,9 @@ const isPristine = (s: Session) => s.title === DEFAULT_TITLE;
 /** Whether the server has ever created this conversation. */
 const isServerBacked = (s: Session): boolean => s.serverId !== undefined || s.serverCreated === true;
 
+/** Whether this session's first send is still creating it server-side (still titled "New chat" and id-less meanwhile). */
+const isCreating = (s: Session): boolean => conversations.get(s.id)?.creating === true;
+
 /** The id the server knows this conversation by, which is what anything server-owned (list membership, a subagent's `parentId`) must be matched against. */
 export const serverKeyOf = (s: Pick<Session, "id" | "serverId">): string => s.serverId ?? s.id;
 
@@ -402,7 +405,8 @@ export const sessionStore = {
 
   /** Open a new conversation, reusing an untouched one if present. */
   startFresh(): string {
-    const spare = state.sessions.find((s) => isPristine(s) && !isServerBacked(s));
+    // A draft whose first send is mid-create is not spare, though it still looks untouched.
+    const spare = state.sessions.find((s) => isPristine(s) && !isServerBacked(s) && !isCreating(s));
     if (!spare) return this.newSession();
     if (state.currentId !== spare.id) setState({ ...state, currentId: spare.id });
     return spare.id;
@@ -509,6 +513,8 @@ export const sessionStore = {
       if (!fullList) return true;
       if (s.parentId) return false; // an ended subagent
       if (s.id === state.currentId) return true;
+      // Mid-create, the list read may predate the create; dropping the row would orphan the new conversation.
+      if (isCreating(s)) return true;
       // A row the server never created can only shadow the real conversation it was meant to become.
       if (!isServerBacked(s)) return false;
       return !isPristine(s);

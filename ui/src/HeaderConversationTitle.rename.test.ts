@@ -7,15 +7,15 @@
 
 import { describe, it, expect } from "vitest";
 
-import { renameStaysOpen } from "./Sidebar.js";
+import { renameStaysOpen } from "./HeaderConversationTitle.js";
 
 describe("renameStaysOpen", () => {
-  it("keeps the input open when focus moves within its own row", () => {
-    // The row's own star/delete buttons take focus during a reconcile; that is not a click-away.
+  it("keeps the input open when focus moves within the rename control", () => {
+    // Focus moving to a sibling inside the header rename control is not a click-away.
     expect(renameStaysOpen(true, true)).toBe(true);
   });
 
-  it("commits when focus moves to something outside the row", () => {
+  it("commits when focus moves to something outside the rename control", () => {
     expect(renameStaysOpen(true, false)).toBe(false);
   });
 
@@ -26,7 +26,7 @@ describe("renameStaysOpen", () => {
     expect(renameStaysOpen(false, false)).toBe(false);
   });
 
-  it("never keeps the input open on a null target, whatever the row says", () => {
+  it("never keeps the input open on a null target, whatever the container says", () => {
     expect(renameStaysOpen(false, true)).toBe(false);
   });
 });

@@ -66,7 +66,7 @@
 
     broker = {
       enable = true;
-      testProvider = true; # whoami + test git-credential transports
+      testProvider = true; # the whoami test transport
 
       # The agent-facing MCP endpoint, on by default and stated here because the
       # coverage check requires the example to exercise every option namespace.
@@ -96,6 +96,13 @@
     # Bring-your-own-Claude: deploys the controller, the unauthenticated /byoc
     # Ingress and the agent-host's remote-agent routes.
     byoc.enable = true;
+
+    # Attachments up to 50MB, at most 4 per message. The ui nginx and (className
+    # "nginx") the Ingress get the matching body limit.
+    uploads = {
+      maxFileBytes = 50 * 1024 * 1024;
+      maxFilesPerMessage = 4;
+    };
 
     # The agent-host trusts an identity header the ingress sets, so auth config
     # goes in `annotations`.
@@ -167,6 +174,8 @@
     conversationController.historyMirror.retainForMigration = true;
     # Sandbox self-access (VS Code continuing its own conversation), so the render check covers it.
     conversationController.selfAccess.enable = true;
+    # Sandbox isolation is on by default; `enable = false` hands it to your own policies.
+    networkPolicy.enable = true;
 
     # OpenTelemetry metrics with per-model prices per million tokens.
     observability.otel = {

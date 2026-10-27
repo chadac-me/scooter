@@ -22,6 +22,7 @@ class GitHubAppSource(CredentialSource):
     app_id: str
     private_key: str                   # PEM content or path
     installation_id: int
+    api_base: str = GITHUB_API
 
     # (token, expires_at), per source instance.
     _cache: tuple[str, float] | None = field(default=None, repr=False)
@@ -47,7 +48,7 @@ class GitHubAppSource(CredentialSource):
         app_jwt = self._generate_jwt()
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"{GITHUB_API}/app/installations/{self.installation_id}/access_tokens",
+                f"{self.api_base}/app/installations/{self.installation_id}/access_tokens",
                 headers={
                     "Authorization": f"Bearer {app_jwt}",
                     "Accept": "application/vnd.github+json",

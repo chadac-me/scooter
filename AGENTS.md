@@ -368,7 +368,7 @@ min total. Add it when the flake needs contention to fire, not by default.
 | `services/webhooks/`, `services/scheduler/` | Python/FastAPI: spawn conversations from provider threads / fire cron-scheduled tasks |
 | `services/claude-sdk-provider/` | Claude Agent SDK provider (an alternative brain to goose) |
 | `pkgs/sandbox-os/` | the NixOS systemd-PID-1 dev sandbox image (exec via K8s API) |
-| `pkgs/broker-tools/` | broker CLIs (`agent-broker` / `git-credential-broker` / `scooter-aws*`), prebuilt into the sandbox |
+| `pkgs/broker-tools/` | broker CLIs (`agent-broker` / `scooter-aws*`), prebuilt into the sandbox |
 | `modules/` | kubenix: per-conversation cold `Sandbox` (SA + 2 PVCs), agent-host, broker, webhooks, scheduler, warm pool |
 | `ui/` | assistant-ui frontend + AG-UI client library |
 | `skills/` | Markdown agent skills that document the PLATFORM (`scooter-intro`, `scooter-env`, `agent-tools`, …) — a skill documenting a contrib lives in that contrib, gated on it |

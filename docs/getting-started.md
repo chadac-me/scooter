@@ -14,6 +14,8 @@ the options most deployments change.
 - **A Kubernetes cluster** (k3s, kind, EKS, …) with the
   [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller installed.
   Scooter creates one `Sandbox` per conversation; the controller turns it into a pod.
+- **A CNI that enforces NetworkPolicy** (k3s's built-in controller, Calico, Cilium, …).
+  Scooter isolates sandbox pods with a NetworkPolicy.
 - **Nix with flakes enabled**, on the machine you deploy from.
 - **An ingress controller** (nginx, Traefik, …), so the UI is reachable from a browser.
 - **An authenticating proxy** in front of the UI, such as

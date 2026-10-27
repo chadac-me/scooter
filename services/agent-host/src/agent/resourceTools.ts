@@ -8,6 +8,7 @@
 import type { ToolResult } from "./mcpServer.js";
 import { validateResources, InvalidResourceError, type SandboxResources } from "../session/resources.js";
 import type { SandboxSizePreset } from "../session/resources.js";
+import type { PendingRestart, SandboxRestartResult } from "../session/manager.js";
 import { formatError, logger } from "../log.js";
 
 const log = logger("resourceTools");
@@ -20,6 +21,10 @@ export interface SandboxResourceToolsWiring {
   setResources(conversationId: string, resources: SandboxResources | { size: string }): Promise<boolean>;
   /** The named sandbox size presets and the default preset name, from the broker. */
   availableSizes?(): Promise<{ sizes: Record<string, SandboxSizePreset>; default: string | null }>;
+  /** Restarts onto the current image and size; enables restart_sandbox. */
+  restartSandbox?(conversationId: string): Promise<SandboxRestartResult>;
+  /** Stops the pod, keeping the turn alive; enables stop_sandbox. */
+  stopSandbox?(conversationId: string): Promise<{ deferred: boolean; pending?: PendingRestart }>;
 }
 
 /** The set_sandbox_resources tool input, either a preset name (size) or flat raw resources where an omitted dimension keeps its current value. */
@@ -98,7 +103,8 @@ export async function handleShowSandboxResources(
           `- requests: ${sideLine(r.requests)}\n` +
           `- limits: ${sideLine(r.limits)}\n` +
           presetLines +
-          "\nChange them with set_sandbox_resources (applies on the next sandbox restart).",
+          "\nChange them with set_sandbox_resources (applies on the next sandbox restart" +
+            (deps.restartSandbox ? "; call restart_sandbox to apply it now)." : ")."),
       },
     ],
   };
@@ -138,7 +144,7 @@ export async function handleSetSandboxResources(
           type: "text",
           text:
             `Recorded size preset "${args.size}" — it takes effect on the NEXT sandbox restart (not applied to the ` +
-            "running pod right now). Nothing was interrupted.",
+            "running pod right now). Nothing was interrupted." + applyNowHint(deps),
         },
       ],
     };
@@ -165,9 +171,65 @@ export async function handleSetSandboxResources(
           type: "text",
           text:
             "Recorded — your new sandbox size takes effect on the NEXT sandbox restart (it is not applied to the " +
-            "running pod right now). Nothing was interrupted.",
+            "running pod right now). Nothing was interrupted." + applyNowHint(deps),
         },
       ],
     };
   }
+}
+
+/** Hint appended to set_sandbox_resources when restart is available. */
+function applyNowHint(deps: SandboxResourceToolsWiring): string {
+  return deps.restartSandbox
+    ? " To apply it now, save your work and call restart_sandbox (running processes, background jobs and web services stop)."
+    : "";
+}
+
+/** Describes pending restart changes; empty when none. */
+function pendingLine(p: PendingRestart | undefined): string {
+  if (!p) return "";
+  const parts = [
+    p.image ? `a newer sandbox image (${p.image.from} -> ${p.image.to})` : null,
+    p.size ? "your recorded size change" : null,
+    p.env ? "refreshed environment settings" : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(", ") : "";
+}
+
+/** restart_sandbox: cycle the pod and wait for it. */
+export async function handleRestartSandbox(deps: SandboxResourceToolsWiring, conversationId: string): Promise<ToolResult> {
+  if (!deps.restartSandbox) return { isError: true, content: [{ type: "text", text: "Sandbox restart is not available here." }] };
+  let r: SandboxRestartResult;
+  try {
+    r = await deps.restartSandbox(conversationId);
+  } catch (e) {
+    return { isError: true, content: [{ type: "text", text: `Could not restart the sandbox: ${(e as Error).message}` }] };
+  }
+  const lines = [
+    r.ready ? "Sandbox restarted and ready." : "Sandbox restart issued, but the new pod was not Ready before the wait gave up; your next command will wait for it.",
+    `from_image: ${r.fromImage ?? "(unknown)"}`,
+    `to_image: ${r.toImage ?? "(unknown)"}`,
+    `size_applied: ${r.sizeApplied}`,
+  ];
+  if (!r.imageCurrent) lines.push("The image update failed; the sandbox is still on its old image. You can try restart_sandbox again later.");
+  lines.push("/workspace, installed modules and /nix/store persist; restart any background jobs or web services you need.");
+  return { content: [{ type: "text", text: lines.join("\n") }] };
+}
+
+/** stop_sandbox: stop the pod; the next sandbox call restarts it. */
+export async function handleStopSandbox(deps: SandboxResourceToolsWiring, conversationId: string): Promise<ToolResult> {
+  if (!deps.stopSandbox) return { isError: true, content: [{ type: "text", text: "Stopping the sandbox is not available here." }] };
+  let r: { deferred: boolean; pending?: PendingRestart };
+  try {
+    r = await deps.stopSandbox(conversationId);
+  } catch (e) {
+    return { isError: true, content: [{ type: "text", text: `Could not stop the sandbox: ${(e as Error).message}` }] };
+  }
+  const pending = pendingLine(r.pending);
+  const lines = [
+    "Sandbox stopped. Its capacity is freed; /workspace persists.",
+    "Any sandbox tool call (bash, read, …) starts it again, which costs one pod boot, so make this your last action.",
+  ];
+  lines.push(pending ? `pending_restart: ${pending} — applies when the sandbox next starts.` : "pending_restart: none");
+  return { content: [{ type: "text", text: lines.join("\n") }] };
 }

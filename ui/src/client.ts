@@ -400,16 +400,55 @@ export async function loadSandboxResources(
   config: AgentHostConfig,
   conversationId: string,
 ): Promise<SandboxResources | null> {
+  return (await loadSandboxInfo(config, conversationId)).resources;
+}
+
+/** What a sandbox restart would pick up. */
+export interface PendingRestart {
+  image?: { from: string; to: string };
+  size?: boolean;
+  env?: boolean;
+}
+
+/** Sandbox size and pending restart; nulls on failure. */
+export async function loadSandboxInfo(
+  config: AgentHostConfig,
+  conversationId: string,
+): Promise<{ resources: SandboxResources | null; pendingRestart: PendingRestart | null }> {
   try {
     const res = await fetch(
       `${config.baseUrl.replace(/\/$/, "")}/conversations/${encodeURIComponent(conversationId)}/resources`,
       { headers: config.token ? { Authorization: `Bearer ${config.token}` } : undefined },
     );
-    if (!res.ok) return null;
-    const body = (await res.json()) as { resources: SandboxResources | null };
-    return body.resources ?? null;
+    if (!res.ok) return { resources: null, pendingRestart: null };
+    const body = (await res.json()) as { resources?: SandboxResources | null; pendingRestart?: PendingRestart | null };
+    return { resources: body.resources ?? null, pendingRestart: body.pendingRestart ?? null };
   } catch {
-    return null;
+    return { resources: null, pendingRestart: null };
+  }
+}
+
+/** Restarts the sandbox; returns null or the error. */
+export async function restartSandbox(config: AgentHostConfig, conversationId: string): Promise<string | null> {
+  return postForError(config, `/conversations/${encodeURIComponent(conversationId)}/restart`);
+}
+
+/** Suspends the sandbox; returns null or the error. */
+export async function suspendConversation(config: AgentHostConfig, conversationId: string): Promise<string | null> {
+  return postForError(config, `/conversations/${encodeURIComponent(conversationId)}/suspend`);
+}
+
+async function postForError(config: AgentHostConfig, path: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}${path}`, {
+      method: "POST",
+      headers: config.token ? { Authorization: `Bearer ${config.token}` } : undefined,
+    });
+    if (res.ok) return null;
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return body.error ?? `request failed (${res.status})`;
+  } catch (e) {
+    return (e as Error).message;
   }
 }
 
@@ -469,11 +508,13 @@ export async function setSandboxSize(
   }
 }
 
-/** The caller's identity from the trusted ingress header. */
+/** The caller's identity from the trusted ingress header, plus the deployment's upload
+ *  caps (absent from an older agent-host). */
 export interface Whoami {
   id: string;
   email: string | null;
   anonymous: boolean;
+  limits?: { maxFileBytes?: number; maxFilesPerMessage?: number };
 }
 
 /** Fetch the caller's identity, falling back to anonymous if unreachable. */

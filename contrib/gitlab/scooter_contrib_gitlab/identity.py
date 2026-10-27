@@ -14,7 +14,7 @@ from .config import settings
 logger = logging.getLogger(__name__)
 _C = {"component": "contrib.gitlab.identity"}
 
-_GITLAB_API = "https://gitlab.com/api/v4"
+_GITLAB_API = f"https://{settings.gitlab_host}/api/v4"
 
 
 @register_email_resolver("gitlab")

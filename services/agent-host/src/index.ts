@@ -52,7 +52,7 @@ import { createSessionBridge, PRIORITY_INTERRUPT, type AguiEvent, type ApproverI
 import { createAcpClient, type BlockingTool } from "./acp/client.js";
 import { createRecorder } from "./transcript/recorder.js";
 import { createSandboxExecBackend, connectSandbox } from "./exec/sandboxExec.js";
-import { createDeferredConnector } from "./exec/deferredConnect.js";
+import { bumpSandboxEpoch, createEpochConnector, sandboxEpoch } from "./exec/deferredConnect.js";
 import { createLocalSandboxApiClient } from "./exec/localExec.js";
 import { resolvePodTarget } from "./exec/k8sExec.js";
 import { createWake, createWebServiceProxy } from "./proxy/webServiceProxy.js";
@@ -75,6 +75,7 @@ import { createPgJobStore } from "./session/jobStore.js";
 import { createPgUserSkillStore } from "./session/userSkillStore.js";
 import { mintConvToken } from "./auth/convToken.js";
 import { createMcpEndpoint, resolveConversation } from "./agent/mcpServer.js";
+import type { ImageToolsWiring } from "./agent/imageTools.js";
 import { createBrokerMcpProxy } from "./agent/brokerMcpProxy.js";
 import {
   lastAssistantText,
@@ -101,11 +102,9 @@ import { createGooseUsageReader } from "./metrics/gooseUsage.js";
 import type { SandboxRef, SessionId } from "./types.js";
 import { resumeUnlessEnded } from "./session/resumeGuard.js";
 import { formatError, logger, type Logger } from "./log.js";
+import { assertFileCount, uploadLimitsFromEnv } from "./config/uploads.js";
 
 const hostLog = logger("agent-host");
-
-/** Default per-file cap (~25MB) for materialized (non-image) uploads, overridable with FILE_MAX_BYTES. */
-const DEFAULT_FILE_MAX_BYTES = 25 * 1024 * 1024;
 
 /** Decoded byte length of a base64 string, computed without allocating a Buffer so an
  *  oversize upload is rejected before decoding. */
@@ -652,7 +651,8 @@ export async function main(
   });
   // Per-file cap for materialized (non-image) uploads, separate from ASSET_MAX_BYTES since
   // files go straight into the sandbox.
-  const fileMaxBytes = Number(process.env.FILE_MAX_BYTES) || DEFAULT_FILE_MAX_BYTES;
+  const uploadLimits = uploadLimitsFromEnv();
+  const fileMaxBytes = uploadLimits.maxFileBytes;
   const server = createAguiServer();
   // The privileged /agui `owner` field is honored only for the trusted webhooks caller,
   // whose SA token is verified via k8s TokenReview.
@@ -786,6 +786,8 @@ export async function main(
     },
     // Keep the pod up while a background job not yet announced as complete is still running,
     // so the idle sweep does not kill it.
+    // Reconnect exec clients after a stop or restart.
+    onSandboxCycled: (ref) => bumpSandboxEpoch(ref),
     hasRunningBackgroundJob: async (id) => {
       if (!jobManager) return false;
       const jobs = await jobManager.list(id as SessionId);
@@ -943,13 +945,24 @@ export async function main(
     return rows.map((r) => personalSkill({ name: r.name, description: r.description, body: r.body }));
   };
 
+  // Resume the pod, then cancel any deferred stop.
+  const healingResume = (id: SessionId, sb: SandboxRef) => {
+    const resume = resumeUnlessEnded(sessions, provisioner, id, sb, conversationRegistry);
+    return async () => {
+      await resume();
+      sessions.noteSandboxResumed?.(id);
+    };
+  };
+
+  // A conversation's pod-exec client, resuming a suspended sandbox on first use.
+  const sandboxClientFor = (id: string) => {
+    const sb = sessions.get(id as SessionId)!.sandbox;
+    return deferredSandboxApi(sb, healingResume(id as SessionId, sb));
+  };
   const jobsEnabled = process.env.AGENT_BACKGROUND_JOBS !== "0" && !config.fakeSandbox && !!jobRegistry;
   const jobManager = jobsEnabled
     ? createJobManager({
-        client: (id) => {
-          const sb = sessions.get(id as SessionId)!.sandbox;
-          return deferredSandboxApi(sb, resumeUnlessEnded(sessions, provisioner, id as SessionId, sb, conversationRegistry));
-        },
+        client: sandboxClientFor,
         registry: jobRegistry!,
         cleanupTtlMs: Number(process.env.BACKGROUND_JOB_TTL_MS ?? 10 * 60 * 1000),
       })
@@ -1029,6 +1042,8 @@ export async function main(
           return true; // recorded — it applies on the next sandbox restart
         },
         availableSizes: async () => k8sProvisioner.getSizes(),
+        restartSandbox: (id: string) => sessions.restartSandbox!(id as SessionId),
+        stopSandbox: (id: string) => sessions.stopSandbox!(id as SessionId),
       }
     : undefined;
 
@@ -1071,13 +1086,15 @@ export async function main(
 
   const convTokenSecret = process.env.CONV_TOKEN_SECRET ?? "";
   const brokerTokenPath = process.env.BROKER_TOKEN_PATH ?? "/var/run/secrets/broker/token";
+  const imageToolsWiring: ImageToolsWiring | undefined = config.fakeSandbox ? undefined : { client: sandboxClientFor };
   const mcpEndpoint =
     agentToolsWiring !== undefined ||
     jobManager !== undefined ||
     modelToolsWiring !== undefined ||
     resourceToolsWiring !== undefined ||
     schedulerToolsWiring !== undefined ||
-    subagentManager !== undefined
+    subagentManager !== undefined ||
+    imageToolsWiring !== undefined
       ? createMcpEndpoint({
           // The URL goose connects to; goose runs in this pod, so localhost reaches it.
           baseUrl: process.env.AGENT_SELF_MODIFY_MCP_URL ?? `http://127.0.0.1:${config.port}`,
@@ -1094,6 +1111,7 @@ export async function main(
           scheduler: schedulerToolsWiring,
           subagents: subagentManager,
           titles: titleToolsWiring,
+          images: imageToolsWiring,
         })
       : undefined;
 
@@ -1192,6 +1210,8 @@ export async function main(
       promptFiles.push({ name: f.name, data: f.data, mimeType: f.mimeType });
     }
     try {
+      // Refuse the whole message rather than silently dropping files past the count.
+      assertFileCount(input.files, uploadLimits);
       await sessions.promptByThread(sessionId, input.text, model, input.priority, input.owner, promptImages, promptFiles, input.source, input.provider);
     } catch (err) {
       // The run could not start, so persist a RUN_ERROR to the durable log so a reattaching
@@ -1266,21 +1286,7 @@ export async function main(
   const brokerAuth = async (): Promise<{ url: string; headers: Record<string, string> } | null> => {
     const url = (process.env.BROKER_URL ?? "").replace(/\/$/, "");
     if (!url) return null;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const tokenPath = process.env.BROKER_TOKEN_PATH ?? "/var/run/secrets/broker/token";
-    try {
-      const { readFileSync } = await import("node:fs");
-      headers["Authorization"] = `Bearer ${readFileSync(tokenPath, "utf8").trim()}`;
-    } catch (e) {
-      if ((e as { code?: string })?.code !== "ENOENT") {
-        throw new Error(
-          `failed to read broker token at ${tokenPath}: ${(e as Error)?.message ?? e}`,
-          { cause: e },
-        );
-      }
-      /* ENOENT -> no token (local/dev) */
-    }
-    return { url, headers };
+    return { url, headers: await brokerAuthHeaders() };
   };
 
   // In-pod web-service registry shared by the management API and the reverse proxy;
@@ -1296,6 +1302,7 @@ export async function main(
   // as /agui.
   server.use(
     createManagementApi({
+    uploadLimits,
     // Live appends only reach the owner's local store, so the integrity stream reports
     // whether this pod owns the conversation.
     streamOwnership: conversationRegistry && podName
@@ -1623,7 +1630,7 @@ export async function main(
     const exec = createSandboxExecBackend(
       config.fakeSandbox
         ? createLocalSandboxApiClient()
-        : deferredSandboxApi(sandbox, resumeUnlessEnded(sessions, provisioner, conversationId as SessionId, sandbox, conversationRegistry)),
+        : deferredSandboxApi(sandbox, healingResume(conversationId as SessionId, sandbox)),
       { commandTimeoutMs: config.commandTimeoutMs },
     );
     const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
@@ -1900,7 +1907,7 @@ export async function main(
 function deferredSandboxApi(sandbox: SandboxRef, ensureRunning?: () => Promise<void>) {
   // Concurrent first tool calls share one connect, and ensureRunning resumes a sandbox
   // idle-suspended out from under a live bridge when connect finds no pod.
-  const ensure = createDeferredConnector(() => connectSandbox(sandbox, { ensureRunning }));
+  const ensure = createEpochConnector(() => connectSandbox(sandbox, { ensureRunning }), () => sandboxEpoch(sandbox));
   return {
     mode: "k8s-exec" as const,
     // Forward the AbortSignal so kill()'s abort reaches the k8s exec layer.

@@ -49,9 +49,14 @@ killed and retry.
 `set_sandbox_resources` **records** a new size that takes effect on the **NEXT
 sandbox restart** — it does NOT resize the pod you're running in right now. So a
 resize you request in the middle of a build does nothing for that build. The value
-is entirely in *anticipating*: set the size, let the sandbox pick it up on its next
-restart (an idle suspend→resume, or tell the user a restart is needed), then run
-the heavy work.
+is entirely in *anticipating*: set the size, apply it, then run the heavy work.
+
+To apply a size now, call `restart_sandbox`. It cycles your pod onto the recorded
+size (and the deployment's current image) and returns once the new pod is up, and
+your turn carries on. `/workspace`, installed modules and `/nix/store` builds
+persist; running processes, background jobs and web services stop, so save state
+first and restart what you need afterwards. Without a restart the size applies on
+the next idle suspend→resume.
 
 ## When to scale UP (before you start)
 
@@ -67,7 +72,7 @@ Estimate the peak, then size for it:
   both sides automatically; k8s requires request == limit for GPUs).
 
 If you already got **`Killed` / an OOM** on a task, that's the signal your memory
-cap was too low: raise `memory`, restart, retry — don't just re-run at the same size.
+cap was too low: raise `memory`, `restart_sandbox`, retry — don't just re-run at the same size.
 
 ## When to scale DOWN
 
@@ -76,10 +81,16 @@ size back down to the default your deployment reports so you're not holding a bi
 reservation idle. Bigger sandboxes are more expensive and reduce how many can be
 packed on a node.
 
+When you're finished with the sandbox altogether, `stop_sandbox` frees its capacity
+right away instead of after the idle timeout. Make it your **last** action: any later
+sandbox tool call starts the pod again (one pod boot). It reports any pending image
+or size change, which applies when the sandbox next starts.
+
 ## How
 
 1. `show_sandbox_resources` — see what you currently have.
 2. `set_sandbox_resources` — use a **named preset** (easiest) OR set raw cpu/memory/gpu fields.
+3. `restart_sandbox` — apply it now (or let the next idle restart pick it up).
 
 ### Named presets (recommended)
 

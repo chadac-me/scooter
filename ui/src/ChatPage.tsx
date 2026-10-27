@@ -12,7 +12,8 @@
 import { useSyncExternalStore } from "react";
 
 import { RuntimeProvider, useConversationInterrupts } from "./RuntimeProvider.js";
-import { ConversationArea, HeaderConversationTitle, SandboxStatusPill } from "./App.js";
+import { ConversationArea, SandboxStatusPill } from "./App.js";
+import { HeaderConversationTitle } from "./HeaderConversationTitle.js";
 import { InterruptList } from "./InterruptPanel.js";
 import { ThemePicker } from "./ThemePicker.js";
 import { useSessions } from "./sessions.js";

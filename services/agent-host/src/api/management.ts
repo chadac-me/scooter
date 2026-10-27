@@ -110,6 +110,8 @@ export interface ManagementDeps {
   resourceLookup?: { lookup(conversationId: string, source: string): Promise<unknown | undefined> };
   /** The broker-MCP proxy handler; absent when the broker or the conversation-token secret is not configured. */
   brokerMcpHandler?: (req: IncomingMessage, res: ServerResponse, body: unknown) => Promise<void>;
+  /** Upload caps served to the UI in /whoami's `limits` block (scooter.uploads). */
+  uploadLimits?: { maxFileBytes: number; maxFilesPerMessage: number };
   /** Resolves the caller's identity per request; defaults to the env-configured resolver. */
   resolveUser?: ResolveUser;
   /** Whether a request is a trusted in-cluster caller (webhooks/scheduler) allowed to set a body `owner`; absent means a body owner is never honored. */
@@ -336,7 +338,12 @@ export function createManagementApi(deps: ManagementDeps): Router {
 
   // The caller per the trusted ingress identity header (anonymous when none).
   r.get("/whoami", (ctx) => ({
-    json: { id: ctx.user.id, email: ctx.user.email ?? null, anonymous: ctx.user.anonymous },
+    json: {
+      id: ctx.user.id,
+      email: ctx.user.email ?? null,
+      anonymous: ctx.user.anonymous,
+      ...(deps.uploadLimits ? { limits: { ...deps.uploadLimits } } : {}),
+    },
   }));
 
   // --- Bring-your-own-Claude: connect a personal Claude agent ------------------
@@ -501,6 +508,22 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (!sessions.get(ctx.params.id)) return { status: 404, json: { error: "not found" } };
     await sessions.suspend(ctx.params.id);
     return { json: view(sessions.get(ctx.params.id)!) };
+  });
+
+  // Restarts the sandbox; 409 while another run uses it.
+  r.post("/conversations/:id/restart", async (ctx) => {
+    if (!sessions.restartSandbox) return { status: 501, json: { error: "sandbox restart unavailable" } };
+    if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
+    const { conv, error } = mutableFor(ctx.params.id, ctx.user);
+    if (error === 404) return { status: 404, json: { error: "not found" } };
+    if (error === 403) return { status: 403, json: { error: "not your conversation" } };
+    try {
+      const result = await sessions.restartSandbox(conv!.id as SessionId);
+      return { json: result };
+    } catch (e) {
+      if ((e as { code?: number }).code === 409) return { status: 409, json: { error: (e as Error).message } };
+      throw e;
+    }
   });
 
   r.post("/conversations/:id/resume", async (ctx) => {
@@ -938,9 +961,13 @@ export function createManagementApi(deps: ManagementDeps): Router {
   // {resources: null}.
   r.get("/conversations/:id/resources", async (ctx) => {
     const id = await resolveConvId(ctx.params.id);
-    if (!id || !deps.sandboxResources) return { json: { resources: null } };
-    const resources = (await deps.sandboxResources(id).catch(() => undefined)) ?? null;
-    return { json: { resources } };
+    if (!id) return { json: { resources: null, pendingRestart: null } };
+    // What a restart would pick up; best-effort.
+    const [resources, pendingRestart] = await Promise.all([
+      deps.sandboxResources ? deps.sandboxResources(id).catch(() => undefined) : undefined,
+      sessions.get(id) && sessions.pendingRestart ? sessions.pendingRestart(id as SessionId).catch(() => undefined) : undefined,
+    ]);
+    return { json: { resources: resources ?? null, pendingRestart: pendingRestart ?? null } };
   });
 
   // The named sandbox size presets and the default preset name; an absent getter yields

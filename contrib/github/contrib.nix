@@ -14,6 +14,29 @@
         description = "GitHub App installation ID (GITHUB_APP_INSTALLATION_ID).";
       };
 
+      host = lib.mkOption {
+        type = lib.types.str;
+        default = "github.com";
+        example = "github.example.com";
+        description = ''
+          The GitHub host: `github.com`, or a GitHub Enterprise Server hostname. The
+          broker's forge proxy, http-proxy and App token minting, the webhooks' API
+          calls, and `gh` in the sandbox all target it.
+        '';
+      };
+
+      forgePolicy = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "my_scooter_policies.github:policy";
+        description = ''
+          A `module:attr` naming a ForgePolicy (scooter_broker_lib.forge) the broker
+          checks on every GitHub request it makes for an agent: git push/fetch through
+          the forge proxy, `gh`, the http-proxy and the agent tools. The module must be
+          importable by the broker. Empty (the default) allows everything the App allows.
+        '';
+      };
+
       privateKeySecret = lib.mkOption {
         type = lib.types.submodule {
           options = {
@@ -33,6 +56,7 @@
 
     config = {
       src = ./.;
+      sandbox.module = ./sandbox.nix;
       # The tool card the UI renders for github_comment.
       ui.tools.github_comment = { argKey = "body"; action = "commented on GitHub"; };
 

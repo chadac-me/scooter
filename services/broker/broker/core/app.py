@@ -76,7 +76,17 @@ def create_app() -> FastAPI:
             for p in providers:
                 if p.on_startup is not None:
                     await p.on_startup()
+            from ..forge import start_forge_proxy
+
+            forge_proxy = await start_forge_proxy(
+                providers,
+                port=settings.forge_proxy_port,
+                namespace=settings.sandbox_namespace,
+                agent_host_url=settings.agent_host_url,
+            )
             yield
+            if forge_proxy is not None:
+                await forge_proxy.close()
             for p in providers:
                 if p.on_shutdown is not None:
                     await p.on_shutdown()

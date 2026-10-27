@@ -9,6 +9,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   handleShowSandboxResources,
   handleSetSandboxResources,
+  handleRestartSandbox,
+  handleStopSandbox,
   type SandboxResourceToolsWiring,
 } from "../../src/agent/resourceTools.js";
 import type { SandboxResources } from "../../src/session/resources.js";
@@ -122,5 +124,55 @@ describe("show_sandbox_resources — the deployment's size presets", () => {
     const { deps } = wiring({ availableSizes: async () => ({ sizes: {}, default: null }) });
     const text = (await handleShowSandboxResources(deps, "c1")).content[0].text;
     expect(text).not.toContain("Available size presets");
+  });
+});
+
+describe("restart_sandbox / stop_sandbox handlers", () => {
+  const text = (r: { content: Array<{ type: string; text?: string }> }) => r.content.map((c) => c.text ?? "").join("\n");
+
+  it("restart_sandbox reports the image swap and size, and reminds what stopped", async () => {
+    const { deps } = wiring({
+      restartSandbox: async () => ({ fromImage: "os:old", toImage: "os:new", imageCurrent: true, sizeApplied: true, ready: true }),
+    });
+    const r = await handleRestartSandbox(deps, "c1");
+    expect(r.isError).toBeFalsy();
+    expect(text(r)).toContain("from_image: os:old");
+    expect(text(r)).toContain("to_image: os:new");
+    expect(text(r)).toContain("size_applied: true");
+    expect(text(r)).toMatch(/background jobs or web services/);
+  });
+
+  it("restart_sandbox says so when the image update failed", async () => {
+    const { deps } = wiring({
+      restartSandbox: async () => ({ fromImage: "os:old", toImage: "os:old", imageCurrent: false, sizeApplied: false, ready: true }),
+    });
+    expect(text(await handleRestartSandbox(deps, "c1"))).toMatch(/image update failed/);
+  });
+
+  it("restart_sandbox surfaces a 409 (another run in the sandbox) as a tool error", async () => {
+    const { deps } = wiring({
+      restartSandbox: async () => {
+        throw Object.assign(new Error("conversation c2 is running in this sandbox; restart after it finishes"), { code: 409 });
+      },
+    });
+    const r = await handleRestartSandbox(deps, "c1");
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("c2 is running");
+  });
+
+  it("stop_sandbox returns what the next start picks up", async () => {
+    const { deps } = wiring({
+      stopSandbox: async () => ({ deferred: true, pending: { image: { from: "os:old", to: "os:new" }, size: true } }),
+    });
+    const t = text(await handleStopSandbox(deps, "c1"));
+    expect(t).toContain("Sandbox stopped");
+    expect(t).toMatch(/pending_restart: a newer sandbox image \(os:old -> os:new\), your recorded size change/);
+  });
+
+  it("set_sandbox_resources points at restart_sandbox only when restart is wired", async () => {
+    const withRestart = wiring({ restartSandbox: vi.fn() });
+    expect(text(await handleSetSandboxResources(withRestart.deps, "c1", { requestCpu: "2", limitCpu: "2" }))).toContain("restart_sandbox");
+    const without = wiring();
+    expect(text(await handleSetSandboxResources(without.deps, "c1", { requestCpu: "2", limitCpu: "2" }))).not.toContain("restart_sandbox");
   });
 });

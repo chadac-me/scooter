@@ -95,3 +95,19 @@ describe("pollForReadyPod — the deadline warn is de-duped per sandbox", () => 
     expect(await pollLevel({ name: "conv-other", namespace: "agent-manager" })).toBe("warn");
   });
 });
+
+describe("pollForReadyPod — a pod terminating after stop_sandbox", () => {
+  it("skips the terminating pod, which still reports ready, and self-heals once it is gone", async () => {
+    let polls = 0;
+    let resumed = false;
+    const terminating = { ...readyPod(), metadata: { name: "conv-qis9hm-abc", deletionTimestamp: new Date() } };
+    // Dying pod twice, then none until the resume.
+    const listCandidates = vi.fn(async () => (++polls <= 2 ? [terminating] : resumed ? [readyPod()] : []));
+    const ensureRunning = vi.fn(async () => {
+      resumed = true;
+    });
+    const pod = await pollForReadyPod(REF, { listCandidates, ensureRunning, sleep: noSleep });
+    expect(ensureRunning).toHaveBeenCalledOnce();
+    expect(pod.metadata).not.toHaveProperty("deletionTimestamp");
+  });
+});
