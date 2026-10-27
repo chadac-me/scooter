@@ -26,7 +26,7 @@ let
   tcp = port: { protocol = "TCP"; inherit port; };
 
   # Named container ports, so a port change in the owning module cannot drift from here.
-  brokerPorts = [ (tcp "http") ] ++ lib.optional cfg.broker.forgeProxy.enable (tcp "forge-proxy");
+  brokerPorts = [ (tcp "http") (tcp "forge-proxy") ];
 in
 {
   options.scooter.networkPolicy = with lib; {
