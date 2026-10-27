@@ -8,6 +8,9 @@ import { expect, type Page, type Response } from "@playwright/test";
 import { test } from "./fixtures.js";
 import { fullOnly } from "./target.js";
 
+/** The agent-host's manifest cache lifetime (webServiceRegistry.ts MANIFEST_TTL_MS). */
+const MANIFEST_TTL_MS = 10_000;
+
 /** Parent domain of the per-conversation service origins, set when the platform has them on. */
 const SANDBOX_DOMAIN = process.env.E2E_SANDBOX_DOMAIN ?? "";
 
@@ -106,6 +109,49 @@ fullOnly("needs a real sandbox pod to suspend and a real web service to auto-sta
       expect(failed, "no navigation along the wake → start → reload path may fail").toEqual([]);
       const offHost = navigations.filter((n) => new URL(n.url).origin !== origin);
       expect(offHost, "every navigation must stay on the conversation's own host").toEqual([]);
+    });
+
+    test("a link opened after the sandbox has gone cold still wakes it", async ({ chat, page, request, baseURL }) => {
+      // One sandbox boot and one wake.
+      test.setTimeout(420_000);
+      const base = (baseURL ?? "").replace(/\/$/, "");
+      const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const fileName = `cold-wake-${stamp}.md`;
+
+      await chat.open();
+      await chat.completeTurn(`!touch /workspace/${fileName}`, 120_000);
+      const thread = new URL(page.url()).searchParams.get("thread");
+      expect(thread, "the URL must name a conversation").toBeTruthy();
+      const id = encodeURIComponent(thread!);
+      await expect
+        .poll(async () => {
+          const res = await request.get(`${base}/conversations/${id}/web-services`);
+          return res.ok() ? ((await res.json()) as { services: Array<{ name: string }> }).services.map((s) => s.name) : [];
+        }, { timeout: 120_000 })
+        .toContain("files");
+
+      const suspended = await request.post(`${base}/conversations/${id}/suspend`);
+      expect(suspended.ok(), `suspend answered ${suspended.status()}`).toBeTruthy();
+      await expect
+        .poll(async () => ((await (await request.get(`${base}/conversations/${id}`)).json()) as { status: string }).status, {
+          timeout: 60_000,
+        })
+        .toBe("suspended");
+      // Outlive the agent-host's manifest cache, as a link opened later would.
+      await page.waitForTimeout(MANIFEST_TTL_MS + 5_000);
+
+      const origin = `https://${thread!.slice(0, 8)}.${SANDBOX_DOMAIN}`;
+      const filesUrl = `${origin}/files/`;
+      const viewer = await page.context().newPage();
+      const navigations = recordNavigations(viewer);
+      // Under the ingress's 30s upstream timeout, so a hang fails here, not as a 502.
+      const first = await viewer.goto(filesUrl, { timeout: 20_000 });
+      expect(first?.status() ?? 0, `the first navigation answered ${first?.status()}`).toBeLessThan(400);
+
+      await expect(viewer.getByRole("button", { name: fileName })).toBeVisible({ timeout: 360_000 });
+      expect(viewer.url()).toBe(filesUrl);
+      const failed = navigations.filter((n) => n.status >= 400);
+      expect(failed, "no navigation along the wake → start → reload path may fail").toEqual([]);
     });
   },
 );
