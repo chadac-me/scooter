@@ -71,7 +71,7 @@ import {
 import { createSdkAcpClient } from "@scooter/claude-sdk-provider";
 import { ensureGooseConfig } from "./agent/gooseConfig.js";
 import { catalogFromEnv, availableIds, contextLimitOf, modelAllowedFor, defaultFor, type ModelCatalog } from "./agent/models.js";
-import { createJobManager, type JobStatus, type JobRegistry } from "./session/jobManager.js";
+import { createJobManager, noticeTail, type JobStatus, type JobRegistry } from "./session/jobManager.js";
 import { createPgJobStore } from "./session/jobStore.js";
 import { createPgUserSkillStore } from "./session/userSkillStore.js";
 import { mintConvToken } from "./auth/convToken.js";
@@ -1547,8 +1547,8 @@ export async function main(
           if (ownership && !(await ownership.guard.confirmOwns(c.id as SessionId))) return;
           const done = await jobManager!.pollCompletions(c.id).catch(() => [] as JobStatus[]);
           for (const st of done) {
-            const tail = st.output.trim();
-            const more = st.truncated ? `\n(output truncated — full log: check_background("${st.jobId}"))` : "";
+            const { text: tail, cut } = noticeTail(st.output);
+            const more = st.truncated || cut ? `\n(last lines only; check_background("${st.jobId}") for more)` : "";
             // The bridge adds the system-message decoration; a died job never wrote an exit
             // code, so say it was killed rather than reporting the synthesized 137 as a
             // failure.

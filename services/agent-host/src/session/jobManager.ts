@@ -33,10 +33,14 @@ export interface JobStatus {
   /** The job's process is gone with no status file (killed before it could record an exit), so the
    *  exit code is a guess and the log stops wherever the process was. */
   died?: boolean;
-  /** The captured log tail, bounded by maxOutputBytes. */
+  /** Cleaned log window, at most maxOutputBytes. */
   output: string;
-  /** True when `output` was truncated to the tail. */
+  /** True when `output` is not the whole log. */
   truncated: boolean;
+  /** Total log bytes, for paging with offset. */
+  size?: number;
+  /** Byte offset in the log where `output` starts. */
+  start?: number;
   /** The in-pod path to the full log, removed by the cleanup sweep `cleanupTtlMs` after the job
    *  exits. */
   logPath: string;
@@ -50,7 +54,9 @@ export interface JobManager {
   /** Launch `command` detached in the conversation's sandbox and return its jobId without waiting. */
   start(id: SessionId, command: string): Promise<StartResult>;
   /** Read a job's current state from its in-pod files. */
-  check(id: SessionId, jobId: string): Promise<JobStatus>;
+  check(id: SessionId, jobId: string, opts?: CheckOptions): Promise<JobStatus>;
+  /** Suppress the completion notice for an already-seen job. */
+  markNotified(id: SessionId, jobId: string): Promise<void>;
   /** List the conversation's known jobs (from the registry), newest first. */
   list(id: SessionId): Promise<JobRecord[]>;
   /** Remove the on-disk files of jobs that exited more than cleanupTtlMs ago; running jobs are
@@ -62,6 +68,13 @@ export interface JobManager {
   /** Kill a running job with SIGTERM then SIGKILL to its whole process group (start() uses setsid,
    *  so PGID == pid); idempotent. */
   kill(id: SessionId, jobId: string): Promise<KillResult>;
+}
+
+export interface CheckOptions {
+  /** Bytes to return, clamped to MAX_OUTPUT_CAP. */
+  maxBytes?: number;
+  /** Read from this byte offset instead of the tail. */
+  offset?: number;
 }
 
 export interface KillResult {
@@ -86,7 +99,7 @@ export interface JobManagerDeps {
   registry: JobRegistry;
   /** The in-pod jobs dir (on the workspace PVC). Default JOBS_DIR. */
   jobsDir?: string;
-  /** Cap the output returned by check() (tail). Default 64 KiB. */
+  /** Default bytes check() returns. */
   maxOutputBytes?: number;
   /** How long after a job exits its on-disk files are kept; default 10 min. */
   cleanupTtlMs?: number;
@@ -99,7 +112,9 @@ export interface JobManagerDeps {
 /** Default in-pod jobs dir, under /workspace so it lives on the workspace PVC rather than tmpfs. */
 export const JOBS_DIR = "/workspace/.scooter/jobs";
 
-const DEFAULT_MAX_OUTPUT = 64 * 1024;
+// Larger tool results can drop the MCP client connection.
+export const DEFAULT_MAX_OUTPUT = 8 * 1024;
+export const MAX_OUTPUT_CAP = 12 * 1024;
 const DEFAULT_CLEANUP_TTL = 10 * 60 * 1000;
 
 /** POSIX-quote a string for embedding inside a single-quoted sh word. */
@@ -141,8 +156,11 @@ export function createJobManager(deps: JobManagerDeps): JobManager {
       return { jobId };
     },
 
-    async check(id, jobId): Promise<JobStatus> {
+    async check(id, jobId, opts): Promise<JobStatus> {
       const d = dir(jobId);
+      const n = Math.max(1, Math.min(Math.floor(opts?.maxBytes ?? maxOutput), MAX_OUTPUT_CAP));
+      const offset = opts?.offset == null ? undefined : Math.max(0, Math.floor(opts.offset));
+      const read = offset == null ? `tail -c ${n} ${d}/log` : `tail -c +${offset + 1} ${d}/log | head -c ${n}`;
       const client = await clientFor(id);
       const command = (await deps.registry.listJobs(id)).find((j) => j.jobId === jobId)?.command ?? "";
       // One exec reads the status file, liveness, log size and log tail; an absent job dir reads as
@@ -154,7 +172,7 @@ export function createJobManager(deps: JobManagerDeps): JobManager {
         // leaves no status file and needs a liveness probe.
         `echo __ALIVE__; if [ -f ${d}/pid ] && [ -d /proc/$(cat ${d}/pid) ]; then echo y; else echo n; fi; ` +
         `echo __SIZE__; wc -c < ${d}/log 2>/dev/null || echo 0; ` +
-        `echo __LOG__; tail -c ${maxOutput} ${d}/log 2>/dev/null || true`;
+        `echo __LOG__; ${read} 2>/dev/null || true`;
       const res = await client.execute({ command: "sh", args: ["-c", probe] });
       const out = res.stdout ?? "";
       if (out.includes("__MISSING__")) {
@@ -163,8 +181,19 @@ export function createJobManager(deps: JobManagerDeps): JobManager {
       const statusRaw = section(out, "__STATUS__", "__ALIVE__").trim();
       const aliveRaw = section(out, "__ALIVE__", "__SIZE__").trim();
       const sizeRaw = section(out, "__SIZE__", "__LOG__").trim();
-      const log = section(out, "__LOG__", null);
+      let log = section(out, "__LOG__", null);
       const size = Number.parseInt(sizeRaw, 10) || 0;
+      const readFrom = offset ?? Math.max(0, size - n);
+      const end = Math.min(size, readFrom + n);
+      let start = readFrom;
+      // Start the tail on a full line.
+      if (offset == null && start > 0) {
+        const nl = log.indexOf("\n");
+        if (nl >= 0 && nl < log.length - 1) {
+          start += Buffer.byteLength(log.slice(0, nl + 1));
+          log = log.slice(nl + 1);
+        }
+      }
       const exited = statusRaw !== "";
       // No status file and no process means the job died; only a negative liveness answer (`n`)
       // counts, since an unreadable /proc must not be read as death.
@@ -176,10 +205,19 @@ export function createJobManager(deps: JobManagerDeps): JobManager {
         // 137 (128+SIGKILL) is the closest honest code for a killed job.
         exitCode: exited ? Number.parseInt(statusRaw, 10) : died ? 137 : undefined,
         died: died || undefined,
-        output: log,
-        truncated: size > maxOutput,
+        output: cleanOutput(log),
+        truncated: start > 0 || end < size,
+        size,
+        start,
         logPath: `${d}/log`,
       };
+    },
+
+    async markNotified(id, jobId): Promise<void> {
+      if (notifiedMem.has(jobId)) return;
+      notifiedMem.add(jobId);
+      const rec = (await deps.registry.listJobs(id)).find((j) => j.jobId === jobId);
+      if (rec && !rec.notifiedAt) await deps.registry.updateJob?.(id, { ...rec, notifiedAt: now() }).catch(() => {});
     },
 
     async list(id): Promise<JobRecord[]> {
@@ -252,3 +290,30 @@ export function createJobManager(deps: JobManagerDeps): JobManager {
   }
 }
 
+/** Strip control bytes and ANSI codes; elide binary output. */
+export function cleanOutput(raw: string): string {
+  if (raw === "") return raw;
+  // Keep only the last \r frame of redrawn lines.
+  const lines = raw.split("\n").map((l) => {
+    const t = l.endsWith("\r") ? l.slice(0, -1) : l;
+    const i = t.lastIndexOf("\r");
+    return i >= 0 ? t.slice(i + 1) : t;
+  });
+  // eslint-disable-next-line no-control-regex
+  const text = lines.join("\n").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  // eslint-disable-next-line no-control-regex
+  const bad = text.match(/[\x00-\x08\x0B-\x1F\x7F�]/g)?.length ?? 0;
+  if (bad > text.length * 0.1) return `[binary output, ${Buffer.byteLength(raw)} bytes not shown]`;
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, "");
+}
+
+/** Short output tail for completion notices. */
+export function noticeTail(output: string, maxChars = 2000): { text: string; cut: boolean } {
+  const t = output.trimEnd();
+  if (t.length <= maxChars) return { text: t, cut: false };
+  let tail = t.slice(-maxChars);
+  const nl = tail.indexOf("\n");
+  if (nl >= 0 && nl < tail.length - 1) tail = tail.slice(nl + 1);
+  return { text: tail, cut: true };
+}
