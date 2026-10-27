@@ -16,7 +16,7 @@ export interface TitleToolsWiring {
   /** This conversation's current title, or undefined when it is unknown here. */
   currentTitle(conversationId: string): string | undefined;
   /** Whether the user named this conversation, in which case the agent must not rename it. */
-  userTitled(conversationId: string): boolean;
+  userTitled(conversationId: string): boolean | Promise<boolean>;
   /** Rename the conversation, forcing past the name-once gate. */
   setTitle(conversationId: string, title: string): Promise<void>;
 }
@@ -37,7 +37,7 @@ export async function handleSetConversationTitle(
     return { isError: true, content: [{ type: "text", text: "title is required and cannot be blank." }] };
   }
   // The user's own name wins: report it rather than failing, so the agent stops retrying.
-  if (deps.userTitled(conversationId)) {
+  if (await deps.userTitled(conversationId)) {
     return {
       content: [
         {

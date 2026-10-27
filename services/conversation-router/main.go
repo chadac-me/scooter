@@ -138,26 +138,26 @@ func main() {
 		}
 	}
 
-	// Optional cluster-only write handle for idle star/title PATCHes; dev has no CR watch to tell idle from live, so it proxies instead.
+	// The write handle: star/title PATCHes in both modes, plus cluster create and assignment.
 	var writeStore *WriteStore
-	if !devModeEnabled() {
-		if dsn := storeDSNFromEnv(); dsn != "" {
-			ws, err := OpenWriteStore(ctx, dsn)
-			if err != nil {
-				log.Warn("postgres write store unavailable (metadata PATCH falls back to proxy)", errAttr(err))
-			} else {
-				writeStore = ws
-				defer writeStore.Close()
-				log.Info("postgres write store connected (idle star/title served here)")
-			}
+	if dsn := storeDSNFromEnv(); dsn != "" {
+		ws, err := OpenWriteStore(ctx, dsn)
+		if err != nil {
+			log.Warn("postgres write store unavailable (star/title PATCH refused)", errAttr(err))
+		} else {
+			writeStore = ws
+			defer writeStore.Close()
+			log.Info("postgres write store connected (star/title served here)")
 		}
 	}
 
 	// The cluster path creates by inserting the row; dev's creator already does.
-	if writeStore != nil {
-		creator = rowCreator{rows: writeStore}
-	} else if !devModeEnabled() {
-		log.Error("no write store: conversation create is refused")
+	if !devModeEnabled() {
+		if writeStore != nil {
+			creator = rowCreator{rows: writeStore}
+		} else {
+			log.Error("no write store: conversation create is refused")
+		}
 	}
 
 	// Optional read-only handle on the webhooks database for link enrichment; without it the list serves bare rows.
@@ -303,13 +303,14 @@ func newRouter(shutdownCtx context.Context, cfg config, resolver ownerResolver, 
 			}
 			return
 		}
-		// Idle star/title is served here; a live conversation falls through to the proxy so its owner stays the single writer.
-		if writeStore != nil && store != nil {
-			if field, id, ok := MetadataPatch(r.Method, r.URL.Path); ok {
-				if resolver == nil || !resolver.Assigned(r.Context(), id) {
-					serveConversationMetadataPatch(w, r, field, id, store, writeStore)
+		if field, id, ok := MetadataPatch(r.Method, r.URL.Path); ok {
+			if routerServesPatch(r.Context(), resolver, field, id) {
+				if writeStore == nil || store == nil {
+					writeJSONError(w, http.StatusServiceUnavailable, "conversation store unavailable")
 					return
 				}
+				serveConversationMetadataPatch(w, r, field, id, store, writeStore)
+				return
 			}
 		}
 		// convID is resolved once and threaded into the proxy layer so every log line carries conversation_id.

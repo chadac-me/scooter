@@ -86,10 +86,10 @@ function fakeDb(): {
       }
 
       if (head.startsWith("SELECT") && /WHERE/i.test(text)) {
-        // readLastActivity or readStarred: SELECT <col> WHERE id = $1 LIMIT $2.
+        // A narrow read by id: the selected columns, in order.
         const row = rows.get(values[0] as string);
-        const col = /"starred"/.test(text) ? "starred" : "last_activity_at";
-        return { rows: row ? [[row[col]]] : [], rowCount: row ? 1 : 0 };
+        const cols = [...text.slice(0, text.search(/ from /i)).matchAll(/"(\w+)"(?:,|$)/g)].map((m) => m[1]);
+        return { rows: row ? [cols.map((c) => row[c])] : [], rowCount: row ? 1 : 0 };
       }
 
       if (head.startsWith("SELECT")) {
@@ -127,6 +127,10 @@ function fakeDb(): {
 
   return { db: drizzle(client as never), rows, created };
 }
+
+/** Stands in for the conversation-router's targeted UPDATE. */
+const routerWrites = (rows: Map<string, Record<string, unknown>>, id: string, cols: Record<string, unknown>) =>
+  Object.assign(rows.get(id)!, cols);
 
 /** A file-backed store standing in for one a deployment still carries on disk. */
 const legacyWith = (metas: ConversationMeta[]) => ({
@@ -170,7 +174,7 @@ describe("conversation metadata in Postgres", () => {
   });
 
   it("round-trips every field", async () => {
-    const { db, created } = fakeDb();
+    const { db, rows, created } = fakeDb();
     const store = createPgMetaStore({ db });
     created("conv-1");
     const full = meta({
@@ -184,8 +188,7 @@ describe("conversation metadata in Postgres", () => {
     });
 
     await store.saveMeta(full);
-    await store.setStarred("conv-1" as SessionId, true);
-    await store.setUserTitle("conv-1" as SessionId, full.title);
+    routerWrites(rows, "conv-1", { starred: true, user_titled: true });
     expect((await store.listConversations())[0]).toEqual(full);
   });
 
@@ -270,29 +273,34 @@ describe("conversation metadata in Postgres", () => {
   });
 
   it("a stale replica's saveMeta does not UNSTAR a conversation the router starred", async () => {
-    const { db, created } = fakeDb();
+    const { db, rows, created } = fakeDb();
     const store = createPgMetaStore({ db });
     created("conv-1");
     // The router stars it; this replica's copy still says unstarred.
-    await store.setStarred("conv-1" as SessionId, true);
+    routerWrites(rows, "conv-1", { starred: true });
     await store.saveMeta(meta({ starred: false, lastActivityAt: 3_000 }));
     await store.saveMeta(meta({ lastActivityAt: 4_000 }));
 
-    expect(await store.readStarred("conv-1" as SessionId)).toBe(true);
+    expect((await store.readRouterMeta("conv-1" as SessionId))?.starred).toBe(true);
     expect((await store.listConversations())[0].starred).toBe(true);
-    expect(await store.readStarred("missing" as SessionId)).toBeUndefined();
+    expect(await store.readRouterMeta("missing" as SessionId)).toBeUndefined();
   });
 
   it("a stale replica's saveMeta does not undo a user rename", async () => {
-    const { db, created } = fakeDb();
+    const { db, rows, created } = fakeDb();
     const store = createPgMetaStore({ db });
     created("conv-1");
-    await store.setUserTitle("conv-1" as SessionId, "My name");
+    routerWrites(rows, "conv-1", { title: "My name", user_titled: true });
     await store.saveMeta(meta({ title: "New chat", userTitled: false }));
 
     const [row] = await store.listConversations();
     expect(row.title).toBe("My name");
     expect(row.userTitled).toBe(true);
+    expect(await store.readRouterMeta("conv-1" as SessionId)).toEqual({
+      title: "My name",
+      userTitled: true,
+      starred: false,
+    });
   });
 
   it("orders the list by recency", async () => {

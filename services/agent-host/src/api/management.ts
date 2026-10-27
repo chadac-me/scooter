@@ -482,7 +482,8 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (!conv && (await sessions.ensureReadable(ctx.params.id))) conv = sessions.get(ctx.params.id);
     if (!conv) return { status: 404, json: { error: "not found" } };
     // A starred conversation is protected from deletion; the caller must unstar first.
-    if (conv.starred) return { status: 409, json: { error: "conversation is starred; unstar before deleting" } };
+    await sessions.refreshRouterMeta(conv.id);
+    if (sessions.get(conv.id)?.starred) return { status: 409, json: { error: "conversation is starred; unstar before deleting" } };
     await sessions.end(ctx.params.id);
     return { status: 204, json: null };
   });
@@ -520,36 +521,6 @@ export function createManagementApi(deps: ManagementDeps): Router {
     }
     await sessions.setVisibility(conv.id, body.visibility);
     return { json: view(sessions.get(conv.id)!) };
-  });
-
-  // A user rename sets the title and locks it (userTitled) against the agent's <title>.
-  r.patch("/conversations/:id/title", async (ctx) => {
-    // Hydrate-if-absent so a title write against an idle conversation does not 404.
-    if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
-    const { conv, error } = mutableFor(ctx.params.id, ctx.user);
-    if (error === 404) return { status: 404, json: { error: "not found" } };
-    if (error === 403) return { status: 403, json: { error: "not your conversation" } };
-    const body = await ctx.body<{ title?: string }>();
-    const title = (body.title ?? "").trim();
-    if (!title) return { status: 400, json: { error: "title is required" } };
-    if (title.length > 200) return { status: 400, json: { error: "title too long (max 200)" } };
-    await sessions.setUserTitle(conv!.id, title);
-    return { json: view(sessions.get(conv!.id)!) };
-  });
-
-  // Star or unstar, with body { starred: boolean }.
-  r.patch("/conversations/:id/starred", async (ctx) => {
-    // Hydrate-if-absent so a star write against an idle conversation does not 404.
-    if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
-    const { conv, error } = mutableFor(ctx.params.id, ctx.user);
-    if (error === 404) return { status: 404, json: { error: "not found" } };
-    if (error === 403) return { status: 403, json: { error: "not your conversation" } };
-    const body = await ctx.body<{ starred?: boolean }>();
-    if (typeof body.starred !== "boolean") {
-      return { status: 400, json: { error: "starred (boolean) is required" } };
-    }
-    await sessions.setStarred(conv!.id, body.starred);
-    return { json: view(sessions.get(conv!.id)!) };
   });
 
   r.post("/conversations/:id/suspend", async (ctx) => {

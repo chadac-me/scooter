@@ -14,7 +14,7 @@ import { agent_host } from "@scooter/schema";
 import { formatError, logger } from "../log.js";
 import { createPgPool } from "../db/pgPool.js";
 
-import type { ConversationMeta } from "./manager.js";
+import type { ConversationMeta, RouterMeta } from "./manager.js";
 import type { AccessFacts, Visibility } from "./visibility.js";
 import type { SessionId, ThreadId } from "../types.js";
 
@@ -31,12 +31,8 @@ export interface MetaStore {
   setRunState(id: SessionId, running: boolean, at: number): Promise<void>;
   /** The persisted lastActivityAt, or undefined when there is no row. */
   readLastActivity(id: SessionId): Promise<number | undefined>;
-  /** Star or unstar, writing only that column. */
-  setStarred(id: SessionId, starred: boolean): Promise<void>;
-  /** Rename and lock the title against the agent's <title>. */
-  setUserTitle(id: SessionId, title: string): Promise<void>;
-  /** The persisted star; undefined without a row, throws on failure. */
-  readStarred(id: SessionId): Promise<boolean | undefined>;
+  /** The router-owned star and title; undefined without a row, throws on failure. */
+  readRouterMeta(id: SessionId): Promise<RouterMeta | undefined>;
   /** Set the visibility of `rootId` and all its descendants in one statement; throws on failure. */
   setVisibility(rootId: SessionId, visibility: Visibility): Promise<void>;
   /** The row's owner and visibility, undefined when there is no row; throws on a failed read. */
@@ -150,29 +146,14 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
       }
     },
 
-    async setStarred(id, starred) {
-      try {
-        await db.update(conversations).set({ starred }).where(eq(conversations.id, id));
-      } catch (e) {
-        log.error("setStarred failed (star not persisted)", { conversation_id: id, error: formatError(e) });
-      }
-    },
-
-    async setUserTitle(id, title) {
-      try {
-        await db.update(conversations).set({ title, userTitled: true }).where(eq(conversations.id, id));
-      } catch (e) {
-        log.error("setUserTitle failed (title not persisted)", { conversation_id: id, error: formatError(e) });
-      }
-    },
-
-    async readStarred(id) {
+    async readRouterMeta(id) {
       const rows = await db
-        .select({ starred: conversations.starred })
+        .select({ title: conversations.title, userTitled: conversations.userTitled, starred: conversations.starred })
         .from(conversations)
         .where(eq(conversations.id, id))
         .limit(1);
-      return rows.length ? rows[0].starred === true : undefined;
+      if (!rows.length) return undefined;
+      return { title: rows[0].title, userTitled: rows[0].userTitled === true, starred: rows[0].starred === true };
     },
 
     async touchActivity(id, at) {

@@ -4,7 +4,7 @@
  * the event log), end.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
   UnknownConversationError,
   type SandboxProvisioner,
   type ConversationStore,
+  type RouterMeta,
 } from "../../src/session/manager.js";
 import { noopRegistry } from "../../src/session/conversationRegistry.js";
 import { createFileConversationStore } from "../../src/session/fileStore.js";
@@ -34,9 +35,15 @@ const fakeProvisioner = (): SandboxProvisioner => {
   };
 };
 
+/** Star and title as the conversation-router writes them to the row. */
+const routerRows = new Map<SessionId, RouterMeta>();
+const routerWrite = (id: SessionId, patch: Partial<RouterMeta>) =>
+  routerRows.set(id, { title: "", userTitled: false, starred: false, ...routerRows.get(id), ...patch });
+
 const inMemoryStore = (): ConversationStore => {
   const logs = new Map<SessionId, AguiEvent[]>();
   return {
+    readRouterMeta: async (id) => routerRows.get(id),
     appendEvent: async (id, e) => {
       (logs.get(id) ?? logs.set(id, []).get(id)!).push(e);
     },
@@ -48,6 +55,8 @@ const inMemoryStore = (): ConversationStore => {
 };
 
 describe("SessionManager", () => {
+  beforeEach(() => routerRows.clear());
+
   it("start() provisions a cold sandbox and a running conversation", async () => {
     const provisioner = fakeProvisioner();
     const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
@@ -468,7 +477,8 @@ describe("SessionManager", () => {
       const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
       await sessions.start("t");
       await sessions.setTitle("t", "Agent's guess"); // agent titled it first
-      await sessions.setUserTitle("t", "My name for this");
+      routerWrite("t" as SessionId, { title: "My name for this", userTitled: true });
+      await sessions.refreshRouterMeta("t" as SessionId);
       expect(sessions.get("t")?.title).toBe("My name for this");
       expect(sessions.get("t")?.userTitled).toBe(true);
 
@@ -498,43 +508,20 @@ describe("SessionManager", () => {
     it("force does NOT override the user's own rename", async () => {
       const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
       await sessions.start("t");
-      await sessions.setUserTitle("t", "My name for this");
+      routerWrite("t" as SessionId, { title: "My name for this", userTitled: true });
       await sessions.setTitle("t", "Agent's idea", { force: true });
       expect(sessions.get("t")?.title).toBe("My name for this");
     });
 
-    it("setStarred toggles the star flag", async () => {
+    it("refreshRouterMeta pulls in the router's star and unstar", async () => {
       const sessions = createSessionManager({ provisioner: fakeProvisioner(), store: inMemoryStore() });
       await sessions.start("t");
-      expect(sessions.get("t")?.starred).toBeFalsy();
-      await sessions.setStarred("t", true);
+      routerWrite("t" as SessionId, { starred: true });
+      await sessions.refreshRouterMeta("t" as SessionId);
       expect(sessions.get("t")?.starred).toBe(true);
-      await sessions.setStarred("t", false);
+      routerWrite("t" as SessionId, { starred: false });
+      await sessions.refreshRouterMeta("t" as SessionId);
       expect(sessions.get("t")?.starred).toBe(false);
-    });
-
-    it("userTitled + starred survive a restart (persisted), and the agent still can't override", async () => {
-      const root = mkdtempSync(join(tmpdir(), "convstore-"));
-      try {
-        const m1 = createSessionManager({ provisioner: fakeProvisioner(), store: createFileConversationStore(root) });
-        await m1.start("t");
-        await m1.setUserTitle("t", "Pinned title");
-        await m1.setStarred("t", true);
-
-        // A fresh manager over the same store hydrates from disk.
-        const m2 = createSessionManager({ provisioner: fakeProvisioner(), store: createFileConversationStore(root) });
-        await m2.hydrate();
-        const c = m2.get("t");
-        expect(c?.title).toBe("Pinned title");
-        expect(c?.userTitled).toBe(true);
-        expect(c?.starred).toBe(true);
-
-        // Still locked after the restart.
-        await m2.setTitle("t", "Agent override attempt");
-        expect(m2.get("t")?.title).toBe("Pinned title");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
     });
   });
 
@@ -1089,7 +1076,8 @@ describe("SessionManager", () => {
       const provisioner = fakeProvisioner();
       const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
       const conv = await sessions.start("starred");
-      await sessions.setStarred(conv.id, true);
+      routerWrite(conv.id, { starred: true });
+      await sessions.refreshRouterMeta(conv.id);
 
       const reaped = await sessions.sweepRetention(30 * DAY, conv.lastActivityAt + 365 * DAY);
 
@@ -1100,26 +1088,15 @@ describe("SessionManager", () => {
 
     it("EXEMPTS a conversation the router starred behind this replica's back", async () => {
       const provisioner = fakeProvisioner();
-      const store = { ...inMemoryStore(), readStarred: vi.fn(async () => true) };
-      const sessions = createSessionManager({ provisioner, store });
+      const sessions = createSessionManager({ provisioner, store: inMemoryStore() });
       const conv = await sessions.start("starred-elsewhere"); // memory says unstarred
+      routerWrite(conv.id, { starred: true });
 
       const reaped = await sessions.sweepRetention(30 * DAY, conv.lastActivityAt + 365 * DAY);
 
       expect(reaped).toEqual([]);
-      expect(store.readStarred).toHaveBeenCalledWith(conv.id);
       expect(sessions.get(conv.id)?.starred).toBe(true);
       expect(provisioner.destroy).not.toHaveBeenCalled();
-    });
-
-    it("setStarred persists through the targeted store write", async () => {
-      const store = { ...inMemoryStore(), setStarred: vi.fn(async () => {}) };
-      const sessions = createSessionManager({ provisioner: fakeProvisioner(), store });
-      const conv = await sessions.start("star-write");
-
-      await sessions.setStarred(conv.id, true);
-
-      expect(store.setStarred).toHaveBeenCalledWith(conv.id, true);
     });
 
     it("leaves a RECENTLY-active conversation alone (age is lastActivityAt, not createdAt)", async () => {
@@ -1143,7 +1120,7 @@ describe("SessionManager", () => {
         const old1 = await sessions.start("old1"); // t=0
         const old2 = await sessions.start("old2"); // t=0
         const starred = await sessions.start("starred"); // t=0
-        await sessions.setStarred(starred.id, true);
+        routerWrite(starred.id, { starred: true });
 
         // A recent one, its lastActivityAt stamped at t=40d (near `now`).
         vi.setSystemTime(40 * DAY);

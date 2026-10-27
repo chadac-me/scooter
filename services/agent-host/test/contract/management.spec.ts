@@ -71,16 +71,7 @@ function fakeSessions(): SessionManager {
       if (c && !c.userTitled) store.set(id, conv({ ...c, title }));
       return Promise.resolve();
     }),
-    setUserTitle: vi.fn((id, title) => {
-      const c = store.get(id);
-      if (c) store.set(id, conv({ ...c, title, userTitled: true }));
-      return Promise.resolve();
-    }),
-    setStarred: vi.fn((id, starred) => {
-      const c = store.get(id);
-      if (c) store.set(id, conv({ ...c, starred }));
-      return Promise.resolve();
-    }),
+    refreshRouterMeta: vi.fn(async () => {}),
     setVisibility: vi.fn(async (id, visibility) => {
       const c = store.get(id);
       if (c) store.set(id, conv({ ...c, visibility }));
@@ -250,88 +241,7 @@ describe("management API", () => {
 
   // GET /conversations and the /conversations/events stream are served by the conversation-router and covered in its tests.
 
-  // --- user rename + starring ------------------------------------------------
-
-  it("PATCH /conversations/:id/title renames + locks (userTitled) — anonymous single-user", async () => {
-    const sessions = fakeSessions();
-    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-    const { status, json } = await call(api, "PATCH", "/conversations/c1/title", { title: "  My pinned name  " });
-    expect(status).toBe(200);
-    expect(sessions.setUserTitle).toHaveBeenCalledWith("c1", "My pinned name"); // trimmed
-    expect((json as any).title).toBe("My pinned name");
-    expect((json as any).userTitled).toBe(true);
-  });
-
-  it("PATCH /conversations/:id/title rejects a blank title (400)", async () => {
-    const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-    const { status } = await call(api, "PATCH", "/conversations/c1/title", { title: "   " });
-    expect(status).toBe(400);
-  });
-
-  it("PATCH /conversations/:id/title 404s an unknown conversation", async () => {
-    const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-    const { status } = await call(api, "PATCH", "/conversations/nope/title", { title: "x" });
-    expect(status).toBe(404);
-  });
-
-  it("PATCH title 403s when another identified user owns the conversation", async () => {
-    const sessions = fakeSessions();
-    // c1 owned by bob; alice tries to rename it.
-    (sessions.get("c1") as any).owner = "bob";
-    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-    const { status } = await call(api, "PATCH", "/conversations/c1/title", { title: "x" }, { "x-auth-user": "alice" });
-    expect(status).toBe(403);
-    expect(sessions.setUserTitle).not.toHaveBeenCalled();
-  });
-
-  it("PATCH title is allowed for the OWNER", async () => {
-    const sessions = fakeSessions();
-    (sessions.get("c1") as any).owner = "alice";
-    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-    const { status } = await call(api, "PATCH", "/conversations/c1/title", { title: "mine" }, { "x-auth-user": "alice" });
-    expect(status).toBe(200);
-    expect(sessions.setUserTitle).toHaveBeenCalledWith("c1", "mine");
-  });
-
-  it("PATCH /conversations/:id/starred toggles the star", async () => {
-    const sessions = fakeSessions();
-    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-    const on = await call(api, "PATCH", "/conversations/c1/starred", { starred: true });
-    expect(on.status).toBe(200);
-    expect(sessions.setStarred).toHaveBeenCalledWith("c1", true);
-    expect((on.json as any).starred).toBe(true);
-
-    const off = await call(api, "PATCH", "/conversations/c1/starred", { starred: false });
-    expect((off.json as any).starred).toBe(false);
-  });
-
-  it("PATCH /conversations/:id/starred hydrates an idle conversation absent from memory instead of 404ing", async () => {
-    // Starring an idle conversation lands on an arbitrary ready pod that does not hold it in memory, so it must hydrate-if-absent like GET/DELETE.
-    const s = fakeSessions();
-    const map = new Map<string, Conversation>();
-    const sessions = {
-      ...s,
-      get: (id: string) => map.get(id),
-      ensureReadable: vi.fn(async (id: string) => { map.set(id, conv({ id, threadId: id, status: "suspended" })); return true; }),
-      setStarred: vi.fn((id: string, starred: boolean) => {
-        const c = map.get(id);
-        if (c) map.set(id, conv({ ...c, starred }));
-        return Promise.resolve();
-      }),
-    } as unknown as SessionManager;
-    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-    const res = await call(api, "PATCH", "/conversations/idle-1/starred", { starred: true });
-    expect(res.status).toBe(200);
-    expect(sessions.ensureReadable).toHaveBeenCalledWith("idle-1");
-    expect(sessions.setStarred).toHaveBeenCalledWith("idle-1", true);
-    expect((res.json as any).starred).toBe(true);
-  });
-
-  it("PATCH starred rejects a non-boolean body (400)", async () => {
-    const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
-    const { status } = await call(api, "PATCH", "/conversations/c1/starred", { starred: "yes" });
-    expect(status).toBe(400);
-  });
+  // Star and title PATCHes are served by the conversation-router, which owns those columns.
 
   it("GET /conversations/:id/resources returns the sandbox size when wired", async () => {
     const size = { requests: { cpu: "500m", memory: "1Gi" }, limits: { memory: "4Gi" } };
@@ -1278,10 +1188,15 @@ describe("management API", () => {
           if (durable.has(id)) memory.set(id, durable.get(id)!);
           return memory.has(id);
         }),
+        // Pulls the durable star, which the router may have changed, into memory.
+        refreshRouterMeta: vi.fn(async (id: string) => {
+          const m = memory.get(id);
+          if (m && durable.has(id)) memory.set(id, { ...m, starred: durable.get(id)!.starred });
+        }),
         end: vi.fn(async () => {}),
         suspend: vi.fn(async () => {}),
       } as unknown as SessionManager;
-      return { api: createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} }), sessions };
+      return { api: createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerPermission: async () => {} }), sessions, durable };
     };
 
     it("DELETE hydrates an absent conversation and destroys it (no 404 leak)", async () => {
@@ -1293,6 +1208,14 @@ describe("management API", () => {
 
     it("DELETE refuses a STARRED conversation with 409 (accidental-delete guard)", async () => {
       const { api, sessions } = mkApi({ starred: true }, { inMemory: true });
+      const r = await call(api, "DELETE", "/conversations/cx");
+      expect(r.status).toBe(409);
+      expect(sessions.end).not.toHaveBeenCalled();
+    });
+
+    it("DELETE refuses a conversation the router starred after this pod loaded it", async () => {
+      const { api, sessions, durable } = mkApi({ starred: false }, { inMemory: true });
+      durable.set("cx", { ...durable.get("cx")!, starred: true });
       const r = await call(api, "DELETE", "/conversations/cx");
       expect(r.status).toBe(409);
       expect(sessions.end).not.toHaveBeenCalled();

@@ -1,4 +1,4 @@
-// Router-served star/title/visibility writes for an idle conversation (newRouter gates on no owner pod).
+// Router-served star/title writes, and visibility for an idle conversation (see routerServesPatch).
 package main
 
 import (
@@ -19,6 +19,14 @@ type metaWriter interface {
 	SetStarred(ctx context.Context, id string, starred bool) (*ConversationRow, error)
 	SetUserTitle(ctx context.Context, id, title string) (*ConversationRow, error)
 	SetVisibility(ctx context.Context, id, visibility string) (*ConversationRow, error)
+}
+
+// routerServesPatch: star/title are router-only; live visibility stays with its owner pod.
+func routerServesPatch(ctx context.Context, resolver ownerResolver, field, id string) bool {
+	if field != "visibility" {
+		return true
+	}
+	return resolver != nil && !resolver.Assigned(ctx, id)
 }
 
 // serveConversationMetadataPatch mirrors agent-host's mutableFor auth and view() response.
