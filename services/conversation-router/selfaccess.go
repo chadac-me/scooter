@@ -7,14 +7,14 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chadac/scooter/conversation-router/svcauth"
 )
 
 // selfRoutes is the whole surface a sandbox may reach; anything else is 404. Tool-permission
@@ -45,27 +45,16 @@ func selfRoute(method, path string) (convID string, isMessage, ok bool) {
 	return "", false, false
 }
 
-// sandboxSAPattern is the per-conversation ServiceAccount the provisioner creates (`sandbox-<shortId>`).
-var sandboxSAPattern = regexp.MustCompile(`^sandbox-([a-z0-9][a-z0-9-]*)$`)
-
-// sandboxIDFromUsername maps a TokenReview username to the sandbox short id, only within `namespace`.
+// sandboxIDFromUsername matches `sandbox-<id>` only within namespace.
 func sandboxIDFromUsername(username, namespace string) (string, bool) {
-	prefix := "system:serviceaccount:" + namespace + ":"
-	if !strings.HasPrefix(username, prefix) {
-		return "", false
-	}
-	m := sandboxSAPattern.FindStringSubmatch(strings.TrimPrefix(username, prefix))
-	if m == nil {
-		return "", false
-	}
-	return m[1], true
+	return svcauth.SandboxID(username, namespace)
 }
 
 // conversationLookup reads the row a self-access request targets; (nil, nil) means no such conversation.
 type conversationLookup func(ctx context.Context, id string) (*ConversationRow, error)
 
 type selfAccess struct {
-	review    reviewTokenFunc
+	verifier  *svcauth.Verifier
 	namespace string
 	lookup    conversationLookup
 	// Identity headers stripped from every request: the agent-host must never see a pod-chosen user.
@@ -74,27 +63,22 @@ type selfAccess struct {
 	messagesPerMinute int
 	now               func() time.Time
 
-	mu      sync.Mutex
-	reviews map[string]cachedReview // keyed by sha256(token)
-	sent    map[string][]time.Time  // conversation id -> recent message times
+	mu   sync.Mutex
+	sent map[string][]time.Time // conversation id -> recent message times
 }
 
-type cachedReview struct {
-	username string
-	ok       bool
-	until    time.Time
-}
-
-// selfReviewTTL bounds how long a TokenReview verdict is reused; projected tokens live far longer, and a revoked SA lingers at most this long.
-const selfReviewTTL = time.Minute
+// selfReviewTTL bounds how long a TokenReview verdict is reused.
+const selfReviewTTL = svcauth.CacheTTL
 
 func newSelfAccess(review reviewTokenFunc, namespace string, lookup conversationLookup, identity identityConfig, messagesPerMinute int) *selfAccess {
 	strip := []string{identity.userHeader, identity.albIdentityHeader, "x-auth-email", "x-amzn-oidc-data", "x-amzn-oidc-accesstoken"}
-	return &selfAccess{
-		review: review, namespace: namespace, lookup: lookup,
+	s := &selfAccess{
+		verifier: svcauth.NewVerifier(review), namespace: namespace, lookup: lookup,
 		stripHeaders: strip, messagesPerMinute: messagesPerMinute, now: time.Now,
-		reviews: map[string]cachedReview{}, sent: map[string][]time.Time{},
+		sent: map[string][]time.Time{},
 	}
+	s.verifier.Now = func() time.Time { return s.now() }
+	return s
 }
 
 // wrap admits a request to `next` only if it is an allowed route on a conversation owned by the calling sandbox.
@@ -118,7 +102,7 @@ func (s *selfAccess) wrap(next http.Handler) http.Handler {
 			http.Error(w, "bearer token required", http.StatusUnauthorized)
 			return
 		}
-		username, authed, err := s.verify(r.Context(), token)
+		username, authed, err := s.verifier.Verify(r.Context(), token)
 		if err != nil {
 			log.Warn("TokenReview failed", errAttr(err))
 			http.Error(w, "token verification unavailable", http.StatusServiceUnavailable)
@@ -151,39 +135,6 @@ func (s *selfAccess) wrap(next http.Handler) http.Handler {
 		r.Header.Set("x-scooter-caller", "sandbox")
 		next.ServeHTTP(w, r)
 	})
-}
-
-func (s *selfAccess) verify(ctx context.Context, token string) (string, bool, error) {
-	sum := sha256.Sum256([]byte(token))
-	key := hex.EncodeToString(sum[:])
-	now := s.now()
-	s.mu.Lock()
-	if c, ok := s.reviews[key]; ok && now.Before(c.until) {
-		s.mu.Unlock()
-		return c.username, c.ok, nil
-	}
-	s.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(ctx, tokenReviewTimeout)
-	defer cancel()
-	username, ok, err := s.review(ctx, token)
-	if err != nil {
-		return "", false, err // not cached: an apiserver blip must not pin a rejection
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.reviews) > 4096 { // bounded: drop expired entries, or everything if none expired
-		for k, c := range s.reviews {
-			if !now.Before(c.until) {
-				delete(s.reviews, k)
-			}
-		}
-		if len(s.reviews) > 4096 {
-			s.reviews = map[string]cachedReview{}
-		}
-	}
-	s.reviews[key] = cachedReview{username: username, ok: ok, until: now.Add(selfReviewTTL)}
-	return username, ok, nil
 }
 
 func (s *selfAccess) allowMessage(convID string) bool {
