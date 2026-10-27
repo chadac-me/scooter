@@ -383,8 +383,10 @@ in
         a runtime with user-namespace support (containerd >= 2.0 or CRI-O, with
         runc >= 1.2 or crun >= 1.9), and volumes on a filesystem that supports
         idmapped mounts (ext4, xfs, btrfs, tmpfs, overlayfs). On by default when
-        `sandboxRuntimeClass` is set: systemd boots user-namespaced under crun but
-        not under plain runc, so leave this off without a cgroup-delegating runtime.
+        `sandboxRuntimeClass` is set, since systemd needs that runtime class to delegate
+        a writable cgroup to the user-namespaced pod. crun is one such runtime; any
+        runtime class that does this works. Plain runc (no runtime class) does not, so
+        leave this off without one.
       '';
     };
     sandboxSizes = mkOption {
