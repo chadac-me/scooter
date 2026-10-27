@@ -173,7 +173,9 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
       await sleep(1500);
       continue; // re-poll: the pod is now being recreated
     }
-    const ready = candidates.find(
+    // Terminating pods still report ready; skip them.
+    const live = candidates.filter((p) => !p.metadata?.deletionTimestamp);
+    const ready = live.find(
       (p) =>
         p.status?.phase === "Running" &&
         (p.status?.containerStatuses ?? []).every((c) => c.ready),

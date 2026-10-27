@@ -510,6 +510,22 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: view(sessions.get(ctx.params.id)!) };
   });
 
+  // Restarts the sandbox; 409 while another run uses it.
+  r.post("/conversations/:id/restart", async (ctx) => {
+    if (!sessions.restartSandbox) return { status: 501, json: { error: "sandbox restart unavailable" } };
+    if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
+    const { conv, error } = mutableFor(ctx.params.id, ctx.user);
+    if (error === 404) return { status: 404, json: { error: "not found" } };
+    if (error === 403) return { status: 403, json: { error: "not your conversation" } };
+    try {
+      const result = await sessions.restartSandbox(conv!.id as SessionId);
+      return { json: result };
+    } catch (e) {
+      if ((e as { code?: number }).code === 409) return { status: 409, json: { error: (e as Error).message } };
+      throw e;
+    }
+  });
+
   r.post("/conversations/:id/resume", async (ctx) => {
     if (!sessions.get(ctx.params.id)) return { status: 404, json: { error: "not found" } };
     await sessions.revive(ctx.params.id);
@@ -945,9 +961,13 @@ export function createManagementApi(deps: ManagementDeps): Router {
   // {resources: null}.
   r.get("/conversations/:id/resources", async (ctx) => {
     const id = await resolveConvId(ctx.params.id);
-    if (!id || !deps.sandboxResources) return { json: { resources: null } };
-    const resources = (await deps.sandboxResources(id).catch(() => undefined)) ?? null;
-    return { json: { resources } };
+    if (!id) return { json: { resources: null, pendingRestart: null } };
+    // What a restart would pick up; best-effort.
+    const [resources, pendingRestart] = await Promise.all([
+      deps.sandboxResources ? deps.sandboxResources(id).catch(() => undefined) : undefined,
+      sessions.get(id) && sessions.pendingRestart ? sessions.pendingRestart(id as SessionId).catch(() => undefined) : undefined,
+    ]);
+    return { json: { resources: resources ?? null, pendingRestart: pendingRestart ?? null } };
   });
 
   // The named sandbox size presets and the default preset name; an absent getter yields

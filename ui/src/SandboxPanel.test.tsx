@@ -298,3 +298,70 @@ describe("SandboxPanelView — size picker", () => {
     }
   });
 });
+
+describe("SandboxPanelView — pending restart", () => {
+  const pending = { image: { from: "os:old", to: "os:new" } };
+
+  it("running with a newer image: shows Update available with a Restart button and what persists", () => {
+    const html = renderToStaticMarkup(
+      createElement(SandboxPanelView, { ...base, state: "running", pendingRestart: pending, onRestartSandbox: noop }),
+    );
+    expect(html).toContain('data-testid="sandbox-update-banner"');
+    expect(html).toContain("Update available");
+    expect(html).toContain('data-testid="sandbox-restart"');
+    expect(html).toContain("/workspace");
+  });
+
+  it("a size-only change reads as a pending size, not an update", () => {
+    const html = renderToStaticMarkup(
+      createElement(SandboxPanelView, { ...base, state: "running", pendingRestart: { size: true }, onRestartSandbox: noop }),
+    );
+    expect(html).toContain("Size change pending");
+    expect(html).not.toContain("Update available");
+  });
+
+  it("suspended: says the next start picks it up, with no Restart button", () => {
+    const html = renderToStaticMarkup(
+      createElement(SandboxPanelView, { ...base, state: "suspended", pendingRestart: pending, onRestartSandbox: noop }),
+    );
+    expect(html).toContain("when it next starts");
+    expect(html).not.toContain('data-testid="sandbox-restart"');
+  });
+
+  it("disables Restart while a restart is in flight", () => {
+    const html = renderToStaticMarkup(
+      createElement(SandboxPanelView, { ...base, state: "running", pendingRestart: pending, onRestartSandbox: noop, restarting: true }),
+    );
+    expect(html).toMatch(/data-testid="sandbox-restart"[^>]*disabled/);
+    expect(html).toContain("Restarting…");
+  });
+
+  it("no banner when nothing is pending", () => {
+    const html = renderToStaticMarkup(
+      createElement(SandboxPanelView, { ...base, state: "running", pendingRestart: null, onRestartSandbox: noop }),
+    );
+    expect(html).not.toContain("sandbox-update-banner");
+  });
+
+  it("offers Restart now on the pending-size note while running", () => {
+    const html = renderToStaticMarkup(
+      createElement(SandboxPanelView, {
+        ...base,
+        state: "running",
+        sizes: { small: { cpu: "1", memory: "2Gi" } },
+        onSelectSize: noop,
+        sizePendingRestart: true,
+        onRestartSandbox: noop,
+      }),
+    );
+    expect(html).toContain('data-testid="sandbox-size-restart"');
+  });
+
+  it("offers Stop while running, and shows a lifecycle error inline", () => {
+    const html = renderToStaticMarkup(
+      createElement(SandboxPanelView, { ...base, state: "running", onStopSandbox: noop, lifecycleError: "conversation c2 is running" }),
+    );
+    expect(html).toContain('data-testid="sandbox-stop"');
+    expect(html).toContain("conversation c2 is running");
+  });
+});

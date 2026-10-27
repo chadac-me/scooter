@@ -62,6 +62,31 @@ export interface SandboxProvisioner {
   /** List the live per-conversation Sandboxes with whether each pod is currently running, so
    *  hydrate() tracks still-running pods; optional. */
   reconcile?(): Promise<Array<{ ref: SandboxRef; running: boolean }>>;
+  /** Changes a restart would pick up; undefined when none. */
+  pendingRestart?(ref: SandboxRef): Promise<PendingRestart | undefined>;
+  /** Cycles the pod onto the current image and size. */
+  restart?(ref: SandboxRef): Promise<SandboxRestartResult>;
+}
+
+export interface PendingRestart {
+  /** Current and target image, when they differ. */
+  image?: { from: string; to: string };
+  /** Conversation env (CONVERSATION_URL etc.) is stale. */
+  env?: boolean;
+  /** The running pod lacks the recorded size. */
+  size?: boolean;
+}
+
+export interface SandboxRestartResult {
+  /** Image before and after the restart. */
+  fromImage?: string;
+  toImage?: string;
+  /** False when the image reconcile failed. */
+  imageCurrent: boolean;
+  /** The restart applied a pending size. */
+  sizeApplied: boolean;
+  /** The new pod became Ready in time. */
+  ready: boolean;
 }
 
 /** Who chose a conversation's model. */
@@ -263,6 +288,14 @@ export interface SessionManager {
    *  in-flight run, rebuilding goose on the new model and re-nudging it to continue; a no-op if
    *  `model` is current, throws on an unknown conversation, and returns whether a switch happened. */
   switchModelNow(id: SessionId, model: string): Promise<boolean>;
+  /** Pending restart changes for this conversation's sandbox. */
+  pendingRestart?(id: SessionId): Promise<PendingRestart | undefined>;
+  /** Restarts the sandbox (the root's, for a subagent). */
+  restartSandbox?(id: SessionId): Promise<SandboxRestartResult>;
+  /** Stops the sandbox; mid-run, suspends once the run ends. */
+  stopSandbox?(id: SessionId): Promise<{ deferred: boolean; pending?: PendingRestart }>;
+  /** A sandbox call resumed the pod; cancel deferred stops. */
+  noteSandboxResumed?(id: SessionId): void;
   suspend(id: SessionId): Promise<void>;
   end(id: SessionId): Promise<void>;
 
@@ -341,6 +374,8 @@ export interface SessionManagerDeps {
   /** Whether the conversation has a running background job; sweepIdle consults it and fails open on
    *  a throw. */
   hasRunningBackgroundJob?: (id: SessionId) => Promise<boolean>;
+  /** Called after a stop or restart so exec clients reconnect. */
+  onSandboxCycled?: (ref: SandboxRef) => void;
 }
 
 interface Entry {
@@ -363,6 +398,8 @@ interface Entry {
   /** Messages still queued in the bridge when this conversation was suspended, for revive() to
    *  re-enqueue. */
   pendingQueue?: Array<{ text: string; priority: number }>;
+  /** Suspend the sandbox when this run ends (in memory). */
+  stopAfterRun?: boolean;
 }
 
 /** Drain an async iterable of events into an array. */
@@ -607,6 +644,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // onEvent would double-log broadcasts.
     e.bridge.onPersist((event) => {
       e.lastActivityAt = nowMs();
+      // An interrupt pause doesn't end the run.
+      if (
+        e.stopAfterRun &&
+        ((event.type === "RUN_FINISHED" && event.outcome?.type !== "interrupt") || event.type === "RUN_ERROR")
+      ) {
+        void finishDeferredStop(e);
+      }
       // Cheap synchronous pre-filter; the store's AppendFence is the authority.
       if (!ownershipGuard.canWrite(e.id)) {
         // Warn, sampled (first drop, then every 25th), because this drop is how a mid-run
@@ -696,6 +740,69 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
   // In-flight revive() per conversation, so concurrent callers share one revive.
   const reviving = new Map<SessionId, Promise<Conversation>>();
+
+  /** The entry owning `e`'s sandbox: itself or its root. */
+  const rootEntry = (e: Entry): Entry => {
+    let cur = e;
+    for (let depth = 0; cur.parentId && depth < 32; depth++) {
+      const up = entries.get(cur.parentId);
+      if (!up) throw new Error(`subagent ${e.id} has no root conversation on this pod`);
+      cur = up;
+    }
+    return cur;
+  };
+  const busy = (e: Entry): boolean => {
+    const qs = e.bridge?.queueState();
+    return !!qs && (qs.running || qs.queued > 0);
+  };
+  /** Another conversation with a run in flight on this sandbox. */
+  const otherBusyOnSandbox = (root: Entry, self: SessionId): Entry | undefined => {
+    const shares = (c: Entry): boolean => {
+      for (let cur: Entry | undefined = c, d = 0; cur && d < 32; cur = cur.parentId ? entries.get(cur.parentId) : undefined, d++) {
+        if (cur.id === root.id) return true;
+      }
+      return false;
+    };
+    for (const c of entries.values()) {
+      if (c.id === self || c.status === "ended" || !shares(c)) continue;
+      if (busy(c)) return c;
+    }
+    return undefined;
+  };
+
+  const clearDeferredStops = (root: Entry): void => {
+    for (const c of entries.values()) {
+      if (!c.stopAfterRun) continue;
+      try {
+        if (rootEntry(c) === root) c.stopAfterRun = false;
+      } catch {
+        c.stopAfterRun = false; // orphaned: its run's end has nothing left to suspend
+      }
+    }
+  };
+
+  /** Finishes a deferred stop once the bridge is idle. */
+  const finishDeferredStop = async (e: Entry): Promise<void> => {
+    // RUN_FINISHED lands before the bridge clears running.
+    for (let i = 0; i < 50 && e.bridge?.queueState().running; i++) await new Promise((r) => setTimeout(r, 100));
+    if (!e.stopAfterRun) return; // a later sandbox call revived it
+    e.stopAfterRun = false;
+    if (entries.get(e.id) !== e || e.status === "ended") return;
+    let root: Entry;
+    try {
+      root = rootEntry(e);
+    } catch {
+      return;
+    }
+    // The pod is still in use; leave it running.
+    if (root.status !== "running" || otherBusyOnSandbox(root, "" as SessionId)) return;
+    try {
+      await api.suspend(root.id);
+      log.info("deferred stop_sandbox: conversation suspended after its run", { conversation_id: e.id });
+    } catch (err) {
+      log.warn("deferred stop_sandbox suspend failed", { conversation_id: e.id, error: formatError(err) });
+    }
+  };
 
   const api: SessionManager = {
     async start(threadId, model, owner) {
@@ -1085,6 +1192,71 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       // source "resume" persists as a UI-hidden SYSTEM_MESSAGE.
       await this.prompt(id, MODEL_SWITCH_NUDGE, undefined, undefined, undefined, undefined, undefined, "resume");
       return true;
+    },
+
+    async pendingRestart(id) {
+      const entry = entries.get(id);
+      if (!entry || entry.status === "ended" || !provisioner.pendingRestart) return undefined;
+      const root = rootEntry(entry);
+      if (!root.sandbox.namespace) return undefined; // not created yet: it starts on the current image
+      return provisioner.pendingRestart(root.sandbox);
+    },
+
+    async restartSandbox(id) {
+      const entry = entries.get(id);
+      if (!entry) throw new Error(`unknown conversation: ${id}`);
+      if (entry.status === "ended") throw new Error(`conversation was ended: ${id}`);
+      if (!provisioner.restart) throw new Error("this deployment cannot restart sandboxes");
+      const root = rootEntry(entry);
+      if (!root.sandbox.namespace) throw new Error("this conversation has no sandbox yet");
+      const other = otherBusyOnSandbox(root, id);
+      if (other) {
+        throw Object.assign(new Error(`conversation ${other.id} is running in this sandbox; restart after it finishes`), { code: 409 });
+      }
+      touch(root);
+      clearDeferredStops(root);
+      const result = await provisioner.restart(root.sandbox);
+      deps.onSandboxCycled?.(root.sandbox);
+      // Revive, not just flip status, so a bridge gets built.
+      if (root.status === "suspended") await this.revive(root.id);
+      return result;
+    },
+
+    async stopSandbox(id) {
+      const entry = entries.get(id);
+      if (!entry) throw new Error(`unknown conversation: ${id}`);
+      if (entry.status === "ended") throw new Error(`conversation was ended: ${id}`);
+      const root = rootEntry(entry);
+      const other = otherBusyOnSandbox(root, id);
+      if (other) {
+        throw Object.assign(new Error(`conversation ${other.id} is running in this sandbox; stop after it finishes`), { code: 409 });
+      }
+      const pending = root.sandbox.namespace ? await provisioner.pendingRestart?.(root.sandbox).catch(() => undefined) : undefined;
+      if (root.status !== "running") return { deferred: false, pending };
+      if (!busy(entry)) {
+        await api.suspend(root.id);
+        deps.onSandboxCycled?.(root.sandbox);
+        return { deferred: false, pending };
+      }
+      // Mid-run: stop the pod; suspend when the run ends.
+      await provisioner.suspend(root.sandbox);
+      deps.onSandboxCycled?.(root.sandbox);
+      entry.stopAfterRun = true;
+      log.info("stop_sandbox: sandbox stopped mid-run; suspending the conversation when the run ends", {
+        conversation_id: id,
+        sandbox: root.sandbox.name,
+      });
+      return { deferred: true, pending };
+    },
+
+    noteSandboxResumed(id) {
+      const entry = entries.get(id);
+      if (!entry) return;
+      try {
+        clearDeferredStops(rootEntry(entry));
+      } catch {
+        // No root entry: nothing to clear.
+      }
     },
 
     async suspend(id) {
