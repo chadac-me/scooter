@@ -30,8 +30,8 @@ describe("QueuedMessages", () => {
 
   it("renders each queued message", () => {
     const html = render([
-      { id: "q1", text: "first queued", priority: 0 },
-      { id: "q2", text: "second queued", priority: 0 },
+      { id: "q1", text: "first queued", priority: 10, interrupt: "thinking" },
+      { id: "q2", text: "second queued", priority: 10, interrupt: "thinking" },
     ]);
     expect(html).toContain('data-testid="queued-messages"');
     expect(html).toContain("first queued");
@@ -39,10 +39,10 @@ describe("QueuedMessages", () => {
     expect(html.match(/data-testid="queued-message"/g)).toHaveLength(2);
   });
 
-  it("marks a priority message distinctly and floats it to the top", () => {
+  it("marks only a tool-call interrupt as priority and floats it to the top", () => {
     const html = render([
-      { id: "q1", text: "normal one", priority: 0 },
-      { id: "q2", text: "urgent one", priority: 10 },
+      { id: "q1", text: "normal one", priority: 10, interrupt: "thinking" },
+      { id: "q2", text: "urgent one", priority: 10, interrupt: "tool-call" },
     ]);
     // The priority message carries the pill + priority flag.
     expect(html).toContain('data-testid="queued-priority-pill"');
@@ -54,7 +54,7 @@ describe("QueuedMessages", () => {
   });
 
   it("wraps long messages instead of truncating (no page-stretching)", () => {
-    const html = render([{ id: "q1", text: "x".repeat(400), priority: 0 }]);
+    const html = render([{ id: "q1", text: "x".repeat(400), priority: 10, interrupt: "thinking" }]);
     // The message wraps rather than forcing one line.
     expect(html).toContain("break-words");
     expect(html).not.toContain("truncate");
@@ -62,12 +62,12 @@ describe("QueuedMessages", () => {
 
   it("clamps a message to a few lines (Show more/less appears once it overflows)", () => {
     // The text is line-clamped by default; the overflow measurement and the toggle are DOM-only.
-    const html = render([{ id: "q1", text: "line\n".repeat(20), priority: 0 }]);
+    const html = render([{ id: "q1", text: "line\n".repeat(20), priority: 10, interrupt: "thinking" }]);
     expect(html).toContain("line-clamp-6");
   });
 
   it("renders as a faded user bubble with a progress spinner and status", () => {
-    const html = render([{ id: "q1", text: "waiting", priority: 0 }]);
+    const html = render([{ id: "q1", text: "waiting", priority: 10, interrupt: "thinking" }]);
     expect(html).toContain("opacity-60");
     expect(html).toContain("animate-spin");
     expect(html).toContain('data-testid="queued-message-status"');
@@ -79,14 +79,29 @@ describe("QueuedMessages", () => {
     expect(html).toContain("Sending…");
   });
 
-  it("labels a priority message as interrupting", () => {
-    const html = render([{ id: "q1", text: "stop that", priority: 10 }]);
-    expect(html).toContain("Interrupting current turn");
+  it("labels a tool-call interrupt as interrupting the tool call", () => {
+    const html = render([{ id: "q1", text: "stop that", priority: 10, interrupt: "tool-call" }]);
+    expect(html).toContain("Interrupting current tool call");
+  });
+
+  it("renders a mid-run send that waits for tools as a plain queued bubble", () => {
+    const html = render([{ id: "q1", text: "after this tool", priority: 10, interrupt: "thinking" }]);
+    expect(html).toContain("after this tool");
+    expect(html).not.toContain('data-testid="queued-priority-pill"');
+    expect(html).not.toContain('data-priority="true"');
+    expect(html).toContain("Queued");
+  });
+
+  it("hides a message that waits for the whole run until it is sent", () => {
+    expect(render([{ id: "q1", text: "after the run", priority: 0 }])).toBe("");
+    expect(render([{ id: "q1", text: "webhook", priority: 0, source: "github" }])).toBe("");
+    // An unacknowledged send still shows, whatever its priority.
+    expect(render([{ id: "optimistic-x", text: "sending", priority: 0 }])).toContain("sending");
   });
   it("renders a queued system message as the collapsed system-event line, not a user bubble", () => {
     const html = render([
-      { id: "q1", text: "PR #12 was approved\n".repeat(40), priority: 0, source: "github" },
-      { id: "q2", text: "user words", priority: 0 },
+      { id: "q1", text: "PR #12 was approved\n".repeat(40), priority: 10, interrupt: "thinking", source: "github" },
+      { id: "q2", text: "user words", priority: 10, interrupt: "thinking" },
     ]);
     // Both are queued rows, but the system one uses the shared SystemEventMessage renderer.
     expect(html.match(/data-testid="queued-message"/g)).toHaveLength(2);

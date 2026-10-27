@@ -57,12 +57,13 @@ test.describe("queue rendering while a run is in flight", () => {
     ).toEqual([0, 1, 2]);
   });
 
-  test("a mid-run message carries the PRIORITY pill (it preempts the running turn)", async ({ chat, page }) => {
+  test("a mid-run message renders as a plain queued bubble (it lets running tools finish)", async ({ chat, page }) => {
     await chat.open();
     await chat.startLongRun(RUN_SEC);
-    await chat.sendWhileRunning("urgent");
-    // The UI marks a send-while-running as priority, so the pill must render.
-    await expect(page.locator('[data-testid="queued-priority-pill"]').first()).toBeVisible({ timeout: 15_000 });
+    await chat.sendWhileRunning("after the tool");
+    await expect(chat.queuedMessages()).toHaveCount(1, { timeout: 15_000 });
+    // Only a send that kills the running tool call gets the Priority pill.
+    await expect(page.locator('[data-testid="queued-priority-pill"]')).toHaveCount(0);
   });
 
   test("queued messages render inline in the thread, faded, with a status (0 → n)", async ({ chat, page }) => {
