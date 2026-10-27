@@ -498,12 +498,15 @@ files never write `scooter.db.*` or `scooter.postgres.*`:
 - the `scooter.db.contrib_<name>` spec entry, rendered into the contrib's own
   `sql/owners.toml` and `sql/atlas.hcl`. Nothing about the contrib is written to
   lib/sql;
-- the database itself, `CREATE DATABASE … OWNER <host>`. **Roles stay per
-  service**: a contrib in the broker connects as `broker`, with no user or Secret
-  of its own;
+- the database itself, `CREATE DATABASE … OWNER <owner>`. The owner is `db.owner`,
+  or by default the first of `broker`, `webhooks` the contrib plugs into. **Roles
+  stay per service**: a contrib in the broker connects as `broker`, with no user or
+  Secret of its own;
+- table-scoped grants for every other service in a table's `writers` or `readers`,
+  on that service's existing role (see below);
 - the migrator env (`DB_ENVS` gets `contrib_<name>:<host role>`), with the `sql/`
   dir bundled into the migrator image;
-- `CONTRIB_<NAME>_DB_NAME` on the host pod.
+- `CONTRIB_<NAME>_DB_NAME` on the owner's pod and on every granted service's pod.
 
 The store connects with `ctx.contrib_store_config("<name>")`, which is the broker's
 `store_config` pointed at the contrib's database. Core's generated bindings
@@ -517,9 +520,28 @@ rows in once, matched on the primary key so rows written during the rollout do n
 block it. Leave the old table declared for one release, then drop it and
 `copyFrom` together.
 
+**Access from other services.** A table's `writers` default to the services the
+contrib plugs into; list any other service to grant it access. A contrib with no
+service half sets `db.owner` to the service that should own it:
+
+```nix
+contribs.ask-user.config.db = {
+  enable = true;
+  owner = "agent-host";
+  tables.questions = { writers = [ "agent-host" ]; readers = [ "conversation-router" ]; };
+};
+```
+
+Each listed service gets `CONNECT`, then `SELECT` (readers) or read-write
+(writers) on exactly those tables, on its own role. It connects with its usual
+credentials and `CONTRIB_<NAME>_DB_NAME` as the database. A deployer can widen or
+narrow the lists the same way, e.g. `contribs.aws.db.tables.<t>.readers`. Services
+that can be granted: `agent-host`, `broker`, `webhooks`, `scheduler`,
+`conversation-router`, `conversation-controller`.
+
 **Another contrib's data.** Go through the owning contrib's Python store (a
 `pythonDeps` dependency, as below), never its SQL. There are no foreign keys
-across databases, and a table read by a second service is not supported yet.
+across databases.
 
 ### Depending on another contrib
 
