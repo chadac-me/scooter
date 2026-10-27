@@ -20,7 +20,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from fastmcp.server.middleware import Middleware
 
-from scooter_broker_lib.autolink import list_links
+from scooter_broker_lib.autolink import list_links, router_headers
 from scooter_broker_lib.forge import DENY_HEADER, api_forge_request, denial_message, enforce
 from scooter_broker_lib.mcp import ToolContext, collect_mcp_servers, gate_for, tool_context
 from scooter_broker_lib.types import Identity, Provider
@@ -109,7 +109,7 @@ class _Links:
         url = f"{self._agent_host_url.rstrip('/')}/conversations/{self._conversation_id}/resource-map"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(url)
+                response = await client.get(url, headers=router_headers())
                 response.raise_for_status()
                 mappings = (response.json() or {}).get("mappings") or []
         except (httpx.HTTPError, ValueError) as exc:

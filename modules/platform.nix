@@ -949,6 +949,24 @@ in
           if you changed it.
         '';
       };
+      sessionCheckUrl = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "http://oauth2-proxy.agent-sandbox.svc.cluster.local/oauth2/auth";
+        description = ''
+          header mode: the auth proxy's forwardAuth endpoint (oauth2-proxy's
+          `/oauth2/auth`, which Authelia and Pomerium also provide). The router
+          sends it each browser request's session cookies to confirm who is signed
+          in, rather than trusting `userHeader`. The proxy must return the user in
+          `X-Auth-Request-User` (oauth2-proxy: `set_xauthrequest = true`). For now
+          a mismatch or rejection is only logged ("auth would reject").
+        '';
+      };
+      sandboxSessionCheckUrl = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "As `sessionCheckUrl`, for requests to `ingress.sandboxDomain` hosts; defaults to `sessionCheckUrl`.";
+      };
       # ALB OIDC only puts the `sub` in a header, so this static sub -> email map
       # seeds the learned identity store.
       subEmailMap = mkOption {
