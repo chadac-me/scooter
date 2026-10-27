@@ -13,13 +13,13 @@ from conversation_controller.reconcile import Pod, SandboxRef
 @pytest.fixture(autouse=True)
 def _reset_zombie_state():
     """Reset the zombie repair's module-level per-conversation state between tests."""
-    for attr in ("_zombie_progress", "_zombie_suspects", "_prev_gen"):
+    for attr in ("_zombie_progress", "_zombie_suspects", "_prev_gen", "_drift_since"):
         state = getattr(loop_mod, attr, None)
         if state is not None:
             state.clear()
     forget_warned()
     yield
-    for attr in ("_zombie_progress", "_zombie_suspects", "_prev_gen"):
+    for attr in ("_zombie_progress", "_zombie_suspects", "_prev_gen", "_drift_since"):
         state = getattr(loop_mod, attr, None)
         if state is not None:
             state.clear()
@@ -417,6 +417,13 @@ def test_autoscale_per_pod_metric():
 
 # --- phase-drift repair through the shell (MarkSuspended end-to-end) --------
 
+@pytest.fixture
+def no_revive_grace(monkeypatch):
+    """Drop the Ready-host revive grace, for tests about the repair itself."""
+    monkeypatch.setattr(loop_mod, "_DRIFT_REVIVE_GRACE_S", 0.0)
+
+
+@pytest.mark.usefixtures("no_revive_grace")
 def test_drifted_conversation_is_repaired_and_leaves_demand():
     from conversation_controller.reconcile import SandboxRef
 
@@ -436,6 +443,71 @@ def test_drifted_conversation_is_repaired_and_leaves_demand():
     st = k8s._convs["drifted"]["status"]
     assert st["phase"] == "Suspended"
     assert st["hostPod"] is None
+
+
+class _MonoClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+@pytest.fixture
+def mono(monkeypatch):
+    c = _MonoClock()
+    monkeypatch.setattr(loop_mod, "_now", c)
+    return c
+
+
+def _reviving_k8s(host_ready=True):
+    """Assigned to pod a while its Sandbox reads Suspended, as mid template-skew adoption."""
+    return FakeK8s(
+        pods=[Pod("a", host_ready, ip="10.0.0.1"), Pod("b", True, ip="10.0.0.2")],
+        convs=[_cr("rev", host="a", phase="Assigned", gen=5, sandbox_ref="conv-r")],
+        sandboxes=[SandboxRef(name="conv-r", age_seconds=1000.0, operating_mode="Suspended")],
+    )
+
+
+def test_a_revive_on_a_ready_host_is_not_released_or_zombie_suspended(mono):
+    k8s = _reviving_k8s()
+    for _ in range(30):  # 150s of 5s ticks, longer than a slow revive
+        mono.t += 5
+        results = reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+        assert ("rev", "mark-suspended") not in results
+    assert k8s.status("rev") == {"phase": "Assigned", "generation": 5, "hostPod": "a"}
+    # The revive lands: the Sandbox runs again and nothing was ever released or suspended.
+    k8s._sandboxes["conv-r"] = SandboxRef(name="conv-r", age_seconds=1000.0, operating_mode="Running")
+    assert ("rev", "noop") in reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+    assert k8s.patches == []
+    assert k8s.suspends == []
+
+
+def test_drift_on_a_ready_host_is_repaired_once_it_outlasts_the_revive_grace(mono):
+    k8s = _reviving_k8s()
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))  # one-tick claim grace
+    assert ("rev", "drift-revive-grace") in reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+    mono.t += loop_mod._DRIFT_REVIVE_GRACE_S
+    assert ("rev", "mark-suspended") in reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+    assert k8s.status("rev")["hostPod"] is None
+
+
+def test_the_revive_grace_restarts_once_the_drift_clears(mono):
+    k8s = _reviving_k8s()
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))  # grace starts at t=0
+    k8s._sandboxes["conv-r"] = SandboxRef(name="conv-r", age_seconds=1000.0, operating_mode="Running")
+    mono.t += loop_mod._DRIFT_REVIVE_GRACE_S - 1
+    reconcile_once(k8s, cap=10, rows=FakeRows(k8s))  # clean pass forgets it
+    k8s._sandboxes["conv-r"] = SandboxRef(name="conv-r", age_seconds=1000.0, operating_mode="Suspended")
+    mono.t += 2
+    assert ("rev", "drift-revive-grace") in reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+
+
+def test_drift_on_a_dead_host_gets_no_revive_grace(mono):
+    k8s = _reviving_k8s(host_ready=False)
+    assert ("rev", "drift-grace") in reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
+    assert ("rev", "mark-suspended") in reconcile_once(k8s, cap=10, rows=FakeRows(k8s))
 
 
 def test_running_sandbox_is_not_repaired():
@@ -614,6 +686,7 @@ def _drift(caplog, level):
     return [r for r in caplog.records if r.message == "phase drift repaired" and r.levelname == level]
 
 
+@pytest.mark.usefixtures("no_revive_grace")
 def test_THE_SPAM_a_persistent_drift_warns_once_but_is_still_REPAIRED_every_pass(caplog):
     caplog.set_level("DEBUG")
     k8s = _drifting_k8s()
@@ -644,6 +717,7 @@ def clock(monkeypatch):
     return c
 
 
+@pytest.mark.usefixtures("no_revive_grace")
 def test_a_PING_PONG_drift_that_clears_and_returns_every_pass_warns_once_per_cooldown(caplog, clock):
     caplog.set_level("DEBUG")
     k8s = _drifting_k8s()
@@ -657,6 +731,7 @@ def test_a_PING_PONG_drift_that_clears_and_returns_every_pass_warns_once_per_coo
     assert len(_drift(caplog, "WARNING")) == 1
 
 
+@pytest.mark.usefixtures("no_revive_grace")
 def test_a_drift_still_recurring_after_the_cooldown_warns_again_with_the_suppressed_count(caplog, clock):
     caplog.set_level("DEBUG")
     k8s = _drifting_k8s()
@@ -671,6 +746,7 @@ def test_a_drift_still_recurring_after_the_cooldown_warns_again_with_the_suppres
     assert warns[1].suppressed_since_last == 2
 
 
+@pytest.mark.usefixtures("no_revive_grace")
 def test_a_drift_idle_past_the_cooldown_is_forgotten(clock):
     import conversation_controller.logging_config as lc
 

@@ -131,3 +131,11 @@ describe("OwnershipTracker.onGained — the settlement trigger", () => {
     expect(gained).toEqual([["c1", 2], ["c2", 1], ["c1", 4]]);
   });
 });
+
+describe("danglingRunInfo host", () => {
+  it("reports the pod that started the dangling run", () => {
+    const e = { type: "RUN_STARTED", threadId: "c", runId: "r1", host: "host-a" } as AguiEvent;
+    expect(danglingRunInfo([e])?.host).toBe("host-a");
+    expect(danglingRunInfo([started("r2")])?.host).toBeUndefined();
+  });
+});

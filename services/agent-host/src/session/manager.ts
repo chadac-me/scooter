@@ -263,6 +263,8 @@ export interface SessionManager {
    *  intent) or resume-nudging it; owner-fenced by callers, one reconciliation in flight per
    *  conversation. */
   reconcileDanglingRun(id: SessionId, expectedGen?: number): Promise<void>;
+  /** Cancel and drop this pod's bridge for a conversation it lost. */
+  relinquish(id: SessionId): Promise<void>;
   /** Make a conversation's history readable on this pod without starting its sandbox or bridge;
    *  returns false when the conversation is genuinely unknown. */
   ensureReadable(id: SessionId): Promise<boolean>;
@@ -376,6 +378,8 @@ export interface SessionManagerDeps {
   hasRunningBackgroundJob?: (id: SessionId) => Promise<boolean>;
   /** Called after a stop or restart so exec clients reconnect. */
   onSandboxCycled?: (ref: SandboxRef) => void;
+  /** Wait before resuming another pod's run; default 0. */
+  handoffGraceMs?: number;
 }
 
 interface Entry {
@@ -1117,7 +1121,21 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         } else if (dangling && !entries.get(id)?.bridge && (await closeIfSuspended(id, dangling))) {
           // Closed above; a live bridge means it was just revived.
         } else if (dangling) {
-          log.info("resuming a dangling run", { conversation_id: id });
+          const grace = deps.handoffGraceMs ?? 0;
+          if (grace > 0 && dangling.host !== undefined && dangling.host !== deps.selfPod) {
+            // The previous owner may still be executing it.
+            await new Promise((r) => setTimeout(r, grace));
+            if (!(ownershipGuard.owns?.(id) ?? true)) {
+              log.info("dangling run: lost ownership during the hand-off grace — not resuming", { conversation_id: id });
+              return;
+            }
+            const after = danglingRunInfo(await collectEvents(store.readEvents(id)), self);
+            if (after?.runId !== dangling.runId) {
+              log.info("dangling run settled during the hand-off grace — not resuming", { conversation_id: id });
+              return;
+            }
+          }
+          log.info("resuming a dangling run", { conversation_id: id, previous_host: dangling.host });
           // source "resume" persists as a UI-hidden SYSTEM_MESSAGE.
           void this.prompt(id, RESUME_NUDGE, undefined, undefined, undefined, undefined, undefined, "resume").catch((err) =>
             log.errorWith("dangling-run resume failed", err, { conversation_id: id }),
@@ -1128,6 +1146,31 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       } finally {
         danglingReconciles.delete(id);
       }
+    },
+
+    async relinquish(id) {
+      // An in-flight revive would rebuild the bridge after teardown.
+      await reviving.get(id)?.catch(() => {});
+      if (ownershipGuard.owns?.(id)) return; // reassigned back meanwhile
+      const entry = entries.get(id);
+      const bridge = entry?.bridge;
+      if (!entry || !bridge) return;
+      // Detach first so no prompt reaches the dying bridge.
+      entry.bridge = undefined;
+      entry.status = "suspended";
+      const qs = bridge.queueState();
+      log.warn("ownership lost — stopping this pod's run", {
+        conversation_id: id,
+        running: qs.running,
+        queued: qs.queued,
+      });
+      // cancel() kills sandbox execs; stop() alone leaves them running.
+      await bridge.cancel().catch((err: unknown) =>
+        log.warn("cancel on ownership loss failed", { conversation_id: id, error: formatError(err) }),
+      );
+      await bridge.stop().catch((err: unknown) =>
+        log.warn("bridge stop on ownership loss failed", { conversation_id: id, error: formatError(err) }),
+      );
     },
 
     async refreshSandbox(id) {

@@ -72,3 +72,23 @@ describe("OwnershipTracker.owns — positive ownership only", () => {
     expect(t.canWrite("c" as never)).toBe(true);
   });
 });
+
+describe("OwnershipTracker.onLost — stops the run, not just the writes", () => {
+  it("fires once when a held conversation is reassigned or deleted, never for others", () => {
+    const t = new OwnershipTracker("host-a");
+    const lost: string[] = [];
+    t.onLost = (id) => lost.push(id);
+    t.observe("c", { hostPod: "host-b", generation: 1 }); // never ours
+    expect(lost).toEqual([]);
+    t.observe("c", { hostPod: "host-a", generation: 2 });
+    t.observe("c", { hostPod: "host-a", generation: 2 }); // re-read, still ours
+    expect(lost).toEqual([]);
+    t.observe("c", { hostPod: "host-b", generation: 3 });
+    expect(lost).toEqual(["c"]);
+    t.observe("c", { hostPod: "host-b", generation: 3 }); // already lost
+    expect(lost).toEqual(["c"]);
+    t.observe("d", { hostPod: "host-a", generation: 1 });
+    t.observe("d", null);
+    expect(lost).toEqual(["c", "d"]);
+  });
+});

@@ -26,6 +26,8 @@ export interface PgEventStoreConfig {
   db?: NodePgDatabase;
   /** The claim every append presents; omitted means appends are unconditional. */
   fence?: AppendFence;
+  /** Called on each fence refusal: this pod may have lost it. */
+  onFenced?: (id: SessionId) => void;
 }
 
 /**
@@ -144,6 +146,11 @@ export function createPgEventStore(config: PgEventStoreConfig): PgEventStore {
     // The head came from a log this pod no longer drives, so drop it and let a conversation
     // reassigned back re-seed from the table instead of colliding on the PK.
     heads.delete(id);
+    try {
+      config.onFenced?.(id);
+    } catch (err) {
+      log.warn("onFenced hook threw", { conversation_id: id, error: formatError(err) });
+    }
     const n = (refusals.get(id) ?? 0) + 1;
     refusals.set(id, n);
     if (n === 1 || n % 100 === 0) {

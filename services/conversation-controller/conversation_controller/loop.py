@@ -7,6 +7,7 @@ and a rows handle (real or fake) so the whole loop is unit-testable against in-m
 from __future__ import annotations
 
 import logging
+import time
 
 from dataclasses import dataclass
 
@@ -78,6 +79,11 @@ _zombie_progress: dict[str, _ZombieProgress] = {}
 # Last tick's generations: a fresh claim gets one tick's grace.
 _prev_gen: dict[str, int] = {}
 
+# A revive cycling the pod suspends the Sandbox under its owner.
+_DRIFT_REVIVE_GRACE_S = 300.0
+_drift_since: dict[str, float] = {}  # conversation -> when drift on a Ready host was first seen
+_now = time.monotonic
+
 
 def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
     """One reconcile pass over all Conversations, returning [(name, action_kind)]; load is tracked as assignments are made so a burst of Pending conversations spreads across pods."""
@@ -113,6 +119,7 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
 
     results: list[tuple[str, str]] = []
     zombie_flagged: set[str] = set()
+    drifting_on_ready: set[str] = set()
     for c in convs:
         action = reconcile(c, pods, load, cap, hosts)
         if isinstance(action, NoOp):
@@ -187,6 +194,12 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
         if isinstance(action, MarkSuspended) and _prev_gen.get(c.name) != c.generation:
             results.append((c.name, "drift-grace"))
             continue
+        if isinstance(action, MarkSuspended) and c.host_pod in ready_names:
+            drifting_on_ready.add(c.name)
+            since = _drift_since.setdefault(c.name, _now())
+            if _now() - since < _DRIFT_REVIVE_GRACE_S:
+                results.append((c.name, "drift-revive-grace"))
+                continue
         if isinstance(action, MarkSuspended):
             # The Sandbox is Suspended but the phase is not: fix the phase and release placement,
             # de-duplicating only the log.
@@ -265,6 +278,10 @@ def reconcile_once(k8s, cap: int, rows) -> list[tuple[str, str]]:
         prog.quiescent += 1
         if prog.quiescent >= _ZOMBIE_FORGET_TICKS:
             del _zombie_progress[name]
+
+    for name in list(_drift_since):
+        if name not in drifting_on_ready:
+            del _drift_since[name]
 
     _prev_gen.clear()
     _prev_gen.update({c.name: c.generation for c in convs})

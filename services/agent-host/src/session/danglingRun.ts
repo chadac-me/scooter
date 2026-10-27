@@ -22,6 +22,8 @@ export interface DanglingRunInfo {
   runId: string;
   threadId: string;
   cancelRequested: boolean;
+  /** The pod that started it, when the event recorded one. */
+  host?: string;
 }
 
 export function danglingRunInfo(events: AguiEvent[], self?: RunOrigin): DanglingRunInfo | null {
@@ -32,7 +34,7 @@ export function danglingRunInfo(events: AguiEvent[], self?: RunOrigin): Dangling
     if (e.type === "CANCEL_REQUESTED") cancelled = e.runId;
     if (e.type === "RUN_STARTED") {
       if (isOwnRun(e, self)) return null;
-      return { runId: e.runId, threadId: e.threadId, cancelRequested: cancelled === e.runId };
+      return { runId: e.runId, threadId: e.threadId, cancelRequested: cancelled === e.runId, host: e.host };
     }
   }
   return null; // no run markers at all
