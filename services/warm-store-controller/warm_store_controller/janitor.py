@@ -226,6 +226,7 @@ def _pv_action(pv: PoolPv, world: World, cfg: UpkeepConfig, now: float) -> Actio
     if pv.phase == "Released":
         if not pv.shutdown_clean:
             return RetirePv(pv, "released-unchecked")
+        # Upper paths can reference paths only the old image's lower has.
         if not pv.image_tag or pv.image_tag != cfg.current_tag:
             return RetirePv(pv, "retired-tag")
         warm = (pv.claim_ref or "").startswith(WARM_PVC_PREFIX)
