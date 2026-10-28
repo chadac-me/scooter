@@ -8,6 +8,8 @@ stories read and disturb the overlay pool: GET /overlay/<thread>, GET /pool, POS
 /canary/<thread>, POST /warm-store/scale/<n>. Stdlib only, shells out to kubectl on PATH.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import subprocess
