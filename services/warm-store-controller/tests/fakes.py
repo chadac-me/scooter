@@ -72,6 +72,9 @@ class FakeK8s(ControllerK8s):
     def delete_marker_jobs(self, pvc):
         self.calls.append(("delete-marker-jobs", pvc))
 
+    def delete_warm_jobs(self, pvc):
+        self.calls.append(("delete-warm-jobs", pvc))
+
     def reserve(self, pv: PoolPv, pvc_name: str):
         if pv.name in self.conflicts:
             raise ApiException(status=409)

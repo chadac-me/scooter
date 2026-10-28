@@ -152,7 +152,7 @@ def plan(
 ) -> list[StartWarm | Retire]:
     """Grow or shrink the current tag's idle PVs toward `target`.
 
-    :param warming: the pinned node (or None) of each warm Job still running.
+    :param warming: the node (or None) of each warm PV in flight: Job running or promoting.
     :param released_epoch: PV name to when it joined its pool, in epoch seconds.
     """
     tag = snap.current_tag

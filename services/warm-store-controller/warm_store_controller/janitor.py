@@ -176,17 +176,23 @@ def plan_upkeep(
     now: float,
     marker_attempts: dict[str, int],
 ) -> tuple[list[Action], list[str | None]]:
-    """Decide this pass's upkeep, and the pinned node of each warm Job still running."""
+    """Decide this pass's upkeep, and the node of each warm PV not yet in the pool."""
     actions: list[Action] = []
+    pv_by_name = {pv.name: pv for pv in world.pvs}
+    warming: list[str | None] = []
     for pv in world.pvs:
         a = _pv_action(pv, world, cfg, now)
         if a is not None:
             actions.append(a)
+            # Recycled this pass; idle only from the next.
+            if isinstance(a, Recycle) and a.pool == POOL_WARM:
+                warming.append(pv.node)
 
-    pv_by_name = {pv.name: pv for pv in world.pvs}
-    warming: list[str | None] = []
     for pvc in world.pvcs.values():
         if pvc.terminating:
+            # A promoted warm PVC, held until its Job's pod goes.
+            if _is_current_warm(pvc, cfg):
+                warming.append(_node_of(pvc, pv_by_name))
             continue
         # TODO: remove once old pool-state PVCs are swept everywhere.
         if LBL_LEGACY_POOL in pvc.labels:
@@ -287,6 +293,15 @@ def _release_action(
     return StartMarkerCheck(pvc.name)
 
 
+def _is_current_warm(pvc: Pvc, cfg: UpkeepConfig) -> bool:
+    return bool(pvc.labels.get(LBL_WARM_SEED)) and pvc.labels.get("scooter.io/warm-store") == cfg.current_tag
+
+
+def _node_of(pvc: Pvc, pv_by_name: dict[str, PoolPv]) -> str | None:
+    pv = pv_by_name.get(pvc.volume_name or "")
+    return pv.node if pv is not None else None
+
+
 def _warm_action(
     pvc: Pvc,
     world: World,
@@ -305,6 +320,8 @@ def _warm_action(
     if job.status == "succeeded":
         if not pvc.volume_name:
             return DeletePvc(pvc.name, "warm-unbound")
+        # Joins the pool in a pass or two; count it meanwhile.
+        warming.append(job.node)
         return PromoteWarm(pvc.name, pvc.volume_name)
     if job.status == "failed":
         return DeletePvc(pvc.name, "warm-failed")
