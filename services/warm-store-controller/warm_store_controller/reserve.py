@@ -59,13 +59,18 @@ class Reserver:
         self._misses = misses
 
     def reserve(self, sandbox: str, tag: str) -> Result:
+        start = time.monotonic()
         with self._lock:
+            waited = time.monotonic() - start
             result, node = self._reserve(sandbox, tag)
         if result.pv is None and result.reason == "miss":
             self._misses.record(tag, node)
         logger.info(
             "reserve",
-            extra={"sandbox": sandbox, "image_tag": tag, "pv": result.pv, "pool": result.pool, "reason": result.reason},
+            extra={
+                "sandbox": sandbox, "image_tag": tag, "pv": result.pv, "pool": result.pool, "reason": result.reason,
+                "duration_ms": round(1000 * (time.monotonic() - start)), "lock_wait_ms": round(1000 * waited),
+            },
         )
         return result
 
@@ -91,7 +96,7 @@ class Reserver:
 
         # On resume the workspace PV already fixes the node.
         workspace = next(
-            (pv for pv in raw if pv.spec.claim_ref and pv.spec.claim_ref.name == f"workspace-{sandbox}"),
+            (pv for pv in raw if (pv["spec"].get("claimRef") or {}).get("name") == f"workspace-{sandbox}"),
             None,
         )
         nodes = allowed_nodes(k.list_nodes(), node_terms(workspace) if workspace is not None else None)

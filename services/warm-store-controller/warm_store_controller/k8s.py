@@ -3,6 +3,7 @@ Sandboxes, warm and marker-check Jobs, nodes and TokenReview."""
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -92,26 +93,27 @@ class ControllerK8s:
     user_namespace: bool = False
 
     # --- observe -------------------------------------------------------------------
-    def list_pvs(self) -> list:
+    def list_pvs(self) -> list[dict]:
         """Every PV, raw: pool PVs plus the workspace PVs that pin sandboxes to nodes."""
         core, _, _, _ = _apis()
-        return list(core.list_persistent_volume().items)
+        return _items(core.list_persistent_volume(_preload_content=False))
 
-    def pool_pvs(self, raw: list) -> list[PoolPv]:
+    def pool_pvs(self, raw: list[dict]) -> list[PoolPv]:
         """The PVs on the pool StorageClass."""
-        return [to_pool_pv(pv) for pv in raw if (pv.spec.storage_class_name or "") == self.pool_storage_class]
+        return [to_pool_pv(pv) for pv in raw if (pv["spec"].get("storageClassName") or "") == self.pool_storage_class]
 
     def list_pvcs(self) -> dict[str, Pvc]:
         core, _, _, _ = _apis()
         out: dict[str, Pvc] = {}
-        for pvc in core.list_namespaced_persistent_volume_claim(self.namespace).items:
-            out[pvc.metadata.name] = to_pvc(pvc)
+        for pvc in _items(core.list_namespaced_persistent_volume_claim(self.namespace, _preload_content=False)):
+            out[pvc["metadata"]["name"]] = to_pvc(pvc)
         return out
 
     def read_pvc(self, name: str) -> Pvc | None:
         core, _, _, _ = _apis()
         try:
-            return to_pvc(core.read_namespaced_persistent_volume_claim(name, self.namespace))
+            resp = core.read_namespaced_persistent_volume_claim(name, self.namespace, _preload_content=False)
+            return to_pvc(json.loads(resp.data))
         except client.ApiException as e:
             if e.status == 404:
                 return None
@@ -140,19 +142,24 @@ class ControllerK8s:
         """PVC names a non-terminal pod mounts."""
         core, _, _, _ = _apis()
         out: set[str] = set()
-        for pod in core.list_namespaced_pod(self.namespace).items:
-            if pod.status and pod.status.phase in ("Succeeded", "Failed"):
+        for pod in _items(core.list_namespaced_pod(self.namespace, _preload_content=False)):
+            if (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
                 continue
-            for vol in pod.spec.volumes or []:
-                if vol.persistent_volume_claim is not None:
-                    out.add(vol.persistent_volume_claim.claim_name)
+            for vol in pod["spec"].get("volumes") or []:
+                claim = vol.get("persistentVolumeClaim")
+                if claim is not None:
+                    out.add(claim["claimName"])
         return out
 
     def list_nodes(self) -> list[Node]:
         core, _, _, _ = _apis()
         return [
-            Node(name=n.metadata.name, labels=n.metadata.labels or {}, schedulable=not bool(n.spec.unschedulable))
-            for n in core.list_node().items
+            Node(
+                name=n["metadata"]["name"],
+                labels=n["metadata"].get("labels") or {},
+                schedulable=not (n.get("spec") or {}).get("unschedulable", False),
+            )
+            for n in _items(core.list_node(_preload_content=False))
         ]
 
     def warm_jobs(self) -> tuple[dict[str, WarmJob], list[float]]:
@@ -160,17 +167,19 @@ class ControllerK8s:
         _, _, batch, _ = _apis()
         jobs: dict[str, WarmJob] = {}
         seconds: list[float] = []
-        for job in batch.list_namespaced_job(self.namespace, label_selector="app=warm-store-seed").items:
-            pvc = (job.metadata.labels or {}).get(LBL_WARM_PVC)
+        resp = batch.list_namespaced_job(self.namespace, label_selector="app=warm-store-seed", _preload_content=False)
+        for job in _items(resp):
+            pvc = (job["metadata"].get("labels") or {}).get(LBL_WARM_PVC)
             if not pvc:
                 continue
-            st = job.status
-            node = ((job.spec.template.spec.node_selector or {}) if job.spec else {}).get(HOSTNAME)
-            if st is not None and (st.succeeded or 0) >= 1:
+            st = job.get("status") or {}
+            pod_spec = (((job.get("spec") or {}).get("template") or {}).get("spec") or {})
+            node = (pod_spec.get("nodeSelector") or {}).get(HOSTNAME)
+            if (st.get("succeeded") or 0) >= 1:
                 jobs[pvc] = WarmJob("succeeded", node)
-                if st.start_time and st.completion_time:
-                    seconds.append((st.completion_time - st.start_time).total_seconds())
-            elif st is not None and (st.failed or 0) >= 1:
+                if st.get("startTime") and st.get("completionTime"):
+                    seconds.append(_epoch(st["completionTime"]) - _epoch(st["startTime"]))
+            elif (st.get("failed") or 0) >= 1:
                 jobs[pvc] = WarmJob("failed", node)
             else:
                 jobs[pvc] = WarmJob("running", node)
@@ -180,9 +189,9 @@ class ControllerK8s:
         """Marker-check results by the PVC they read."""
         _, _, batch, _ = _apis()
         out: dict[str, MarkerStatus] = {}
-        for job in batch.list_namespaced_job(self.namespace, label_selector=LBL_MARKER_PVC).items:
-            pvc = (job.metadata.labels or {}).get(LBL_MARKER_PVC)
-            if pvc and job.metadata.deletion_timestamp is None:
+        for job in _items(batch.list_namespaced_job(self.namespace, label_selector=LBL_MARKER_PVC, _preload_content=False)):
+            pvc = (job["metadata"].get("labels") or {}).get(LBL_MARKER_PVC)
+            if pvc and job["metadata"].get("deletionTimestamp") is None:
                 out[pvc] = marker_status(job)
         return out
 
@@ -400,58 +409,65 @@ class ControllerK8s:
 
 # --- conversions --------------------------------------------------------------------
 
-def to_pool_pv(pv) -> PoolPv:
-    meta, spec = pv.metadata, pv.spec
-    labels = meta.labels or {}
-    ann = meta.annotations or {}
+def _items(resp) -> list[dict]:
+    """A list response's items as dicts; model deserialization costs ~20x more."""
+    return json.loads(resp.data)["items"]
+
+
+def _epoch(stamp: str) -> float:
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+
+
+def to_pool_pv(pv: dict) -> PoolPv:
+    meta, spec = pv["metadata"], pv["spec"]
+    labels = meta.get("labels") or {}
+    ann = meta.get("annotations") or {}
+    claim = spec.get("claimRef") or {}
     return PoolPv(
-        name=meta.name,
+        name=meta["name"],
         image_tag=labels.get(LBL_WARM_STORE, ""),
-        phase=(pv.status.phase if pv.status else "") or "",
+        phase=(pv.get("status") or {}).get("phase") or "",
         pool=labels.get(LBL_POOL),
         node_selector_terms=node_terms(pv),
-        claim_ref=spec.claim_ref.name if spec.claim_ref else None,
-        claim_uid=spec.claim_ref.uid if spec.claim_ref else None,
+        claim_ref=claim.get("name"),
+        claim_uid=claim.get("uid"),
         last_sandbox=ann.get(ANN_LAST_SANDBOX),
         released_at=ann.get(ANN_RELEASED_AT),
         reserved_at=ann.get(ANN_RESERVED_AT),
         shutdown_clean=ann.get(ANN_SHUTDOWN) == "clean",
-        reclaim_policy=spec.persistent_volume_reclaim_policy or "Retain",
-        terminating=meta.deletion_timestamp is not None,
-        resource_version=meta.resource_version or "",
+        reclaim_policy=spec.get("persistentVolumeReclaimPolicy") or "Retain",
+        terminating=meta.get("deletionTimestamp") is not None,
+        resource_version=meta.get("resourceVersion") or "",
     )
 
 
-def node_terms(pv) -> list[dict]:
-    """A PV's required nodeSelectorTerms as plain dicts."""
-    na = getattr(pv.spec, "node_affinity", None)
-    required = getattr(na, "required", None) if na else None
-    out: list[dict] = []
-    for term in getattr(required, "node_selector_terms", None) or []:
-        out.append({
-            "matchExpressions": [
-                {"key": e.key, "operator": e.operator, "values": list(e.values or [])}
-                for e in (term.match_expressions or [])
-            ],
-            "matchFields": [
-                {"key": e.key, "operator": e.operator, "values": list(e.values or [])}
-                for e in (getattr(term, "match_fields", None) or [])
-            ],
-        })
-    return out
+def node_terms(pv: dict) -> list[dict]:
+    """A PV's required nodeSelectorTerms, with both lists always present."""
+    required = ((pv["spec"].get("nodeAffinity") or {}).get("required") or {})
+    return [
+        {
+            "matchExpressions": [_requirement(e) for e in term.get("matchExpressions") or []],
+            "matchFields": [_requirement(e) for e in term.get("matchFields") or []],
+        }
+        for term in required.get("nodeSelectorTerms") or []
+    ]
 
 
-def to_pvc(pvc) -> Pvc:
-    meta = pvc.metadata
-    created = meta.creation_timestamp
+def _requirement(e: dict) -> dict:
+    return {"key": e["key"], "operator": e["operator"], "values": list(e.get("values") or [])}
+
+
+def to_pvc(pvc: dict) -> Pvc:
+    meta, spec = pvc["metadata"], pvc.get("spec") or {}
+    created = meta.get("creationTimestamp")
     return Pvc(
-        name=meta.name,
-        phase=(pvc.status.phase if pvc.status else "") or "",
-        volume_name=pvc.spec.volume_name or None,
-        storage_class=pvc.spec.storage_class_name,
-        labels=dict(meta.labels or {}),
-        terminating=meta.deletion_timestamp is not None,
-        created_at=created.timestamp() if created else 0.0,
+        name=meta["name"],
+        phase=(pvc.get("status") or {}).get("phase") or "",
+        volume_name=spec.get("volumeName") or None,
+        storage_class=spec.get("storageClassName"),
+        labels=dict(meta.get("labels") or {}),
+        terminating=meta.get("deletionTimestamp") is not None,
+        created_at=_epoch(created) if created else 0.0,
     )
 
 
@@ -478,15 +494,13 @@ def to_sandbox(cr: dict) -> Sandbox:
     )
 
 
-def marker_status(job) -> MarkerStatus:
+def marker_status(job: dict) -> MarkerStatus:
     """Succeeded is clean; a failed check command is dirty; anything else is unknown."""
-    st = job.status
-    if st is None:
-        return "running"
-    if (st.succeeded or 0) >= 1:
+    st = job.get("status") or {}
+    if (st.get("succeeded") or 0) >= 1:
         return "clean"
-    if (st.failed or 0) >= 1:
-        reasons = {c.reason for c in (st.conditions or []) if c.type == "Failed"}
+    if (st.get("failed") or 0) >= 1:
+        reasons = {c.get("reason") for c in st.get("conditions") or [] if c.get("type") == "Failed"}
         # Only the command's own failure proves the marker is absent.
         return "dirty" if "BackoffLimitExceeded" in reasons else "unknown"
     return "running"
