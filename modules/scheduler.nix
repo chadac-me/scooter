@@ -1,6 +1,6 @@
 # Scheduler: Deployment, Service and ServiceAccount. It fires cron-scheduled
 # tasks by POSTing each run's prompt to the agent-host /agui as a fresh
-# conversation, presenting a projected SA token (audience agent-host) so the
+# conversation, presenting a projected SA token (audience scooter-router) so the
 # agent-host honors the task `owner`. It also runs the deployment's system tasks
 # (`scooter.systemTasks`) as subprocesses. State lives in the scheduler's own
 # database on the shared platform Postgres.
@@ -255,7 +255,7 @@ in
                 ++ cfg.contribDbEnv.scheduler;
                 volumeMounts = [
                   { name = "data"; mountPath = "/data"; }
-                  # Projected SA token (audience agent-host) for /agui owner trust.
+                  # Projected SA token (audience scooter-router) for /agui owner trust.
                   { name = "agent-host-token"; mountPath = "/var/run/secrets/agent-host"; readOnly = true; }
                   { name = "system-tasks"; mountPath = "/etc/scheduler/system-tasks"; readOnly = true; }
                   # A task run's working directory, /tmp/task-<run id>.
@@ -274,7 +274,7 @@ in
                 {
                   name = "agent-host-token";
                   projected.sources = [{
-                    serviceAccountToken = { audience = "agent-host"; path = "token"; expirationSeconds = 3600; };
+                    serviceAccountToken = { audience = "scooter-router"; path = "token"; expirationSeconds = 3600; };
                   }];
                 }
               ] ++ lib.optional cfg.broker.enable {

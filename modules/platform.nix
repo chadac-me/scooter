@@ -1725,9 +1725,9 @@ in
               ++ lib.optional cfg.broker.enable
                 { name = "broker-token"; projected.sources = [{ serviceAccountToken = { audience = "agent-broker"; path = "token"; }; }]; }
               ++ [
-                # Audience `agent-host`, the Service the router fronts.
+                # The router's own audience, checked by its gateway.
                 { name = "conversation-router-token";
-                  projected.sources = [{ serviceAccountToken = { audience = "agent-host"; path = "token"; }; }]; }
+                  projected.sources = [{ serviceAccountToken = { audience = "scooter-router"; path = "token"; }; }]; }
               ];
             };
           };

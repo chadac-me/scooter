@@ -297,7 +297,7 @@ in
                 {
                   name = "agent-host-token";
                   projected.sources = [{
-                    serviceAccountToken = { audience = "agent-host"; path = "token"; expirationSeconds = 3600; };
+                    serviceAccountToken = { audience = "scooter-router"; path = "token"; expirationSeconds = 3600; };
                   }];
                 }
               ];
