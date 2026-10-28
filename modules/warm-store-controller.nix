@@ -31,6 +31,17 @@ in
         restart just delays a warm/GC, never blocks a conversation). Set >1 for HA.
       '';
     };
+    resources = mkOption {
+      type = types.attrs;
+      default = {
+        requests = { cpu = "50m"; memory = "128Mi"; };
+        limits = { cpu = "500m"; memory = "256Mi"; };
+      };
+      description = ''
+        The controller container's resources. /reserve deserializes every PV under
+        the lock and has a 2s client budget; at a 50m limit it took ~24s (#974).
+      '';
+    };
     minWarm = mkOption {
       type = types.int;
       default = 1;
@@ -258,11 +269,7 @@ in
                   # The leader-election Lease holder identity.
                   { name = "POD_NAME"; valueFrom.fieldRef.fieldPath = "metadata.name"; }
                 ];
-                # The kubernetes client alone needs more than a 64Mi request.
-                resources = lib.mkDefault {
-                  requests = { cpu = "25m"; memory = "128Mi"; };
-                  limits = { cpu = "50m"; memory = "256Mi"; };
-                };
+                resources = wcfg.resources;
               };
             };
           };
