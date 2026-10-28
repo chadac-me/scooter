@@ -100,7 +100,20 @@ _push_eval_t0=$(date +%s)
 # One build for everything this script needs from the flake (refs map, image
 # manifests, copyTo runners, k3d platform manifests), since each separate
 # `nix build` re-evaluates the sandbox-os system.
-deps=$(nix build .#k3d-ci-deps --no-link --print-out-paths)
+# Retry: a truncated cachix download aborts the build with HTTP 416.
+deps=""
+for attempt in 1 2 3; do
+  if deps=$(nix build .#k3d-ci-deps --no-link --print-out-paths --fallback); then
+    break
+  fi
+  deps=""
+  echo "k3d-ci-deps build failed (attempt $attempt/3)"
+  if [ "$attempt" -lt 3 ]; then sleep $((attempt * 10)); fi
+done
+if [ -z "$deps" ]; then
+  echo "ERROR: k3d-ci-deps did not build after 3 attempts"
+  exit 1
+fi
 refs="$deps/image-refs.json"
 echo "[phase] image-refs-eval=$(( $(date +%s) - _push_eval_t0 ))s"
 
