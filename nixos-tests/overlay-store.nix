@@ -91,7 +91,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed(f"test -z \"$(ls -A {up}/state/profiles/per-user)\"")
 
     # Its own roots survive a re-run of the setup, since the owner now matches.
-    machine.succeed("nix build -o /root/result nixpkgs#hello")
+    machine.succeed(f"nix-store --realise {out} --add-root /root/result")
     machine.succeed("systemctl restart overlay-store-setup.service")
     machine.succeed(f"test -n \"$(ls -A {up}/state/gcroots/auto)\"")
 
