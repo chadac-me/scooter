@@ -280,14 +280,23 @@
           mkTestPlatformConfig = import ./.github/deployment/test-platform.nix {
             inherit lib scooterSkills testContribs;
           };
-          mkTestPlatformImages = prefix: mkTestPlatform (mkTestPlatformConfig prefix);
           # Side-loaded into k3s, so bare names on :latest
           platform = mkTestPlatform (mkTestPlatformConfig "" // {
             # Side-loaded: bare names on :latest, overriding the x86_64 tag pin.
             images = builtins.mapAttrs (_: _: { ref.tag = lib.mkOverride 40 "latest"; }) builtImages;
           });
           # `nix build .#platform-manifests-k3d`
-          platformK3d = mkTestPlatformImages k3dRegistry;
+          platformK3d = mkTestPlatform (lib.recursiveUpdate (mkTestPlatformConfig k3dRegistry) {
+            # The warm overlay pool, so e2e-full runs every sandbox through /reserve.
+            # One warm volume at a time, since each warm Job is a full sandbox boot.
+            warmStore = {
+              enable = true;
+              minWarm = 1;
+              maxWarm = 1;
+              maxWarmJobs = 1;
+              sizing.policy = "fixed";
+            };
+          });
 
           # `nix build .#platform-manifests-k3d-backfill`
           platformK3dBackfill = mkTestPlatform (lib.recursiveUpdate (mkTestPlatformConfig k3dRegistry) {

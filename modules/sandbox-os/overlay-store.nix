@@ -28,6 +28,8 @@ in
         workdir, must be on the same volume as upper), and `state/` (the
         local-overlay store's own Nix DB for new paths). If the volume isn't
         mounted, the store stays as-is (no upper) — degrade, don't break.
+        `.scooter-owner` names the sandbox whose GC roots and profiles `state/`
+        holds; on a mismatch they are dropped at boot and the store paths kept.
 
         Named `.scooter-rw` (not `.rw-store`/`.ro-store`) to avoid colliding with
         the nixosTest VM framework's own store-overlay paths.
@@ -77,6 +79,17 @@ in
         if [ ! -d "$upper_root" ]; then
           echo "overlay-store: no upper volume at $upper_root; store unchanged"
           exit 0
+        fi
+
+        # A pooled upper keeps store paths, not another sandbox's roots.
+        owner=$(cat /proc/sys/kernel/hostname)
+        stamp="$upper_root/.scooter-owner"
+        if [ "$(cat "$stamp" 2>/dev/null || true)" != "$owner" ]; then
+          state="$upper_root/state"
+          rm -rf "$state/profiles" "$state/gcroots/auto" "$state/gcroots/per-user"
+          if [ -d "$state" ]; then mkdir -p "$state/profiles/per-user" "$state/gcroots/auto" "$state/gcroots/per-user"; fi
+          printf '%s\n' "$owner" > "$stamp"
+          echo "overlay-store: upper now owned by $owner; dropped prior roots and profiles"
         fi
 
         # Nothing to do when /nix/store is already this overlay.

@@ -12,6 +12,8 @@ let
 
   # Shape of one conversation's resources, keyed by conversationId.
   mkConversation = { id, sandboxImage ? cfg.sandboxImage, brokerAudience ? "agent-broker", overlayStore ? false, overlayStorage ? "20Gi"
+    # Pool class, so the overlay PVC can bind a reserved PV.
+  , overlayStorageClass ? (if cfg.warmStore.enable then cfg.warmStore.storageClass else null)
     # The default size preset rendered with requests == limits (Guaranteed QoS), including a GPU under its extended-resource name on both sides.
   , sandboxResources ? let
       defaultPreset =
@@ -97,7 +99,7 @@ let
           spec = {
             accessModes = [ "ReadWriteOnce" ];
             resources.requests.storage = overlayStorage;
-          };
+          } // lib.optionalAttrs (overlayStorageClass != null) { storageClassName = overlayStorageClass; };
         }];
       };
     };

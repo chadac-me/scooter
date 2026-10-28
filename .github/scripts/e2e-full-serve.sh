@@ -38,7 +38,7 @@ LOGS_PID=$!
 
 # The rollout/move hook lets the browser specs delete the owner pod or restart the
 # deployment, with kubectl running here rather than in the browser.
-nix shell nixpkgs#kubectl -c python3 test/e2e/support/rolloutHook.py 8898 >/tmp/rollout-hook.log 2>&1 &
+nix shell nixpkgs#kubectl nixpkgs#python3 -c python3 test/e2e/support/rolloutHook.py 8898 >/tmp/rollout-hook.log 2>&1 &
 HOOK_PID=$!
 
 # Per-conversation service origins, when the deployed platform has them on: a

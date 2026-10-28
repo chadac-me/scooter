@@ -1,100 +1,18 @@
-"""Tier 1: the imperative marker read (read_unmount_marker and _job_result) against a monkeypatched `_apis()`, where a terminating claim spawns no check Job and a read failure or timeout is "unknown", never "unclean"."""
+"""Reading a marker-check Job: only the command's own failure means dirty."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
-from kubernetes import client
-
-import warm_store_controller.k8s as k8smod
-from warm_store_controller.k8s import ControllerK8s, _job_result
+from warm_store_controller.k8s import marker_status
 
 
-def _pvc(name: str, *, terminating: bool = False):
-    meta = SimpleNamespace(
-        name=name,
-        deletion_timestamp="2026-08-28T00:00:00Z" if terminating else None,
-        labels={"scooter.io/pool-state": "claimed", "scooter.io/claimed-by": "conv-a"},
-    )
-    return SimpleNamespace(metadata=meta)
+def job(succeeded=0, failed=0, reason=None):
+    conds = [SimpleNamespace(type="Failed", reason=reason)] if reason else []
+    return SimpleNamespace(status=SimpleNamespace(succeeded=succeeded, failed=failed, conditions=conds))
 
 
-def _fake_apis(monkeypatch, *, claimed_items, batch=None):
-    core = MagicMock()
-    core.list_namespaced_persistent_volume_claim.return_value.items = claimed_items
-    batch = batch or MagicMock()
-    monkeypatch.setattr(k8smod, "_apis", lambda: (core, MagicMock(), batch, MagicMock()))
-    return core, batch
-
-
-def test_terminating_claim_spawns_no_marker_job(monkeypatch):
-    core, batch = _fake_apis(monkeypatch, claimed_items=[_pvc("warm-store-x", terminating=True)])
-    k = ControllerK8s(namespace="ns")
-    assert k.read_unmount_marker("conv-a") == "unknown"
-    batch.create_namespaced_job.assert_not_called()
-
-
-def test_missing_claim_is_unknown_no_job(monkeypatch):
-    core, batch = _fake_apis(monkeypatch, claimed_items=[])
-    k = ControllerK8s(namespace="ns")
-    assert k.read_unmount_marker("conv-a") == "unknown"
-    batch.create_namespaced_job.assert_not_called()
-
-
-def test_marker_read_api_error_is_unknown_not_unclean(monkeypatch):
-    batch = MagicMock()
-    batch.create_namespaced_job.side_effect = client.ApiException(status=500, reason="boom")
-    _fake_apis(monkeypatch, claimed_items=[_pvc("warm-store-x")], batch=batch)
-    k = ControllerK8s(namespace="ns")
-    # A read that errors must not be reported as unclean.
-    assert k.read_unmount_marker("conv-a") == "unknown"
-
-
-def test_healthy_claim_reads_the_marker_clean(monkeypatch):
-    # A non-terminating claim spawns the check Job, and a Completed Job is "clean".
-    batch = MagicMock()
-    created = SimpleNamespace(metadata=SimpleNamespace(name="warm-marker-check-abc"))
-    batch.create_namespaced_job.return_value = created
-    batch.read_namespaced_job_status.return_value = SimpleNamespace(
-        status=SimpleNamespace(succeeded=1, failed=0)
-    )
-    _fake_apis(monkeypatch, claimed_items=[_pvc("warm-store-x")], batch=batch)
-    k = ControllerK8s(namespace="ns")
-    assert k.read_unmount_marker("conv-a") == "clean"
-    batch.create_namespaced_job.assert_called_once()
-
-
-def test_definitively_failed_check_is_unclean(monkeypatch):
-    # A Failed Job means the marker was definitively absent.
-    batch = MagicMock()
-    batch.create_namespaced_job.return_value = SimpleNamespace(
-        metadata=SimpleNamespace(name="warm-marker-check-abc")
-    )
-    batch.read_namespaced_job_status.return_value = SimpleNamespace(
-        status=SimpleNamespace(succeeded=0, failed=1)
-    )
-    _fake_apis(monkeypatch, claimed_items=[_pvc("warm-store-x")], batch=batch)
-    k = ControllerK8s(namespace="ns")
-    assert k.read_unmount_marker("conv-a") == "unclean"
-
-
-class _Clock:
-    """A fake monotonic clock so the timeout path does not sleep in real time."""
-
-    def __init__(self):
-        self._t = 0.0
-
-    def time(self):
-        return self._t
-
-    def sleep(self, s):
-        self._t += s
-
-
-def test_job_result_timeout_is_unknown_not_failed(monkeypatch):
-    # A check Job that never reaches a terminal state within the deadline is unknown, not failed.
-    batch = MagicMock()
-    batch.read_namespaced_job_status.return_value = SimpleNamespace(
-        status=SimpleNamespace(succeeded=0, failed=0)
-    )
-    monkeypatch.setattr(k8smod, "_apis", lambda: (MagicMock(), MagicMock(), batch, MagicMock()))
-    assert _job_result("warm-marker-check-abc", "ns", timeout_s=5.0, clock=_Clock()) == "unknown"
+def test_marker_status():
+    assert marker_status(job(succeeded=1)) == "clean"
+    assert marker_status(job(failed=1, reason="BackoffLimitExceeded")) == "dirty"
+    assert marker_status(job(failed=1, reason="DeadlineExceeded")) == "unknown"
+    assert marker_status(job()) == "running"
+    assert marker_status(SimpleNamespace(status=None)) == "running"

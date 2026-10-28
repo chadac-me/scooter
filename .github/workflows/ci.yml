@@ -430,6 +430,8 @@ jobs:
               - 'test/e2e/sessions.spec.ts'
               - 'test/e2e/settings-tabs.spec.ts'
               - 'test/e2e/suspended-recovery.spec.ts'
+              - 'test/e2e/warm-store.spec.ts'
+              - 'test/e2e/support/rolloutHook.py'
               - 'test/e2e/fixtures.ts'
               - 'test/e2e/full-specs.json'
               - 'test/e2e/client-server-identity.spec.ts'

@@ -1585,6 +1585,13 @@ in
                   # The BYOC controller's public base URL, which the user's container dials
                   # (/byoc/ws/<session-id> appended per owner).
                   { name = "BYOC_PUBLIC_URL"; value = cfg.agent.remoteAgent.bridgeUrl; }
+                ++ lib.optionals cfg.warmStore.enable [
+                  # Reserve a pool PV on start; release on suspend.
+                  { name = "WARM_STORE_URL"; value = "http://warm-store-controller.${cfg.namespace}.svc.cluster.local:8080"; }
+                  { name = "WARM_STORE_STORAGE_CLASS"; value = cfg.warmStore.storageClass; }
+                  { name = "WARM_STORE_TOKEN_PATH"; value = "/var/run/secrets/warm-store/token"; }
+                  { name = "WARM_STORE_RESERVE_TIMEOUT_MS"; value = toString cfg.warmStore.reserveTimeoutMs; }
+                ]
                 ++ lib.optional cfg.byoc.enable
                   # The controller's in-cluster base, where the agent-host mints sessions,
                   # resolves ownership, and sends every ACP frame.
@@ -1701,7 +1708,9 @@ in
                   { name = "broker-token"; mountPath = "/var/run/secrets/broker"; readOnly = true; }
                 ++ [
                   { name = "conversation-router-token"; mountPath = "/var/run/secrets/conversation-router"; readOnly = true; }
-                ];
+                ]
+                ++ lib.optional cfg.warmStore.enable
+                  { name = "warm-store-token"; mountPath = "/var/run/secrets/warm-store"; readOnly = true; };
                 readinessProbe.httpGet = { path = "/healthz"; port = "agui"; };
                 # preStop sleeps so endpoint removal propagates before SIGTERM, and the
                 # grace period stays above preStop + SHUTDOWN_TIMEOUT_MS so the drain can
@@ -1728,7 +1737,11 @@ in
                 # The router's own audience, checked by its gateway.
                 { name = "conversation-router-token";
                   projected.sources = [{ serviceAccountToken = { audience = "scooter-router"; path = "token"; }; }]; }
-              ];
+              ]
+              ++ lib.optional cfg.warmStore.enable
+                # Audience `warm-store`, which the controller's /reserve checks.
+                { name = "warm-store-token";
+                  projected.sources = [{ serviceAccountToken = { audience = "warm-store"; path = "token"; }; }]; };
             };
           };
         };
