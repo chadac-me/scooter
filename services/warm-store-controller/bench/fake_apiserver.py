@@ -104,6 +104,7 @@ def serve(n: int) -> None:
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        disable_nagle_algorithm = True
 
         def _send(self, code: int, body: bytes) -> None:
             self.send_response(code)

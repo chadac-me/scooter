@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import { compare, globRegex, parseRegistry, ratioInterval, render, selectSuites } from "./bench-compare.mjs";
+import { countChanges, globRegex, parseRegistry, report, selectSuites } from "./bench-compare.mjs";
 
 const REGISTRY = `
 suites:
@@ -19,12 +19,6 @@ suites:
     paths:
       - services/other/*.py
 `;
-
-/** One case's rounds, given each side's per-round medians. */
-const rounds = (base, pr, extra = {}) => [
-  ...base.map((value) => ({ suite: "warm-store", side: "base", case: "c", unit: "ms_cpu", value, ...extra })),
-  ...pr.map((value) => ({ suite: "warm-store", side: "pr", case: "c", unit: "ms_cpu", value, ...extra })),
-];
 
 describe("parseRegistry", () => {
   it("reads suites, their paths, and defaults the noise floor", () => {
@@ -63,66 +57,50 @@ describe("selectSuites", () => {
   });
 });
 
-describe("compare", () => {
+const TABLE = `| Benchmark | warm-store.base | warm-store.pr |
+|---|:-:|:-:|
+| reserve/380 (cpu) | 122 ms | 7.09 ms: 17.25x faster |
+| list/380 (cpu) | 10 ms | 12 ms: 1.20x slower |
+| Geometric mean | (ref) | 4.00x faster |`;
+
+const files = (map) => (f) => map[f] ?? null;
+
+describe("countChanges", () => {
+  it("counts faster and slower rows, not the geometric mean", () => {
+    expect(countChanges(TABLE)).toEqual({ faster: 1, slower: 1 });
+  });
+
+  it("counts nothing when pyperf hides every row", () => {
+    expect(countChanges("Benchmark hidden because not significant (10): a, b")).toEqual({ faster: 0, slower: 0 });
+  });
+});
+
+describe("report", () => {
   const suites = parseRegistry(REGISTRY);
 
-  it("calls a clear speedup faster", () => {
-    const cmp = compare(rounds([180, 182, 179, 185, 181], [7, 7.2, 6.9, 7.1, 7]), suites);
-    expect(cmp.rows[0]).toMatchObject({ verdict: "faster", base: 181, pr: 7 });
-    expect(cmp.faster).toBe(1);
+  it("warns on a slowdown and embeds the table", () => {
+    const out = report([suites[0]], files({ "warm-store.md": TABLE }), { baseRef: "0123456789" });
+    expect(out.status).toBe("warn");
+    expect(out.summary).toBe("benchmarks — 1 faster, 1 slower");
+    expect(out.body).toContain("vs merge base `01234567`");
+    expect(out.body).toContain("17.25x faster");
+    expect(out.body).toContain("| Benchmark | base | PR |");
   });
 
-  it("calls a clear slowdown slower", () => {
-    const cmp = compare(rounds([10, 10.1, 9.9, 10, 10.2], [13, 13.1, 12.9, 13, 13.2]), suites);
-    expect(cmp.rows[0].verdict).toBe("slower");
-    expect(render(cmp).status).toBe("warn");
+  it("passes when nothing is significant", () => {
+    const out = report([suites[0]], files({ "warm-store.md": "Benchmark hidden because not significant (2): a, b" }));
+    expect(out).toMatchObject({ status: "pass", summary: "benchmarks — no change beyond noise" });
   });
 
-  it("does not count a change whose interval reaches inside the noise floor", () => {
-    // Medians differ 10%, but the rounds overlap too much.
-    const cmp = compare(rounds([10, 8, 12, 9, 11], [11, 9, 13, 10, 12]), suites);
-    expect(cmp.rows[0].verdict).toBe("same");
-    expect(render(cmp).status).toBe("pass");
-  });
-
-  it("needs three rounds a side for an interval", () => {
-    const cmp = compare(rounds([10, 10], [20, 20]), suites);
-    expect(cmp.rows[0]).toMatchObject({ verdict: "few", interval: null });
-  });
-
-  it("shows a PR-only case as new and a failed base as having no baseline", () => {
-    const lines = [...rounds([], [5, 5, 5]), { suite: "warm-store", side: "base", failed: true }];
-    const out = render(compare(lines, suites));
-    expect(out.status).toBe("pass");
-    expect(out.body).toMatch(/new case/);
-    expect(out.body).toMatch(/did not run on the merge base/);
-  });
-
-  it("fails when the PR side cannot run", () => {
-    const out = render(compare([{ suite: "warm-store", side: "pr", failed: true }], suites));
+  it("fails when a suite failed on the PR", () => {
+    const out = report(suites, files({ "warm-store.md": TABLE, "other.failed": "" }));
     expect(out.status).toBe("fail");
-    expect(out.summary).toMatch(/FAILED/);
+    expect(out.summary).toContain("1 suite(s) FAILED");
   });
-});
 
-describe("ratioInterval", () => {
-  it("is reproducible and brackets the ratio of medians", () => {
-    const a = ratioInterval([10, 11, 9, 10, 10], [20, 21, 19, 20, 20]);
-    expect(a).toEqual(ratioInterval([10, 11, 9, 10, 10], [20, 21, 19, 20, 20]));
-    expect(a[0]).toBeLessThanOrEqual(2);
-    expect(a[1]).toBeGreaterThanOrEqual(2);
-  });
-});
-
-describe("render", () => {
-  it("summarises the counts and renders one table row per case", () => {
-    const lines = [
-      ...rounds([180, 182, 179], [7, 7.2, 6.9]),
-      ...rounds([10, 10, 10], [10, 10, 10], { case: "d" }),
-    ];
-    const out = render(compare(lines, parseRegistry(REGISTRY)), { baseRef: "81210157abcdef" });
-    expect(out.summary).toBe("benchmarks — 1 faster");
-    expect(out.body).toMatch(/merge base `81210157`/);
-    expect(out.body.split("\n").filter((l) => l.startsWith("| warm-store"))).toHaveLength(2);
+  it("notes a suite with no baseline without failing", () => {
+    const out = report([suites[1]], files({ "other.nobase": "" }));
+    expect(out.status).toBe("pass");
+    expect(out.body).toContain("No baseline");
   });
 });

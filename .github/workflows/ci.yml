@@ -246,6 +246,7 @@ jobs:
   bench:
     name: benchmarks (PR vs merge base)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: >-
       github.event_name == 'pull_request' &&
       contains(github.event.pull_request.labels.*.name, 'bench')
@@ -266,18 +267,18 @@ jobs:
           name: scooter
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: run the touched suites, PR and merge base interleaved
-        run: scripts/bench-ab.sh "origin/${{ github.base_ref }}" rounds.jsonl 8
+        run: scripts/bench-ab.sh "origin/${{ github.base_ref }}" bench-out
       - name: post bench section
         run: |
           set -euo pipefail
-          if [ ! -s rounds.jsonl ]; then
+          if [ ! -s bench-out/suites.txt ]; then
             printf 'No suite in `.github/benchmarks.yml` covers a path this PR changes.\n' > bench.md
             node scripts/ci-report.mjs post --section bench --status skip \
               --summary 'benchmarks — no suite touched' --body bench.md --labels "$LABELS"
             exit 0
           fi
           # Writes status= and summary= to a local file.
-          GITHUB_OUTPUT=verdict.txt node scripts/bench-compare.mjs compare rounds.jsonl \
+          GITHUB_OUTPUT=verdict.txt node scripts/bench-compare.mjs report bench-out \
             --base-ref "$(git merge-base "origin/${{ github.base_ref }}" HEAD)" > bench.md
           cat bench.md >> "$GITHUB_STEP_SUMMARY"
           node scripts/ci-report.mjs post --section bench \
@@ -286,8 +287,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: bench-rounds
-          path: rounds.jsonl
+          name: bench-pyperf
+          path: bench-out
           if-no-files-found: ignore
       # Resolve the section even when the harness crashed.
       - name: post bench failure section
