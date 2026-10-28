@@ -111,3 +111,16 @@ def test_returned_pool_is_capped_by_ttl_and_count():
     assert Retire("r0", "returned-ttl") in out
     assert Retire("r1", "returned-cap") in out
     assert len([a for a in out if isinstance(a, Retire)]) == 2
+
+
+def test_a_promoting_warm_pv_stops_further_warming():
+    """#973: a warm PVC held by pvc-protection must not trigger another warm Job."""
+    from warm_store_controller import janitor as j
+
+    pvc = j.Pvc("warm-store-t-1", "Bound", "pv9", "pool", {j.LBL_WARM_SEED: "true", "scooter.io/warm-store": "t"},
+                terminating=True)
+    pv = PoolPv("pv9", image_tag="t", phase="Bound", claim_ref="warm-store-t-1")
+    world = j.World(pvs=[pv], pvcs={pvc.name: pvc}, sandboxes={}, mounted=set(), warm_jobs={}, markers={})
+    _, warming = j.plan_upkeep(world, j.UpkeepConfig(current_tag="t", pool_class="pool"), NOW, {})
+    out = plan(snap(pvs=[pv]), {("t", None): 1}, warming, ActuatorConfig(max_warm_jobs=2), ActuatorState(), {})
+    assert out == []

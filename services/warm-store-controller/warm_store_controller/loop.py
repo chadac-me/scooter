@@ -162,6 +162,8 @@ def _apply(k8s: ControllerK8s, a: j.Action, lock: threading.Lock, state: PassSta
         touched.add(a.pv)
     elif isinstance(a, j.PromoteWarm):
         k8s.mark_clean(a.pv)
+        # The Job's pod holds the PVC (pvc-protection) until it goes.
+        k8s.delete_warm_jobs(a.pvc)
         k8s.delete_pvc(a.pvc)
         touched.add(a.pv)
         logger.info("warm PV ready", extra={"pv": a.pv, "pvc": a.pvc})

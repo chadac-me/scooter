@@ -271,6 +271,12 @@ class ControllerK8s:
             self.namespace, label_selector=f"{LBL_MARKER_PVC}={pvc}", propagation_policy="Background"
         )
 
+    def delete_warm_jobs(self, pvc: str) -> None:
+        _, _, batch, _ = _apis()
+        batch.delete_collection_namespaced_job(
+            self.namespace, label_selector=f"{LBL_WARM_PVC}={pvc}", propagation_policy="Background"
+        )
+
     def start_marker_check(self, pvc: str) -> None:
         """A read-only Job that succeeds iff the clean-shutdown marker is on the upper."""
         _, _, batch, _ = _apis()

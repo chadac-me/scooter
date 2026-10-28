@@ -144,8 +144,8 @@ def warm_pvc(name="warm-store-t-1", tag="t", volume="pv9", created=NOW - 10) -> 
 def test_warm_pvcs_follow_their_job():
     w = world(pvcs=[warm_pvc()], warm_jobs={"warm-store-t-1": j.WarmJob("running", "n1")})
     assert run(w) == ([], ["n1"])
-    w = world(pvcs=[warm_pvc()], warm_jobs={"warm-store-t-1": j.WarmJob("succeeded")})
-    assert run(w)[0] == [j.PromoteWarm("warm-store-t-1", "pv9")]
+    w = world(pvcs=[warm_pvc()], warm_jobs={"warm-store-t-1": j.WarmJob("succeeded", "n1")})
+    assert run(w) == ([j.PromoteWarm("warm-store-t-1", "pv9")], ["n1"])
     w = world(pvcs=[warm_pvc()], warm_jobs={"warm-store-t-1": j.WarmJob("failed")})
     assert run(w)[0] == [j.DeletePvc("warm-store-t-1", "warm-failed")]
 
@@ -159,3 +159,27 @@ def test_warm_pvcs_of_a_retired_tag_or_without_a_job_are_dropped():
 def test_pvcs_from_the_old_pool_state_machine_are_deleted():
     old = j.Pvc("warm-store-t-old", "Bound", "pv5", "pool", {j.LBL_LEGACY_POOL: "ready"})
     assert run(world(pvcs=[old]))[0] == [j.DeletePvc("warm-store-t-old", "legacy-pool")]
+
+
+# --- warm PVs in flight still count (#973) -------------------------------------
+
+def test_a_promoting_warm_pvc_still_counts_as_warming():
+    pvc = j.Pvc("warm-store-t-1", "Bound", "pv9", "pool", {j.LBL_WARM_SEED: "true", "scooter.io/warm-store": "t"},
+                terminating=True)
+    pv = PoolPv("pv9", image_tag="t", phase="Bound", claim_ref="warm-store-t-1",
+                node_selector_terms=[{"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": ["n1"]}]}])
+    actions, warming = run(world([pv], pvcs=[pvc]))
+    assert warming == ["n1"]
+
+
+def test_a_terminating_warm_pvc_of_an_old_tag_does_not_count():
+    pvc = j.Pvc("warm-store-old-1", "Bound", "pv9", "pool", {j.LBL_WARM_SEED: "true", "scooter.io/warm-store": "old"},
+                terminating=True)
+    assert run(world(pvcs=[pvc]))[1] == []
+
+
+def test_a_warm_pv_recycled_this_pass_counts_as_warming():
+    pv = PoolPv("pv9", image_tag="t", phase="Released", claim_ref="warm-store-t-1", shutdown_clean=True)
+    actions, warming = run(world([pv]))
+    assert actions == [j.Recycle(pv, "warm")]
+    assert warming == [None]
