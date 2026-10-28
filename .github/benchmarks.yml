@@ -1,0 +1,9 @@
+# PR benchmark suites; see .github/design/benchmarks.md.
+suites:
+  - id: warm-store
+    app: bench-warm-store
+    src: services/warm-store-controller
+    noise: 5
+    paths:
+      - services/warm-store-controller/**
+      - modules/warm-store-controller.nix
