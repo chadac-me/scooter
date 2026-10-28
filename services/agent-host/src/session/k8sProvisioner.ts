@@ -24,6 +24,7 @@ import { formatError, logger } from "../log.js";
 import { applyOverlay, deepMerge, parseOverlay } from "./sandboxOverlay.js";
 import { sandboxOrigin, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { cpuToMillicores, memoryToBytes } from "./resourceFit.js";
+import type { ReserveFn } from "./warmStore.js";
 import {
   InvalidResourceError,
   type RenderedResources,
@@ -49,6 +50,8 @@ const GROUP = "agents.x-k8s.io";
 const VERSION = "v1beta1";
 const PLURAL = "sandboxes";
 const SANDBOX_NAME_LABEL = "agents.x-k8s.io/sandbox-name";
+/** On a suspended overlay PVC: the controller may reclaim its PV. */
+export const RELEASE_LABEL = "scooter.io/release";
 /** The ConfigMap key holding the consumer manifest-overlay payload. */
 const OVERLAY_KEY = "overlay.yaml";
 /** The enabled contribs' sandbox-pod parts, in the same ConfigMap and overlay shape, merged under
@@ -192,6 +195,12 @@ export interface K8sProvisionerOptions {
   sandboxRuntimeClass?: string;
   /** Backoff before each image-reconcile retry (default 3s, 6s). */
   reconcileRetryDelaysMs?: number[];
+  /** Warm overlay pool: reserve on start, release on suspend. */
+  warmStore?: {
+    reserve: ReserveFn;
+    /** Pool StorageClass for new overlay PVCs, to bind reserved PVs. */
+    storageClass?: string;
+  };
   /** Pod poll interval for restart (default 1.5s). */
   podPollMs?: number;
   /** Run the systemd sandbox in its own user namespace (hostUsers: false) with an unmasked /proc, so
@@ -262,6 +271,28 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       },
       setHeaderOptions("Content-Type", PatchStrategy.MergePatch),
     );
+  };
+
+  const overlayPvc = (ref: SandboxRef) => `scooter-rw-${ref.name}`;
+
+  /** Set or clear the overlay PVC's release label; tolerates absence. */
+  const labelOverlay = async (ref: SandboxRef, value: string | null) => {
+    await core
+      .patchNamespacedPersistentVolumeClaim(
+        { name: overlayPvc(ref), namespace: refNs(ref), body: { metadata: { labels: { [RELEASE_LABEL]: value } } } },
+        setHeaderOptions("Content-Type", PatchStrategy.MergePatch),
+      )
+      .catch(ignoreDeleteNotFound);
+  };
+
+  /** Unrelease the overlay PVC and reserve a PV; best-effort. */
+  const prepareOverlay = async (ref: SandboxRef): Promise<void> => {
+    const ws = opts.warmStore;
+    if (!ws) return;
+    await labelOverlay(ref, null).catch((e) =>
+      log.warn("could not clear the overlay release label", { sandbox: ref.name, error: formatError(e) }),
+    );
+    await ws.reserve(ref.name, imageTagOf(opts.sandboxImage));
   };
 
   // --- image skew ---------------------------------------------------------
@@ -395,9 +426,13 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
   };
 
   /** Re-renders the pod template if the platform half changed. */
-  const reconcileTemplate = async (ref: SandboxRef, threadId?: string): Promise<{ running: boolean; changed: boolean }> => {
+  const reconcileTemplate = async (
+    ref: SandboxRef,
+    threadId?: string,
+  ): Promise<{ running: boolean; changed: boolean; overlay: boolean }> => {
     const sb = await readCr(ref);
     const running = isRunning(sb);
+    const overlay = (sb.spec?.volumeClaimTemplates ?? []).some((v) => v.metadata?.name === "scooter-rw");
     let want: PodTemplate | undefined;
     try {
       want = await desiredTemplate(ref.name, sb, threadId);
@@ -405,11 +440,11 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     } catch (e) {
       log.warn("could not render the sandbox template; adopting only image and env", { sandbox: ref.name, error: formatError(e) });
     }
-    if (!want) return { running, changed: await reconcileImageEnv(ref, sb) };
+    if (!want) return { running, overlay, changed: await reconcileImageEnv(ref, sb) };
 
     const hash = templateHash(want);
     const annotations = sb.metadata?.annotations;
-    if (annotations?.[TEMPLATE_HASH_ANNOTATION] === hash) return { running, changed: false };
+    if (annotations?.[TEMPLATE_HASH_ANNOTATION] === hash) return { running, overlay, changed: false };
     const current = sb.spec?.podTemplate;
     const changed = templateDiff(current, want);
     const ops: Array<{ op: string; path: string; value: unknown }> = [];
@@ -435,7 +470,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         cycling_pod: running,
       });
     }
-    return { running, changed: changed.length > 0 };
+    return { running, overlay, changed: changed.length > 0 };
   };
 
   /** Deletes the pod so the CR stays Running throughout. */
@@ -482,7 +517,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
 
   /** Brings the Sandbox to Running on the current template. */
   const runOnCurrentTemplate = async (ref: SandboxRef, o: { threadId?: string; forceCycle?: boolean } = {}): Promise<void> => {
-    let result: { running: boolean; changed: boolean } | undefined;
+    let result: { running: boolean; changed: boolean; overlay: boolean } | undefined;
     for (let attempt = 0; ; attempt++) {
       try {
         result = await reconcileTemplate(ref, o.threadId);
@@ -505,6 +540,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
     }
     // A template patch never restarts a running pod.
     if (o.forceCycle || (result?.running && result.changed)) await cyclePod(ref);
+    // Reserve before the pod exists, so the PVC binds the pooled PV.
+    if (!result?.running && (result?.overlay ?? opts.overlayStore)) await prepareOverlay(ref);
     await setOperatingMode(ref, "Running");
   };
 
@@ -545,6 +582,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         extraEnv: [...conversationEnv(urlThread), ...(opts.extraEnv ?? [])],
         overlayStore: override.overlayStore ?? opts.overlayStore ?? false,
         overlayStorage: opts.overlayStorage,
+        overlayStorageClass: opts.warmStore?.storageClass,
         pullPolicy: opts.sandboxPullPolicy,
         sandboxRuntimeClass: opts.sandboxRuntimeClass,
         userNamespace: opts.sandboxUserNamespace ?? false,
@@ -594,6 +632,8 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       // 2. the cold Sandbox (SA + workspace PVC + projected broker token)
       const name = sandboxName(id);
       let alreadyExisted = false;
+      // Reserve first: the Sandbox creates its overlay PVC immediately.
+      if (opts.overlayStore) await prepareOverlay({ name, namespace: ns });
       await custom
         .createNamespacedCustomObject({
           group: GROUP,
@@ -625,6 +665,12 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
       // A Sandbox that is already gone counts as suspended, so the 404 is swallowed and the idle
       // sweep stops retrying; any other error propagates.
       await setOperatingMode(ref, "Suspended").catch(ignoreDeleteNotFound);
+      // Unused once suspended; the controller reclaims it after the pod.
+      if (opts.warmStore) {
+        await labelOverlay(ref, "requested").catch((e) =>
+          log.warn("could not mark the overlay PVC for release", { sandbox: ref.name, error: formatError(e) }),
+        );
+      }
     },
 
     async resume(ref: SandboxRef, threadId?: string): Promise<SandboxRef> {
@@ -810,6 +856,8 @@ export function sandboxManifest(
     extraEnv?: Array<{ name: string; value: string }>;
     overlayStore?: boolean;
     overlayStorage?: string;
+    /** Overlay PVC StorageClass; unset means the cluster default. */
+    overlayStorageClass?: string;
     /** imagePullPolicy for the sandbox container; default "Always", with "IfNotPresent"/"Never" for
      *  a side-loaded local cluster that has no registry to pull from. */
     pullPolicy?: "Always" | "IfNotPresent" | "Never";
@@ -964,6 +1012,7 @@ export function sandboxManifest(
                 spec: {
                   accessModes: ["ReadWriteOnce"],
                   resources: { requests: { storage: overlayStorage } },
+                  ...(deploy.overlayStorageClass ? { storageClassName: deploy.overlayStorageClass } : {}),
                 },
               },
             ]

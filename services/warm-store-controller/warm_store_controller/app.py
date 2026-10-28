@@ -1,4 +1,4 @@
-"""Entrypoint: the elect-then-reconcile loop, which only reconciles while holding the leader Lease."""
+"""Entrypoint: serve /reserve and run passes, both only while holding the leader Lease."""
 
 from __future__ import annotations
 
@@ -7,51 +7,88 @@ import signal
 import threading
 
 from .config import Config
+from .janitor import UpkeepConfig
 from .k8s import ControllerK8s
 from .leader import LeaderElector
 from .logging_config import configure_logging
-from .loop import reconcile_once
-from .reconcile import PoolConfig
-from .reservations import Reservations
+from .loop import PassState, reconcile_once
+from .reserve import Misses, Reserver
+from .server import TokenAuth, make_server
+from .sizing import ActuatorConfig, FixedPolicy, ReactivePolicy, SizingPolicy
 
 SERVICE = "warm-store-controller"
 logger = logging.getLogger("app")
 
 
+def make_policy(cfg: Config) -> SizingPolicy:
+    if cfg.sizing_policy == "fixed":
+        return FixedPolicy(cfg.min_warm)
+    if cfg.sizing_policy == "reactive":
+        return ReactivePolicy(cfg.min_warm, cfg.max_warm, cfg.sizing_window, cfg.sizing_headroom)
+    raise ValueError(f"unknown sizing policy {cfg.sizing_policy!r}")
+
+
 def run(cfg: Config, stop: threading.Event) -> None:
     k8s = ControllerK8s(
         namespace=cfg.namespace,
+        pool_storage_class=cfg.pool_storage_class,
         warm_job_image=cfg.warm_job_image,
         warm_golden_expr=cfg.warm_golden_expr,
         overlay_storage=cfg.overlay_storage,
         runtime_class=cfg.runtime_class,
         user_namespace=cfg.user_namespace,
-        pool_storage_class=cfg.pool_storage_class,
     )
-    # The hold TTL spans several reconcile intervals so a binding has time to appear.
-    reservations = Reservations(ttl_seconds=max(120.0, cfg.reconcile_interval * 6))
-    # sandbox -> the PV it last used, for preferential placement.
-    affinity: dict[str, str] = {}
+    upkeep = UpkeepConfig(
+        current_tag=cfg.current_image_tag,
+        pool_class=cfg.pool_storage_class,
+        reserve_grace=cfg.reserve_grace,
+        marker_retries=cfg.marker_retries,
+    )
+    actuator = ActuatorConfig(
+        max_warm=cfg.max_warm,
+        max_warm_jobs=cfg.max_warm_jobs,
+        cooldown=cfg.cooldown,
+        max_returned=cfg.max_returned,
+        returned_ttl=cfg.returned_ttl,
+    )
+    policy = make_policy(cfg)
+    lock = threading.Lock()
+    misses = Misses(keep_seconds=max(3600.0, cfg.sizing_window))
+    reserver = Reserver(k8s, lock, misses)
+    leader = threading.Event()
+
+    server = make_server(
+        cfg.port,
+        leader.is_set,
+        TokenAuth(k8s.review_token, cfg.audience, cfg.allowed_subjects),
+        lambda sandbox, tag: reserver.reserve(sandbox, tag),
+    )
+    threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
+
     elector = LeaderElector(cfg.namespace, cfg.lease_name, cfg.identity, cfg.lease_seconds)
-    pool_cfg = PoolConfig(
-        current_image_tag=cfg.current_image_tag,
-        min_ready=cfg.min_ready,
-        max_total=cfg.max_total,
-    )
-    was_leader = False
+    state = PassState()
     while not stop.is_set():
         try:
-            leader = elector.try_acquire_or_renew()
-            if leader:
-                if not was_leader:
-                    logger.info("became leader", extra={"identity": cfg.identity})
-                reconcile_once(k8s, pool_cfg, reservations, affinity)
-            elif was_leader:
-                logger.info("lost leadership, standing by", extra={"identity": cfg.identity})
-            was_leader = leader
-        except Exception:  # a transient k8s error must not kill the loop
-            logger.exception("reconcile tick failed")
+            is_leader = elector.try_acquire_or_renew()
+        except Exception:  # noqa: BLE001
+            logger.exception("lease renewal failed")
+            is_leader = False
+        if is_leader and not leader.is_set():
+            logger.info("became leader", extra={"identity": cfg.identity})
+            state = PassState()
+        elif not is_leader and leader.is_set():
+            logger.info("lost leadership, standing by", extra={"identity": cfg.identity})
+        if is_leader:
+            leader.set()
+            try:
+                reconcile_once(k8s, upkeep, policy, actuator, state, misses, lock)
+            except Exception:  # a transient k8s error must not kill the loop
+                logger.exception("reconcile tick failed")
+        else:
+            leader.clear()
         stop.wait(cfg.reconcile_interval)
+    leader.clear()
+    server.shutdown()
 
 
 def main() -> None:
@@ -67,7 +104,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _drain)
     logger.info(
         "starting",
-        extra={"namespace": cfg.namespace, "image_tag": cfg.current_image_tag},
+        extra={"namespace": cfg.namespace, "image_tag": cfg.current_image_tag, "policy": cfg.sizing_policy},
     )
     run(cfg, stop)
 

@@ -4,8 +4,8 @@
  * Two mechanisms are proved end to end. The warm round-trip: a warm Job boots the sandbox
  * image against a fresh PVC, its scooter-warm-store-seed unit builds the golden expr into the
  * overlay upper, stamps the clean-shutdown marker and powers off, and a fresh pod over the
- * same image then finds the warmed path valid with no fixup. The claim CAS: two concurrent
- * claimers racing for one `ready` PVC, of which exactly one wins the label flip. The spec
+ * same image then finds the warmed path valid with no fixup. The reserve CAS: two concurrent
+ * claimRef patches from the same stale view of one idle PV, of which exactly one wins. The spec
  * applies its own namespace, PVCs, Job and pods; gated on RUN_CLUSTER_TESTS=1.
  */
 
@@ -29,11 +29,9 @@ const GOLDEN_EXPR =
 
 const LBL = {
   warm: "scooter.io/warm-store",
-  state: "scooter.io/pool-state",
-  claimedBy: "scooter.io/claimed-by",
 };
 
-maybe("warm /nix/store PVC pool (round-trip + claim CAS)", () => {
+maybe("warm /nix/store PVC pool (round-trip + reserve CAS)", () => {
   let cluster: Cluster;
 
   beforeAll(async () => {
@@ -55,7 +53,7 @@ maybe("warm /nix/store PVC pool (round-trip + claim CAS)", () => {
     await cluster.apply({
       apiVersion: "v1",
       kind: "PersistentVolumeClaim",
-      metadata: { name: pvc, namespace: NS, labels: { [LBL.warm]: TAG, [LBL.state]: "warming" } },
+      metadata: { name: pvc, namespace: NS, labels: { [LBL.warm]: TAG, "scooter.io/warm-seed": "true" } },
       spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "5Gi" } } },
     });
 
@@ -200,35 +198,35 @@ maybe("warm /nix/store PVC pool (round-trip + claim CAS)", () => {
     expect(content.stdout.trim()).toBe("warmed");
   }, 600_000);
 
-  it("two concurrent claimers race for one ready PVC → exactly one wins the CAS", async () => {
-    const pvc = "warm-store-cas";
+  it("two concurrent reservations race for one idle PV → the claimRef CAS lets exactly one win", async () => {
+    const pv = `warm-store-cas-${Date.now()}`;
     await cluster.apply({
       apiVersion: "v1",
-      kind: "PersistentVolumeClaim",
-      metadata: { name: pvc, namespace: NS, labels: { [LBL.warm]: TAG, [LBL.state]: "ready" } },
-      spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "1Gi" } } },
+      kind: "PersistentVolume",
+      metadata: { name: pv, labels: { [LBL.warm]: TAG, "scooter.io/pool": "warm" } },
+      spec: {
+        capacity: { storage: "1Gi" },
+        accessModes: ["ReadWriteOnce"],
+        persistentVolumeReclaimPolicy: "Retain",
+        storageClassName: "warm-store-cas-test",
+        hostPath: { path: `/tmp/${pv}` },
+      },
     });
+    const before = await cluster.get<{ metadata: { resourceVersion: string } }>("PersistentVolume", pv);
 
-    // Two concurrent claims, each the optimistic CAS claimWarmStorePvc does.
-    const claim = (who: string) =>
-      cluster.patchPvcLabelsCAS(pvc, NS, LBL.state, "ready", {
-        [LBL.state]: "claimed",
-        [LBL.claimedBy]: who,
+    // Both send ControllerK8s.reserve's patch from one stale view.
+    const reserve = (sandbox: string) =>
+      cluster.mergePatchPv(pv, {
+        metadata: { resourceVersion: before.metadata.resourceVersion },
+        spec: { claimRef: { apiVersion: "v1", kind: "PersistentVolumeClaim", namespace: NS, name: `scooter-rw-${sandbox}` } },
       });
 
-    const results = await Promise.allSettled([claim("conv-a"), claim("conv-b")]);
-    const won = results.filter((r) => r.status === "fulfilled").length;
-    const lost = results.filter((r) => r.status === "rejected").length;
-    expect(won, "exactly one claimer wins").toBe(1);
-    expect(lost, "the other loses the CAS (test-op 422)").toBe(1);
+    const results = await Promise.allSettled([reserve("conv-a"), reserve("conv-b")]);
+    expect(results.filter((r) => r.status === "fulfilled").length, "exactly one reservation wins").toBe(1);
+    expect(results.filter((r) => r.status === "rejected").length, "the other gets a 409").toBe(1);
 
-    // The PVC ends up claimed by exactly one of them.
-    const after = await cluster.get<{ metadata: { labels: Record<string, string> } }>(
-      "PersistentVolumeClaim",
-      pvc,
-      NS,
-    );
-    expect(after.metadata.labels[LBL.state]).toBe("claimed");
-    expect(["conv-a", "conv-b"]).toContain(after.metadata.labels[LBL.claimedBy]);
+    const after = await cluster.get<{ spec: { claimRef?: { name: string } } }>("PersistentVolume", pv);
+    expect(["scooter-rw-conv-a", "scooter-rw-conv-b"]).toContain(after.spec.claimRef?.name);
+    await cluster.mergePatchPv(pv, { spec: { claimRef: null } }).catch(() => {});
   }, 120_000);
 });

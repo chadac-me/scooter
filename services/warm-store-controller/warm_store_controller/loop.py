@@ -1,144 +1,208 @@
-"""The reconcile loop: the imperative shell around reconcile.py plus the PV placement pass.
+"""One controller pass: observe, plan upkeep and sizing, then apply.
 
-It lists pool PVCs and Sandboxes, applies each decided action, then places warm PVs for
-pending sandboxes. The caller leader-gates it, and it takes a ControllerK8s (real or fake)
-so the whole loop is unit-testable against an in-memory fake."""
+Any failure degrades to sandboxes provisioning a fresh upper, so per-action errors are
+logged and skipped rather than aborting the pass.
+"""
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
+from dataclasses import dataclass, field, replace
 
 from kubernetes.client.exceptions import ApiException
 
-from .allocate import Node, PendingSandbox, PoolPv, candidates_for
-from .reservations import AlreadyClaimed, Reservations
-from .k8s import ControllerK8s
-from .reconcile import PoolConfig, WarmNew, Relabel, DeletePvc, reconcile
+from . import janitor as j
+from .k8s import ControllerK8s, node_terms, now_rfc3339
+from .allocate import PoolPv
+from .reserve import Misses
+from .sizing import (
+    ActuatorConfig,
+    ActuatorState,
+    Event,
+    Retire,
+    SizingPolicy,
+    Snapshot,
+    StartWarm,
+    plan,
+)
 
 logger = logging.getLogger("loop")
+
+WARM_HISTORY = 50
+# Each wipe is a helper pod; backlogs drain across passes.
+MAX_RETIRES_PER_PASS = 10
+
+
+@dataclass
+class PassState:
+    """What the leader remembers between passes; a new leader starts fresh."""
+
+    marker_attempts: dict[str, int] = field(default_factory=dict)
+    warm_seconds: list[float] = field(default_factory=list)
+    actuator: ActuatorState = field(default_factory=ActuatorState)
 
 
 def reconcile_once(
     k8s: ControllerK8s,
-    cfg: PoolConfig,
-    reservations: Reservations,
-    affinity: dict[str, str],
+    upkeep: j.UpkeepConfig,
+    policy: SizingPolicy,
+    actuator: ActuatorConfig,
+    state: PassState,
+    misses: Misses,
+    lock: threading.Lock,
+    clock=time,
 ) -> None:
-    """One reconcile pass, where a per-action failure is logged and skipped."""
-    for a in reconcile(k8s.list_pool_pvcs(), k8s.list_sandboxes(), cfg):
+    raw = k8s.list_pvs()
+    pvs = k8s.pool_pvs(raw)
+    pvcs = k8s.list_pvcs()
+    sandboxes = k8s.list_sandboxes()
+    warm_jobs, seconds = k8s.warm_jobs()
+    world = j.World(
+        pvs=pvs,
+        pvcs=pvcs,
+        sandboxes=sandboxes,
+        mounted=k8s.mounted_claims(),
+        warm_jobs=warm_jobs,
+        markers=k8s.marker_jobs(),
+    )
+    for s in seconds:
+        if s not in state.warm_seconds:
+            state.warm_seconds.append(s)
+    del state.warm_seconds[:-WARM_HISTORY]
+
+    now = clock.time()
+    actions, warming = j.plan_upkeep(world, upkeep, now, state.marker_attempts)
+    retires = [a for a in actions if isinstance(a, j.RetirePv)]
+    if len(retires) > MAX_RETIRES_PER_PASS:
+        skip = {id(a) for a in retires[MAX_RETIRES_PER_PASS:]}
+        actions = [a for a in actions if id(a) not in skip]
+        logger.info("retire backlog; continuing next pass", extra={"pending": len(skip)})
+    touched: set[str] = set()
+    for a in actions:
         try:
-            if isinstance(a, WarmNew):
-                k8s.warm_new(a.image_tag)
-                logger.info("warming a new pool PVC", extra={"image_tag": a.image_tag})
-            elif isinstance(a, Relabel):
-                k8s.relabel(a.pvc, a.state, a.labels)
-                logger.info("relabel pool PVC", extra={"pvc": a.pvc, "state": a.state, "labels": a.labels})
-            elif isinstance(a, DeletePvc):
-                k8s.delete_pvc(a.pvc)
-                logger.info("delete pool PVC", extra={"pvc": a.pvc, "reason": a.reason})
+            _apply(k8s, a, lock, state, touched)
         except Exception:  # noqa: BLE001
-            logger.exception(
-                "action failed",
-                extra={"action": type(a).__name__, "target": getattr(a, "pvc", None) or getattr(a, "image_tag", None)},
-            )
+            logger.exception("upkeep action failed", extra={"action": type(a).__name__, "target": _target(a)})
 
-    # --- PV placement. Every failure below degrades to the vct provisioning a fresh upper,
-    # so errors are logged and skipped.
-    try:
-        # Pending first, so an idle cluster does not list PVs and nodes every interval.
-        pending = k8s.list_pending_uppers()
-        pvs = list(k8s.iter_pool_pvs())
-        nodes = k8s.list_nodes() if pending else []
-    except ApiException:
-        logger.exception("PV placement: listing failed; sandboxes fall back to their vct")
-        return
+    # Drop attempt counts for releases that finished.
+    releasing = {n for n, p in pvcs.items() if p.labels.get(j.LBL_RELEASE) == "requested"}
+    for pvc in list(state.marker_attempts):
+        if pvc not in releasing:
+            del state.marker_attempts[pvc]
 
-    # Affinity is recorded at bind time, not at reservation.
-    still_pending = {w.pvc_name for w in pending}
-    for pv in pvs:
-        if pv.claim_ref and pv.claim_ref not in still_pending:
-            reservations.release(pv.name)
-            affinity[_sandbox_of_pvc(pv.claim_ref)] = pv.name
-
-    # The PVs behind pool PVCs only exist once bound and inherit no labels, so adopt them now.
-    try:
-        k8s.adopt_bound_pvs([w.pvc_name for w in pending])
-    except ApiException:
-        logger.exception("adopting bound PVs failed; they stay invisible until the next pass")
-
-    # Recycle before allocating, so a PV freed this pass is usable in it.
-    for pv in pvs:
-        if pv.phase != "Released" or pv.terminating:
-            continue
+    # Count PVs recycled this pass as idle, so none warm twice.
+    recycled = [
+        replace(a.pv, phase="Available", pool=a.pool, claim_ref=None, claim_uid=None, released_at=now_rfc3339())
+        for a in actions if isinstance(a, j.Recycle) and a.pv.name in touched
+    ]
+    snap = Snapshot(
+        now=now,
+        current_tag=upkeep.current_tag,
+        arrivals=_arrivals(sandboxes, pvcs, raw),
+        misses=misses.recent(),
+        pvs=[pv for pv in pvs if pv.name not in touched] + recycled,
+        warm_job_seconds=list(state.warm_seconds),
+    )
+    target = policy.target(snap)
+    released = {pv.name: j.epoch(pv.released_at) for pv in snap.pvs}
+    for a in plan(snap, target, warming, actuator, state.actuator, released):
         try:
-            k8s.release_pv(pv.name)
-            reservations.release(pv.name)
-            logger.info("returned a PV to the pool", extra={"pv": pv.name})
+            if isinstance(a, StartWarm):
+                name = k8s.start_warm(a.tag, a.node)
+                logger.info("warming a pool PV", extra={"pvc": name, "image_tag": a.tag, "node": a.node, "target": _total(target)})
+            elif isinstance(a, Retire):
+                pv = next(p for p in snap.pvs if p.name == a.pv)
+                with lock:
+                    k8s.retire(pv)
+                logger.info("retired a pool PV", extra={"pv": a.pv, "reason": a.reason})
         except ApiException:
-            logger.exception("release-pv failed", extra={"pv": pv.name})
-
-    # Counted once per pass so a burst of pending sandboxes cannot blow past max_total.
-    pool_size = sum(1 for pv in pvs if not pv.terminating)
-    for want in pending:
-        if _place_one(k8s, reservations, want, pvs, nodes, affinity, cfg.max_total - pool_size):
-            pool_size += 1
+            logger.exception("sizing action failed", extra={"action": type(a).__name__})
 
 
-def _sandbox_of_pvc(pvc_name: str) -> str:
-    """The sandbox a `scooter-rw-<sandbox>` PVC belongs to, since the vct generates exactly that name."""
-    return pvc_name[len("scooter-rw-"):] if pvc_name.startswith("scooter-rw-") else pvc_name
+def _apply(k8s: ControllerK8s, a: j.Action, lock: threading.Lock, state: PassState, touched: set[str]) -> None:
+    if isinstance(a, j.LabelPv):
+        with lock:
+            k8s.label_bound(a.pv, a.tag, a.last_sandbox, a.drop_shutdown)
+        touched.add(a.pv.name)
+    elif isinstance(a, j.Recycle):
+        with lock:
+            k8s.recycle(a.pv, a.pool)
+        touched.add(a.pv.name)
+        logger.info("returned a PV to the pool", extra={"pv": a.pv.name, "pool": a.pool, "last_sandbox": a.pv.last_sandbox})
+    elif isinstance(a, j.RetirePv):
+        with lock:
+            k8s.retire(a.pv)
+        touched.add(a.pv.name)
+        logger.info("retired a pool PV", extra={"pv": a.pv.name, "reason": a.reason})
+    elif isinstance(a, j.ClearReservation):
+        with lock:
+            k8s.clear_reservation(a.pv)
+        touched.add(a.pv.name)
+        logger.info("cleared a stale reservation", extra={"pv": a.pv.name, "pvc": a.pv.claim_ref})
+    elif isinstance(a, j.Unrelease):
+        k8s.set_pvc_label(a.pvc, j.LBL_RELEASE, None)
+        k8s.delete_marker_jobs(a.pvc)
+        logger.info("sandbox resumed; keeping its PV", extra={"pvc": a.pvc})
+    elif isinstance(a, j.DeletePvc):
+        k8s.delete_pvc(a.pvc)
+        logger.info("deleted a PVC", extra={"pvc": a.pvc, "reason": a.reason})
+    elif isinstance(a, j.StartMarkerCheck):
+        k8s.start_marker_check(a.pvc)
+        state.marker_attempts[a.pvc] = state.marker_attempts.get(a.pvc, 0) + 1
+        logger.info("checking the clean-shutdown marker", extra={"pvc": a.pvc, "attempt": state.marker_attempts[a.pvc]})
+    elif isinstance(a, j.MarkerUnknown):
+        k8s.delete_marker_jobs(a.pvc)
+        logger.warning("clean-shutdown marker unreadable; will retry", extra={"pvc": a.pvc})
+    elif isinstance(a, j.FinishRelease):
+        _finish_release(k8s, a, lock)
+        touched.add(a.pv)
+    elif isinstance(a, j.PromoteWarm):
+        k8s.mark_clean(a.pv)
+        k8s.delete_pvc(a.pvc)
+        touched.add(a.pv)
+        logger.info("warm PV ready", extra={"pv": a.pv, "pvc": a.pvc})
 
 
-def _place_one(
-    k8s: ControllerK8s,
-    reservations: Reservations,
-    want: PendingSandbox,
-    pvs: list[PoolPv],
-    nodes: list[Node],
-    affinity: dict[str, str],
-    headroom: int,
-) -> bool:
-    """Give one sandbox the first warm PV it wins, or grow the pool, or fall back to its vct, returning True if it grew the pool."""
-    for pv in candidates_for(want, pvs, nodes, affinity):
-        try:
-            reservations.claim(pv.name, want.sandbox)
-        except AlreadyClaimed:
-            continue
-        try:
-            k8s.reserve_pv(pv.name, want.pvc_name, want.sandbox)
-        except ApiException:
-            # Without the rollback the pool leaks a volume on every miss.
-            logger.exception("reserve-pv failed; rolling back", extra={"pv": pv.name, "sandbox": want.sandbox})
-            try:
-                k8s.release_pv(pv.name)
-            except ApiException:
-                logger.exception("reserve-pv rollback FAILED — the PV may stay reserved", extra={"pv": pv.name})
-            reservations.release(pv.name)
-            continue
-        logger.info(
-            "placed a warm PV",
-            extra={
-                "pv": pv.name,
-                "pvc": want.pvc_name,
-                "sandbox": want.sandbox,
-                "reason": "reusing a volume this sandbox has warmed"
-                if affinity.get(want.sandbox) == pv.name
-                else "assigning a warm pool PV",
-            },
-        )
-        return False
+def _finish_release(k8s: ControllerK8s, a: j.FinishRelease, lock: threading.Lock) -> None:
+    """Re-check under the reserve lock, so a resume that raced the check keeps its PVC."""
+    with lock:
+        pvc = k8s.read_pvc(a.pvc)
+        if pvc is None or pvc.labels.get(j.LBL_RELEASE) != "requested" or pvc.volume_name != a.pv:
+            return
+        sandbox = j.sandbox_of(a.pvc)
+        sb = k8s.read_sandbox(sandbox) if sandbox else None
+        if sb is not None and not sb.suspended:
+            return
+        if a.clean:
+            k8s.mark_clean(a.pv)
+        else:
+            k8s.retire_bound(a.pv)
+        k8s.delete_pvc(a.pvc)
+    k8s.delete_marker_jobs(a.pvc)
+    logger.info("released a PV", extra={"pvc": a.pvc, "pv": a.pv, "clean": a.clean, "reason": a.reason})
 
-    # Under the cap, grow the pool with a pool-class PVC rather than letting the vct make a
-    # Delete-reclaimed one on the default class.
-    if headroom > 0:
-        try:
-            k8s.grow_pool(want.pvc_name, want.image_tag)
-            logger.info("grew the warm pool", extra={"sandbox": want.sandbox, "pvc": want.pvc_name})
-            return True
-        except ApiException:
-            logger.exception("grow-pool failed; the vct will provision", extra={"sandbox": want.sandbox})
-            return False
 
-    logger.info("pool at capacity; the vct will provision", extra={"sandbox": want.sandbox})
-    return False
+def _arrivals(sandboxes: dict[str, j.Sandbox], pvcs: dict[str, j.Pvc], raw: list) -> list[Event]:
+    """Sandbox creations, each on the node its workspace PV pins it to, if known yet."""
+    pv_node: dict[str, str | None] = {}
+    for pv in raw:
+        pv_node[pv.metadata.name] = PoolPv(name=pv.metadata.name, node_selector_terms=node_terms(pv)).node
+    out: list[Event] = []
+    for sb in sandboxes.values():
+        ws = pvcs.get(f"workspace-{sb.name}")
+        node = pv_node.get(ws.volume_name) if ws is not None and ws.volume_name else None
+        out.append(Event(sb.created_at, sb.tag, node))
+    return out
 
+
+def _total(target: dict) -> int:
+    return sum(target.values())
+
+
+def _target(a: j.Action) -> str | None:
+    pv = getattr(a, "pv", None)
+    if isinstance(pv, PoolPv):
+        return pv.name
+    return pv or getattr(a, "pvc", None)

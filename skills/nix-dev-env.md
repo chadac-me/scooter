@@ -53,7 +53,8 @@ nix search nixpkgs <query>             # find the package name
 ```
 
 `nixpkgs` is **pinned** to a fixed version, so `nixpkgs#x` is deterministic.
-(See also the `nix-packages` skill for list/remove/upgrade.)
+(See also the `nix-packages` skill for list/remove/upgrade, and for why
+secrets must never end up in `/nix`: the store can be reused by other conversations.)
 
 ## 3. Running services (systemd)
 

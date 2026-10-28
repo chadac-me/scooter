@@ -41,14 +41,8 @@ export interface Cluster {
     command: string[],
     namespace?: string,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
-  /** Optimistic label CAS on a PVC via a JSON-patch `test` op, mirroring the provisioner's claimWarmStorePvc. */
-  patchPvcLabelsCAS(
-    name: string,
-    namespace: string,
-    expectStateLabel: string,
-    expectStateValue: string,
-    setLabels: Record<string, string>,
-  ): Promise<void>;
+  /** Merge-patch a PV; a resourceVersion in the body makes a CAS. */
+  mergePatchPv(name: string, body: object): Promise<void>;
   /** Run a curl from a throwaway in-cluster pod and return the response body.
    *  No body at all is a lost attach rather than an answer, so it is retried (curlPodWithRetry). */
   curlInCluster(url: string, opts?: CurlOptions): Promise<string>;
@@ -145,6 +139,7 @@ const RESOURCES: Record<string, { group: string; version: string; plural: string
   SandboxClaim: { group: "extensions.agents.x-k8s.io", version: "v1beta1", plural: "sandboxclaims" },
   ServiceAccount: { group: "", version: "v1", plural: "serviceaccounts", core: true },
   PersistentVolumeClaim: { group: "", version: "v1", plural: "persistentvolumeclaims", core: true },
+  PersistentVolume: { group: "", version: "v1", plural: "persistentvolumes", core: true },
   Pod: { group: "", version: "v1", plural: "pods", core: true },
   Job: { group: "batch", version: "v1", plural: "jobs" },
 };
@@ -170,7 +165,9 @@ export async function withCluster(opts: ClusterFixtureOptions = {}): Promise<Clu
           ? core.readNamespacedServiceAccount({ name, namespace: ns })
           : kind === "Pod"
             ? core.readNamespacedPod({ name, namespace: ns })
-            : core.readNamespacedPersistentVolumeClaim({ name, namespace: ns });
+            : kind === "PersistentVolume"
+              ? core.readPersistentVolume({ name })
+              : core.readNamespacedPersistentVolumeClaim({ name, namespace: ns });
       return (await fn) as T;
     }
     return (await custom.getNamespacedCustomObject({
@@ -250,17 +247,8 @@ export async function withCluster(opts: ClusterFixtureOptions = {}): Promise<Clu
       return { stdout, stderr, exitCode };
     },
 
-    async patchPvcLabelsCAS(name, ns, expectStateLabel, expectStateValue, setLabels) {
-      // The `test` op is the CAS for PATCH, since k8s honours resourceVersion as a precondition only on PUT.
-      const ptr = (label: string) => `/metadata/labels/${label.replace(/~/g, "~0").replace(/\//g, "~1")}`;
-      const body = [
-        { op: "test", path: ptr(expectStateLabel), value: expectStateValue },
-        ...Object.entries(setLabels).map(([k, v]) => ({ op: "add", path: ptr(k), value: v })),
-      ];
-      await core.patchNamespacedPersistentVolumeClaim(
-        { name, namespace: ns, body: body as object },
-        setHeaderOptions("Content-Type", PatchStrategy.JsonPatch),
-      );
+    async mergePatchPv(name, body) {
+      await core.patchPersistentVolume({ name, body }, setHeaderOptions("Content-Type", PatchStrategy.MergePatch));
     },
 
     async curlInCluster(url, opts = {}) {

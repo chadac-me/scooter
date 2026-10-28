@@ -44,3 +44,16 @@ nix profile upgrade '.*'
 - Installs are isolated and immutable — they never break existing packages.
 - For language deps prefer the language's own tool inside a project (pip in a
   venv, npm for project deps); use Nix for runtimes and system tools.
+
+## The Nix store is shared
+
+Anything you add to `/nix` (builds, `nix profile install`, fetched sources) may be
+handed to another conversation's sandbox after this one suspends. Keep tokens,
+keys and private data out of it:
+
+- no secrets in derivation inputs, build scripts or `fetch*` URLs;
+- no `builtins.readFile` on a secret path;
+- no `nix profile install` of generated files that contain secrets.
+
+Put secrets in environment variables or under `/workspace`, which stay with
+this conversation.

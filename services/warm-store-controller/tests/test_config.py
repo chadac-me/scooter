@@ -48,3 +48,8 @@ def test_user_namespace_from_env():
         assert Config.from_env().user_namespace is True
     with env(SANDBOX_USER_NAMESPACE=None):
         assert Config.from_env().user_namespace is False
+
+
+def test_agent_host_is_the_default_caller():
+    with env(NAMESPACE="scooter", WARM_STORE_ALLOWED_SUBJECTS=None):
+        assert Config.from_env().allowed_subjects == {"system:serviceaccount:scooter:agent-host"}

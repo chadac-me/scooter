@@ -32,6 +32,7 @@ import { createPgRemoteAgentStore } from "./acp/remoteAgentStore.js";
 import type { AcpProvider } from "./acp/provider.js";
 import { historyAfterCompaction, compactConversation } from "./session/compaction.js";
 import { createK8sProvisioner, type K8sProvisioner } from "./session/k8sProvisioner.js";
+import { createWarmStoreReserver } from "./session/warmStore.js";
 import type { SandboxResources } from "./session/resources.js";
 import { brokerAuthHeaders as sharedBrokerAuthHeaders } from "./session/brokerAuth.js";
 import { parseContribUserApi } from "./api/contribApi.js";
@@ -507,6 +508,17 @@ export async function main(
         // runtime nix builds across suspend/resume; SANDBOX_OVERLAY_STORE=0 opts out.
         overlayStore: (process.env.SANDBOX_OVERLAY_STORE || "1") !== "0",
         overlayStorage: process.env.SANDBOX_OVERLAY_STORAGE || undefined,
+        // Warm overlay pool: reserve a pooled PV before each start.
+        warmStore: process.env.WARM_STORE_URL
+          ? {
+              reserve: createWarmStoreReserver({
+                url: process.env.WARM_STORE_URL,
+                tokenPath: process.env.WARM_STORE_TOKEN_PATH || undefined,
+                timeoutMs: Number(process.env.WARM_STORE_RESERVE_TIMEOUT_MS) || undefined,
+              }),
+              storageClass: process.env.WARM_STORE_STORAGE_CLASS || undefined,
+            }
+          : undefined,
         // Deployment-supplied tool injection: SCOOTER_CONFIGMAP, SCOOTER_TOKEN_AUDIENCES
         // (CSV) and SCOOTER_ENV (JSON, or k=v;k=v).
         scooterConfigMap: process.env.SCOOTER_CONFIGMAP || undefined,
