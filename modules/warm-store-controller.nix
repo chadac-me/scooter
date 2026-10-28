@@ -224,6 +224,8 @@ in
         metadata = { name = "warm-store-controller"; namespace = cfg.namespace; };
         spec = {
           replicas = wcfg.replicas;
+          # Only the leader is Ready, so a surge pod never would be.
+          strategy.type = "Recreate";
           selector.matchLabels.app = "warm-store-controller";
           template = {
             metadata.labels.app = "warm-store-controller";
