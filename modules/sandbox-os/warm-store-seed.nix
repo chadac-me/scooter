@@ -49,7 +49,11 @@ in
       requires = [ "overlay-store-setup.service" ];
       wantedBy = [ "multi-user.target" ];
       # The request file exists only in a warm Job, so a real conversation skips this unit.
-      unitConfig.ConditionPathExists = request;
+      unitConfig = {
+        ConditionPathExists = request;
+        # A failed seed ends the pod, so the Job fails fast instead of idling.
+        FailureAction = "exit";
+      };
       path = [ pkgs.coreutils config.nix.package ];
       serviceConfig = {
         Type = "oneshot";
@@ -57,6 +61,8 @@ in
         ExecStart = pkgs.writeShellScript "scooter-warm-store-seed" ''
           set -eu
           expr=$(cat ${request})
+          # An empty expr is a minimal warm: no build, just the clean marker.
+          if [ -z "$expr" ]; then echo "warm-store: empty golden expr, minimal warm"; exit 0; fi
           echo "warm-store: seeding golden expr: $expr"
           # `eval` lets the request be either a list of flake installables or a quoted `--expr '<nix>'` form.
           eval "nix build --no-link --print-build-logs $expr"

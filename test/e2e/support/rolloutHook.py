@@ -45,6 +45,19 @@ def pv_view(pv: dict) -> dict:
 def thread_ok(thread: str) -> bool:
     return re.fullmatch(r"[A-Za-z0-9-]+", thread) is not None
 
+def sandbox_of(thread: str) -> str:
+    """The Sandbox name; mirrors shortId in services/agent-host/src/session/manager.ts."""
+    h = 0
+    for c in thread:
+        h = (h * 31 + ord(c)) & 0xFFFFFFFF
+    n = abs(h - (1 << 32) if h >= 1 << 31 else h)
+    digits = ""
+    while True:
+        n, r = divmod(n, 36)
+        digits = "0123456789abcdefghijklmnopqrstuvwxyz"[r] + digits
+        if n == 0:
+            return f"conv-{digits}"
+
 class Hook(BaseHTTPRequestHandler):
     def _reply(self, code: int, body: str) -> None:
         data = body.encode()
@@ -83,7 +96,7 @@ class Hook(BaseHTTPRequestHandler):
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
             if not (thread_ok(thread) and thread_ok(body)):
                 return self._reply(400, "bad conversation id or canary")
-            r = sh("kubectl", "-n", NS, "exec", f"conv-{thread}", "-c", "sandbox", "--",
+            r = sh("kubectl", "-n", NS, "exec", sandbox_of(thread), "-c", "sandbox", "--",
                    "sh", "-c", f"echo {body} > {CANARY} && sync")
             return self._reply(200 if r.returncode == 0 else 500, r.stdout + r.stderr)
 
@@ -112,13 +125,14 @@ class Hook(BaseHTTPRequestHandler):
             thread = self.path.removeprefix("/overlay/")
             if not thread_ok(thread):
                 return self._reply(400, "bad conversation id")
-            sandbox = f"conv-{thread}"
+            sandbox = sandbox_of(thread)
             pvc = kget("pvc", f"scooter-rw-{sandbox}")
             pvs = (kget("pv") or {"items": []})["items"]
             bound = pvc["spec"].get("volumeName") if pvc else None
             pv = next((p for p in pvs if p["metadata"]["name"] == bound), None) or next(
                 (p for p in pvs if p["metadata"].get("annotations", {}).get("scooter.io/last-sandbox") == sandbox), None)
             return self._json(200, {
+                "sandbox": sandbox,
                 "pvc": None if pvc is None else {
                     "phase": pvc.get("status", {}).get("phase"),
                     "volume": bound,
@@ -132,7 +146,7 @@ class Hook(BaseHTTPRequestHandler):
             thread = self.path.removeprefix("/canary/")
             if not thread_ok(thread):
                 return self._reply(400, "bad conversation id")
-            r = sh("kubectl", "-n", NS, "exec", f"conv-{thread}", "-c", "sandbox", "--", "cat", CANARY)
+            r = sh("kubectl", "-n", NS, "exec", sandbox_of(thread), "-c", "sandbox", "--", "cat", CANARY)
             return self._reply(200 if r.returncode == 0 else 404, r.stdout.strip() or r.stderr)
 
         return self._reply(404, "unknown hook")

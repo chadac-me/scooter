@@ -21,6 +21,7 @@ interface PvView {
 }
 
 interface Overlay {
+  sandbox: string;
   pvc: { phase: string | null; volume: string | null; storageClass: string | null } | null;
   pv: PvView | null;
 }
@@ -135,12 +136,13 @@ fullOnly("needs the warm-store controller and kubectl access to the pool")("warm
     }
 
     // Back up, the controller adopts the unreserved volume so it can be recycled later.
+    const { sandbox } = await overlay(request, thread);
     await expect
       .poll(async () => (await overlay(request, thread)).pv?.annotations["scooter.io/last-sandbox"], {
         message: "the janitor must adopt a volume provisioned without it",
         timeout: 120_000,
         intervals: [5_000],
       })
-      .toBe(`conv-${thread}`);
+      .toBe(sandbox);
   });
 });
