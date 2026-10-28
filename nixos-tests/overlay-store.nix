@@ -38,6 +38,22 @@ pkgs.testers.runNixOSTest {
       before = lib.mkForce [ "nix-daemon.service" "nix-daemon.socket" ];
     };
 
+    # Stand in for a pooled upper returned by another sandbox: a foreign owner with its own roots and profile.
+    systemd.services.seed-foreign-upper = {
+      wantedBy = [ "overlay-store-setup.service" ];
+      before = [ "overlay-store-setup.service" ];
+      after = [ "nix-.scooter\\x2drw.mount" ];
+      unitConfig.DefaultDependencies = false;
+      serviceConfig.Type = "oneshot";
+      script = ''
+        up=${config.programs.overlayStore.upperPath}
+        mkdir -p $up/state/gcroots/auto $up/state/profiles/per-user/root
+        echo conv-other > $up/.scooter-owner
+        ln -s /workspace/result $up/state/gcroots/auto/foreign
+        ln -s /nix/store/foreign-profile $up/state/profiles/per-user/root/profile-1-link
+      '';
+    };
+
     virtualisation.diskSize = 4096;
   };
 
@@ -68,6 +84,16 @@ pkgs.testers.runNixOSTest {
     machine.fail(f"test -e {lo}/{base} 2>/dev/null")
     # The built tool runs from the merged view.
     machine.succeed(f"{out}/bin/hello >/dev/null")
+
+    # The foreign sandbox's roots and profile are gone, and this machine owns the upper.
+    machine.succeed(f"test \"$(cat {up}/.scooter-owner)\" = machine")
+    machine.succeed(f"test -z \"$(ls -A {up}/state/gcroots/auto)\"")
+    machine.succeed(f"test -z \"$(ls -A {up}/state/profiles/per-user)\"")
+
+    # Its own roots survive a re-run of the setup, since the owner now matches.
+    machine.succeed("nix build -o /root/result nixpkgs#hello")
+    machine.succeed("systemctl restart overlay-store-setup.service")
+    machine.succeed(f"test -n \"$(ls -A {up}/state/gcroots/auto)\"")
 
     # Nix is configured with the local-overlay store.
     store = machine.succeed("nix config show store")
