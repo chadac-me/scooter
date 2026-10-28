@@ -259,7 +259,7 @@ export interface PromptOptions {
   /** Higher runs sooner among queued items, and a priority prompt (>0) may also
    *  force-interrupt the running turn (default 0). */
   priority?: number;
-  /** How a priority prompt preempts the running turn (default "timeout"). */
+  /** How a priority prompt preempts the running turn (default "thinking"). */
   interrupt?: InterruptPolicy;
 }
 
@@ -1529,7 +1529,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       // within a tier; a priority prompt may also preempt the running turn per its
       // interrupt policy.
       const priority = opts?.priority ?? PRIORITY_NORMAL;
-      const interrupt: InterruptPolicy = opts?.interrupt ?? "timeout";
+      const interrupt: InterruptPolicy = opts?.interrupt ?? "thinking";
       const p = new Promise<RunId>((resolve, reject) => {
         queue.push({ id: nextId("queue"), input, priority, interrupt, enqueuedAt: Date.now(), resolve, reject });
       });
