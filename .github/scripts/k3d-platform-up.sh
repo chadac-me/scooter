@@ -114,6 +114,7 @@ push_attrs=(
   conversation-router-image
   db-migrator-image
   byoc-controller-image
+  warm-store-controller-image
 )
 
 

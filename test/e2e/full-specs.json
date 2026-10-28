@@ -30,5 +30,6 @@
   "suspended-recovery.spec.ts",
   "suspended-web-service.spec.ts",
   "tail-rerender.spec.ts",
-  "ui-state-consistency.spec.ts"
+  "ui-state-consistency.spec.ts",
+  "warm-store.spec.ts"
 ]
