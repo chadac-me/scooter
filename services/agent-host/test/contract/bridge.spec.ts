@@ -744,7 +744,7 @@ describe("bridge run queue + cancel", () => {
     await tick();
     // While the first run is gated, queue a normal then a priority prompt.
     void bridge.prompt({ threadId: "t1", text: "normal" }, { priority: 0 });
-    void bridge.prompt({ threadId: "t1", text: "priority" }, { priority: 10 });
+    void bridge.prompt({ threadId: "t1", text: "priority" }, { priority: 10, interrupt: "timeout" });
     await tick();
     expect(bridge.queueState().queued).toBe(2);
     expect(bridge.queueState().maxQueuedPriority).toBe(10);
@@ -975,7 +975,7 @@ describe("bridge run queue + cancel", () => {
     void bridge.prompt({ threadId: "t1", text: "long running turn" });
     await tick();
     // A priority (mention) prompt queues behind the stuck run.
-    void bridge.prompt({ threadId: "t1", text: "@scooter urgent" }, { priority: 10 });
+    void bridge.prompt({ threadId: "t1", text: "@scooter urgent" }, { priority: 10, interrupt: "timeout" });
     // Wait past the timeout — the force-interrupt should fire.
     await new Promise((r) => setTimeout(r, 60));
     agent.releaseGate();
@@ -1087,6 +1087,31 @@ describe("bridge run queue + cancel", () => {
     await tick();
 
     // No tool in flight → preempt now.
+    const fin = events.find((e) => e.type === "RUN_FINISHED") as { cancelled?: boolean } | undefined;
+    expect(fin?.cancelled).toBe(true);
+  });
+
+  it('a priority prompt with no policy defaults to "thinking" (waits for tool, then preempts)', async () => {
+    const agent = createFakeAcpAgent();
+    agent.setScript([
+      { emit: { sessionUpdate: "tool_call", toolCallId: "tc1", title: "run: build" } as never },
+      { finish: { stopReason: "end_turn" } },
+    ]);
+    agent.gate();
+    const bridge = mkBridge(agent); // no timeout fallback, as in production
+    const events = collect(bridge);
+    await bridge.start();
+    void bridge.prompt({ threadId: "t1", text: "building" });
+    await tick();
+
+    // A replayed queue item carries only its priority, no interrupt policy.
+    void bridge.prompt({ threadId: "t1", text: "slack reply" }, { priority: PRIORITY_INTERRUPT });
+    await tick();
+    expect(agent.killCount()).toBe(0);
+
+    agent.emit({ sessionUpdate: "tool_call_update", toolCallId: "tc1", status: "completed", content: "ok" } as never);
+    await tick();
+    await tick();
     const fin = events.find((e) => e.type === "RUN_FINISHED") as { cancelled?: boolean } | undefined;
     expect(fin?.cancelled).toBe(true);
   });
