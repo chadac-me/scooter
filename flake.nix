@@ -579,7 +579,7 @@
 
             # nix build .#forge-shim  ->  the sandbox's local forge proxy shim (runs go test)
             forge-shim = pkgs.callPackage ./pkgs/forge-shim { };
-            # One warm-store benchmark round; see .github/design/benchmarks.md.
+            # One warm-store benchmark round, for the `bench` CI job.
             bench-warm-store = pkgs.callPackage ./services/warm-store-controller/bench { };
 
             # nix build .#broker-image  ->  broker OCI image

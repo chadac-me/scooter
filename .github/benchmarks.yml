@@ -1,4 +1,4 @@
-# PR benchmark suites; see .github/design/benchmarks.md.
+# Suites the `bench` job runs when a PR touches their paths.
 suites:
   - id: warm-store
     app: bench-warm-store
