@@ -17,6 +17,7 @@ WARM_PVC_PREFIX = "warm-store-"
 LBL_RELEASE = "scooter.io/release"            # "requested" on a suspended sandbox's overlay PVC
 LBL_WARM_SEED = "scooter.io/warm-seed"        # on a warm PVC
 LBL_MARKER_PVC = "scooter.io/marker-pvc"      # on a marker-check Job: the PVC it reads
+# TODO: drop with the legacy-pool sweep below, once no such PVCs remain.
 LBL_LEGACY_POOL = "scooter.io/pool-state"     # on a PVC from the retired pool state machine
 
 MarkerStatus = Literal["running", "clean", "dirty", "unknown"]
@@ -115,6 +116,13 @@ class DeletePvc:
 
 
 @dataclass(frozen=True)
+class DropRelease:
+    """A suspended sandbox's PVC with no pool PV behind it: delete it."""
+    pvc: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class StartMarkerCheck:
     pvc: str
 
@@ -142,7 +150,7 @@ class PromoteWarm:
 
 
 Action = (
-    LabelPv | Recycle | RetirePv | ClearReservation | Unrelease | DeletePvc
+    LabelPv | Recycle | RetirePv | ClearReservation | Unrelease | DeletePvc | DropRelease
     | StartMarkerCheck | MarkerUnknown | FinishRelease | PromoteWarm
 )
 
@@ -180,6 +188,7 @@ def plan_upkeep(
     for pvc in world.pvcs.values():
         if pvc.terminating:
             continue
+        # TODO: remove once old pool-state PVCs are swept everywhere.
         if LBL_LEGACY_POOL in pvc.labels:
             actions.append(DeletePvc(pvc.name, "legacy-pool"))
         elif pvc.labels.get(LBL_RELEASE) == "requested":
@@ -258,10 +267,10 @@ def _release_action(
     if pvc.name in world.mounted:
         return None
     if not pvc.volume_name:
-        return DeletePvc(pvc.name, "release-unbound")
+        return DropRelease(pvc.name, "release-unbound")
     pv = pv_by_name.get(pvc.volume_name)
     if pv is None or pvc.storage_class != cfg.pool_class:
-        return DeletePvc(pvc.name, "release-legacy")
+        return DropRelease(pvc.name, "release-legacy")
 
     status = world.markers.get(pvc.name)
     if status == "running":

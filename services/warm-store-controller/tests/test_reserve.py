@@ -3,7 +3,7 @@
 import threading
 
 from warm_store_controller import janitor as j
-from warm_store_controller.loop import _finish_release
+from warm_store_controller.loop import _drop_release, _finish_release
 from warm_store_controller.reserve import Misses, Reserver
 
 from .fakes import FakeK8s, raw_pv
@@ -83,3 +83,14 @@ def test_finish_release_marks_clean_or_wipes():
     k = FakeK8s(pvcs=[pvc], sandboxes=[j.Sandbox("conv-a", "t", suspended=True)])
     _finish_release(k, j.FinishRelease(pvc.name, "pv1", False, "unclean-shutdown"), threading.Lock())
     assert k.calls[:2] == [("retire-bound", "pv1"), ("delete-pvc", pvc.name)]
+
+
+def test_drop_release_backs_off_when_the_sandbox_resumed():
+    pvc = j.Pvc("scooter-rw-conv-a", "Bound", "legacy-pv", "local-path", {j.LBL_RELEASE: "requested"})
+    k = FakeK8s(pvcs=[pvc], sandboxes=[j.Sandbox("conv-a", "t", suspended=False)])
+    _drop_release(k, j.DropRelease(pvc.name, "release-legacy"), threading.Lock())
+    assert ("delete-pvc", pvc.name) not in k.calls
+
+    k = FakeK8s(pvcs=[pvc], sandboxes=[j.Sandbox("conv-a", "t", suspended=True)])
+    _drop_release(k, j.DropRelease(pvc.name, "release-legacy"), threading.Lock())
+    assert ("delete-pvc", pvc.name) in k.calls

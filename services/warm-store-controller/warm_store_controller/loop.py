@@ -148,6 +148,8 @@ def _apply(k8s: ControllerK8s, a: j.Action, lock: threading.Lock, state: PassSta
     elif isinstance(a, j.DeletePvc):
         k8s.delete_pvc(a.pvc)
         logger.info("deleted a PVC", extra={"pvc": a.pvc, "reason": a.reason})
+    elif isinstance(a, j.DropRelease):
+        _drop_release(k8s, a, lock)
     elif isinstance(a, j.StartMarkerCheck):
         k8s.start_marker_check(a.pvc)
         state.marker_attempts[a.pvc] = state.marker_attempts.get(a.pvc, 0) + 1
@@ -165,15 +167,30 @@ def _apply(k8s: ControllerK8s, a: j.Action, lock: threading.Lock, state: PassSta
         logger.info("warm PV ready", extra={"pv": a.pv, "pvc": a.pvc})
 
 
+def _still_released(k8s: ControllerK8s, name: str) -> j.Pvc | None:
+    """The PVC if it still awaits release and its sandbox has not resumed."""
+    pvc = k8s.read_pvc(name)
+    if pvc is None or pvc.labels.get(j.LBL_RELEASE) != "requested":
+        return None
+    sandbox = j.sandbox_of(name)
+    sb = k8s.read_sandbox(sandbox) if sandbox else None
+    return None if sb is not None and not sb.suspended else pvc
+
+
+def _drop_release(k8s: ControllerK8s, a: j.DropRelease, lock: threading.Lock) -> None:
+    """Re-check under the reserve lock, so a resume that raced the pass keeps its PVC."""
+    with lock:
+        if _still_released(k8s, a.pvc) is None:
+            return
+        k8s.delete_pvc(a.pvc)
+    logger.info("deleted a PVC", extra={"pvc": a.pvc, "reason": a.reason})
+
+
 def _finish_release(k8s: ControllerK8s, a: j.FinishRelease, lock: threading.Lock) -> None:
     """Re-check under the reserve lock, so a resume that raced the check keeps its PVC."""
     with lock:
-        pvc = k8s.read_pvc(a.pvc)
-        if pvc is None or pvc.labels.get(j.LBL_RELEASE) != "requested" or pvc.volume_name != a.pv:
-            return
-        sandbox = j.sandbox_of(a.pvc)
-        sb = k8s.read_sandbox(sandbox) if sandbox else None
-        if sb is not None and not sb.suspended:
+        pvc = _still_released(k8s, a.pvc)
+        if pvc is None or pvc.volume_name != a.pv:
             return
         if a.clean:
             k8s.mark_clean(a.pv)

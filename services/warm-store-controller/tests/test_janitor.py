@@ -130,8 +130,8 @@ def test_legacy_and_unbound_pvcs_are_just_deleted():
     unbound = overlay("conv-b", release=True, volume=None)
     w = world([], pvcs=[legacy, unbound], sandboxes=[SUSPENDED, j.Sandbox("conv-b", "t", True)])
     assert run(w)[0] == [
-        j.DeletePvc("scooter-rw-conv-a", "release-legacy"),
-        j.DeletePvc("scooter-rw-conv-b", "release-unbound"),
+        j.DropRelease("scooter-rw-conv-a", "release-legacy"),
+        j.DropRelease("scooter-rw-conv-b", "release-unbound"),
     ]
 
 
