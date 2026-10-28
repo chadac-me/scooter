@@ -44,7 +44,8 @@ pkgs.testers.runNixOSTest {
       before = [ "overlay-store-setup.service" ];
       after = [ "nix-.scooter\\x2drw.mount" ];
       unitConfig.DefaultDependencies = false;
-      serviceConfig.Type = "oneshot";
+      # Stays active, so restarting overlay-store-setup does not re-seed it.
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
       script = ''
         up=${config.programs.overlayStore.upperPath}
         mkdir -p $up/state/gcroots/auto $up/state/profiles/per-user/root
