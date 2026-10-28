@@ -203,11 +203,12 @@ def _finish_release(k8s: ControllerK8s, a: j.FinishRelease, lock: threading.Lock
     logger.info("released a PV", extra={"pvc": a.pvc, "pv": a.pv, "clean": a.clean, "reason": a.reason})
 
 
-def _arrivals(sandboxes: dict[str, j.Sandbox], pvcs: dict[str, j.Pvc], raw: list) -> list[Event]:
+def _arrivals(sandboxes: dict[str, j.Sandbox], pvcs: dict[str, j.Pvc], raw: list[dict]) -> list[Event]:
     """Sandbox creations, each on the node its workspace PV pins it to, if known yet."""
     pv_node: dict[str, str | None] = {}
     for pv in raw:
-        pv_node[pv.metadata.name] = PoolPv(name=pv.metadata.name, node_selector_terms=node_terms(pv)).node
+        name = pv["metadata"]["name"]
+        pv_node[name] = PoolPv(name=name, node_selector_terms=node_terms(pv)).node
     out: list[Event] = []
     for sb in sandboxes.values():
         ws = pvcs.get(f"workspace-{sb.name}")

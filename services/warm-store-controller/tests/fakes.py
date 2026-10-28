@@ -1,8 +1,7 @@
-"""An in-memory ControllerK8s: real conversions over hand-built PV objects."""
+"""An in-memory ControllerK8s: real conversions over hand-built PV dicts."""
 
 from __future__ import annotations
 
-from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
 from warm_store_controller import janitor as j
@@ -22,20 +21,18 @@ def raw_pv(
     annotations: dict | None = None,
     rv: str = "1",
 ):
-    return client.V1PersistentVolume(
-        metadata=client.V1ObjectMeta(name=name, labels=labels or {}, annotations=annotations or {}, resource_version=rv),
-        spec=client.V1PersistentVolumeSpec(
-            storage_class_name=sc,
-            claim_ref=client.V1ObjectReference(name=claim, uid=uid) if claim else None,
-            persistent_volume_reclaim_policy="Retain",
-            node_affinity=client.V1VolumeNodeAffinity(required=client.V1NodeSelector(node_selector_terms=[
-                client.V1NodeSelectorTerm(match_expressions=[
-                    client.V1NodeSelectorRequirement(key="kubernetes.io/hostname", operator="In", values=[node]),
-                ]),
-            ])),
-        ),
-        status=client.V1PersistentVolumeStatus(phase=phase),
-    )
+    return {
+        "metadata": {"name": name, "labels": labels or {}, "annotations": annotations or {}, "resourceVersion": rv},
+        "spec": {
+            "storageClassName": sc,
+            "claimRef": {"name": claim, "uid": uid} if claim else None,
+            "persistentVolumeReclaimPolicy": "Retain",
+            "nodeAffinity": {"required": {"nodeSelectorTerms": [
+                {"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": [node]}]},
+            ]}},
+        },
+        "status": {"phase": phase},
+    }
 
 
 class FakeK8s(ControllerK8s):

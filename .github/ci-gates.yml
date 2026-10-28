@@ -61,3 +61,11 @@ gates:
     # Advisory: image-sizes-diff.sh never exits non-zero, and a closure that
     # balloons should be seen before merge without vetoing it.
     advisory: true
+
+  - id: bench
+    name: benchmarks (PR vs merge base)
+    require: when_labelled
+    label: bench
+    # Advisory: runner timings inform the reviewer, never veto.
+    advisory: true
+    block_while_pending: false

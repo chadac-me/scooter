@@ -10,7 +10,7 @@ name: CI
 on:
   pull_request:
     # `labeled` so adding an opt-in label (`flake-check`, `e2e-full-flake-check`,
-    # `e2e-full`, `full-nixos-tests`) to an open PR re-runs CI.
+    # `e2e-full`, `full-nixos-tests`, `bench`) to an open PR re-runs CI.
     types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
@@ -242,6 +242,63 @@ jobs:
   # Enumerates the dev-env-* nixosTests into a matrix so each VM test runs in its
   # own job; HEAVY_TESTS are excluded per-PR and included nightly or with the
   # `full-nixos-tests` label.
+  # Touched suites in .github/benchmarks.yml, opt-in via `bench` label.
+  bench:
+    name: benchmarks (PR vs merge base)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'bench')
+    permissions:
+      contents: read
+      pull-requests: write   # the shared CI comment
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR: ${{ github.event.pull_request.number }}
+      LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0     # the merge base's worktree
+      - uses: nixbuild/nix-quick-install-action@v30
+      - uses: cachix/cachix-action@v15
+        with:
+          name: scooter
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: run the touched suites, PR and merge base interleaved
+        run: scripts/bench-ab.sh "origin/${{ github.base_ref }}" bench-out
+      - name: post bench section
+        run: |
+          set -euo pipefail
+          if [ ! -s bench-out/suites.txt ]; then
+            printf 'No suite in `.github/benchmarks.yml` covers a path this PR changes.\n' > bench.md
+            node scripts/ci-report.mjs post --section bench --status skip \
+              --summary 'benchmarks — no suite touched' --body bench.md --labels "$LABELS"
+            exit 0
+          fi
+          # Writes status= and summary= to a local file.
+          GITHUB_OUTPUT=verdict.txt node scripts/bench-compare.mjs report bench-out \
+            --base-ref "$(git merge-base "origin/${{ github.base_ref }}" HEAD)" > bench.md
+          cat bench.md >> "$GITHUB_STEP_SUMMARY"
+          node scripts/ci-report.mjs post --section bench \
+            --status "$(sed -n 's/^status=//p' verdict.txt)" \
+            --summary "$(sed -n 's/^summary=//p' verdict.txt)" --body bench.md --labels "$LABELS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-pyperf
+          path: bench-out
+          if-no-files-found: ignore
+      # Resolve the section even when the harness crashed.
+      - name: post bench failure section
+        if: failure()
+        continue-on-error: true
+        run: |
+          printf 'The benchmark run failed before it could compare; see the job log.\n' > bench.md
+          node scripts/ci-report.mjs post --section bench --status fail \
+            --summary 'benchmarks — run FAILED' --body bench.md --labels "$LABELS"
+
   nixos-tests-matrix:
     name: enumerate dev-env nixosTests
     runs-on: ubuntu-latest
@@ -1787,7 +1844,7 @@ jobs:
   # always() so a red producer still yields a verdict.
   ci-summary:
     name: ci summary (gates)
-    needs: [ci, image-build-report, image-sizes, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
+    needs: [ci, image-build-report, image-sizes, bench, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
