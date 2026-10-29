@@ -30,6 +30,7 @@ import io
 import logging
 import mimetypes
 import posixpath
+import re
 import zipfile
 from typing import Callable
 
@@ -52,6 +53,30 @@ _ALLOWED_EXT = {
     ".map", ".xml", ".wasm",
 }
 _VALID_VISIBILITY = {"public", "private"}
+
+# The Scooter UI's favicon (ui/index.html), for pages that declare none.
+_DEFAULT_FAVICON_LINK = (
+    b"<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
+    b"viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B5%3C/text%3E%3C/svg%3E\">"
+)
+_ICON_LINK_RE = re.compile(rb"<link\b[^>]*\brel\s*=\s*[\"']?[^\"'>]*\bicon\b", re.IGNORECASE)
+# Insert after the first match; never before a doctype.
+_FAVICON_ANCHORS = [
+    re.compile(rb"<head\b[^>]*>", re.IGNORECASE),
+    re.compile(rb"<html\b[^>]*>", re.IGNORECASE),
+    re.compile(rb"<!doctype\b[^>]*>", re.IGNORECASE),
+]
+
+
+def _with_default_favicon(html: bytes) -> bytes:
+    """Add the Scooter favicon to an HTML page that has no icon link of its own."""
+    if _ICON_LINK_RE.search(html):
+        return html
+    for anchor in _FAVICON_ANCHORS:
+        m = anchor.search(html)
+        if m:
+            return html[: m.end()] + _DEFAULT_FAVICON_LINK + html[m.end():]
+    return _DEFAULT_FAVICON_LINK + html
 
 
 def _guess_content_type(path: str, given: str | None = None) -> str:
@@ -260,7 +285,10 @@ def create_shares_router(
         f = ver.files.get(rel)
         if f is None:
             raise HTTPException(status_code=404, detail="not found")
-        return Response(content=f.data, media_type=f.content_type, headers=_serve_headers())
+        data = f.data
+        if f.content_type.split(";")[0].strip().lower() == "text/html":
+            data = _with_default_favicon(data)
+        return Response(content=data, media_type=f.content_type, headers=_serve_headers())
 
     @router.get("/s/{uuid}/v/{version}/{path:path}")
     async def serve_versioned(uuid: str, version: int, path: str) -> Response:
