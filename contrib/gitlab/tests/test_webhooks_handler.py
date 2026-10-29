@@ -49,3 +49,19 @@ def test_importing_the_handler_arms_the_owner_lookup_and_shapes():
 
     assert "gitlab" in identity.registered_providers()
     assert "gitlab" in resources.registered_sources()
+
+
+def test_a_forwarded_note_asks_to_react_and_plan_and_carries_its_id():
+    msg = gitlab_h._format_forwarded_message(
+        "@chadac commented:\n\nplease fix", 7, "merge_requests", 3, has_mention=True, note_id=1234,
+    )
+    assert "React with an emoji first" in msg
+    assert "comment your plan" in msg
+    assert "note_id: 1234" in msg
+
+
+def test_a_label_trigger_has_no_note_to_react_to():
+    text = gitlab_h._response_instructions("issues", 3)
+    assert "React" not in text
+    assert "note_id" not in text
+    assert "comment your plan" in text

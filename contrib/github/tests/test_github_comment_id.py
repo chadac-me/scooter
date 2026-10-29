@@ -91,3 +91,31 @@ class TestTheHandlerStaysADataPipe:
         msg = forwarded.call_args[0][1]
         assert "reactions" not in msg
         assert "agent-broker" not in msg
+
+
+class TestTheReplyStepsAreAsked:
+    """Every forwarded comment asks for a reaction, then a plan comment, then results."""
+
+    @pytest.mark.asyncio
+    async def test_a_pr_comment_asks_to_react_and_plan(self, forwarded):
+        await gh._handle_comment(issue_comment())
+        msg = forwarded.call_args[0][1]
+        assert "React with an emoji first" in msg
+        assert "comment your plan" in msg
+
+    @pytest.mark.asyncio
+    async def test_a_line_comment_asks_to_react_and_plan(self, forwarded):
+        await gh._handle_review_comment(review_comment())
+        msg = forwarded.call_args[0][1]
+        assert "React with an emoji first" in msg
+        assert "comment your plan" in msg
+
+    def test_a_first_mention_carries_the_id_to_react_to(self):
+        text = gh._response_instructions("chadac", "scooter", 42, True, comment_id=991)
+        assert "React with an emoji first" in text
+        assert "comment_id: 991" in text
+
+    def test_a_label_trigger_has_no_comment_to_react_to(self):
+        text = gh._response_instructions("chadac", "scooter", 42, True)
+        assert "React" not in text
+        assert "comment your plan" in text

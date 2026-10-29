@@ -21,6 +21,7 @@ from scooter_webhooks_lib.agent_host_client import (
 from scooter_contrib_jira.issue_keys import extract_issue_keys
 from scooter_webhooks_lib import policy
 from scooter_webhooks_lib.identity import resolve_owner
+from scooter_webhooks_lib.reply_workflow import reply_workflow
 from .responses import post_gitlab_comment
 
 logger = logging.getLogger(__name__)
@@ -67,14 +68,23 @@ async def _infer_conversation_from_jira(
     return None
 
 
-def _response_instructions(noteable_type: str, noteable_iid: int) -> str:
+def _reply_steps(note_id: int | None) -> str:
+    return reply_workflow("gitlab_comment", "agent-tools", react=bool(note_id))
+
+
+def _note_ref(note_id: int | None) -> str:
+    """The id of this note, so a reply or reaction can target it."""
+    return f"\n\n(note_id: {note_id})" if note_id else ""
+
+
+def _response_instructions(noteable_type: str, noteable_iid: int, note_id: int | None = None) -> str:
     kind = "merge request" if noteable_type == "merge_requests" else "issue"
     return (
         f"\n\n---\n"
-        f"**Response workflow:** First, post an acknowledgment on GitLab so the requester knows you've seen it. "
-        f"Then work on the task. When finished, post a follow-up comment with your results.\n\n"
+        f"{_reply_steps(note_id)}\n\n"
         f"To respond on GitLab {kind} {noteable_iid}, use the `gitlab_comment` tool with your comment `body` — "
         f"the target is already known."
+        + _note_ref(note_id)
     )
 
 
@@ -96,7 +106,7 @@ def _format_diff_context(note: dict) -> str:
 
 def _format_forwarded_message(
     comment_body: str, project_id: int, noteable_type: str, noteable_iid: int,
-    discussion_id: str | None = None, has_mention: bool = False,
+    discussion_id: str | None = None, has_mention: bool = False, note_id: int | None = None,
 ) -> str:
     iid_prefix = "!" if noteable_type == "merge_requests" else "#"
 
@@ -115,17 +125,19 @@ def _format_forwarded_message(
 
     if has_mention:
         preamble = (
-            f"You were mentioned in a comment on GitLab {noteable_type.replace('_', ' ')} {iid_prefix}{noteable_iid}. "
-            f"First, post an acknowledgment so the requester knows you've seen it. "
-            f"Then work on the task. When finished, post a follow-up comment with your results."
+            f"You were mentioned in a comment on GitLab {noteable_type.replace('_', ' ')} {iid_prefix}{noteable_iid}."
         )
     else:
         preamble = (
             f"A new comment was posted on GitLab {noteable_type.replace('_', ' ')} {iid_prefix}{noteable_iid}. "
-            f"This is for your awareness -- no action is required unless the comment explicitly asks you to do something."
+            f"If it is addressed to you or asks for something, respond as below; "
+            f"otherwise it is just for your awareness."
         )
 
-    return f"{preamble}\n\n---\n\n{comment_body}\n\n---\n\n{reply_instruction}"
+    return (
+        f"{preamble}\n\n---\n\n{comment_body}\n\n---\n\n{_reply_steps(note_id)}\n\n{reply_instruction}"
+        + _note_ref(note_id)
+    )
 
 
 @router.post("/webhooks/gitlab")
@@ -230,7 +242,7 @@ async def _handle_note(payload: dict):
         discussion_id = note.get("discussion_id")
         forward_msg = _format_forwarded_message(
             comment_body, project_id, note_api_type, noteable_iid,
-            discussion_id=discussion_id, has_mention=has_mention,
+            discussion_id=discussion_id, has_mention=has_mention, note_id=note.get("id"),
         )
         await db.store_pending_message("gitlab", res_type, res_id, forward_msg)
         return
@@ -239,7 +251,7 @@ async def _handle_note(payload: dict):
         discussion_id = note.get("discussion_id")
         forward_msg = _format_forwarded_message(
             comment_body, project_id, note_api_type, noteable_iid,
-            discussion_id=discussion_id, has_mention=has_mention,
+            discussion_id=discussion_id, has_mention=has_mention, note_id=note.get("id"),
         )
         outcome = await deliver_message(existing, forward_msg, source="gitlab")
         if outcome is not SendOutcome.NOT_FOUND:
@@ -275,7 +287,7 @@ async def _handle_note(payload: dict):
     else:
         conv_title = f"Issue #{issue_iid}: {issue_title}"
 
-    reply_hint = _response_instructions(note_api_type, noteable_iid)
+    reply_hint = _response_instructions(note_api_type, noteable_iid, note.get("id"))
     full_message = f"{context}\n{policy.repo_context(repo)}\n{comment_body}{reply_hint}"
 
     asyncio.create_task(

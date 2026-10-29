@@ -95,6 +95,12 @@ this (by purpose — find them in your tool list):
   one of them on GitHub).
 - **Comment on the GitLab MR** — comment on the MR this conversation came from.
   (Optional discussion id to reply inside a review discussion.)
+  GitLab reactions ("award emoji") also go through the broker, using the
+  `note_id` the forwarded comment carries: `agent-broker
+  'gitlab/api/v4/projects/<project>/merge_requests/<iid>/notes/<note_id>/award_emoji?name=eyes'
+  -X POST` (`issues/<iid>` for an issue; `<project>` is the URL-encoded path,
+  e.g. `group%2Frepo`). React 👀 the moment a comment reaches you, `rocket`
+  when done.
 - **Comment on the Jira issue** — comment on the Jira issue this conversation came from.
 
 **These provider tools appear ONLY when that resource is attached** to this

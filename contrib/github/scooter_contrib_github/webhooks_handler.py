@@ -23,6 +23,7 @@ from scooter_webhooks_lib.agent_host_client import (
 )
 from scooter_webhooks_lib import policy
 from scooter_webhooks_lib.identity import resolve_owner
+from scooter_webhooks_lib.reply_workflow import reply_workflow
 from .responses import get_app_login, post_github_comment
 
 logger = logging.getLogger(__name__)
@@ -85,14 +86,20 @@ async def _resolve_conversation(res_type: str, res_id: str) -> str | None:
     return None
 
 
-def _response_instructions(owner: str, repo: str, number: int, is_pr: bool) -> str:
+def _reply_steps(comment_id: int | None) -> str:
+    return reply_workflow("github_comment", "scooter-github", react=bool(comment_id))
+
+
+def _response_instructions(
+    owner: str, repo: str, number: int, is_pr: bool, comment_id: int | None = None,
+) -> str:
     kind = "PR" if is_pr else "issue"
     return (
         f"\n\n---\n"
-        f"**Response workflow:** First, post an acknowledgment on GitHub so the requester knows you've seen it. "
-        f"Then work on the task. When finished, post a follow-up comment with your results.\n\n"
+        f"{_reply_steps(comment_id)}\n\n"
         f"To respond on GitHub {kind} #{number}, use the `github_comment` tool with your comment `body` — "
         f"the target ({owner}/{repo} #{number}) is already known."
+        + _comment_ref(comment_id)
     )
 
 
@@ -108,18 +115,16 @@ def _format_forwarded_message(
     kind = "pull request" if is_pr else "issue"
 
     if has_mention:
-        preamble = (
-            f"You were mentioned in a comment on GitHub {kind} #{number} in {owner}/{repo}. "
-            f"First, acknowledge it so the requester knows you've seen it. "
-            f"Then work on the task. When finished, post a follow-up comment with your results."
-        )
+        preamble = f"You were mentioned in a comment on GitHub {kind} #{number} in {owner}/{repo}."
     else:
         preamble = (
             f"A new comment was posted on GitHub {kind} #{number} in {owner}/{repo}. "
-            f"This is for your awareness -- no action is required unless the comment explicitly asks you to do something."
+            f"If it is addressed to you or asks for something, respond as below; "
+            f"otherwise it is just for your awareness."
         )
 
     reply_instruction = (
+        f"{_reply_steps(comment_id)}\n\n"
         "To respond, use the `github_comment` tool (this PR/issue is already known — "
         "you just provide the comment body). It reports the real result."
     )
@@ -245,7 +250,7 @@ async def _handle_comment(payload: dict):
     conv_title = f"{kind} #{issue_number}: {issue_title}"
     full_repo = f"{owner}/{repo}"
 
-    reply_hint = _response_instructions(owner, repo, issue_number, is_pr)
+    reply_hint = _response_instructions(owner, repo, issue_number, is_pr, comment_id)
     context = f"Context: {kind} #{issue_number} '{issue_title}' in {full_repo}"
     full_message = f"{context}\n\n{comment_text}{reply_hint}"
 
@@ -303,6 +308,7 @@ async def _handle_review_comment(payload: dict):
         f"**{where}**\n\n"
         + (f"```diff\n{hunk}\n```\n\n" if hunk else "")
         + f"{body}\n\n---\n\n"
+        f"{_reply_steps(comment_id)}\n\n"
         f"This is a LINE comment, so reply IN THE THREAD: "
         f"`github_comment(body, in_reply_to={comment_id})`. That puts your answer next to "
         f"the code being discussed. Use a plain `github_comment(body)` only for something "
@@ -340,8 +346,10 @@ async def _handle_review(payload: dict):
     elif state == "changes_requested":
         head = f"@{user} requested CHANGES on PR #{number} in {owner}/{repo}."
         tail = (
-            "Address the individual line comments (they arrive separately), then PUSH — "
-            "a reply alone does not clear a changes-requested review."
+            "Before changing code, post ONE `github_comment` with your plan for the requested "
+            "changes, then carry it out without waiting for approval. Address the individual "
+            "line comments (they arrive separately), then PUSH — a reply alone does not clear "
+            "a changes-requested review."
         )
     else:
         head = f"@{user} reviewed PR #{number} in {owner}/{repo}."
