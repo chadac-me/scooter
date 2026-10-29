@@ -38,6 +38,10 @@ image-sizes *images:
 image-sizes-diff base pr flag="5":
     ./scripts/image-sizes-diff.sh {{base}} {{pr}} {{flag}}
 
+# Inventory third-party licenses as JSON and a static dashboard.
+eval-licenses out="result-licenses":
+    node scripts/eval-licenses.mjs --out {{out}}
+
 # --- Test tiers ------------------------------------------------------------
 
 # unit — fast contract tests against fakes (no cluster, no network); run this constantly.

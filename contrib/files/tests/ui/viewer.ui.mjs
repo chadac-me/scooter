@@ -544,6 +544,33 @@ Second?
   );
   check("the thread renders inline under its lines", (await page.locator("[data-thread]").count()) === 1);
 
+  // --- phone: tree drawer, tap to comment, comments in a bottom sheet -------------
+
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const mob = await phone.newPage();
+  mob.on("pageerror", (e) => errors.push(e.message));
+  await mob.goto(`${url}/`);
+  const drawer = mob.getByRole("navigation", { name: "File tree" });
+  check("phone: with no file open the tree is shown", await drawer.isVisible());
+  await mob.getByText("docs", { exact: true }).tap();
+  await mob.getByText("two.md").tap();
+  await mob.locator("article h1").waitFor();
+  check("phone: opening a file closes the tree", !(await drawer.isVisible()));
+  const sheet = mob.locator("[data-comments]");
+  check("phone: comments start hidden behind a button", !(await sheet.isVisible()));
+  const width = await mob.evaluate(() => document.documentElement.scrollWidth);
+  check("phone: the page does not scroll sideways", width <= 390, `scrollWidth ${width}`);
+  await mob.locator("article p").first().tap();
+  await mob.getByLabel("Comment on this paragraph").tap();
+  check("phone: a tapped paragraph opens the composer in the sheet", await sheet.locator("textarea").isVisible());
+  await sheet.locator("textarea").fill("from a phone");
+  await sheet.getByRole("button", { name: "Comment", exact: true }).tap();
+  await sheet.locator("[data-thread]").first().waitFor();
+  check("phone: the comment is stored", (await notes("docs/two.md")).some((a) => a.text === "from a phone"));
+  await mob.getByLabel("Close comments").tap();
+  check("phone: the sheet closes", !(await sheet.isVisible()));
+  await phone.close();
+
   check("no page errors", errors.length === 0, errors.join(" | "));
 } catch (err) {
   check("the run finished", false, String(err).split("\n")[0]);

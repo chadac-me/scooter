@@ -153,3 +153,65 @@ describe("reconcileDanglingRun — hand-off grace before resuming another pod's 
     }
   });
 });
+
+describe("a fenced write stops the run, not just the write", () => {
+  const FOREIGN_RUN: AguiEvent[] = [
+    { type: "RUN_STARTED", threadId: "t1", runId: "r1", host: "dead-pod", gen: 1 },
+  ] as never;
+
+  /** This pod runs t1, but the row names `host`. */
+  const setup = (host: string, seed: AguiEvent[] = []) => {
+    const guard = new OwnershipTracker("this-pod");
+    guard.observe("t1", { hostPod: host, generation: 2 });
+    let persist: ((e: AguiEvent) => void) | undefined;
+    const bridge = {
+      ...fakeBridge(),
+      onPersist: (cb: (e: AguiEvent) => void) => {
+        persist = cb;
+        return () => {};
+      },
+    };
+    const { store } = memStore(seed);
+    const sessions = createSessionManager({
+      provisioner: fakeProvisioner(),
+      store,
+      selfPod: "this-pod",
+      ownershipGuard: guard,
+      bridgeFactory: () => bridge as never,
+    } as never);
+    return { bridge, sessions, emit: (e: AguiEvent) => persist?.(e) };
+  };
+  const text = { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: "hi" } as never as AguiEvent;
+
+  it("the first event the cache fences cancels the run, even on a pod that never owned it @proves", async () => {
+    const { bridge, sessions, emit } = setup("other-pod");
+    const conv = await sessions.start("t1" as never);
+    emit(text);
+    await vi.waitFor(() => expect(bridge.cancel).toHaveBeenCalledTimes(1));
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+    expect(sessions.get(conv.id as SessionId)?.bridge).toBeUndefined();
+    emit(text);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bridge.cancel, "one stop, not one per dropped event").toHaveBeenCalledTimes(1);
+  });
+
+  it("a store-refused append stops the run even while the cache says this pod owns it", async () => {
+    const { bridge, sessions } = setup("this-pod");
+    const conv = await sessions.start("t1" as never);
+    await sessions.stopFencedRun(conv.id as SessionId);
+    expect(bridge.cancel).toHaveBeenCalledTimes(1);
+    expect(sessions.get(conv.id as SessionId)?.bridge).toBeUndefined();
+  });
+
+  it("the restart sweep does not resume a conversation another pod owns", async () => {
+    const other = setup("other-pod", FOREIGN_RUN);
+    await other.sessions.start("t1" as never);
+    await other.sessions.resumeInterrupted();
+    expect(other.bridge.prompt).not.toHaveBeenCalled();
+
+    const mine = setup("this-pod", FOREIGN_RUN);
+    await mine.sessions.start("t1" as never);
+    await mine.sessions.resumeInterrupted();
+    expect(mine.bridge.prompt, "its own dangling run still resumes").toHaveBeenCalledTimes(1);
+  });
+});

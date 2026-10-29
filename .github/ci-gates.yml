@@ -55,6 +55,10 @@ gates:
     name: image builds (every published image)
     require: always
 
+  - id: migrations
+    name: db migrations (no contribs, all contribs)
+    require: always
+
   - id: size
     name: image size benchmark
     require: always

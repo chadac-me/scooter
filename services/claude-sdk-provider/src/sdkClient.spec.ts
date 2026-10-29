@@ -37,17 +37,17 @@ const mkClient = (queryImpl: ReturnType<typeof fakeQuery>["queryImpl"]) =>
   });
 
 describe("SDK client context usage", () => {
-  it("emits a context_usage update from the result's modelUsage", async () => {
+  const usage = (input: number, cacheRead: number, cacheCreate: number) => ({
+    input_tokens: input, output_tokens: 2_000, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheCreate,
+  });
+  const assistant = (u: unknown, parent: string | null = null, model = "claude-x") =>
+    ({ type: "assistant", session_id: "s1", parent_tool_use_id: parent, message: { model, content: [], usage: u } }) as never;
+  const result = (modelUsage: Record<string, unknown>) =>
+    ({ type: "result", subtype: "success", session_id: "s1", modelUsage }) as never;
+
+  async function contextUsageOf(msgs: never[]) {
     const queryImpl = () => {
-      async function* gen() {
-        yield { type: "assistant", session_id: "s1", message: { content: [] } } as never;
-        yield {
-          type: "result", subtype: "success", session_id: "s1",
-          modelUsage: {
-            "claude-x": { inputTokens: 150_000, outputTokens: 5_000, cacheReadInputTokens: 4_000, cacheCreationInputTokens: 1_000, contextWindow: 200_000 },
-          },
-        } as never;
-      }
+      async function* gen() { for (const m of msgs) yield m; }
       return Object.assign(gen(), { interrupt: async () => {} });
     };
     const client = await mkClient(queryImpl);
@@ -55,11 +55,39 @@ describe("SDK client context usage", () => {
     client.onSessionUpdate((_id, u) => updates.push(u as never));
     await client.newSession({ threadId: "c1" } as never);
     await client.prompt({ prompt: [{ type: "text", text: "hi" }] } as never);
+    return updates.find((u) => u.sessionUpdate === "context_usage");
+  }
 
-    const cu = updates.find((u) => u.sessionUpdate === "context_usage");
-    expect(cu).toBeTruthy();
-    expect(cu!.usedTokens).toBe(160_000); // 150k input + 4k cacheRead + 1k cacheCreate + 5k output
-    expect(cu!.contextWindow).toBe(200_000);
+  it("reports the last main-thread prompt's size, not the turn's summed usage", async () => {
+    // Each round re-reads ~90k; summed, the turn exceeds the window.
+    const rounds = Array.from({ length: 30 }, (_, i) => assistant(usage(500, 90_000 + i * 100, 1_000)));
+    const cu = await contextUsageOf([
+      ...rounds,
+      result({ "claude-x": { inputTokens: 15_000, outputTokens: 60_000, cacheReadInputTokens: 2_743_500, cacheCreationInputTokens: 30_000, contextWindow: 1_000_000 } }),
+    ]);
+    expect(cu!.usedTokens).toBe(500 + 92_900 + 1_000);
+    expect(cu!.contextWindow).toBe(1_000_000);
+  });
+
+  it("ignores subagent prompts and takes the main model's window", async () => {
+    const cu = await contextUsageOf([
+      assistant(usage(1_000, 50_000, 0)),
+      assistant(usage(9_000, 150_000, 0), "toolu_1", "claude-small"),
+      result({
+        "claude-x": { contextWindow: 1_000_000 },
+        "claude-small": { contextWindow: 200_000 },
+      }),
+    ]);
+    expect(cu!.usedTokens).toBe(51_000);
+    expect(cu!.contextWindow).toBe(1_000_000);
+  });
+
+  it("emits nothing when no assistant message carried usage", async () => {
+    const cu = await contextUsageOf([
+      { type: "assistant", session_id: "s1", parent_tool_use_id: null, message: { content: [] } } as never,
+      result({ "claude-x": { inputTokens: 150_000, contextWindow: 200_000 } }),
+    ]);
+    expect(cu).toBeUndefined();
   });
 });
 

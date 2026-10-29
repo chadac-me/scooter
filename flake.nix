@@ -525,7 +525,12 @@
             scooterTask = p.scooter-task;
             scooterPrompt = p.scooter-prompt;
             scooter-prompt-tests = p.scooter-prompt.tests;
-          } // devEnvTests // contribSandboxChecks;
+          } // devEnvTests // contribSandboxChecks
+          # The deploy's migrator against a scratch Postgres, without and with contribs.
+          // import ./nix/check-db-migrations.nix {
+            inherit pkgs lib evalPlatform;
+            contribRegistry = contribsWithExamples;
+          };
         };
 
       flake = {

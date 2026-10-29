@@ -54,7 +54,7 @@ function Node({
         title={path}
         onClick={() => (isDir ? setOpen(!open) : onSelect(path))}
         className={clsx(
-          "flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left text-[13px] leading-5 transition-colors",
+          "flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left text-[13px] leading-5 transition-colors pointer-coarse:py-2 pointer-coarse:text-sm",
           active
             ? "bg-accent font-medium text-accent-foreground"
             : "text-sidebar-foreground hover:bg-sidebar-accent/60",
@@ -116,7 +116,7 @@ function Children({
 
 export function Tree({ selected, onSelect }: { selected: string; onSelect: (p: string) => void }) {
   return (
-    <nav className="font-sans">
+    <nav aria-label="File tree" className="font-sans">
       <Children dir="" depth={0} selected={selected} onSelect={onSelect} />
     </nav>
   );

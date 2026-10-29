@@ -15,7 +15,7 @@ from scooter_schema.broker import Base as _SchemaBase, StaticShares, StaticShare
 from scooter_broker_lib.store import StoreConfig
 from broker.core.auth import authenticate
 from scooter_broker_lib.types import Identity
-from broker.shares.routes import create_shares_router
+from broker.shares.routes import _DEFAULT_FAVICON_LINK, create_shares_router
 from broker.shares.store import ShareFile, ShareStore
 
 
@@ -110,7 +110,7 @@ async def test_publish_then_serve_unauthenticated(store):
     uuid = r.json()["uuid"]
     assert r.json()["url"] == f"https://scooter.example.com/s/{uuid}/"
     served = c.get(f"/s/{uuid}/")
-    assert served.status_code == 200 and served.text == "<h1>hi</h1>"
+    assert served.status_code == 200 and served.content == _DEFAULT_FAVICON_LINK + b"<h1>hi</h1>"
     assert served.headers["content-type"].startswith("text/html")
 
 
@@ -119,9 +119,9 @@ async def test_update_serves_new_version_at_root(store):
     c = _client(store)
     uuid = c.post("/shares", json=_inline("one")).json()["uuid"]
     c.put(f"/shares/{uuid}", json=_inline("two"))
-    assert c.get(f"/s/{uuid}/").text == "two"
-    assert c.get(f"/s/{uuid}/v/1/").text == "one"
-    assert c.get(f"/s/{uuid}/v/2/").text == "two"
+    assert c.get(f"/s/{uuid}/").content.endswith(b"two")
+    assert c.get(f"/s/{uuid}/v/1/").content.endswith(b"one")
+    assert c.get(f"/s/{uuid}/v/2/").content.endswith(b"two")
 
 
 @pytest.mark.asyncio
@@ -131,7 +131,7 @@ async def test_zip_ingest_multifile(store):
     r = c.post("/shares", json={"zip_b64": zb})
     assert r.status_code == 201, r.text
     uuid = r.json()["uuid"]
-    assert c.get(f"/s/{uuid}/").text == "<img src=chart.png>"
+    assert c.get(f"/s/{uuid}/").content.endswith(b"<img src=chart.png>")
     assert c.get(f"/s/{uuid}/chart.png").content == b"\x89PNG..."
 
 
@@ -200,3 +200,39 @@ async def test_non_admin_cannot_list_another_conversation(store):
     bob = _client(store, "conv-bob")
     assert bob.get("/shares", params={"conversation_id": "conv-alice"}).status_code == 403
     assert bob.get("/shares", params={"conversation_id": "conv-bob"}).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page, expected", [
+    (b"<!DOCTYPE html><html><head><title>t</title></head></html>",
+     b"<!DOCTYPE html><html><head>" + _DEFAULT_FAVICON_LINK + b"<title>t</title></head></html>"),
+    (b"<!doctype html><html lang=en><body>x</body></html>",
+     b"<!doctype html><html lang=en>" + _DEFAULT_FAVICON_LINK + b"<body>x</body></html>"),
+    (b"<!DOCTYPE html><p>x</p>", b"<!DOCTYPE html>" + _DEFAULT_FAVICON_LINK + b"<p>x</p>"),
+])
+async def test_html_without_icon_gets_scooter_favicon(store, page, expected):
+    c = _client(store)
+    files = {"index.html": {"content_type": "text/html; charset=utf-8", "b64": _b64(page)}}
+    uuid = c.post("/shares", json={"files": files}).json()["uuid"]
+    assert c.get(f"/s/{uuid}/").content == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link", [
+    b'<link rel="icon" href="me.png">',
+    b"<LINK REL='shortcut icon' href='me.ico'>",
+    b'<link href="me.png" rel=icon>',
+])
+async def test_html_with_own_icon_is_untouched(store, link):
+    c = _client(store)
+    page = b"<html><head>" + link + b"</head></html>"
+    uuid = c.post("/shares", json=_inline(page.decode())).json()["uuid"]
+    assert c.get(f"/s/{uuid}/").content == page
+
+
+@pytest.mark.asyncio
+async def test_non_html_is_untouched(store):
+    c = _client(store)
+    files = {"data.txt": {"content_type": "text/plain", "b64": _b64(b"<head>")}}
+    uuid = c.post("/shares", json={"files": files}).json()["uuid"]
+    assert c.get(f"/s/{uuid}/").content == b"<head>"
