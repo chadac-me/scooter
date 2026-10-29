@@ -177,3 +177,67 @@ export function previewOf(quote: string): string {
       .join(" / ");
   return plainOf(quote);
 }
+
+// An <img> tag's attributes, and the markup allowed around one in a block.
+const IMG = /<img\b([^>]*?)\/?>/gi;
+const ATTR = /([a-z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi;
+const WRAPPER = /<\/?(?:p|div|center|a|picture|source|br)\b[^>]*>/gi;
+const KEEP = new Set(["alt", "title", "width", "height"]);
+// Parents whose children are blocks, not inline content.
+const FLOW = new Set(["root", "blockquote", "listItem"]);
+
+function imagesOf(html: string, position: MdNode["position"]): MdNode[] | null {
+  if (html.replace(IMG, "").replace(WRAPPER, "").trim()) return null;
+  const out: MdNode[] = [];
+  for (const [, attrs] of html.matchAll(IMG)) {
+    const props: Record<string, string> = {};
+    for (const [, name, a, b, c] of attrs.matchAll(ATTR)) props[name.toLowerCase()] = a ?? b ?? c ?? "";
+    if (!props.src) continue;
+    const hProperties = Object.fromEntries(Object.entries(props).filter(([k]) => KEEP.has(k)));
+    out.push({ type: "image", url: props.src, alt: props.alt ?? "", position, data: { hProperties } });
+  }
+  return out.length ? out : null;
+}
+
+type MdNode = { type: string; value?: string; children?: MdNode[]; position?: unknown; [k: string]: unknown };
+
+/** HTML <img> tags as images; other raw HTML stays unrendered. */
+export function remarkHtmlImages() {
+  return (tree: MdNode) => {
+    const walk = (node: MdNode) => {
+      if (!node.children) return;
+      const block = FLOW.has(node.type);
+      node.children = node.children.flatMap((child) => {
+        if (child.type !== "html") {
+          walk(child);
+          return [child];
+        }
+        const images = imagesOf(child.value ?? "", child.position);
+        if (!images) return [child];
+        // A block of HTML becomes a paragraph, so it is commentable like one.
+        return block ? [{ type: "paragraph", children: images, position: child.position }] : images;
+      });
+    };
+    walk(tree);
+  };
+}
+
+/** Marks images that share a paragraph with text, so they flow inline. */
+export function remarkInlineImages() {
+  const words = (n: MdNode): boolean =>
+    (n.type === "text" && !!n.value?.trim()) || (n.type !== "image" && !!n.children?.some(words));
+  const mark = (n: MdNode) => {
+    if (n.type === "image") {
+      const data = (n.data ??= {}) as { hProperties?: Record<string, unknown> };
+      data.hProperties = { ...data.hProperties, dataInline: "" };
+    }
+    n.children?.forEach(mark);
+  };
+  return (tree: MdNode) => {
+    const walk = (node: MdNode) => {
+      if (node.type === "paragraph") return void (node.children?.some(words) && mark(node));
+      node.children?.forEach(walk);
+    };
+    walk(tree);
+  };
+}

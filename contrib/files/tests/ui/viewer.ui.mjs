@@ -14,7 +14,7 @@
 // server.py (default: python3).
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -34,7 +34,7 @@ function check(name, ok, detail = "") {
 
 // --- fixture: a workspace, a stub broker, the viewer ------------------------------
 
-const root = mkdtempSync(join(tmpdir(), "files-ui-"));
+const root = realpathSync(mkdtempSync(join(tmpdir(), "files-ui-")));
 const ws = join(root, "workspace");
 mkdirSync(join(ws, "docs"), { recursive: true });
 mkdirSync(join(ws, "src"), { recursive: true });
@@ -76,6 +76,12 @@ writeFileSync(join(root, "token"), "test-token\n");
 writeFileSync(
   join(ws, "docs/dot.png"),
   Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"),
+);
+
+// The ways an agent shares an image in a document besides a relative ![](…).
+writeFileSync(
+  join(ws, "docs/images.md"),
+  `# Images\n\n![by host path](${ws}/docs/dot.png)\n\n<p align="center"><img src="dot.png" width="40" alt="html dot"></p>\n\nInline <img src="./dot.png" alt="inline dot"> too.\n`,
 );
 
 // The broker's annotation store, reduced to a map. PUT is slowed so the in-flight
@@ -486,6 +492,30 @@ Second?
     new URL(page.url()).searchParams.get("path") === "docs/review.md",
     page.url(),
   );
+
+  // --- images: shared in a document, and opened on their own ---------------------
+
+  await page.goto(`${url}/?path=docs/images.md`);
+  await page.locator("article h1").waitFor();
+  const loaded = (alt) =>
+    until(() => page.locator(`article img[alt="${alt}"]`).evaluate((i) => i.complete && i.naturalWidth === 1), 3000).catch(() => false);
+  check("an image by host path loads from the workspace", await loaded("by host path"));
+  check("an HTML <img> in a document renders", await loaded("html dot"));
+  check("its width attribute is kept", (await page.locator('article img[alt="html dot"]').getAttribute("width")) === "40");
+  check("an inline HTML <img> renders", await loaded("inline dot"));
+  check(
+    "an image inside a sentence stays on its line",
+    (await page.locator('article img[alt="inline dot"]').evaluate((i) => getComputedStyle(i).display)) === "inline",
+  );
+
+  await page.goto(`${url}/?path=docs/dot.png`);
+  const opened = page.locator("main img");
+  check(
+    "an image file opened from the tree is shown, not called binary",
+    await until(() => opened.evaluate((i) => i.complete && i.naturalWidth === 1), 3000).catch(() => false),
+    await page.locator("main").innerText(),
+  );
+  check("its dimensions are shown", await until(async () => (await page.locator("main").innerText()).includes("1 × 1"), 3000));
 
   // --- code: a line-range comment -------------------------------------------------
 

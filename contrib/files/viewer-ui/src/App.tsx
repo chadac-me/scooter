@@ -5,6 +5,7 @@ import { api, threadsOf, type Annotation, type FileView, type Question } from ".
 import { Tree } from "./Tree";
 import { CodePane } from "./CodePane";
 import { MarkdownPane } from "./MarkdownPane";
+import { ImagePane } from "./ImagePane";
 import { RetryAll } from "./Thread";
 import { current, navigate, onNavigate } from "./nav";
 
@@ -154,6 +155,9 @@ export function App() {
     load(path).catch(() => {});
   };
   const md = file?.renderer === "markdown";
+  const image = file?.renderer === "image";
+  // Rendered by default, with a Source toggle: markdown, and SVGs (images with a body).
+  const previewable = md || (image && !!file?.body);
   const open = threads.filter((t) => !t.resolved).length;
   const unanswered = questions.filter((q) => !q.answered).length;
 
@@ -193,7 +197,7 @@ export function App() {
             </span>
           )}
           <RetryAll failed={annotations.filter((a) => a.state === "failed")} onChange={refresh} />
-          {md && (
+          {previewable && (
             <div className="flex rounded-md border border-border p-0.5">
               <button className={clsx("seg", !source && "seg-on")} onClick={() => setSource(false)}>
                 <Eye className="size-3.5" /> Preview
@@ -237,6 +241,7 @@ export function App() {
               {file.renderer === "binary" ? "Binary file, not shown." : "Too large to show."}
             </div>
           )}
+          {file && file.path === path && image && !(previewable && source) && <ImagePane file={file} />}
           {file && file.path === path && md && !source && (
             <MarkdownPane
               path={path}
@@ -247,7 +252,7 @@ export function App() {
               onChange={refresh}
             />
           )}
-          {file && file.path === path && (file.renderer === "code" || (md && source)) && (
+          {file && file.path === path && (file.renderer === "code" || (previewable && source)) && (
             <div className="min-h-0 flex-1 overflow-auto">
               <CodePane path={path} body={file.body} threads={threads} dark={dark} onChange={refresh} />
             </div>
