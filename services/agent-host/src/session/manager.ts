@@ -691,8 +691,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // Detach first so no prompt reaches the dying bridge.
     entry.bridge = undefined;
     entry.status = "suspended";
-    const qs = bridge.queueState();
-    log.warn(`${why} — stopping this pod's run`, { conversation_id: id, running: qs.running, queued: qs.queued });
+    const qs = bridge.queueState?.();
+    log.warn(`${why} — stopping this pod's run`, { conversation_id: id, running: qs?.running, queued: qs?.queued });
     // cancel() kills sandbox execs; stop() alone leaves them running.
     await bridge.cancel().catch((err: unknown) =>
       log.warn("cancel of a fenced run failed", { conversation_id: id, error: formatError(err) }),
@@ -728,7 +728,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           });
         }
         // A run that can't write is not this pod's to run.
-        if (n === 1) void stopLocalRun(e.id, "write fenced by the ownership cache");
+        if (n === 1) {
+          // Caught: an unhandled rejection would kill the process.
+          stopLocalRun(e.id, "write fenced by the ownership cache").catch((err: unknown) =>
+            log.warn("stopping a fenced run failed", { conversation_id: e.id, error: formatError(err) }),
+          );
+        }
         return;
       }
       // Not bare `void`: the store rethrows append failures after logging them, and an unhandled
