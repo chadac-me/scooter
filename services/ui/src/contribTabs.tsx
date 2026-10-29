@@ -18,7 +18,7 @@ type TabModule = { default: ComponentType };
 
 /** `<contrib>/ui/<file>.tsx` -> loader. Keys match the manifest's `entry`. */
 const MODULES: Record<string, () => Promise<TabModule>> = Object.fromEntries(
-  Object.entries(import.meta.glob<TabModule>("../../contrib/*/ui/*.tsx")).map(([path, load]) => [
+  Object.entries(import.meta.glob<TabModule>("../../../contrib/*/ui/*.tsx")).map(([path, load]) => [
     path.replace(/^\.\.\/\.\.\/contrib\//, ""),
     load,
   ]),

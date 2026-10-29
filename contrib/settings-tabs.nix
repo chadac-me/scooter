@@ -5,7 +5,7 @@
 { lib }:
 
 let
-  # Must match SETTINGS_TABS in ui/src/view.ts. A contrib tab may not take one of
+  # Must match SETTINGS_TABS in services/ui/src/view.ts. A contrib tab may not take one of
   # these URLs; this only bites a contrib whose name is a built-in id.
   builtinIds = [ "tasks" "skills" "claude" "modules" "admin" ];
 

@@ -197,7 +197,7 @@ the sandbox proxies nothing.
 can't frame B's chat or the main app, and, being cross-origin, can't read the chat
 it does frame. Without `ingress.sandboxDomain`, services share the UI's origin and
 the subpage allows `'self'`. That is no weaker than before, since a same-origin
-sandbox page can already act as the user. `ui/image/check.nix` pins these
+sandbox page can already act as the user. `services/ui/image/check.nix` pins these
 headers against the rendered nginx config.
 
 ### Contributing deployment config (`contrib/<name>/deployment.nix`)
@@ -420,7 +420,7 @@ tool at all rather than one that answers every query with nothing.
 
 **TOOL NAMES ARE FLAT AND THEREFORE GLOBAL.** The servers are mounted
 namespace-less, because the skills name these tools and
-`ui/src/toolCallView.ts` matches on the name. So a name is an identity, and two
+`services/ui/src/toolCallView.ts` matches on the name. So a name is an identity, and two
 providers claiming one leaves nothing to arbitrate but mount order — the broker
 refuses to start on a duplicate (`broker/mcp/routes.py`).
 
@@ -594,7 +594,7 @@ rather than breaking the cycle with a late import.
 
 A contrib also owns its row in the frontend — the brand label/icon/color shown
 for its linked resources, and how its agent tools render as message cards. These
-used to be hardcoded lists in `ui/src/`, so adding an integration meant editing
+used to be hardcoded lists in `services/ui/src/`, so adding an integration meant editing
 the app and disabling one left a dead chip behind.
 
 ```nix
@@ -639,11 +639,11 @@ ui.settingsTabs = [{
   lint only see that glob.
 - **The module.** Its default export is a React component with no props. It may
   import only `@/src/contrib/sdk`, `@/components/*`, `@/lib/*` and the packages in
-  `ui/package.json`; `just lint` (ESLint, `ui/eslint.config.js`) rejects anything
-  else. If a tab needs something from the app, add it to `ui/src/contrib/sdk.ts`.
-  Need a new npm package? Add it to `ui/package.json`, the single lockfile.
+  `services/ui/package.json`; `just lint` (ESLint, `services/ui/eslint.config.js`) rejects anything
+  else. If a tab needs something from the app, add it to `services/ui/src/contrib/sdk.ts`.
+  Need a new npm package? Add it to `services/ui/package.json`, the single lockfile.
 - **How it ships.** Tabs are compiled into the main UI bundle as lazy chunks
-  (`ui/src/contribTabs.tsx`), and the runtime manifest's `settingsTabs` section
+  (`services/ui/src/contribTabs.tsx`), and the runtime manifest's `settingsTabs` section
   decides which appear. A disabled contrib's chunk is in the bundle but never
   fetched. A tab that fails to load or throws shows an error card in that tab only.
 
@@ -731,10 +731,10 @@ locally:
 
 ```
 nix build .#contrib-ui-manifest
-mkdir -p ui/public/contrib && cp result ui/public/contrib/manifest.json
+mkdir -p services/ui/public/contrib && cp result services/ui/public/contrib/manifest.json
 ```
 
-`ui/public/contrib/` is gitignored: a committed copy is exactly the drift the
+`services/ui/public/contrib/` is gitignored: a committed copy is exactly the drift the
 runtime manifest removes.
 
 ### What the framework does with it

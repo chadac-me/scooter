@@ -109,7 +109,7 @@ let
         description = ''
           The tab's module, relative to this contrib's directory and inside its `ui/`.
           Its default export is a React component with no props. It may import only
-          @/components/*, @/lib/*, @/src/contrib/sdk and ui/package.json deps (an
+          @/components/*, @/lib/*, @/src/contrib/sdk and services/ui/package.json deps (an
           ESLint rule enforces this). A string so the UI build resolves it; a path
           would pull the .tsx into every eval that reads the registry.
         '';

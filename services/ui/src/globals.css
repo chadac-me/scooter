@@ -2,7 +2,7 @@
 @import "tw-animate-css";
 @import "tw-shimmer";
 /* Tailwind v4 needs file globs; bare directories match nothing. */
-@source "../../contrib/*/ui/**/*.{ts,tsx}";
+@source "../../../contrib/*/ui/**/*.{ts,tsx}";
 
 @custom-variant dark (&:is(.dark *));
 

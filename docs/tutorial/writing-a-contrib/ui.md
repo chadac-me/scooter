@@ -46,9 +46,9 @@ To see your rows in local UI development:
 
 ```bash
 nix build .#contrib-ui-manifest
-mkdir -p ui/public/contrib && cp result ui/public/contrib/manifest.json
+mkdir -p services/ui/public/contrib && cp result services/ui/public/contrib/manifest.json
 ```
 
-`ui/public/contrib/` is gitignored, so don't commit the copy.
+`services/ui/public/contrib/` is gitignored, so don't commit the copy.
 
 Next: [testing and shipping](testing.md).

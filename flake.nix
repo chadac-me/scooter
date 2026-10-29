@@ -489,7 +489,7 @@
             agentHost = p.scooter-agent-host;
             ui = p.scooter-ui;
             # Who may frame which UI page, against the rendered nginx config.
-            ui-nginx = import ./ui/image/check.nix { inherit pkgs; };
+            ui-nginx = import ./services/ui/image/check.nix { inherit pkgs; };
             # Every contrib variant
             contribs-all = contribsAll;
             contrib-echo = contribsWithExamples.packages.echo.broker;

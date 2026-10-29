@@ -125,7 +125,7 @@ export default defineConfig({
         },
         {
           // The default UI dev server, 5173 -> agent-host 8080 directly, used by every spec except the SSE-resilience one.
-          command: "npm --prefix ui run dev",
+          command: "npm --prefix services/ui run dev",
           env: {
             AGENT_HOST_URL: "http://localhost:8080",
             // E2E_TELEMETRY=1 emits a span per line to the browser console, off by default because it buries real console errors.
@@ -152,7 +152,7 @@ export default defineConfig({
         {
           // A second UI dev server (port 5273) with a small idle-watchdog; only the integrity
           // stream is routed through the fault proxy, and only the SSE-resilience spec targets it.
-          command: "npm --prefix ui run dev -- --port 5273",
+          command: "npm --prefix services/ui run dev -- --port 5273",
           env: {
             AGENT_HOST_URL: "http://localhost:8080",
             AGENT_HOST_STREAM_URL: "http://localhost:8090",

@@ -62,7 +62,7 @@ test.describe("session selector & titles", () => {
   // whole story: the trace shows the click landing on ✎, and no editing render in the 15s
   // that follow — openRename() can silently no-op under load on any runner. That is a UI
   // bug (#796), not a test bug, and re-enabling here would only make it CI's problem.
-  // ui/src/HeaderConversationTitle.rename.test.ts guards the blur rule meanwhile. Rename now
+  // services/ui/src/HeaderConversationTitle.rename.test.ts guards the blur rule meanwhile. Rename now
   // lives in the header, away from the remounting sidebar row, so this may be re-enableable.
   test.skip("the user can rename a conversation, and the agent can't override it", async ({ chat, page }) => {
     await chat.open();

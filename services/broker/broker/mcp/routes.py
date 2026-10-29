@@ -2,7 +2,7 @@
 
 `authenticate_mcp` produces an Identity bound to the presented credentials; each enabled
 provider's `McpTools` server is mounted namespace-less so tool names stay flat (the skills
-and ui/src/toolCallView.ts match on them); and a per-provider middleware establishes the
+and services/ui/src/toolCallView.ts match on them); and a per-provider middleware establishes the
 `ToolContext` for a call and applies the attachment gate when listing. The endpoint is
 stateless because the broker runs several replicas behind a load balancer.
 """

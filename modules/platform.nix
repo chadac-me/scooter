@@ -197,7 +197,7 @@ let
       (lib.filterAttrs (_: c: c.enable) config.contribs));
 
   # The UI's contrib manifest from THIS deployment's enabled contribs, mounted over
-  # the image's built-in one (ui/image/nginx.nix). The image is built with its
+  # the image's built-in one (services/ui/image/nginx.nix). The image is built with its
   # repo's contrib list, so without this a contrib the deployment left off would still
   # show its settings tab, tool cards and source rows, and its tab would 404.
   uiContribManifest = builtins.toJSON (import ../contrib/ui-manifest-data.nix { inherit lib; }
@@ -1972,7 +1972,7 @@ in
                 value = uploadMaxBody;
               }] ++ lib.optional (cfg.ingress.sandboxDomain != "")
                 # nginx lets /chat/<id> be framed only by that conversation's own sandbox
-                # origin, <label>.<sandboxDomain> (ui/image/nginx.nix).
+                # origin, <label>.<sandboxDomain> (services/ui/image/nginx.nix).
                 { name = "SANDBOX_DOMAIN"; value = cfg.ingress.sandboxDomain; }
               ++ lib.optionals cfg.observability.browserTelemetry.enable [
                 # Where nginx forwards /telemetry/, asserted rather than defaulted because

@@ -366,11 +366,11 @@ min total. Add it when the flake needs contention to fire, not by default.
 | `services/agent-host/` | TS: ACP⇄AG-UI bridge, session manager, K8s-exec backend, web-service proxy, MCP agent tools, auth |
 | `services/broker/` | Python/FastAPI credential broker + provider modules (GitHub, GitLab, Jira, Slack, AWS, Datadog) |
 | `services/webhooks/`, `services/scheduler/` | Python/FastAPI: spawn conversations from provider threads / fire cron-scheduled tasks |
+| `services/ui/` | assistant-ui frontend + AG-UI client library |
 | `services/claude-sdk-provider/` | Claude Agent SDK provider (an alternative brain to goose) |
 | `pkgs/sandbox-os/` | the NixOS systemd-PID-1 dev sandbox image (exec via K8s API) |
 | `pkgs/broker-tools/` | broker CLIs (`agent-broker` / `scooter-aws*`), prebuilt into the sandbox |
 | `modules/` | kubenix: per-conversation cold `Sandbox` (SA + 2 PVCs), agent-host, broker, webhooks, scheduler, warm pool |
-| `ui/` | assistant-ui frontend + AG-UI client library |
 | `skills/` | Markdown agent skills that document the PLATFORM (`scooter-intro`, `scooter-env`, `agent-tools`, …) — a skill documenting a contrib lives in that contrib, gated on it |
 | `test/`, `nixos-tests/` | cluster-integration + e2e fixtures/fakes; NixOS VM tests for the sandbox image |
 | `services/agent-host/test/` | unit (contract) tests |

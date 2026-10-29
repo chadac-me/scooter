@@ -3,7 +3,7 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Tokens copied from ui/src/globals.css so the viewer matches the main UI. */
+/* Tokens copied from services/ui/src/globals.css so the viewer matches the main UI. */
 @theme inline {
   /* The three-column shell (sidebar | thread | right panel) needs real width to
      not feel cramped; below this it switches to the mobile off-canvas-drawer

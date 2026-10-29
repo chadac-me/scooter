@@ -12,7 +12,7 @@
     "services/claude-sdk-provider",
     "services/remote-agent",
     "contrib/code-server/ahp",
-    "ui"
+    "services/ui"
   ],
   "scripts": {
     "test": "vitest run --project agent-host --project claude-sdk-provider --project ui --project remote-agent --project vscode-ahp --project byoc-controller --project integration --project scooter-schema --project scooter-svcauth --project ci-scripts --project cluster-support",
