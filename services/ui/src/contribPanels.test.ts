@@ -33,3 +33,12 @@ describe("preprocessFences", () => {
     expect(preprocessFences(src, [])).toBe(src);
   });
 });
+
+describe("fence tokens", () => {
+  it("keep two languages distinct when they differ only by a hyphen", () => {
+    const src = `${fence}a-b\n${fence}\n${fence}ab\n${fence}`;
+    const [first, , second] = preprocessFences(src, ["a-b", "ab"]).split("\n");
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/^```\w+$/);
+  });
+});

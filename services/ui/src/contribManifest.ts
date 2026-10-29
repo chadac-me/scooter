@@ -1,10 +1,11 @@
 /**
  * The deployment's contrib UI metadata (brand rows, tool cards, filter chips,
- * settings tabs, Approvals-tab cards, right-panel tabs, fenced-block renderers), fetched at runtime from `/contrib/manifest.json`,
- * which the UI's nginx serves from the contrib set that deployment enabled. Loading
- * never throws: a 404, a network error, a timeout or a malformed body all mean "no
- * contribs", and the app renders its built-ins. Rows are validated one at a time, so
- * one malformed row costs its own chip rather than the whole manifest.
+ * settings tabs, Approvals-tab cards, right-panel tabs, fenced-block renderers),
+ * fetched at runtime from `/contrib/manifest.json`, which the UI's nginx serves from
+ * the contrib set that deployment enabled. Loading never throws: a 404, a network
+ * error, a timeout or a malformed body all mean "no contribs", and the app renders its
+ * built-ins. Rows are validated one at a time, so one malformed row costs its own chip
+ * rather than the whole manifest.
  */
 
 import type {

@@ -61,22 +61,18 @@ export function contribFetch(
 }
 
 /**
- * Call this contrib's broker routes for the open conversation, as the signed-in user.
+ * GET this contrib's broker routes for the open conversation, as the signed-in user.
  * Needs `api = true` on the contrib's `ui.panel`. `conversationFetch("shares", "list")`
  * reaches the broker's `/shares/conversation/<id>/list` once the agent-host has checked
  * the user may see the conversation. Resolves null before the conversation exists on
  * the server, so a panel shows its empty state without a request.
  */
-export function conversationFetch(
-  contrib: string,
-  path: string,
-  init: RequestInit = {},
-): Promise<Response | null> {
+export function conversationFetch(contrib: string, path: string): Promise<Response | null> {
   const url = currentConversation()?.url(
     `/contrib-api/${encodeURIComponent(contrib)}/${path.replace(/^\/+/, "")}`,
   );
   if (!url) return Promise.resolve(null);
-  return fetch(url, { ...init, credentials: "same-origin" });
+  return fetch(url, { credentials: "same-origin" });
 }
 
 /** Changes when the user opens another conversation, for a panel's effect deps. */

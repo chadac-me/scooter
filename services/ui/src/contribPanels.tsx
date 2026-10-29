@@ -74,8 +74,9 @@ export function ContribFence({ fence, lang, body }: { fence: ContribMarkdownFenc
 }
 
 // assistant-ui reads a fence's language with /language-(\w+)/, which stops at a hyphen,
-// so each claimed language is rewritten to a hyphen-free token before parsing.
-const fenceToken = (lang: string) => `contribfence${lang.replace(/-/g, "")}`;
+// so each claimed language is rewritten to a hyphen-free token before parsing. A
+// language has no "_", so mapping "-" to "_" keeps distinct languages distinct.
+const fenceToken = (lang: string) => `contribfence_${lang.replace(/-/g, "_")}`;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Rewrite each opening fence of a claimed language to its token. */
