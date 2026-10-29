@@ -131,22 +131,32 @@ function resultStopReason(msg: { subtype?: string; is_error?: boolean }): string
   return msg.subtype ?? (msg.is_error ? "error" : "end_turn");
 }
 
-/** Build a `context_usage` update from the SDK result's modelUsage, or null if it carries no usable usage. */
-function emitContextUsage(msg: unknown): SessionUpdate | null {
-  const mu = (msg as { modelUsage?: Record<string, {
-    inputTokens?: number; outputTokens?: number;
-    cacheReadInputTokens?: number; cacheCreationInputTokens?: number; contextWindow?: number;
-  }> }).modelUsage;
-  if (!mu) return null;
-  let used = 0;
-  let contextWindow = 0;
-  for (const u of Object.values(mu)) {
-    // Context usage is the prompt going into the next turn: input plus both cache tiers, with output included as a safe over-estimate.
-    used += (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0) + (u.outputTokens ?? 0);
-    if ((u.contextWindow ?? 0) > contextWindow) contextWindow = u.contextWindow ?? 0;
-  }
+/** One API call's prompt: input plus both cache tiers. */
+type PromptUsage = { model?: string; tokens: number };
+
+/** Main-thread prompt size; null for subagents or usage-less frames. */
+function promptUsageOf(msg: unknown): PromptUsage | null {
+  const m = msg as {
+    type?: string; parent_tool_use_id?: string | null;
+    message?: { model?: string; usage?: { input_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null } };
+  };
+  const u = m.message?.usage;
+  if (m.type !== "assistant" || m.parent_tool_use_id || !u) return null;
+  return {
+    model: m.message?.model,
+    tokens: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+  };
+}
+
+/** Context fill: the last prompt's size over the model's window. */
+function emitContextUsage(msg: unknown, last: PromptUsage | null): SessionUpdate | null {
+  // modelUsage tokens are per-turn totals; only contextWindow is usable.
+  const mu = (msg as { modelUsage?: Record<string, { contextWindow?: number }> }).modelUsage;
+  if (!mu || !last) return null;
+  const contextWindow = (last.model ? mu[last.model]?.contextWindow : undefined)
+    ?? Math.max(0, ...Object.values(mu).map((u) => u.contextWindow ?? 0));
   if (contextWindow <= 0) return null;
-  return { sessionUpdate: "context_usage", usedTokens: used, contextWindow };
+  return { sessionUpdate: "context_usage", usedTokens: last.tokens, contextWindow };
 }
 
 /** Spawn an SDK-backed AcpClient. */
@@ -342,6 +352,7 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
       const q = query({ prompt: promptArg, options });
       active = q;
       let stopReason = "end_turn";
+      let lastPrompt: PromptUsage | null = null;
       try {
         for await (const msg of q) {
           // Surface the SDK's init message (the skills it discovered) via onInit so the host can log it.
@@ -360,10 +371,11 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
           if (msg.type === "result") {
             stopReason = resultStopReason(msg as { subtype?: string; is_error?: boolean });
             // The result carries per-model usage including the context window; emit it for the UI's fill bar.
-            const usage = emitContextUsage(msg);
+            const usage = emitContextUsage(msg, lastPrompt);
             if (usage) for (const cb of updateCbs) cb(sessionId, usage);
             continue;
           }
+          lastPrompt = promptUsageOf(msg) ?? lastPrompt;
           const updates = sdkMessageToUpdates(msg as SdkMessage, INCLUDE_PARTIALS);
           for (const u of updates) {
             for (const cb of updateCbs) cb(sessionId, u);
