@@ -1,4 +1,4 @@
-"""GitHub's agent tool: comment on the conversation's PR or issue."""
+"""GitHub's agent tools: comment on the conversation's PR or issue, and summarise a PR."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import logging
 
 from fastmcp import FastMCP
 
-from scooter_broker_lib.links import first_target, ref_of
+from scooter_broker_lib.links import first_target, ref_of, resource_type_is
 from scooter_broker_lib.mcp import ToolContext, ToolContextDep, ToolResult, gate
 from scooter_broker_lib.refs import GithubTarget, parse_github_resource_id
+
+from .pr_summary import fetch_pr_summary
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +122,60 @@ async def github_comment(
     )
     response = await ctx.upstream.request("POST", path, json={"body": body})
     return ToolResult.from_upstream(response, success_text="Commented on the GitHub PR/issue.")
+
+
+_PR_TYPES = ("pr", "pull", "pulls", "pull_request", "pull_requests")
+_ISSUE_TYPES = ("issue", "issues")
+
+
+def _pr_target_from_link(link: dict) -> GithubTarget | None:
+    """A link's target unless the link is known to be an issue."""
+    if resource_type_is(str(link.get("resourceType") or ""), truthy=_ISSUE_TYPES, falsy=_PR_TYPES):
+        return None
+    if "/issues/" in (link.get("url") or ""):
+        return None
+    return _target_from_link(link)
+
+
+async def github_pr_target(ctx: ToolContext) -> GithubTarget | None:
+    """The conversation's oldest linked PR, skipping linked issues."""
+    return first_target(await ctx.links.list(), SOURCE, _pr_target_from_link)
+
+
+@mcp.tool
+async def github_pr_summary(
+    pr: str | None = None,
+    ctx: ToolContext = ToolContextDep,
+) -> ToolResult:
+    """One-call status of a GitHub pull request. Check it before reporting on a PR.
+
+    Shows state (open/merged/closed), DRAFT status, mergeability and conflicts, the
+    review decision (who approved, who requested changes, who is still requested), CI
+    on the head commit (failing and pending checks named), the comment count, and
+    review threads. Each UNRESOLVED thread is listed with its comment_id, which
+    github_comment takes as `in_reply_to`. The last line lists what blocks the merge.
+
+    Use it to keep track of your own PRs: before marking a draft ready for review,
+    before saying a PR is done or green, and when picking work back up.
+
+    `pr` is a PR URL or `owner/repo#123`. Omit it for the PR this conversation is
+    linked to.
+    """
+    if pr:
+        target = parse_github_resource_id(pr.strip())
+        if target is None:
+            return ToolResult.error(
+                f"Could not parse {pr!r} as a GitHub PR. Pass a PR URL "
+                "(https://github.com/owner/repo/pull/123) or `owner/repo#123`."
+            )
+    else:
+        target = await github_pr_target(ctx)
+        if target is None:
+            return ToolResult.error(
+                "This conversation has no linked GitHub PR. Pass `pr` explicitly, as a "
+                "PR URL or `owner/repo#123`."
+            )
+    return await fetch_pr_summary(ctx.upstream, target)
 
 
 def github_mcp_server() -> FastMCP:
