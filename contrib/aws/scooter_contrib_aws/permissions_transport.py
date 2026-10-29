@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 
-from .models import PermissionRequest, RequestStatus, StsCredentials, approval_message
+from .models import APPROVAL_KIND, PermissionRequest, RequestStatus, StsCredentials, approval_data, approval_message
 from .service import PermissionService, RequestError
 from scooter_broker_lib.types import AuthDependency, Identity, Provider, Transport
 
@@ -141,7 +141,8 @@ class AwsPermissions(Transport):
                 raise HTTPException(status_code=400, detail="conversation_id required")
             reqs = await _svc().list_for_conversation(conversation_id)
             pend = [r for r in reqs if r.status == RequestStatus.PENDING]
-            return {"requests": [_request_view(r) for r in pend]}
+            # kind+data let the re-raised window draw the same detail card.
+            return {"requests": [{**_request_view(r), "kind": APPROVAL_KIND, "data": approval_data(r)} for r in pend]}
 
         # --- agent: status / refresh / revoke (isolated) -------------------
         @router.get("/aws/{request_id}")

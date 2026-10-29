@@ -2,12 +2,11 @@
  * QuestionCard: the Approvals-tab card for an `ask-user.questions` request, whose data is
  * Claude's AskUserQuestion input. Each question takes one option, several with
  * multiSelect, or typed text, and the card resolves with `{ answers }` keyed by question
- * text, which the provider merges into the tool's input.
+ * text, which the provider merges into the tool's input. The brief view is compact pills;
+ * the detail view adds option descriptions and a preview pane beside the options.
  */
 
-import { useState } from "react";
-
-import { Button, cn, type InterruptRendererProps } from "@/src/contrib/sdk";
+import { Button, cn, useRequestDraft, type InterruptRendererProps } from "@/src/contrib/sdk";
 
 export interface Question {
   question: string;
@@ -65,111 +64,183 @@ export function buildAnswers(questions: Question[], sels: Record<number, Selecti
 
 const EMPTY: Selection = { picked: [], other: "" };
 
-export default function QuestionCard({ message, data, busy, resolve, dismiss }: InterruptRendererProps) {
+/** The preview of the first picked option that has one. */
+export function previewOf(q: Question, sel: Selection): string | undefined {
+  return q.options.find((o) => o.preview && sel.picked.includes(o.label))?.preview;
+}
+
+export default function QuestionCard({ message, data, view, busy, resolve, dismiss }: InterruptRendererProps) {
   const questions = questionsOf(data);
   // A request with no usable questions fails over to the core's plain Answer/Dismiss card.
   if (!questions) throw new Error(`"${message}" carries no questions this card can show`);
-  return <Questions questions={questions} busy={busy} onAnswer={(answers) => resolve({ answers })} onDismiss={dismiss} />;
+  return (
+    <Questions
+      questions={questions}
+      detail={view === "detail"}
+      busy={busy}
+      onAnswer={(answers) => resolve({ answers })}
+      onDismiss={dismiss}
+    />
+  );
 }
 
 function Questions({
   questions,
+  detail,
   busy,
   onAnswer,
   onDismiss,
 }: {
   questions: Question[];
+  detail: boolean;
   busy: boolean;
   onAnswer: (answers: Record<string, string>) => void;
   onDismiss: () => void;
 }) {
-  const [sels, setSels] = useState<Record<number, Selection>>({});
+  // Shared with the other view of this request, so switching keeps the picks.
+  const [sels, setSels] = useRequestDraft<Record<number, Selection>>({});
   const answers = buildAnswers(questions, sels);
+  const answered = questions.filter((q, i) => answerOf(q, sels[i]) !== "").length;
   const update = (i: number, f: (s: Selection) => Selection) => setSels((prev) => ({ ...prev, [i]: f(prev[i] ?? EMPTY) }));
 
   return (
     <form
-      className="mb-3 rounded-lg border border-status-question/40 bg-muted/40 p-3 last:mb-0"
+      className={cn(
+        detail ? "flex flex-col gap-6" : "rounded-lg border border-status-question/40 bg-muted/40 p-3",
+      )}
       data-testid="question-request"
+      data-view={detail ? "detail" : "brief"}
       onSubmit={(e) => {
         e.preventDefault();
         if (answers && !busy) onAnswer(answers);
       }}
     >
-      {questions.map((q, i) => {
-        const sel = sels[i] ?? EMPTY;
-        const preview = q.options.find((o) => o.preview && sel.picked.includes(o.label))?.preview;
-        return (
-          <fieldset key={i} className="mb-4 last:mb-3" data-testid="question" disabled={busy}>
-            <legend className="mb-2 text-sm">
-              {q.header && (
-                <span className="mr-2 rounded bg-status-question/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-status-question">
-                  {q.header}
-                </span>
-              )}
-              <span className="whitespace-pre-wrap" data-testid="question-text">{q.question}</span>
-              {q.multiSelect && <span className="ml-1 text-xs text-muted-foreground">(pick any)</span>}
-            </legend>
-            <div className="flex flex-col gap-1.5">
-              {q.options.map((o) => {
-                const on = sel.picked.includes(o.label);
-                return (
-                  <button
-                    key={o.label}
-                    type="button"
-                    role={q.multiSelect ? "checkbox" : "radio"}
-                    aria-checked={on}
-                    data-testid="question-option"
-                    data-label={o.label}
-                    onClick={() => update(i, (s) => toggle(s, o.label, q.multiSelect === true))}
-                    className={cn(
-                      "rounded-md border px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-accent disabled:opacity-50",
-                      on && "border-status-question bg-status-question/10",
-                    )}
-                  >
-                    <div className="font-medium">{o.label}</div>
-                    {o.description && <div className="text-xs text-muted-foreground">{o.description}</div>}
-                  </button>
-                );
-              })}
-              {preview && (
-                <pre className="max-h-48 overflow-auto rounded-md border bg-card p-2 text-xs" data-testid="question-preview">
-                  {preview}
-                </pre>
-              )}
-              <input
-                type="text"
-                value={sel.other}
-                placeholder={q.multiSelect ? "Something else (optional)" : "Or type your own answer"}
-                aria-label={`Your own answer to: ${q.question}`}
-                data-testid="question-other"
-                onChange={(e) => {
-                  const other = e.target.value;
-                  // Typing replaces a single-select pick, so the card never shows two answers.
-                  update(i, (s) => ({ picked: q.multiSelect || !other ? s.picked : [], other }));
-                }}
-                className="rounded-md border border-input bg-card px-2.5 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-              />
-            </div>
-          </fieldset>
-        );
-      })}
-      <div className="flex gap-2">
+      {questions.map((q, i) => (
+        <QuestionField
+          key={i}
+          q={q}
+          sel={sels[i] ?? EMPTY}
+          detail={detail}
+          busy={busy}
+          onToggle={(label) => update(i, (s) => toggle(s, label, q.multiSelect === true))}
+          onOther={(other) =>
+            // Typing replaces a single pick, so never two answers.
+            update(i, (s) => ({ picked: q.multiSelect || !other ? s.picked : [], other }))
+          }
+        />
+      ))}
+      <div className={cn("flex items-center gap-2", detail && "sticky bottom-0 flex-row-reverse border-t bg-background pt-3")}>
         <Button type="submit" size="sm" disabled={busy || !answers} data-testid="question-submit">
           {questions.length > 1 ? "Send answers" : "Send answer"}
         </Button>
+        {detail && questions.length > 1 && (
+          <span className="text-xs text-muted-foreground" data-testid="question-progress">
+            {answered} of {questions.length} answered
+          </span>
+        )}
         <Button
           type="button"
           variant="ghost"
           size="sm"
           disabled={busy}
           data-testid="interrupt-cancel"
-          className="text-muted-foreground"
+          className={cn("text-muted-foreground", detail && "mr-auto")}
           onClick={onDismiss}
         >
           Dismiss
         </Button>
       </div>
     </form>
+  );
+}
+
+function QuestionField({
+  q,
+  sel,
+  detail,
+  busy,
+  onToggle,
+  onOther,
+}: {
+  q: Question;
+  sel: Selection;
+  detail: boolean;
+  busy: boolean;
+  onToggle: (label: string) => void;
+  onOther: (other: string) => void;
+}) {
+  const preview = previewOf(q, sel);
+  const hasPreviews = q.options.some((o) => o.preview);
+
+  const options = q.options.map((o) => {
+    const on = sel.picked.includes(o.label);
+    return (
+      <button
+        key={o.label}
+        type="button"
+        role={q.multiSelect ? "checkbox" : "radio"}
+        aria-checked={on}
+        data-testid="question-option"
+        data-label={o.label}
+        // The brief view drops descriptions, so hovering still shows them.
+        title={detail ? undefined : o.description}
+        onClick={() => onToggle(o.label)}
+        className={cn(
+          "border text-left text-sm transition-colors hover:bg-accent disabled:opacity-50",
+          detail ? "rounded-lg px-3 py-2.5" : "rounded-full px-3 py-1",
+          on && "border-status-question bg-status-question/10",
+        )}
+      >
+        <div className="font-medium">{o.label}</div>
+        {detail && o.description && <div className="mt-0.5 text-xs text-muted-foreground">{o.description}</div>}
+      </button>
+    );
+  });
+
+  const other = (
+    <input
+      type="text"
+      value={sel.other}
+      placeholder={q.multiSelect ? "Something else (optional)" : "Or type your own answer"}
+      aria-label={`Your own answer to: ${q.question}`}
+      data-testid="question-other"
+      onChange={(e) => onOther(e.target.value)}
+      className="rounded-md border border-input bg-card px-2.5 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+    />
+  );
+
+  return (
+    <fieldset className={cn(!detail && "mb-4 last:mb-3")} data-testid="question" disabled={busy}>
+      <legend className={cn("mb-2", detail ? "text-base" : "text-sm")}>
+        {q.header && (
+          <span className="mr-2 rounded bg-status-question/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-status-question">
+            {q.header}
+          </span>
+        )}
+        <span className="whitespace-pre-wrap" data-testid="question-text">{q.question}</span>
+        {q.multiSelect && <span className="ml-1 text-xs text-muted-foreground">(pick any)</span>}
+      </legend>
+      {detail ? (
+        <div className={cn("grid gap-3", hasPreviews && "md:grid-cols-2")}>
+          <div className="flex flex-col gap-2">
+            {options}
+            {other}
+          </div>
+          {hasPreviews && (
+            <pre
+              className="max-h-[28rem] min-h-32 overflow-auto rounded-lg border bg-card p-3 text-xs"
+              data-testid="question-preview"
+            >
+              {preview ?? "Pick an option to preview it."}
+            </pre>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex flex-wrap gap-1.5">{options}</div>
+          {other}
+        </div>
+      )}
+    </fieldset>
   );
 }

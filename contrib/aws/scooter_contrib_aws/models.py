@@ -82,3 +82,26 @@ def approval_message(req: PermissionRequest) -> str:
         lines.append(req.policy_summary)
     lines.append(f"Reason: {req.justification or '(none)'}")
     return "\n".join(lines)
+
+
+APPROVAL_KIND = "aws.permissions"
+
+
+def approval_data(req: PermissionRequest) -> dict[str, Any]:
+    """The full request for the approval UI's `aws.permissions` card, beside the prose."""
+    # Deferred: policy imports this module for RiskLevel.
+    from .policy import write_actions
+
+    policy = getattr(req, "policy_document", None)
+    return {
+        "account": req.target_account,
+        "risk": req.risk_level.value,
+        "justification": req.justification,
+        "summary": req.policy_summary,
+        "policy_document": policy,
+        "managed_policy_arns": list(getattr(req, "managed_policy_arns", None) or []),
+        # The broker's own read/write rule, so the UI never re-derives it.
+        "write_actions": write_actions(policy) if policy else [],
+        "requested_at": getattr(req, "requested_at", "") or None,
+        "parent_request_id": getattr(req, "parent_request_id", None),
+    }

@@ -177,6 +177,10 @@ export interface ApprovalRequest {
   message?: string;
   /** Optional override of the Approve/Deny pair (the shape raiseInterrupt takes). */
   options?: Array<{ optionId: string; name: string; kind: string }>;
+  /** The renderer key a contrib card draws this request with, e.g. "aws.permissions". */
+  kind?: string;
+  /** The full request for that card; opaque here. */
+  data?: unknown;
 }
 
 /** Where a contrib's approval verbs live on the broker, from APPROVAL_CONTRIBS_JSON. */
@@ -290,7 +294,11 @@ export function raiseApprovalInterrupt(
     options: [...(req.options ?? DEFAULT_APPROVAL_OPTIONS)],
     // `contrib` is the name the UI looks up in the manifest for which option to grey; requestId
     // is carried explicitly so the UI need not assume it equals the interrupt id.
-    metadata: { contrib, requestId: req.request_id },
+    metadata: {
+      contrib,
+      requestId: req.request_id,
+      ...(req.kind ? { kind: req.kind, data: req.data } : {}),
+    },
     onAnswer: (optionId, approver) => {
       // The approver is the human who answered; the conversation-id fallback exists only
       // for anonymous deployments where there is no human to name.
