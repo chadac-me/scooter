@@ -58,7 +58,7 @@ function scriptedHooks(answer: (event: HookEvent, input: Record<string, unknown>
   return { runner, calls };
 }
 
-function makeBridge(agent: AcpClient, hooks: HookRunner, extra: { maxStopBlocks?: number; parentId?: () => string | undefined } = {}) {
+function makeBridge(agent: AcpClient, hooks: HookRunner, extra: { maxStopBlocks?: number; parentId?: () => string | undefined; untitled?: () => boolean } = {}) {
   const exec = createSandboxExecBackend(createFakeSandboxApi());
   const bridge = createSessionBridge({
     config: { cwd: "/workspace", skillsDir: "/skills", agent: { command: "fake", args: [], env: {} }, sandbox: { name: "s", namespace: "ns" } },
@@ -196,5 +196,25 @@ describe("bridge conversation hooks", () => {
     const { bridge } = makeBridge(agent.client, hooks.runner);
     await bridge.prompt({ threadId: "t", text: "go" });
     expect(hooks.calls.filter((c) => c.event === "Stop")).toEqual([]);
+  });
+});
+
+describe("bridge untitled fact", () => {
+  const stopFacts = async (untitled: (() => boolean) | undefined, text = "Done.") => {
+    const agent = scriptedAgent([{ text }]);
+    const hooks = scriptedHooks(() => undefined);
+    const { bridge } = makeBridge(agent.client, hooks.runner, untitled ? { untitled } : {});
+    await bridge.prompt({ threadId: "t", text: "fix it" });
+    return (hooks.calls.find((c) => c.event === "Stop")!.input.scooter as Record<string, unknown>).untitled;
+  };
+
+  it("tells Stop hooks whether the conversation is unnamed", async () => {
+    expect(await stopFacts(() => true)).toBe(true);
+    expect(await stopFacts(() => false)).toBe(false);
+    expect(await stopFacts(undefined)).toBe(false);
+  });
+
+  it("counts a <title> marker whose save is still in flight as named", async () => {
+    expect(await stopFacts(() => true, "<title>Fix the thing</title>Done.")).toBe(false);
   });
 });

@@ -25,7 +25,7 @@ import {
   type ApprovalContrib,
   fetchConversationShares,
 } from "./api/management.js";
-import { createSessionManager, shortId } from "./session/manager.js";
+import { createSessionManager, isPlaceholderTitle, shortId } from "./session/manager.js";
 import { createRemoteAgentRegistry, createRemotePersonalizedProvider } from "./acp/remoteAgentRegistry.js";
 import { createRemoteAgentUi } from "./acp/remoteAgentOneliner.js";
 import { createPgRemoteAgentStore } from "./acp/remoteAgentStore.js";
@@ -1999,6 +1999,11 @@ export async function main(
       model,
       pickedProvider,
       modelCatalog: cfg.modelCatalog,
+      // An in-memory read, so the stop-time title check costs microseconds.
+      untitled: () => {
+        const c = sessions.get(conversationId as SessionId);
+        return c !== undefined && !c.userTitled && isPlaceholderTitle(c.title);
+      },
       onRunComplete: ({ acpSessionId, durationMs, outcome }) => {
         // Attribute cost to the conversation owner, resolving the email async without
         // blocking the run.

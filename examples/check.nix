@@ -1131,7 +1131,7 @@ let
     ++ (if !(builtins.tryEval (builtins.deepSeq (awaitingOf { contribs.aws.db.provides = [ "awaiting-input" ]; }) true)).success then [ ]
         else [ "two contribs providing awaiting-input rendered" ]);
 
-  # Hooks: none by default, opt-out, contrib namespacing and gating.
+  # Hooks: only name-conversation by default, opt-out, contrib namespacing and gating.
   hooksOf = env:
     let m = builtins.filter (e: e.name == "AGENT_HOOKS_JSON") env;
     in if m == [ ] then [ ] else builtins.fromJSON (builtins.head m).value;
@@ -1142,7 +1142,10 @@ let
   };
   stopHook = enable: { scooter.agent.hooks.nag = { inherit enable; event = "Stop"; command = "exit 0"; userCanDisable = true; }; };
   hookProblems =
-    (if hookIds { } == [ ] then [ ] else [ "AGENT_HOOKS_JSON has undeclared hooks: ${builtins.toJSON (hookIds { })}" ])
+    (if hookIds { } == [ "name-conversation" ] then [ ] else [ "AGENT_HOOKS_JSON has undeclared hooks: ${builtins.toJSON (hookIds { })}" ])
+    ++ (let d = hooksOf (hostEnvOf { }); in
+        if d != [ ] && ((builtins.head d).when or null) == "untitled" then [ ]
+        else [ "the default name-conversation hook lost its `when = untitled` pre-filter" ])
     ++ (let f = builtins.filter (h: h.id == "nag") (hooksOf (hostEnvOf (stopHook true))); in
         if f != [ ] && (builtins.head f).event == "Stop" && (builtins.head f).userCanDisable then [ ]
         else [ "a declared opt-out-able Stop hook is not in AGENT_HOOKS_JSON" ])
