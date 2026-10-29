@@ -4,7 +4,7 @@
 buildNpmPackage {
   pname = "scooter-svcauth-js";
   version = "0.0.0";
-  src = ./.;
+  src = (import ../../../nix/package-source.nix { inherit lib; }).of ./.;
 
   npmDepsHash = "sha256-Jm/WKroGgFPzy79pazkp/NP3LqI6blCeD3OqQlXdqLs=";
 

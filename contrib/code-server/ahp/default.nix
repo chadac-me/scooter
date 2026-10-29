@@ -5,7 +5,7 @@
 buildNpmPackage {
   pname = "scooter-vscode-ahp";
   version = "0.0.0";
-  src = ./.;
+  src = (import ../../../nix/package-source.nix { inherit lib; }).of ./.;
 
   npmDepsHash = "sha256-J5sY97SY1dcGlowabHC7Fjd0VbD5O83puOGBfGlmY5Q=";
 

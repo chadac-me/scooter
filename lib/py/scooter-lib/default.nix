@@ -6,7 +6,7 @@
 python3Packages.buildPythonPackage {
   pname = "scooter-lib";
   version = "0.0.0";
-  src = ./.;
+  src = (import ../../../nix/package-source.nix { inherit lib; }).of ./.;
   pyproject = true;
 
   build-system = [ python3Packages.hatchling ];

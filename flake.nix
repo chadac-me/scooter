@@ -87,18 +87,23 @@
 
           # agent-host runs `goose acp` per conversation outside the sandbox; it takes the
           # same `agent` derivation the image's goose layer bakes so the closure ships goose once.
-          agentHost = pkgs.callPackage ./services/agent-host { inherit agent claudeSdkProvider scooterSchemaJs scooterSvcauthJs; };
+          agentHost = pkgs.callPackage ./services/agent-host {
+            scooter-agent = agent;
+            scooter-claude-sdk-provider = claudeSdkProvider;
+            scooter-schema-js = scooterSchemaJs;
+            scooter-svcauth-js = scooterSvcauthJs;
+          };
 
           # Bring-your-own-Claude container app
           remoteAgent = pkgs.callPackage ./services/remote-agent {
-            inherit claudeSdkProvider;
+            scooter-claude-sdk-provider = claudeSdkProvider;
             claude-code = pkgs.claude-code;
           };
           # The same container WITHOUT the unfree claude CLI, for `--backend echo`:
           # it drives no model, so it needs neither the CLI nor a subscription, and
           # this variant evaluates in pure mode (CI, nixosTests).
           remoteAgentEcho = pkgs.callPackage ./services/remote-agent {
-            inherit claudeSdkProvider;
+            scooter-claude-sdk-provider = claudeSdkProvider;
             claude-code = null;
           };
 
@@ -106,8 +111,8 @@
 
 
           # The contrib-free service builds, to break the cycle.
-          brokerBase = pkgs.callPackage ./services/broker { inherit scooterSchema scooterLib scooterBrokerLib; };
-          webhooksBase = pkgs.callPackage ./services/webhooks { inherit scooterSchema scooterLib scooterWebhooksLib; };
+          brokerBase = pkgs.callPackage ./services/broker { scooter-schema = scooterSchema; scooter-lib = scooterLib; scooter-broker-lib = scooterBrokerLib; };
+          webhooksBase = pkgs.callPackage ./services/webhooks { scooter-schema = scooterSchema; scooter-lib = scooterLib; scooter-webhooks-lib = scooterWebhooksLib; };
 
           # Contrib modules
           deploymentModules = [ ./.github/deployment/config.nix ];
@@ -144,16 +149,16 @@
 
           # Shared Python libraries (the lib split)
           scooterLib = pkgs.callPackage ./lib/py/scooter-lib { };
-          scooterBrokerLib = pkgs.callPackage ./lib/py/scooter-broker-lib { inherit scooterLib; };
-          scooterWebhooksLib = pkgs.callPackage ./lib/py/scooter-webhooks-lib { inherit scooterLib scooterSchema; };
+          scooterBrokerLib = pkgs.callPackage ./lib/py/scooter-broker-lib { scooter-lib = scooterLib; };
+          scooterWebhooksLib = pkgs.callPackage ./lib/py/scooter-webhooks-lib { scooter-lib = scooterLib; scooter-schema = scooterSchema; };
 
           # System tasks: the Python runtime, the builder, and the built-in prompt task.
-          scooterTask = pkgs.callPackage ./lib/py/scooter-task { inherit scooterLib; };
-          mkScooterTask = pkgs.callPackage ./nix/scooter-task.nix { inherit scooterLib scooterTask; };
-          scooterPrompt = pkgs.callPackage ./pkgs/scooter-prompt { inherit mkScooterTask scooterLib scooterTask; };
+          scooterTask = pkgs.callPackage ./lib/py/scooter-task { scooter-lib = scooterLib; };
+          mkScooterTask = pkgs.callPackage ./nix/scooter-task.nix { scooter-lib = scooterLib; scooter-task = scooterTask; };
+          scooterPrompt = pkgs.callPackage ./pkgs/scooter-prompt { inherit mkScooterTask; scooter-lib = scooterLib; scooter-task = scooterTask; };
 
           # Scheduler (Python/FastAPI)
-          scheduler = pkgs.callPackage ./services/scheduler { inherit scooterLib; };
+          scheduler = pkgs.callPackage ./services/scheduler { scooter-lib = scooterLib; };
 
           # Scheduler OCI image.
 
@@ -164,7 +169,7 @@
 
           # Conversation router (Go)
           conversationRouter = pkgs.callPackage ./services/conversation-router { };
-          byocController = pkgs.callPackage ./services/byoc-controller { inherit scooterSchemaJs; };
+          byocController = pkgs.callPackage ./services/byoc-controller { scooter-schema-js = scooterSchemaJs; };
 
           # Warm /nix/store PVC pool controller (Python)
           warmStoreController = pkgs.callPackage ./services/warm-store-controller { };

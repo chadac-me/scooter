@@ -8,7 +8,7 @@
 buildNpmPackage {
   pname = "scooter-schema-js";
   version = "0.0.0";
-  src = ./.;
+  src = (import ../../../nix/package-source.nix { inherit lib; }).of ./.;
 
   npmDepsHash = "sha256-BA9sMAPR9jwYzdQ4vheK7a7ovwRTWmFNF2/C7+XnJOA=";
 

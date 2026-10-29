@@ -1,4 +1,4 @@
-{ lib, python3Packages, scooterLib, ... }:
+{ lib, python3Packages, scooter-lib, ... }:
 
 # Scheduler service (Python/FastAPI): fires cron-scheduled tasks by spawning a
 # fresh conversation per run, with a REST API to manage tasks.
@@ -6,13 +6,13 @@
 python3Packages.buildPythonApplication {
   pname = "agent-scheduler";
   version = "0.0.0";
-  src = ./.;
+  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
   pyproject = true;
 
   build-system = [ python3Packages.setuptools ];
 
   dependencies = with python3Packages; [
-    scooterLib # scooter_lib.client: spawn_conversation
+    scooter-lib # scooter_lib.client: spawn_conversation
     fastapi
     uvicorn
     httpx

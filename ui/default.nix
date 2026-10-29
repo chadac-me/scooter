@@ -18,7 +18,7 @@ buildNpmPackage {
   version = "0.0.0";
   src = fs.toSource {
     root = ../.;
-    fileset = fs.unions ([ ./. ] ++ contribUi);
+    fileset = fs.unions ([ (fs.difference ./. ((import ../nix/package-source.nix { inherit lib; }).moduleFiles ./.)) ] ++ contribUi);
   };
   sourceRoot = "source/ui";
 

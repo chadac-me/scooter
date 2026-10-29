@@ -10,7 +10,7 @@
 #   }
 #
 # `lib.getExe` on the result is a valid `scooter.systemTasks.<id>.command`.
-{ lib, python3, writeTextFile, scooterLib, scooterTask }:
+{ lib, python3, writeTextFile, scooter-lib, scooter-task }:
 
 { name, entry, src ? null, packages ? [ ], pythonDeps ? (_: [ ]) }:
 
@@ -18,7 +18,7 @@ let
   parts = lib.splitString ":" entry;
   module = builtins.head parts;
   attr = lib.last parts;
-  python = python3.withPackages (ps: [ scooterLib scooterTask ] ++ packages ++ pythonDeps ps);
+  python = python3.withPackages (ps: [ scooter-lib scooter-task ] ++ packages ++ pythonDeps ps);
 in
 assert lib.assertMsg (builtins.length parts == 2 && module != "" && attr != "")
   "mkScooterTask ${name}: entry must be \"<module>:<command>\", got \"${entry}\"";

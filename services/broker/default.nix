@@ -1,4 +1,4 @@
-{ lib, python3Packages, scooterSchema, scooterLib, scooterBrokerLib, contribs ? [ ], ... }:
+{ lib, python3Packages, scooter-schema, scooter-lib, scooter-broker-lib, contribs ? [ ], ... }:
 
 # The credential broker (Python/FastAPI) with extensible provider/transport modules.
 # `contribs` are provider packages injected as ordinary dependencies, which the
@@ -7,7 +7,7 @@
 python3Packages.buildPythonApplication {
   pname = "agent-broker";
   version = "0.0.0";
-  src = ./.;
+  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
   pyproject = true;
 
   build-system = [ python3Packages.setuptools ];
@@ -28,9 +28,9 @@ python3Packages.buildPythonApplication {
     fastmcp        # serves the agent-facing /mcp endpoint (broker/mcp/routes.py)
     h11            # HTTP/1.1 inside the forge proxy tunnel (broker/forge/proxy.py)
     cryptography   # the forge proxy CA and leaf certificates (broker/forge/ca.py)
-    scooterSchema  # generated SQLAlchemy models for the broker DB
-    scooterLib     # shared structured-logging convention
-    scooterBrokerLib # the extension surface a provider composes
+    scooter-schema  # generated SQLAlchemy models for the broker DB
+    scooter-lib     # shared structured-logging convention
+    scooter-broker-lib # the extension surface a provider composes
   ] ++ contribs;
 
   nativeCheckInputs = with python3Packages; [

@@ -7,7 +7,7 @@
 buildGoModule {
   pname = "conversation-router";
   version = "0.0.0";
-  src = ./.;
+  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
 
   vendorHash = "sha256-wHz3ypgaaUGIZXw9+mCBkYh9Oi+EH1VA0W//p2JicRw=";
 

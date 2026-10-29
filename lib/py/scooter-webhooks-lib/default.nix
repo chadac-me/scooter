@@ -1,4 +1,4 @@
-{ lib, python3Packages, scooterLib, scooterSchema, ... }:
+{ lib, python3Packages, scooter-lib, scooter-schema, ... }:
 
 # scooter_webhooks_lib: the webhooks extension surface (handler contract and the
 # spawn/identity/store building blocks) that a handler build-depends on instead of
@@ -7,14 +7,14 @@
 python3Packages.buildPythonPackage {
   pname = "scooter-webhooks-lib";
   version = "0.0.0";
-  src = ./.;
+  src = (import ../../../nix/package-source.nix { inherit lib; }).of ./.;
   pyproject = true;
 
   build-system = [ python3Packages.hatchling ];
 
   dependencies = with python3Packages; [
-    scooterLib
-    scooterSchema
+    scooter-lib
+    scooter-schema
     fastapi
     httpx
     pydantic
