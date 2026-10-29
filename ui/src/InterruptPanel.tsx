@@ -15,6 +15,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { hasId, type MaybeConversationId } from "./conversation.js";
 
 import { useConversationInterrupts } from "./RuntimeProvider.js";
@@ -344,9 +345,9 @@ export function InterruptList() {
 }
 
 /**
- * The detail view of the request the user opened, drawn over the thread in the central
- * column. Keeps the thread mounted underneath, so closing it loses no scroll or draft.
- * Mounted wherever the conversation area is, so it also prunes stale focus and drafts.
+ * The detail view of the request the user opened, drawn over the whole page so a large
+ * request has room. Keeps the app mounted underneath, so closing it loses no scroll or
+ * draft. Mounted wherever the conversation area is, so it also prunes stale focus and drafts.
  */
 export function ApprovalDetail() {
   const { interrupts: pending, conversationId, baseUrl } = useConversationInterrupts();
@@ -374,9 +375,10 @@ export function ApprovalDetail() {
   const owner = ownerOf(intr);
   const step = (d: number) => approvalFocus.open(pending[(index + d + pending.length) % pending.length].id);
 
-  return (
+  // Portalled so no panel clips it; dialogs (z-50) stay above.
+  return createPortal(
     <section
-      className="absolute inset-0 z-20 flex flex-col bg-background"
+      className="fixed inset-0 z-40 flex flex-col bg-background"
       data-testid="approval-detail"
       data-interrupt-id={intr.id}
       aria-label="Approval request details"
@@ -400,7 +402,7 @@ export function ApprovalDetail() {
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
+        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-8 py-6">
           {owner && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <SourceBadge source={owner} fallback={null} />
@@ -420,6 +422,7 @@ export function ApprovalDetail() {
           />
         </div>
       </div>
-    </section>
+    </section>,
+    document.body,
   );
 }

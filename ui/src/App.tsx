@@ -40,10 +40,10 @@ export function ConversationArea() {
   const { starting } = useSandboxStatus();
   if (starting) return <StartingPodLanding />;
   return (
-    <div className="relative h-full">
+    <>
       <GuardedThread />
       <ApprovalDetail />
-    </div>
+    </>
   );
 }
 
