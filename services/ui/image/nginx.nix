@@ -181,7 +181,7 @@ let
     AGENT_HOST_SERVER="$agent_host_authority"
     AGENT_HOST_PROXY="$agent_host_scheme://agent_host"
     export AGENT_HOST_SERVER AGENT_HOST_PROXY
-    # Where nginx forwards /s/.
+    # Where nginx forwards the contribs' broker public paths.
     : "''${BROKER_URL:=http://agent-broker:8080}"
     # Decide telemetry before the placeholder default below is applied.
     if [ -n "''${OTEL_COLLECTOR_URL:-}" ]; then TELEMETRY_ENABLED=true; else TELEMETRY_ENABLED=false; fi

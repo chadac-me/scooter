@@ -1688,9 +1688,8 @@ in
                   # user through /contrib-api, name -> broker prefix.
                   { name = "CONTRIB_USER_API_JSON"; value = builtins.toJSON contribUserApi; }
                 ++ lib.optionals cfg.broker.enable [
-                  # BROKER_URL and the projected broker token for the approve/deny relay
-                  # and the shares/links queries the agent-host makes on a conversation's
-                  # behalf.
+                  # BROKER_URL and the projected broker token for the approve/deny and
+                  # /contrib-api relays, and the links queries the agent-host makes.
                   { name = "BROKER_URL"; value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080"; }
                   { name = "BROKER_TOKEN_PATH"; value = "/var/run/secrets/broker/token"; }
                 ] ++ lib.optionals overlayCmNeeded [
@@ -1783,8 +1782,8 @@ in
                   # Per-model price table -> cost derivation (AGENT_PRICING_FILE).
                   { name = "pricing"; mountPath = "/etc/agent-sandbox/pricing"; readOnly = true; }
                 ++ lib.optional cfg.broker.enable
-                  # The agent-host's own broker token for the approve/deny relay and the
-                  # shares/links queries it makes on a conversation's behalf.
+                  # The agent-host's own broker token for the approve/deny and /contrib-api
+                  # relays, and the links queries it makes.
                   { name = "broker-token"; mountPath = "/var/run/secrets/broker"; readOnly = true; }
                 ++ [
                   { name = "conversation-router-token"; mountPath = "/var/run/secrets/conversation-router"; readOnly = true; }

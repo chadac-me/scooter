@@ -1,8 +1,8 @@
 { pkgs, n2c, ui, contribManifest ? null }:
 
 # OCI image for the conversation UI: nginx serving the static assistant-ui build
-# and reverse-proxying the agent-host API and the broker's /s/ shares on the same
-# origin. The config (image/nginx.nix) is templated from the env at container start.
+# and reverse-proxying the agent-host API and the contribs' broker public paths
+# on the same origin. The config (image/nginx.nix) is templated from the env at container start.
 
 let
   # Runtime-writable dirs plus the passwd entries nginx looks up on start.
@@ -40,7 +40,7 @@ let
       Entrypoint = [ "${entrypoint}" ];
       Env = [
         "AGENT_HOST_URL=http://agent-host:8080"
-        # The /s/ proxy target.
+        # Where the contribs' broker public paths are proxied.
         "BROKER_URL=http://agent-broker:8080"
         # Unset means /telemetry/ 204s and discards.
         "OTEL_COLLECTOR_URL="

@@ -1,7 +1,7 @@
 /**
  * The agent-host HTTP client: an @ag-ui/client HttpAgent against POST /agui plus
  * typed fetch helpers for the management API (conversations, models, links, web
- * services, sandbox sizing, scheduled tasks, shares, remote agents).
+ * services, sandbox sizing, scheduled tasks, remote agents).
  */
 
 import { HttpAgent } from "@ag-ui/client";
