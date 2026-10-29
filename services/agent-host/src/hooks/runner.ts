@@ -1,7 +1,7 @@
 /** Runs a conversation's hooks in its sandbox, per Claude Code's protocol. */
 
 import type { ExecBackend } from "../types.js";
-import { HOOK_EVENTS, type HookDef, type HookEvent, type HookOutcome, type HookRunRecord, type HookRunner } from "./types.js";
+import { HOOK_CONDITIONS, HOOK_EVENTS, type HookCondition, type HookDef, type HookEvent, type HookOutcome, type HookRunRecord, type HookRunner } from "./types.js";
 
 /** Hook output reaches the model verbatim, so it is capped. */
 const MAX_TEXT = 8_000;
@@ -25,7 +25,8 @@ export function parseHooks(raw: string | undefined, warn?: (msg: string) => void
       !HOOK_EVENTS.includes(r.event as HookEvent) ||
       typeof r.command !== "string" ||
       !r.command.trim() ||
-      !validMatcher(r.matcher ?? "")
+      !validMatcher(r.matcher ?? "") ||
+      (r.when != null && !HOOK_CONDITIONS.includes(r.when as HookCondition))
     ) {
       warn?.(`AGENT_HOOKS_JSON: dropping malformed hook ${JSON.stringify(r?.id ?? null)}`);
       continue;
@@ -39,6 +40,7 @@ export function parseHooks(raw: string | undefined, warn?: (msg: string) => void
       failClosed: r.failClosed === true,
       userCanDisable: r.userCanDisable === true,
       description: typeof r.description === "string" ? r.description : "",
+      ...(r.when != null ? { when: r.when as HookCondition } : {}),
     });
   }
   return out;
@@ -58,6 +60,13 @@ export function matches(matcher: string, target: string | undefined): boolean {
   if (matcher === "" || matcher === "*") return true;
   if (target === undefined) return false;
   return new RegExp(`^(?:${matcher})$`).test(target);
+}
+
+/** Whether a hook's precondition is met by the event's `scooter` facts. */
+export function holds(when: HookCondition | undefined, input: Record<string, unknown>): boolean {
+  if (when === undefined) return true;
+  const facts = (input.scooter ?? {}) as Record<string, unknown>;
+  return facts[when] === true;
 }
 
 const clip = (s: string) => (s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT)}\n…[truncated]` : s);
@@ -196,7 +205,7 @@ export function createHookRunner(deps: HookRunnerDeps): HookRunner {
       return (await enabledHooks()).some((h) => h.event === event);
     },
     async run(event, input, target, signal) {
-      const hooks = (await enabledHooks()).filter((h) => h.event === event && matches(h.matcher, target));
+      const hooks = (await enabledHooks()).filter((h) => h.event === event && matches(h.matcher, target) && holds(h.when, input));
       if (hooks.length === 0) return EMPTY;
       const payload = JSON.stringify({ cwd, hook_event_name: event, ...input });
       const answers = await Promise.all(hooks.map((h) => runOne(h, payload, signal)));

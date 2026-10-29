@@ -199,39 +199,22 @@ describe("bridge conversation hooks", () => {
   });
 });
 
-describe("bridge title check", () => {
-  const noHooks = () => scriptedHooks(() => undefined).runner;
-
-  it("sends an agent stopping in an untitled conversation back once to name it", async () => {
-    const agent = scriptedAgent([{ text: "Done." }, { text: "Still done." }, { text: "Again." }]);
-    const { bridge, events } = makeBridge(agent.client, noHooks(), { untitled: () => true });
+describe("bridge untitled fact", () => {
+  const stopFacts = async (untitled: (() => boolean) | undefined, text = "Done.") => {
+    const agent = scriptedAgent([{ text }]);
+    const hooks = scriptedHooks(() => undefined);
+    const { bridge } = makeBridge(agent.client, hooks.runner, untitled ? { untitled } : {});
     await bridge.prompt({ threadId: "t", text: "fix it" });
-    expect(agent.prompts).toHaveLength(2);
-    expect(agent.prompts[1]).toContain("set_conversation_title");
-    expect(finishes(events)).toHaveLength(1);
-  });
+    return (hooks.calls.find((c) => c.event === "Stop")!.input.scooter as Record<string, unknown>).untitled;
+  };
 
-  it("leaves a titled conversation alone", async () => {
-    const agent = scriptedAgent([{ text: "Done." }]);
-    const { bridge } = makeBridge(agent.client, noHooks(), { untitled: () => false });
-    await bridge.prompt({ threadId: "t", text: "fix it" });
-    expect(agent.prompts).toHaveLength(1);
+  it("tells Stop hooks whether the conversation is unnamed", async () => {
+    expect(await stopFacts(() => true)).toBe(true);
+    expect(await stopFacts(() => false)).toBe(false);
+    expect(await stopFacts(undefined)).toBe(false);
   });
 
   it("counts a <title> marker whose save is still in flight as named", async () => {
-    const agent = scriptedAgent([{ text: "<title>Fix the thing</title>Done." }]);
-    const { bridge } = makeBridge(agent.client, noHooks(), { untitled: () => true });
-    await bridge.prompt({ threadId: "t", text: "fix it" });
-    expect(agent.prompts).toHaveLength(1);
-  });
-
-  it("joins a Stop hook's block and the title nudge into one continuation", async () => {
-    const agent = scriptedAgent([{ text: "Done." }, { text: "Ok." }]);
-    const hooks = scriptedHooks((event, input) => (event === "Stop" && !input.stop_hook_active ? { block: "run the tests" } : undefined));
-    const { bridge } = makeBridge(agent.client, hooks.runner, { untitled: () => true });
-    await bridge.prompt({ threadId: "t", text: "fix it" });
-    expect(agent.prompts).toHaveLength(2);
-    expect(agent.prompts[1]).toContain("run the tests");
-    expect(agent.prompts[1]).toContain("set_conversation_title");
+    expect(await stopFacts(() => true, "<title>Fix the thing</title>Done.")).toBe(false);
   });
 });

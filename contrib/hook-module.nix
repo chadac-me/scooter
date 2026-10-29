@@ -44,6 +44,15 @@ in
       '';
     };
 
+    when = mkOption {
+      type = types.nullOr (types.enum [ "untitled" ]);
+      default = null;
+      description = ''
+        A precondition agent-host checks itself before running the hook, so other events
+        cost no sandbox exec. `untitled`: the conversation has no title yet (Stop only).
+      '';
+    };
+
     timeout = mkOption {
       type = types.ints.positive;
       default = 30;

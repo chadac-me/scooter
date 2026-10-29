@@ -174,3 +174,24 @@ describe("createHookRunner", () => {
     expect(calls).toHaveLength(1);
   });
 });
+
+describe("hook preconditions (when)", () => {
+  it("skips the exec unless the event's scooter facts satisfy it", async () => {
+    const { exec, calls } = fakeExec(() => ok("", 2, "name it"));
+    const runner = createHookRunner({ exec, hooks: [hook({ when: "untitled" })] });
+    expect((await runner.run("Stop", { scooter: { untitled: false } })).block).toBeUndefined();
+    expect(calls).toHaveLength(0);
+    expect((await runner.run("Stop", { scooter: { untitled: true } })).block).toBe("name it");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("parses known conditions and drops rows with unknown ones", () => {
+    const out = parseHooks(
+      JSON.stringify([
+        { id: "a", event: "Stop", command: "x", when: "untitled" },
+        { id: "b", event: "Stop", command: "x", when: "sunny" },
+      ]),
+    );
+    expect(out.map((h) => [h.id, h.when])).toEqual([["a", "untitled"]]);
+  });
+});

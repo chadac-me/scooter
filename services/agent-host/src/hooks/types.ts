@@ -3,6 +3,10 @@
 export const HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
 
+/** In-process preconditions, so a rare hook costs no sandbox exec. */
+export const HOOK_CONDITIONS = ["untitled"] as const;
+export type HookCondition = (typeof HOOK_CONDITIONS)[number];
+
 /** One row of AGENT_HOOKS_JSON. */
 export interface HookDef {
   /** Stable: user opt-outs are keyed by it. */
@@ -16,6 +20,8 @@ export interface HookDef {
   /** A crash or timeout blocks instead of being skipped. */
   failClosed: boolean;
   userCanDisable: boolean;
+  /** Checked in-process; the hook runs only while it holds. */
+  when?: HookCondition;
   description: string;
 }
 

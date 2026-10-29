@@ -188,7 +188,7 @@ let
         inherit id;
         inherit (h) event matcher command failClosed userCanDisable description;
         timeoutSec = h.timeout;
-      };
+      } // lib.optionalAttrs (h.when != null) { inherit (h) when; };
       enabledRows = prefix: hooks:
         lib.mapAttrsToList (id: row "${prefix}${id}") (lib.filterAttrs (_: h: h.enable) hooks);
     in
@@ -1273,6 +1273,20 @@ in
   };
 
   config = {
+    # Asks an agent ending a turn in an unnamed conversation to name it.
+    scooter.agent.hooks.name-conversation = {
+      event = lib.mkDefault "Stop";
+      when = lib.mkDefault "untitled";
+      userCanDisable = lib.mkDefault true;
+      description = lib.mkDefault "Ask the agent to title a conversation it left unnamed.";
+      # Once per turn, so it cannot loop with an agent that ignores it.
+      command = lib.mkDefault ''
+        grep -q '"stop_hook_active":true' && exit 0
+        echo "This conversation has no title yet. Call set_conversation_title with a concise 3-6 word title for the task, then end your turn. Do not mention this to the user." >&2
+        exit 2
+      '';
+    };
+
     # No package: the unfree claude CLI would force allowUnfree.
     scooter.images.remote-agent = { };
 

@@ -431,7 +431,7 @@ export interface BridgeDeps {
   maxStopBlocks?: number;
   /** The spawning conversation when this is a subagent. */
   parentId?: () => string | undefined;
-  /** Whether the conversation is still unnamed; read on every stop, so keep it in-memory. */
+  /** Whether the conversation is unnamed, for `when: untitled` hooks; read each stop. */
   untitled?: () => boolean;
 }
 
@@ -700,8 +700,6 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     hookFeedback: string[];
     // Awaited before the turn may end.
     pendingHooks: Promise<unknown>[];
-    // The agent was already told to name the conversation this run.
-    titleNudged?: boolean;
     toolInfo: Map<string, { name: string; input: unknown }>;
     source?: string;
   }
@@ -943,45 +941,30 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
 
   // The prompt sending a stopping agent back, or undefined.
   const stopContinuation = async (st: RunState, stopBlocks: number): Promise<string | undefined> => {
+    if (!deps.hooks) return undefined;
     const feedback = st.hookFeedback.splice(0);
     // A waiting message outranks a hook's continuation.
     if (queue.length > 0) return undefined;
-    const nudge = titleNudge(st);
     let reason: string | undefined;
-    if (deps.hooks && (await deps.hooks.has("Stop"))) {
+    if (await deps.hooks.has("Stop")) {
       const out = await fireHooks(
         st,
         "Stop",
         { stop_hook_active: stopBlocks > 0, last_assistant_message: st.lastText },
         undefined,
-        { stop_blocks: stopBlocks },
+        { stop_blocks: stopBlocks, untitled: !markedTitle && deps.untitled?.() === true },
       );
       if (out.stop) return undefined;
       reason = out.block;
     }
     const parts = [...feedback, ...(reason ? [reason] : [])];
-    if (parts.length === 0 && !nudge) return undefined;
+    if (parts.length === 0) return undefined;
     if (stopBlocks >= maxStopBlocks) {
       log.warn("hooks kept the agent going past the limit; letting it stop", { run_id: st.runId, limit: maxStopBlocks });
       emitHookNote(`Hooks sent the agent back ${maxStopBlocks} times this turn; letting it stop.`);
       return undefined;
     }
-    const messages = [
-      ...(parts.length ? [decorateSystemMessage("hook", parts.join("\n\n"))] : []),
-      ...(nudge ? [decorateSystemMessage("title check", nudge)] : []),
-    ];
-    return messages.join("\n\n");
-  };
-
-  // Once per run, ask an agent stopping in an unnamed conversation to name it.
-  const titleNudge = (st: RunState): string | undefined => {
-    if (st.titleNudged || markedTitle || !deps.untitled?.()) return undefined;
-    st.titleNudged = true;
-    log.info("conversation still untitled at stop; asking the agent to name it", { run_id: st.runId });
-    return (
-      "This conversation has no title yet. Call the set_conversation_title tool now with a " +
-      "concise 3–6 word title for the task, then end your turn. Do not mention this to the user."
-    );
+    return decorateSystemMessage("hook", parts.join("\n\n"));
   };
 
   const runPrompt = async (
