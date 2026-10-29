@@ -82,6 +82,8 @@ agent-broker shares/<uuid> -X DELETE     # remove it + all versions
 - Allowed types: `.html .css .js .json .csv .txt .md .svg .png .jpg .jpeg .gif
   .webp .ico .woff .woff2 .map .xml .wasm`. No server-side execution — pure static.
 - Limits (placeholder): 10 MB/file, 100 MB/bundle, 200 files.
+- HTML pages without a `<link rel="icon">` are served with the Scooter favicon;
+  add your own link to override it.
 
 ## Interactive graphs with Python
 
