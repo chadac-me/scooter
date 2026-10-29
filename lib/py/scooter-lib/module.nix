@@ -1,4 +1,4 @@
-{ config, lib, scooterPkgs, ... }:
+{ config, lib, buildPkgs, ... }:
 {
-  scooter.packages.scooter-lib = lib.mkDefault (scooterPkgs.callPackage ./. { });
+  scooter.packages.scooter-lib = lib.mkDefault (buildPkgs.callPackage ./. { });
 }

@@ -1,4 +1,4 @@
-{ config, lib, scooterPkgs, ... }:
+{ config, lib, buildPkgs, ... }:
 
 # The scheduler image carries the closure of every store path a task run can touch:
 # the contrib registry's tasks and scooter-prompt, unioned with this deployment's
@@ -19,8 +19,8 @@ let
 
   registryRefs = lib.concatLists (lib.mapAttrsToList
     (_: tasks: lib.concatLists (lib.mapAttrsToList (_: t: storeRefs (lib.getExe t.package) t.args) tasks))
-    cfg.contribBuild.tasks)
-    ++ [ (lib.getExe scooterPkgs.scooter-prompt) ];
+    cfg.contribs.tasks)
+    ++ [ (lib.getExe buildPkgs.scooter-prompt) ];
 
   enabledContribs = lib.filterAttrs (_: c: c.enable) config.contribs;
   deploymentTasks = buildContribTasks enabledContribs;
@@ -28,15 +28,15 @@ let
     (lib.filterAttrs (_: t: t.enable) config.scooter.systemTasks));
 in
 {
-  scooter.packages.scooter-scheduler = lib.mkDefault (scooterPkgs.callPackage ./. { });
+  scooter.packages.scooter-scheduler = lib.mkDefault (buildPkgs.callPackage ./. { });
 
   scooter.images.agent-scheduler = {
     package = lib.mkDefault (import ./image.nix {
       inherit lib;
-      pkgs = scooterPkgs;
+      pkgs = buildPkgs;
       inherit (cfg) n2c imageLayers;
-      scheduler = scooterPkgs.scooter-scheduler;
-      scooterPrompt = scooterPkgs.scooter-prompt;
+      scheduler = buildPkgs.scooter-scheduler;
+      scooterPrompt = buildPkgs.scooter-prompt;
       refs = registryRefs ++ deploymentRefs;
     });
     attr = "scheduler-image";

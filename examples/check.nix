@@ -1217,7 +1217,7 @@ let
   forkedLib = evalPlatform {
     module = { config, ... }: {
       imports = [ ./kubenix-config.nix ];
-      scooter.packages.scooter-lib = config.scooter.config.pkgs.python3Packages.toolz;
+      scooter.packages.scooter-lib = config.scooter.config.buildPkgs.python3Packages.toolz;
     };
   };
   imageDrv = p: n: p.config.scooter.images.${n}.package.drvPath;

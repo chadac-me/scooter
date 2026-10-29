@@ -1,5 +1,5 @@
-{ config, lib, scooterPkgs, ... }:
+{ config, lib, buildPkgs, ... }:
 {
   # The broker CLI the sandbox's commands call.
-  scooter.packages.scooter-broker-tools = lib.mkDefault (scooterPkgs.callPackage ./. { }).agent-broker;
+  scooter.packages.scooter-broker-tools = lib.mkDefault (buildPkgs.callPackage ./. { }).agent-broker;
 }

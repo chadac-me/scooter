@@ -1,6 +1,6 @@
 # Every first-party package, built in the platform eval.
 # Built here so a deployment's config reaches the builds.
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
 
 let
   inherit (lib) mkOption types literalExpression;
@@ -34,15 +34,18 @@ in
     ../contrib/module.nix
   ] ++ contribPackageModules;
 
-  # kubenix's `pkgs` is the rendering machine's; packages build for the cluster's.
-  config._module.args.scooterPkgs = cfg.pkgs;
+  # Render and build machines can differ, so no plain `pkgs`.
+  config._module.args = {
+    kubePkgs = pkgs;
+    buildPkgs = cfg.buildPkgs;
+  };
 
   options.scooter.packages = mkOption {
     type = types.lazyAttrsOf types.package;
     default = { };
     description = ''
       Every first-party package, by its `scooter-*` name. Each is also in
-      `scooter.config.pkgs`, so one package's dependencies resolve to the
+      `scooter.config.buildPkgs`, so one package's dependencies resolve to the
       others: setting `scooter.packages.scooter-lib = myFork;` rebuilds
       everything that uses it, images included.
     '';
@@ -53,7 +56,7 @@ in
     description = "What shapes `scooter.packages`: the package set they build from, and helpers.";
     type = types.submodule {
       options = {
-        system = mkOption {
+        buildSystem = mkOption {
           type = types.str;
           default = "x86_64-linux";
           description = ''
@@ -69,10 +72,10 @@ in
           description = "Scooter's flake inputs: nixpkgs, nix2container, nix-stubs, uv-nix.";
         };
 
-        pkgs = mkOption {
+        buildPkgs = mkOption {
           type = types.raw;
           default = import cfg.inputs.nixpkgs {
-            inherit (cfg) system;
+            system = cfg.buildSystem;
             overlays = [ libOverlay mcpOverlay (_: _: config.scooter.packages) ];
           };
           defaultText = literalExpression "Scooter's nixpkgs, with scooter.packages overlaid";
@@ -80,13 +83,13 @@ in
             The package set every package builds from. It has `scooter.packages`
             overlaid, so `callPackage` resolves them by name. To build on another
             nixpkgs, overlay `config.scooter.packages` onto it the same way.
-            Modules receive it as the `scooterPkgs` argument.
+            Modules receive it as `buildPkgs`; `kubePkgs` is the rendering machine's set.
           '';
         };
 
         n2c = mkOption {
           type = types.raw;
-          default = cfg.inputs.nix2container.packages.${cfg.system}.nix2container;
+          default = cfg.inputs.nix2container.packages.${cfg.buildSystem}.nix2container;
           defaultText = literalExpression "nix2container for this system";
           internal = true;
           description = "The nix2container builder the images use.";
@@ -94,7 +97,7 @@ in
 
         imageLayers = mkOption {
           type = types.raw;
-          default = import ../pkgs/image-layers.nix { inherit lib; inherit (cfg) pkgs n2c; };
+          default = import ../pkgs/image-layers.nix { inherit lib; inherit (cfg) n2c; pkgs = cfg.buildPkgs; };
           defaultText = literalExpression "pkgs/image-layers.nix";
           internal = true;
           description = "Runtime layers the service images share.";
@@ -114,7 +117,7 @@ in
           description = "Packages a Python system task; see nix/scooter-task.nix.";
         };
 
-        contribBuild = mkOption {
+        contribs = mkOption {
           type = types.raw;
           readOnly = true;
           internal = true;
@@ -123,7 +126,7 @@ in
 
         sandboxPkgs = mkOption {
           type = types.raw;
-          defaultText = literalExpression "pkgs's nixpkgs with the nix-stubs overlay";
+          defaultText = literalExpression "buildPkgs's nixpkgs with the nix-stubs overlay";
           description = "The package set the sandbox image builds from.";
         };
 

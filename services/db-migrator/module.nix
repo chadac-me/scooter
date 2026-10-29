@@ -1,4 +1,4 @@
-{ config, lib, scooterPkgs, ... }:
+{ config, lib, buildPkgs, ... }:
 
 let
   cfg = config.scooter.config;
@@ -9,8 +9,8 @@ in
     package = lib.mkDefault (import ./image.nix {
       inherit lib;
       inherit (cfg) n2c;
-      pkgs = scooterPkgs;
-      contribSqlDirs = cfg.contribBuild.sqlDirs;
+      pkgs = buildPkgs;
+      contribSqlDirs = cfg.contribs.sqlDirs;
     });
     attr = "db-migrator-image";
     refKey = "dbMigrator";

@@ -1,4 +1,4 @@
-{ config, lib, scooterPkgs, ... }:
+{ config, lib, buildPkgs, ... }:
 
 let
   cfg = config.scooter.config;
@@ -6,15 +6,15 @@ in
 {
   scooter.packages = {
     # Without contribs: what the contribs build and test against.
-    scooter-broker-base = lib.mkDefault (scooterPkgs.callPackage ./. { });
-    scooter-broker = lib.mkDefault (scooterPkgs.callPackage ./. { contribs = cfg.contribBuild.broker; });
+    scooter-broker-base = lib.mkDefault (buildPkgs.callPackage ./. { });
+    scooter-broker = lib.mkDefault (buildPkgs.callPackage ./. { contribs = cfg.contribs.broker; });
   };
 
   scooter.images.agent-broker = {
     package = lib.mkDefault (import ./image.nix {
-      pkgs = scooterPkgs;
+      pkgs = buildPkgs;
       inherit (cfg) n2c imageLayers;
-      broker = scooterPkgs.scooter-broker;
+      broker = buildPkgs.scooter-broker;
     });
     attr = "broker-image";
     refKey = "broker";

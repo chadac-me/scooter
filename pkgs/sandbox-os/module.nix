@@ -2,7 +2,8 @@
 
 let
   cfg = config.scooter.config;
-  inherit (cfg) inputs system;
+  inherit (cfg) inputs;
+  system = cfg.buildSystem;
   nix-stubs = inputs.nix-stubs.packages.${system}.nix-stubs;
   # stubs.nix's arguments beyond `pkgs`, also vendored for the in-pod re-converge.
   stubArgs = { uvNixSrc = inputs.uv-nix.outPath; };
@@ -14,7 +15,7 @@ in
       lockLib = inputs.nix-stubs.lib;
       flakeLock = ../../flake.lock;
     };
-    sandboxPkgs = lib.mkDefault (import cfg.pkgs.path { inherit system; overlays = [ cfg.stubOverlay ]; });
+    sandboxPkgs = lib.mkDefault (import cfg.buildPkgs.path { inherit system; overlays = [ cfg.stubOverlay ]; });
     nixStubs = {
       src = inputs.nix-stubs;
       package = nix-stubs;

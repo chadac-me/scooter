@@ -41,9 +41,9 @@
       platformModule = { imports = [ ./modules/platform.nix inputsModule ]; };
 
       # The platform eval, which owns every package and image.
-      evalPlatformWith = { system, modules }: kubenix.evalModules.${system} {
+      evalPlatformWith = { system, buildSystem ? "x86_64-linux", modules }: kubenix.evalModules.${system} {
         module = { kubenix, ... }: {
-          imports = [ platformModule ] ++ modules;
+          imports = [ platformModule { scooter.config.buildSystem = buildSystem; } ] ++ modules;
           kubenix.project = "agent-sandbox";
           kubernetes.version = "1.31";
         };
@@ -58,13 +58,13 @@
       perSystem = { system, lib, ... }:
         let
           # Packages build for the system they're listed under.
-          evalPlatform = { module }: evalPlatformWith { inherit system; modules = [ module native ]; };
-          native = { scooter.config.system = system; };
+          evalPlatform = { module }: evalPlatformWith { inherit system; buildSystem = system; modules = [ module ]; };
 
           # `contribs` is at the module root, not under `scooter`.
           mkPlatformWith = extraModules: full: evalPlatformWith {
             inherit system;
-            modules = extraModules ++ [ native {
+            buildSystem = system;
+            modules = extraModules ++ [ {
               contribs = full.contribs or { };
               scooter = builtins.removeAttrs full [ "contribs" ];
             }];
@@ -75,12 +75,13 @@
           # This repo's own build: the shipped contribs.
           build = (mkPlatform { }).config.scooter;
           p = build.packages;
-          inherit (build.config) pkgs contribBuild;
+          inherit (build.config) contribs;
+          pkgs = build.config.buildPkgs;
           builtImages = build.images;
           shippedContribs = (import ./.github/deployment/config.nix).contribs;
 
           # The set CI tests: adds the contribs shipping nowhere.
-          contribsWithExamples = contribBuild.withModules [{
+          contribsWithExamples = contribs.withModules [{
             contribs.echo.enable = lib.mkForce true;
           }];
 
@@ -341,25 +342,25 @@
             # nix build .#contrib-echo / .#contrib-echo-webhooks -> the reference contrib
             contrib-echo = contribsWithExamples.packages.echo.broker;
             contrib-echo-webhooks = contribsWithExamples.packages.echo.webhooks;
-            contrib-airtable = contribBuild.packages.airtable.broker;
-            contrib-brave = contribBuild.packages.brave.broker;
-            contrib-datadog = contribBuild.packages.datadog.broker;
-            contrib-duckduckgo = contribBuild.packages.duckduckgo.broker;
-            contrib-github = contribBuild.packages.github.broker;
-            contrib-github-webhooks = contribBuild.packages.github.webhooks;
-            contrib-gitlab = contribBuild.packages.gitlab.broker;
-            contrib-google = contribBuild.packages.google.broker;
-            contrib-gitlab-webhooks = contribBuild.packages.gitlab.webhooks;
-            contrib-grafana = contribBuild.packages.grafana.broker;
-            contrib-jira = contribBuild.packages.jira.broker;
-            contrib-jira-webhooks = contribBuild.packages.jira.webhooks;
-            contrib-kagi = contribBuild.packages.kagi.broker;
-            contrib-slack = contribBuild.packages.slack.broker;
-            contrib-slack-webhooks = contribBuild.packages.slack.webhooks;
+            contrib-airtable = contribs.packages.airtable.broker;
+            contrib-brave = contribs.packages.brave.broker;
+            contrib-datadog = contribs.packages.datadog.broker;
+            contrib-duckduckgo = contribs.packages.duckduckgo.broker;
+            contrib-github = contribs.packages.github.broker;
+            contrib-github-webhooks = contribs.packages.github.webhooks;
+            contrib-gitlab = contribs.packages.gitlab.broker;
+            contrib-google = contribs.packages.google.broker;
+            contrib-gitlab-webhooks = contribs.packages.gitlab.webhooks;
+            contrib-grafana = contribs.packages.grafana.broker;
+            contrib-jira = contribs.packages.jira.broker;
+            contrib-jira-webhooks = contribs.packages.jira.webhooks;
+            contrib-kagi = contribs.packages.kagi.broker;
+            contrib-slack = contribs.packages.slack.broker;
+            contrib-slack-webhooks = contribs.packages.slack.webhooks;
             # files' broker half is the annotation store; its build carries the whole
             # suite, the sandbox viewer's stdlib tests included, as check inputs.
-            contrib-files = contribBuild.packages.files.broker;
-            contrib-personalization = contribBuild.packages.personalization.broker;
+            contrib-files = contribs.packages.files.broker;
+            contrib-personalization = contribs.packages.personalization.broker;
 
             # nix build .#contribs-all -> every variant of every contrib
             contribs-all = contribsAll;
@@ -444,7 +445,7 @@
             ui-image = builtImages.agent-sandbox-ui.package;
 
             # nix build .#contrib-ui-manifest -> the contribs' UI metadata as one manifest.
-            contrib-ui-manifest = contribBuild.uiManifest;
+            contrib-ui-manifest = contribs.uiManifest;
 
             # nix build .#platform-manifests -> multi-doc YAML for kubectl apply on the e2e/local cluster.
             platform-manifests = platform.config.kubernetes.resultYAML;
@@ -493,23 +494,23 @@
             contribs-all = contribsAll;
             contrib-echo = contribsWithExamples.packages.echo.broker;
             contrib-echo-webhooks = contribsWithExamples.packages.echo.webhooks;
-            contrib-airtable = contribBuild.packages.airtable.broker;
-            contrib-brave = contribBuild.packages.brave.broker;
-            contrib-datadog = contribBuild.packages.datadog.broker;
-            contrib-duckduckgo = contribBuild.packages.duckduckgo.broker;
-            contrib-github = contribBuild.packages.github.broker;
-            contrib-github-webhooks = contribBuild.packages.github.webhooks;
-            contrib-gitlab = contribBuild.packages.gitlab.broker;
-            contrib-google = contribBuild.packages.google.broker;
-            contrib-gitlab-webhooks = contribBuild.packages.gitlab.webhooks;
-            contrib-grafana = contribBuild.packages.grafana.broker;
-            contrib-jira = contribBuild.packages.jira.broker;
-            contrib-jira-webhooks = contribBuild.packages.jira.webhooks;
-            contrib-kagi = contribBuild.packages.kagi.broker;
-            contrib-slack = contribBuild.packages.slack.broker;
-            contrib-slack-webhooks = contribBuild.packages.slack.webhooks;
-            contrib-files = contribBuild.packages.files.broker;
-            contrib-personalization = contribBuild.packages.personalization.broker;
+            contrib-airtable = contribs.packages.airtable.broker;
+            contrib-brave = contribs.packages.brave.broker;
+            contrib-datadog = contribs.packages.datadog.broker;
+            contrib-duckduckgo = contribs.packages.duckduckgo.broker;
+            contrib-github = contribs.packages.github.broker;
+            contrib-github-webhooks = contribs.packages.github.webhooks;
+            contrib-gitlab = contribs.packages.gitlab.broker;
+            contrib-google = contribs.packages.google.broker;
+            contrib-gitlab-webhooks = contribs.packages.gitlab.webhooks;
+            contrib-grafana = contribs.packages.grafana.broker;
+            contrib-jira = contribs.packages.jira.broker;
+            contrib-jira-webhooks = contribs.packages.jira.webhooks;
+            contrib-kagi = contribs.packages.kagi.broker;
+            contrib-slack = contribs.packages.slack.broker;
+            contrib-slack-webhooks = contribs.packages.slack.webhooks;
+            contrib-files = contribs.packages.files.broker;
+            contrib-personalization = contribs.packages.personalization.broker;
             # Every shipped handler and provider imports in its service's runtime env.
             webhooks-entrypoints = import ./nix/check-entrypoints.nix {
               inherit pkgs; name = "webhooks-entrypoints"; package = p.scooter-webhooks; bin = "agent-webhooks"; group = "scooter_webhooks.handlers";
@@ -539,9 +540,11 @@
         lib.scooterSkills = scooterSkills;
 
         # The entry point for a deployment: render the platform from your own config module.
-        #   (scooter.lib.evalPlatform { system = "x86_64-linux"; module = ./scooter.nix; })
+        #   (scooter.lib.evalPlatform { system = "aarch64-darwin"; module = ./scooter.nix; })
         #     .config.kubernetes.result
-        lib.evalPlatform = { system, module }: evalPlatformWith { inherit system; modules = [ module ]; };
+        # `system` renders the manifests; `buildSystem` (x86_64-linux) builds the images.
+        lib.evalPlatform = { system, buildSystem ? "x86_64-linux", module }:
+          evalPlatformWith { inherit system buildSystem; modules = [ module ]; };
 
         # kubenix modules
         kubenixModules.scooter = ./modules;
