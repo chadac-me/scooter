@@ -293,3 +293,23 @@ describe("adopting a conversation heals a fenced hand-off", () => {
     expect(dump().length).toBe(before);
   });
 });
+
+describe("closing older orphans at the tail does not hide the live run", () => {
+  // What reconcileDanglingRun appends: interrupted terminals for older orphans, after the live run.
+  const closed = (runId: string) => ev({ type: "RUN_FINISHED", threadId: "c", runId, interrupted: true });
+
+  it("the latest open run stays dangling after its predecessors are closed @proves", () => {
+    const log = [...truncatedRun("old1"), ...truncatedRun("old2"), ...truncatedRun("live"), closed("old1"), closed("old2")];
+    expect(danglingRunInfo(log, SELF)).toMatchObject({ runId: "live" });
+  });
+
+  it("a terminal for the run itself still settles it", () => {
+    const log = [...truncatedRun("live"), ev({ type: "RUN_FINISHED", threadId: "c", runId: "live" })];
+    expect(danglingRunInfo(log, SELF)).toBeNull();
+  });
+
+  it("a RUN_ERROR without a runId still ends the latest run", () => {
+    const log = [...truncatedRun("live"), ev({ type: "RUN_ERROR", message: "remote agent disconnected" })];
+    expect(danglingRunInfo(log, SELF)).toBeNull();
+  });
+});
