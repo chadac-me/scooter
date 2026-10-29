@@ -7,7 +7,7 @@ import json
 
 import httpx
 import pytest
-from conftest import create_schema, sqlite_config
+from scooter_broker_lib.testing import create_schema, sqlite_config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from scooter_broker_lib.mcp import ToolContext

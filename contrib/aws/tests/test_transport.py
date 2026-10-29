@@ -27,7 +27,7 @@ async def authenticate() -> Identity:  # pragma: no cover
     raise AssertionError("dependency_overrides should have replaced this")
 from scooter_contrib_aws.permissions_transport import AwsPermissions  # noqa: E402
 
-from conftest import create_schema
+from scooter_broker_lib.testing import create_schema
 from scooter_contrib_aws import store as aws_store
 
 REGISTRY = {

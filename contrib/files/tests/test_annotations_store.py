@@ -18,7 +18,7 @@ from scooter_contrib_files import store as files_store
 from scooter_contrib_files.annotations_transport import Annotations
 from scooter_contrib_files.store import Anchor, Annotation, AnnotationStore
 
-from conftest import create_schema, sqlite_config
+from scooter_broker_lib.testing import create_schema, sqlite_config
 
 
 async def authenticate() -> Identity:  # pragma: no cover

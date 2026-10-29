@@ -514,7 +514,8 @@ The store connects with `ctx.contrib_store_config("<name>")`, which is the broke
 `store_config` pointed at the contrib's database. Core's generated bindings
 (`scooter_schema`, `@scooter/schema`) skip contrib databases, because core must not
 know contribs exist. The contrib keeps its own row model, and a
-`tests/test_schema_matches.py` holds it to `sql/schema.sql`.
+`tests/test_db.py` holds it to `sql/schema.sql` with
+`scooter_broker_lib.testing.assert_rows_match_schema_sql`.
 
 **Moving an existing table out of a core database.** Set
 `db.tables.<t>.copyFrom = "<old db>"`. After migrating, the migrator copies the old

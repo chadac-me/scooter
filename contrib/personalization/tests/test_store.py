@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from conftest import create_schema, sqlite_config
+from scooter_broker_lib.testing import create_schema, sqlite_config
 from scooter_contrib_personalization.store import PersonalizationStore, ProtectedNote, _Base
 
 NOW = datetime(2026, 10, 17, tzinfo=timezone.utc)
