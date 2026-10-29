@@ -215,3 +215,35 @@ describe("a fenced write stops the run, not just the write", () => {
     expect(mine.bridge.prompt, "its own dangling run still resumes").toHaveBeenCalledTimes(1);
   });
 });
+
+describe("hand-off with stale orphans below the live run", () => {
+  it("closes the orphans and still resumes the live run after the grace @proves", async () => {
+    vi.useFakeTimers();
+    try {
+      const run = (runId: string, host: string): AguiEvent[] =>
+        [{ type: "RUN_STARTED", threadId: "t1", runId, host, gen: 5 }] as never;
+      const guard = new OwnershipTracker("new-pod");
+      guard.observe("t1", { hostPod: "new-pod", generation: 6 });
+      const bridge = fakeBridge();
+      const { store, dump } = memStore([...run("old1", "dead-pod"), ...run("old2", "dead-pod"), ...run("live", "old-pod")]);
+      const sessions = createSessionManager({
+        provisioner: fakeProvisioner(),
+        store,
+        selfPod: "new-pod",
+        ownershipGuard: guard,
+        handoffGraceMs: 5_000,
+        bridgeFactory: () => bridge as never,
+      } as never);
+      const conv = await sessions.start("t1" as never);
+      const done = sessions.reconcileDanglingRun(conv.id as SessionId, 6);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await done;
+      await vi.runAllTimersAsync();
+      const closedIds = dump().filter((e) => e.type === "RUN_FINISHED").map((e) => (e as { runId: string }).runId);
+      expect(closedIds.sort()).toEqual(["old1", "old2"]);
+      expect(bridge.prompt, "the live run must be resumed, not taken for settled").toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -28,11 +28,20 @@ export interface DanglingRunInfo {
 
 export function danglingRunInfo(events: AguiEvent[], self?: RunOrigin): DanglingRunInfo | null {
   let cancelled: string | undefined; // runId named by a CANCEL_REQUESTED seen in the tail
+  // Terminals end their own run, so closing an older orphan can't hide the latest.
+  const ended = new Set<string>();
+  let endedUnnamed = false; // a terminal without a runId ends the latest run
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.type === "RUN_FINISHED" || e.type === "RUN_ERROR") return null; // last run completed
+    if (e.type === "RUN_FINISHED" || e.type === "RUN_ERROR") {
+      const runId = (e as { runId?: string }).runId;
+      if (runId) ended.add(runId);
+      else endedUnnamed = true;
+      continue;
+    }
     if (e.type === "CANCEL_REQUESTED") cancelled = e.runId;
     if (e.type === "RUN_STARTED") {
+      if (endedUnnamed || ended.has(e.runId)) return null; // last run completed
       if (isOwnRun(e, self)) return null;
       return { runId: e.runId, threadId: e.threadId, cancelRequested: cancelled === e.runId, host: e.host };
     }
