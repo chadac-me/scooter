@@ -16,16 +16,6 @@ import urllib.error
 import urllib.request
 
 
-def _credentials_entry() -> None:
-    """Console-script entry: `scooter-aws-credentials`."""
-    sys.exit(credentials_main(sys.argv[1:]))
-
-
-def _cli_entry() -> None:
-    """Console-script entry: `scooter-aws`."""
-    sys.exit(cli_main(sys.argv[1:]))
-
-
 # --- broker client (SA-token auth, like agent-broker.sh) -----------------
 def _broker_base() -> str:
     url = os.environ.get("BROKER_URL", "").rstrip("/")

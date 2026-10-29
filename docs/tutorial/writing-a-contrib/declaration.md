@@ -1,7 +1,7 @@
 # The declaration
 
-Every contrib starts with two files: `contrib.nix` says what the contrib *is* to Nix, and
-`pyproject.toml` says what it is to Python.
+Every contrib starts with `contrib.nix`, which says what the contrib *is*, and a Python
+package named `scooter_contrib_<name>`.
 
 ## `contrib.nix`
 
@@ -139,40 +139,22 @@ issue-key parser:
 services.webhooks.pythonDeps = ps: [ ps.scooterContrib.jira ];
 ```
 
-## `pyproject.toml`
+## The Python package
 
 The Python package registers its halves through **entry points**. At startup, each
-service loads every factory in its group:
+service loads every factory in its group. You don't write a `pyproject.toml` for this:
+`contrib/build.nix` generates one from `contrib.nix`, with one entry point for each
+enabled service:
 
-```toml
-# contrib/acme/pyproject.toml
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+| Service | Entry point group | Entry point |
+|---|---|---|
+| `broker` | `agent_broker.providers` | `acme = "scooter_contrib_acme.broker_provider:acme"` |
+| `webhooks` | `scooter_webhooks.handlers` | `acme = "scooter_contrib_acme.webhooks_handler:acme"` |
 
-[project]
-name = "scooter-contrib-acme"          # fixed by convention: scooter-contrib-<name>
-version = "0.0.0"
-license = "MIT"
-description = "Acme Tracker integration for Scooter"
-requires-python = ">=3.11"
-# Never depend on the broker or webhooks apps: they depend on their contribs.
-dependencies = ["fastapi"]
-
-# One extra per service, so the webhooks surface never lands in the broker image.
-[project.optional-dependencies]
-broker = ["scooter-broker-lib", "scooter-lib"]
-webhooks = ["scooter-webhooks-lib", "scooter-lib"]
-
-[project.entry-points."agent_broker.providers"]
-acme = "scooter_contrib_acme.broker_provider:acme"
-
-[project.entry-points."scooter_webhooks.handlers"]
-acme = "scooter_contrib_acme.webhooks_handler:acme"
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-```
+So each factory function must be named after the contrib. Python dependencies go in
+`services.<svc>.pythonDeps`; `fastapi` and the service's extension library are always
+included. Tests run with pytest's `asyncio_mode = "auto"`. If a contrib really needs
+something else, a `pyproject.toml` in its directory replaces the generated one.
 
 The package is `scooter_contrib_acme`. Keep its `__init__.py` **import-light**: it must
 import neither the broker nor the webhooks library, because each image only has one of

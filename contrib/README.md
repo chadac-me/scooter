@@ -25,7 +25,7 @@ services.
 
 ```
 contrib/<name>/
-  pyproject.toml            # package + entry points (both groups if it spans services); hatchling backend
+  pyproject.toml            # optional: overrides the generated one (contrib/build.nix)
   contrib.nix               # the DECLARATION: `contribs.<name>` (see schema below)
   deployment.nix            # optional: a KUBENIX module -> renders manifests/env
   sandbox.nix               # optional: a NIXOS module  -> goes into the sandbox-os image

@@ -129,7 +129,7 @@ def test_register_provider_keys_on_the_factory_name():
 
 
 def test_entry_point_group_is_named_once():
-    # The contribs' pyproject files spell this group out.
+    # contrib/build.nix spells this group out.
     assert ENTRY_POINT_GROUP == "agent_broker.providers"
 
 

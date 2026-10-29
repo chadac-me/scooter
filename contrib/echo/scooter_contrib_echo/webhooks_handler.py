@@ -27,6 +27,6 @@ async def echo_webhook(event: EchoEvent) -> dict:
 
 
 @register_webhook
-def echo_contrib() -> WebhookHandler:
+def echo() -> WebhookHandler:
     """Build the echo handler, registered ``enabled`` like every handler that self-gates in-route."""
     return WebhookHandler(name=HANDLER_NAME, router=router)

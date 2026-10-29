@@ -11,8 +11,8 @@ def test_entrypoints_declared():
     """Both entry-point groups advertise the echo contrib."""
     broker_eps = {ep.name: ep.value for ep in entry_points(group="agent_broker.providers")}
     webhook_eps = {ep.name: ep.value for ep in entry_points(group="scooter_webhooks.handlers")}
-    assert broker_eps.get("echo") == "scooter_contrib_echo.broker_provider:echo_contrib"
-    assert webhook_eps.get("echo") == "scooter_contrib_echo.webhooks_handler:echo_contrib"
+    assert broker_eps.get("echo") == "scooter_contrib_echo.broker_provider:echo"
+    assert webhook_eps.get("echo") == "scooter_contrib_echo.webhooks_handler:echo"
 
 
 def test_broker_discovers_echo_via_entrypoint():
@@ -51,14 +51,14 @@ def _client(identity):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from scooter_contrib_echo.broker_provider import echo_contrib
+    from scooter_contrib_echo.broker_provider import echo
 
     async def authed():
         return identity
 
-    echo = echo_contrib()
+    provider = echo()
     app = FastAPI()
-    app.include_router(echo.transports[0].routes(echo, authed=authed), prefix="/echo")
+    app.include_router(provider.transports[0].routes(provider, authed=authed), prefix="/echo")
     return TestClient(app)
 
 
