@@ -44,6 +44,8 @@
 
       services.broker = {
         enable = true;
+        # Share links, served unauthenticated; the UUID is the capability.
+        publicPaths = [ "/s/" ];
         # The SQLite driver the suite runs the store against.
         pythonDeps = ps: [ ps.aiosqlite ];
       };

@@ -105,7 +105,15 @@ pkgs.runCommand "ui-nginx-frame-ancestors"
   grep -q 'client_max_body_size 10m;' $TMPDIR/uploads/rendered.conf \
     || { echo "FAIL UPLOAD_MAX_BODY=10m not rendered"; fail=1; }
 
-  kill $(cat $TMPDIR/sandbox/nginx.pid) $(cat $TMPDIR/shared/nginx.pid) $(cat $TMPDIR/uploads/nginx.pid) || true
+  # Contribs' public broker paths: proxied only when the manifest lists them.
+  echo '{"brokerPublicPaths":["/s/"]}' > $TMPDIR/mount/paths.json && chmod 644 $TMPDIR/mount/paths.json
+  serve paths 18084 "" $TMPDIR/mount/paths.json
+  got=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18084/s/abc/)
+  [ "$got" = 502 ] && echo "ok   /s/ proxied -> $got" || { echo "FAIL /s/ with publicPaths -> $got (want 502)"; fail=1; }
+  curl -sf http://127.0.0.1:18081/s/abc/ | grep -q scooter-ui-stub \
+    && echo "ok   /s/ unlisted -> SPA" || { echo "FAIL /s/ without publicPaths is still proxied"; fail=1; }
+
+  kill $(cat $TMPDIR/sandbox/nginx.pid) $(cat $TMPDIR/shared/nginx.pid) $(cat $TMPDIR/uploads/nginx.pid) $(cat $TMPDIR/paths/nginx.pid) || true
   [ $fail = 0 ] || exit 1
   touch $out
 ''

@@ -200,8 +200,17 @@ let
   # the image's built-in one (services/ui/image/nginx.nix). The image is built with its
   # repo's contrib list, so without this a contrib the deployment left off would still
   # show its settings tab, tool cards and source rows, and its tab would 404.
-  uiContribManifest = builtins.toJSON (import ../contrib/ui-manifest-data.nix { inherit lib; }
-    (lib.filterAttrs (_: c: c.enable) config.contribs));
+  uiContribData = import ../contrib/ui-manifest-data.nix { inherit lib; }
+    (lib.filterAttrs (_: c: c.enable) config.contribs);
+  uiContribManifest = builtins.toJSON uiContribData;
+
+  # Without the UI's nginx to proxy them, contribs' public paths route at the Ingress.
+  ingressBrokerPaths = lib.optionals (!cfg.ui.enable && cfg.broker.enable)
+    (map (path: {
+      inherit path;
+      pathType = "Prefix";
+      backend.service = { name = "agent-broker"; port.number = 8080; };
+    }) uiContribData.brokerPublicPaths);
 
   # The contribs whose settings tab opened the /contrib-api relay (`api = true`), and
   # where the agent-host reaches their broker routes. Read off the declarations, so a
@@ -1976,8 +1985,7 @@ in
                 name = "AGENT_HOST_URL";
                 value = "http://agent-host.${cfg.namespace}.svc.cluster.local:8080";
               } {
-                # nginx forwards /s/ (static shares) here so the broker stays
-                # cluster-internal; harmless when shares is off.
+                # Where nginx proxies contribs' public broker paths (brokerPublicPaths).
                 name = "BROKER_URL";
                 value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080";
               } {
@@ -2047,7 +2055,7 @@ in
                 path = "/";
                 pathType = "Prefix";
                 backend.service = { name = ingressBackend; port.number = 8080; };
-              }];
+              }] ++ ingressBrokerPaths;
             }
           )];
           # Only emit a tls entry when there is a host to name.

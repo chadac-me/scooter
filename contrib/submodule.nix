@@ -330,6 +330,19 @@ let
           modules/contrib-env.nix. Use `lib.mkIf` to leave a variable unset.
         '';
       };
+    } // lib.optionalAttrs (svc == "broker") {
+      publicPaths = mkOption {
+        type = types.listOf (types.strMatching "/[A-Za-z0-9._~-]+/");
+        default = [ ];
+        example = [ "/s/" ];
+        description = ''
+          Path prefixes on the public origin that go straight to this contrib's broker
+          routes, unauthenticated, e.g. `/s/` for published shares. The UI's nginx
+          proxies each one to the broker, and with `scooter.ui.enable = false` the
+          Ingress routes it there instead. Each prefix needs its own routes on the
+          broker (`Provider(mount_at_root=True)`), and two contribs may not claim the same one.
+        '';
+      };
     };
   };
 in

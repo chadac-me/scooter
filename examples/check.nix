@@ -70,7 +70,22 @@ let
       (builtins.filter (t: !hasWord "contrib_shares:${t}:broker" (toString (contribEnvValue migrateEnv "DB_COPIES")))
         [ "static_shares" "static_share_versions" ])
     ++ (if contribEnvValue legacySharesEnv "SHARES_PUBLIC_BASE_URL" == "https://legacy.example.com" then [ ]
-        else [ "scooter.broker.shares.* no longer reaches contribs.shares — an existing deployment's config is dropped" ]);
+        else [ "scooter.broker.shares.* no longer reaches contribs.shares — an existing deployment's config is dropped" ])
+    ++ (if brokerPathsAt res == [ ] then [ ]
+        else [ "ingress routes /s/ to the broker with the UI on — the UI's nginx proxies it" ])
+    ++ (if brokerPathsAt (uiOffRes { }) == [ "/s/" ] then [ ]
+        else [ "ui-off: the Ingress lacks /s/ -> agent-broker, so share links 404" ])
+    ++ (if brokerPathsAt (uiOffRes ({ lib, ... }: { contribs.shares.enable = lib.mkForce false; })) == [ ] then [ ]
+        else [ "ui-off, shares disabled: the Ingress still routes /s/ to the broker" ]);
+  # The main Ingress's paths that go to the broker.
+  brokerPathsAt = r: map (p: p.path) (builtins.filter (p: p.backend.service.name == "agent-broker")
+    (builtins.concatMap (rule: rule.http.paths) r.ingresses.agent-host.spec.rules));
+  uiOffRes = extra: (evalPlatform {
+    module = { lib, ... }: {
+      imports = [ ./kubenix-config.nix extra ];
+      scooter.ui.enable = lib.mkForce false;
+    };
+  }).config.kubernetes.resources;
   # The pre-contrib option path still configures the contrib.
   legacySharesEnv = deployEnv (evalPlatform {
     module = { ... }: {

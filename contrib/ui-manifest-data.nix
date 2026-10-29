@@ -58,8 +58,22 @@ let
   interruptRenderers = resolveInterruptRenderers contribs;
 
   # The presentation half of each contrib's approval gate, not gated on `ui.enable` because a contrib may raise approvals while contributing no icon.
+  # Public path prefix -> the contribs claiming it. nginx reads this list off the
+  # manifest it serves, so the deployment's mounted copy decides what it proxies.
+  publicPathOwners = lib.foldl' (acc: { name, path }: acc // { ${path} = (acc.${path} or [ ]) ++ [ name ]; }) { }
+    (lib.concatLists (lib.mapAttrsToList
+      (name: c: map (path: { inherit name path; })
+        (if c.services.broker.enable then c.services.broker.publicPaths else [ ]))
+      contribs));
+  publicPathClashes = lib.filterAttrs (_: cs: lib.length cs > 1) publicPathOwners;
+  brokerPublicPaths =
+    if publicPathClashes != { } then
+      throw ("contribs' services.broker.publicPaths: ${lib.concatStringsSep "; " (lib.mapAttrsToList
+        (p: cs: "\"${p}\" is claimed by contribs ${lib.concatStringsSep " and " cs}") publicPathClashes)}")
+    else lib.attrNames publicPathOwners;
+
   approvals = lib.mapAttrs
     (_: c: { inherit (c.approvals) gatedOption blockedTitle blockedHint; })
     (lib.filterAttrs (_: c: c.approvals != null) contribs);
 in
-{ inherit sources toolCards toolTitles linkProviders approvals settingsTabs interruptRenderers; }
+{ inherit sources toolCards toolTitles linkProviders approvals settingsTabs interruptRenderers brokerPublicPaths; }
