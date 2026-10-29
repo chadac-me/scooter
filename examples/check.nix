@@ -61,13 +61,23 @@ let
     ++ (if builtins.any (e: e.name == "DUCKDUCKGO_ENABLED" && (e.value or "") == "true") brokerEnv then [ ]
         else [ "broker.env.DUCKDUCKGO_ENABLED (duckduckgo.enable = true not wired, so the keyless provider stays off)" ]);
 
-  # Static shares: the broker must carry SHARES_ENABLED and a derived public base URL.
+  # Static shares: the broker must carry a public base URL derived from ingress.host.
   sharesEnvVal = name: let m = builtins.filter (e: e.name == name) brokerEnv; in if m == [ ] then "" else (builtins.head m).value;
   sharesProblems =
-    (if builtins.any (e: e.name == "SHARES_ENABLED") brokerEnv then [ ]
-     else [ "broker.env.SHARES_ENABLED (shares.enable = true not wired)" ])
-    ++ (if builtins.match "https://.+" (sharesEnvVal "SHARES_PUBLIC_BASE_URL") != null then [ ]
-        else [ "broker.env.SHARES_PUBLIC_BASE_URL (should derive from ingress.host)" ]);
+    (if builtins.match "https://.+" (sharesEnvVal "SHARES_PUBLIC_BASE_URL") != null then [ ]
+        else [ "broker.env.SHARES_PUBLIC_BASE_URL (should derive from ingress.host)" ])
+    ++ map (t: "migrate.env.DB_COPIES lacks contrib_shares:${t}:broker — published shares would be left behind in broker")
+      (builtins.filter (t: !hasWord "contrib_shares:${t}:broker" (toString (contribEnvValue migrateEnv "DB_COPIES")))
+        [ "static_shares" "static_share_versions" ])
+    ++ (if contribEnvValue legacySharesEnv "SHARES_PUBLIC_BASE_URL" == "https://legacy.example.com" then [ ]
+        else [ "scooter.broker.shares.* no longer reaches contribs.shares — an existing deployment's config is dropped" ]);
+  # The pre-contrib option path still configures the contrib.
+  legacySharesEnv = deployEnv (evalPlatform {
+    module = { ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.broker.shares.publicBaseUrl = "https://legacy.example.com";
+    };
+  }).config.kubernetes.resources "agent-broker";
 
   # deployTools.configFiles must render its ConfigMap and tell the agent-host to mount it.
   hostEnv =
@@ -548,7 +558,7 @@ let
       imports = [ ./kubenix-config.nix ];
       # mkForce the attr so the config goes with it.
       contribs.aws = lib.mkForce { enable = false; };
-      scooter.broker.shares.enable = lib.mkForce false;
+      contribs.shares = lib.mkForce { enable = false; };
     };
   };
   awsOffBrokerEnv =

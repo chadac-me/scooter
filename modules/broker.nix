@@ -11,17 +11,6 @@
 let
   cfg = config.scooter;
   bcfg = cfg.broker;
-
-  # Share origin and CSP allowlist both fall back to the ingress host, and when
-  # that is empty too the broker returns relative URLs with a `'self'` default.
-  sharesBaseUrl =
-    if bcfg.shares.publicBaseUrl != "" then bcfg.shares.publicBaseUrl
-    else if cfg.ingress.host != "" then "https://${cfg.ingress.host}"
-    else "";
-  sharesFrameAncestors =
-    if bcfg.shares.frameAncestors != "" then bcfg.shares.frameAncestors
-    else if cfg.ingress.host != "" then "https://${cfg.ingress.host}"
-    else "";
 in
 {
   options.scooter.broker = with lib; {
@@ -127,38 +116,6 @@ in
       };
     };
 
-    # --- Static shares (broker/shares/) — persistent static webpages --------
-    # Agents publish static bundles served at /s/<uuid>/, persisted in the shared
-    # Postgres `broker` DB through the BROKER_DB_* settings.
-    shares = {
-      enable = mkOption {
-        type = types.bool;
-        default = false;
-        description = "Enable static-share publishing (/shares + /s/<uuid>/). Persists to the shared Postgres `broker` DB.";
-      };
-      publicBaseUrl = mkOption {
-        type = types.str;
-        default = "";
-        example = "https://scooter.example.com";
-        description = ''
-          External origin used to build the returned share URL
-          (SHARES_PUBLIC_BASE_URL). Empty -> defaults to https://<ingress.host>
-          when that is set, else a relative /s/<uuid>/ URL.
-        '';
-      };
-      frameAncestors = mkOption {
-        type = types.str;
-        default = "";
-        example = "https://scooter.example.com";
-        description = ''
-          CSP frame-ancestors allowlist for embedding a served share in an
-          <iframe> (SHARES_FRAME_ANCESTORS) — the UI origin(s), space-separated.
-          Empty -> defaults to https://<ingress.host> when set, else the broker's
-          own `'self'` default (same-origin only).
-        '';
-      };
-    };
-
     # --- OpenFGA authorization (the approver gate) --------------------------
     # core/authz.py builds the authorizer from these settings and hands it to every
     # provider through BrokerContext; off means NoopAuthorizer.
@@ -202,8 +159,6 @@ in
       owner = "broker";
       tables = {
         sandbox_size = { writers = [ "broker" ]; };
-        static_shares = { writers = [ "broker" ]; };
-        static_share_versions = { writers = [ "broker" ]; };
       };
     };
   }
@@ -318,16 +273,7 @@ in
                   { name = "MCP_ENABLED"; value = lib.boolToString bcfg.mcp.enable; }
                 ] ++ lib.optional (cfg.postgres.sslmode != null)
                   { name = "BROKER_DB_SSLMODE"; value = cfg.postgres.sslmode; }
-                ++ lib.optionals bcfg.shares.enable ([
-                  # Static shares: the broker mounts /shares + /s/<uuid>/ and persists
-                  # bundles through the BROKER_DB_* components, so SHARES_DB_DSN stays
-                  # unset.
-                  { name = "SHARES_ENABLED"; value = "true"; }
-                ] ++ lib.optional (sharesBaseUrl != "")
-                  { name = "SHARES_PUBLIC_BASE_URL"; value = sharesBaseUrl; }
-                ++ lib.optional (sharesFrameAncestors != "")
-                  { name = "SHARES_FRAME_ANCESTORS"; value = sharesFrameAncestors; }
-                ) ++ [
+                ++ [
                   { name = "FORGE_PROXY_PORT"; value = toString bcfg.forgeProxy.port; }
                 ] ++ lib.optionals bcfg.fga.enable [
                   # Settings for the authorizer core/authz.py hands to every provider.

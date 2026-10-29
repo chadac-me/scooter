@@ -71,10 +71,6 @@
       # The agent-facing MCP endpoint, on by default and stated here because the
       # coverage check requires the example to exercise every option namespace.
       mcp.enable = true;
-
-      # Static shares: agents publish static bundles the broker serves at /s/<uuid>/,
-      # persisted in the shared Postgres `broker` DB.
-      shares.enable = true;
     };
 
     # Config files mounted byte-for-byte as a flat dir at /etc/agent-sandbox/config.
@@ -216,6 +212,8 @@
     grafana.enable = true;
     jira.enable = true;
     kagi.enable = true;
+    # Static shares: agents publish bundles the broker serves at /s/<uuid>/.
+    shares.enable = true;
     slack.enable = true;
 
     # Datadog provider: proxies /datadog/* -> https://api.<site> with the two keys

@@ -308,7 +308,7 @@ asserts it still covers all of them.
 
 `modules/broker.nix` declares only the broker's OWN options (`enable`, `image`,
 `testProvider`, `agentHostUrl`, `extraEnv`, `extraVolumes`, `extraVolumeMounts`,
-`podAnnotations`, `serviceAccountAnnotations`, `mcp`, `shares`, `fga`); no
+`podAnnotations`, `serviceAccountAnnotations`, `mcp`, `fga`); no
 integration's options live there, and nothing under `scooter.broker` is named after
 a contrib.
 
@@ -442,6 +442,14 @@ with two search tools listed, that docstring is all the agent has to choose on.
 A reply tool for an attachable resource should also be **attachment-gated** with
 `@gate`, so it is unlisted in a conversation it could not act in. Search needs no
 gate: there is no resource to be attached to.
+
+### Where a provider's routes mount (`mount_at_root`)
+
+The broker mounts each transport's router under `/<provider name>`. A provider that
+must own a path outside its prefix sets `Provider(mount_at_root=True)`, and its
+transports then declare full paths. `contrib/shares` does this, because the share
+URLs it already published are `/s/<uuid>/` and must keep resolving. Core routes
+(`/health`, `/link`, `/mcp`, `/modules`) are registered first and win a clash.
 
 ### Extending the preset
 

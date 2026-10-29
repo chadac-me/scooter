@@ -1,4 +1,4 @@
-"""The static-shares store and HTTP API on in-memory SQLite."""
+"""The shares store and HTTP API on in-memory SQLite."""
 
 from __future__ import annotations
 
@@ -10,13 +10,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scooter_schema.broker import Base as _SchemaBase, StaticShares, StaticShareVersions
-
-from scooter_broker_lib.store import StoreConfig
-from broker.core.auth import authenticate
 from scooter_broker_lib.types import Identity
-from broker.shares.routes import _DEFAULT_FAVICON_LINK, create_shares_router
-from broker.shares.store import ShareFile, ShareStore
+from scooter_contrib_shares import store as shares_store
+from scooter_contrib_shares.store import ShareFile, ShareStore
+from scooter_contrib_shares.transport import _DEFAULT_FAVICON_LINK, create_shares_router
+
+from conftest import create_schema, sqlite_config
 
 
 def _identity(conv: str) -> Identity:
@@ -26,22 +25,17 @@ def _identity(conv: str) -> Identity:
 
 @pytest.fixture
 async def store():
-    s = ShareStore(StoreConfig(dsn="sqlite+aiosqlite:///:memory:"))
-    # The store issues no DDL, so the throwaway SQLite tables are built here.
-    async with s._engine.begin() as conn:
-        await conn.run_sync(
-            _SchemaBase.metadata.create_all,
-            tables=[StaticShares.__table__, StaticShareVersions.__table__],
-        )
+    s = ShareStore(sqlite_config())
+    await create_schema(s, shares_store._Base)
     return s
 
 
 def _client(store, conv="conv-alice", frame_ancestors="'self'"):
     app = FastAPI()
     app.include_router(create_shares_router(
-        store, public_base_url="https://scooter.example.com", frame_ancestors=frame_ancestors,
+        store, authed=lambda: _identity(conv),
+        public_base_url="https://scooter.example.com", frame_ancestors=frame_ancestors,
     ))
-    app.dependency_overrides[authenticate] = lambda: _identity(conv)
     return TestClient(app)
 
 
@@ -173,11 +167,13 @@ async def test_list_and_delete_owner_scoped(store):
 def _admin_client(store):
     """An approver caller with no conversation of its own, like the agent-host relaying a UI request."""
     app = FastAPI()
-    app.include_router(create_shares_router(store, public_base_url="https://scooter.example.com"))
-    app.dependency_overrides[authenticate] = lambda: Identity(
+    admin = Identity(
         conversation_id="", namespace="agent-sandbox",
         service_account="system:serviceaccount:agent-sandbox:agent-host", is_approver=True,
     )
+    app.include_router(create_shares_router(
+        store, authed=lambda: admin, public_base_url="https://scooter.example.com",
+    ))
     return TestClient(app)
 
 

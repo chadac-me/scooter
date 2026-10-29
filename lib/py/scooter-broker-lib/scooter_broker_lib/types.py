@@ -95,7 +95,7 @@ class Transport(Protocol):
     name: str
 
     def routes(self, provider: "Provider", authed: AuthDependency) -> APIRouter:
-        """An APIRouter with this transport's routes for `provider`, which the core mounts under the provider's prefix."""
+        """An APIRouter with this transport's routes for `provider`, mounted under its prefix unless `mount_at_root`."""
         ...
 
     # An optional `mcp_server` attribute (a `FastMCP`), discovered by `hasattr` so transports without tools still satisfy the Protocol, carries the agent tools served at the broker's /mcp endpoint.
@@ -111,6 +111,8 @@ class Provider:
 
     name: str                          # registry key and route prefix
     transports: list[Transport]
+    # Mount at "/" rather than "/<name>"; the transports then own their full paths.
+    mount_at_root: bool = False
     # Optional because a diagnostic transport delivers no secret; transports that need one assert it at mount time.
     credential: CredentialSource | None = None
     enabled: bool = True

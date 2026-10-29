@@ -1,9 +1,9 @@
-"""Static-share store: the broker-side persistence for published static bundles.
+"""Static-share persistence, in this contrib's own `contrib_shares` database.
 
 A share is identified by a broker-minted UUID and carries metadata plus one or more
 versions, each a snapshot of the bundle's files; updating a share adds a version and
-keeps the UUID. The tables live in lib/sql/broker/schema.sql and are created by the
-db-migrator, so this store issues no DDL and callers use the dataclass API, never a row.
+keeps the UUID. The tables are declared in contrib/shares/sql/schema.sql and applied
+by the Atlas migration Job, so this store issues no DDL and callers use the dataclass API.
 """
 
 from __future__ import annotations
@@ -13,17 +13,43 @@ import json
 import uuid as uuidlib
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import Integer, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from scooter_broker_lib.store import StoreConfig, open_sessions
 
-# Generated ORM models from lib/sql/broker/schema.sql.
-from scooter_schema.broker import (
-    StaticShares as _ShareRow,
-    StaticShareVersions as _VersionRow,
-)
 
+class _Base(DeclarativeBase):
+    pass
+
+
+class _ShareRow(_Base):
+    """Mirrors `static_shares` in contrib/shares/sql/schema.sql, the DDL's source of truth."""
+
+    __tablename__ = "static_shares"
+
+    uuid: Mapped[str] = mapped_column(String, primary_key=True)
+    owner: Mapped[str] = mapped_column(String, index=True)
+    conversation_id: Mapped[str] = mapped_column(String, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    visibility: Mapped[str] = mapped_column(String, index=True)
+    latest_version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(String, default="")
+    updated_at: Mapped[str] = mapped_column(String, default="")
+
+
+class _VersionRow(_Base):
+    """Mirrors `static_share_versions` in contrib/shares/sql/schema.sql."""
+
+    __tablename__ = "static_share_versions"
+
+    # Natural key: copied rows keep it, so no sequence must catch up.
+    share_uuid: Mapped[str] = mapped_column(String, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entry_point: Mapped[str] = mapped_column(String)
+    files_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String, default="")
 
 
 @dataclass
@@ -131,7 +157,7 @@ def _to_version(row: _VersionRow) -> ShareVersion:
 
 
 class ShareStore:
-    """Persists static shares and their versions through the generated models, never creating tables."""
+    """Persists static shares and their versions, never creating tables."""
 
     def __init__(self, config: StoreConfig) -> None:
         self._engine: AsyncEngine

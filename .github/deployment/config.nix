@@ -21,6 +21,7 @@
     kagi.enable = true;
     marimo.enable = true;
     personalization.enable = true;
+    shares.enable = true;
     slack.enable = true;
     # echo ships nowhere; CI builds it via withModules.
   };

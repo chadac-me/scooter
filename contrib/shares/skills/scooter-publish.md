@@ -22,9 +22,8 @@ stores the files and serves them at a stable, shareable URL. Use this for
 dashboards, generated reports, docs, or interactive visualizations you want a
 human to open later, after the sandbox is gone.
 
-> Status: **scaffold**. The broker `shares` subsystem exists behind the
-> `SHARES_ENABLED` flag; a `scooter-publish` CLI wrapper is a follow-up. Until
-> then, publish via the broker HTTP API shown below.
+There is no CLI wrapper yet: publish through the broker HTTP API shown below.
+A 404 from `agent-broker shares` means publishing is not enabled here.
 
 ## The model
 

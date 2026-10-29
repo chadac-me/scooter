@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scooter-contrib-shares"
+version = "0.0.0"
+license = "MIT"
+description = "Static shares: the broker publishes agent-built static pages at /s/<uuid>/"
+requires-python = ">=3.11"
+# The extension surface only, never the broker app.
+dependencies = [
+  "fastapi",
+  "sqlalchemy",   # the share store's row model
+]
+
+[project.optional-dependencies]
+broker = ["scooter-broker-lib", "scooter-lib"]
+
+[project.entry-points."agent_broker.providers"]
+shares = "scooter_contrib_shares.broker_provider:shares"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scooter_contrib_shares"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "httpx"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
