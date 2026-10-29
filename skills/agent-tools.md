@@ -13,6 +13,15 @@ triggers:
 - comment on the MR
 - github_comment
 - gitlab_comment
+- github_pr_summary
+- gitlab_mr_summary
+- pr status
+- pr summary
+- ci status
+- is the pr ready
+- mark ready for review
+- draft pr
+- unresolved threads
 - comment on jira
 - jira_comment
 - query jira
@@ -99,6 +108,33 @@ on. Match the tool to your live tool list, not to this doc — the doc lists wha
 Typical flow: **acknowledge first** (a short "on it" via the matching tool), do the
 work, then post your result with the same tool. One acknowledgment, one result —
 don't repeat.
+
+## Keeping track of a PR / MR: the summary tools
+
+**Get a PR's or MR's status in one call**: `github_pr_summary` / `gitlab_mr_summary`.
+It returns the state (open/merged/closed), **draft** status, mergeability and
+conflicts, the review decision or approvals (who approved, who asked for changes,
+who has not reviewed yet), **CI** on the head commit (failing and pending jobs
+named), the comment count, and the **unresolved threads**, each with the id that
+the comment tool takes to reply in that thread. The last line, `Blockers:`, lists
+what stands between the PR and a merge.
+
+Unlike the comment tools, these are always available. With no argument they read
+the PR/MR linked to this conversation; pass a URL (or `owner/repo#123`,
+`group/project!123`) for any other one, such as a PR you opened yourself.
+
+Call it instead of piecing the state together from `check-runs`, `reviews` and
+`comments` by hand, and call it at these points:
+
+- **Before you say a PR is ready, done, or green.** Check that `CI` is `SUCCESS`
+  for the head commit you pushed and that `Blockers:` reads `none`, apart from
+  anything you are deliberately leaving.
+- **Before you move a draft to ready for review.** Open your PRs as drafts while
+  you are still working; the summary tells you when CI and the open threads allow
+  you to mark it ready.
+- **When you pick work back up** (a new comment arrives, a scheduled run fires, a
+  subagent finishes), so you don't lose track of a draft, a red check, or a thread
+  you never answered.
 
 ## Looking things up
 

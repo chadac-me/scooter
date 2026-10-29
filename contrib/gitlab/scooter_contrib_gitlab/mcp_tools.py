@@ -1,4 +1,4 @@
-"""GitLab's agent tool: comment on the conversation's MR or issue."""
+"""GitLab's agent tools: comment on the conversation's MR or issue, and summarise an MR."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from fastmcp import FastMCP
 from scooter_broker_lib.links import first_target, ref_of, resource_type_is
 from scooter_broker_lib.mcp import ToolContext, ToolContextDep, ToolResult, gate
 from scooter_broker_lib.refs import GitlabTarget, parse_gitlab_resource_id
+
+from .mr_summary import fetch_mr_summary
 
 mcp = FastMCP(name="gitlab")
 
@@ -71,6 +73,53 @@ async def gitlab_comment(
         response,
         success_text=f"Commented on the GitLab {'MR' if target.is_mr else 'issue'}.",
     )
+
+
+def _mr_target_from_link(link: dict) -> GitlabTarget | None:
+    target = _target_from_link(link)
+    return target if target is not None and target.is_mr else None
+
+
+async def gitlab_mr_target(ctx: ToolContext) -> GitlabTarget | None:
+    """The conversation's oldest linked MR, skipping linked issues."""
+    return first_target(await ctx.links.list(), SOURCE, _mr_target_from_link)
+
+
+@mcp.tool
+async def gitlab_mr_summary(
+    mr: str | None = None,
+    ctx: ToolContext = ToolContextDep,
+) -> ToolResult:
+    """One-call status of a GitLab merge request. Check it before reporting on an MR.
+
+    Shows state (open/merged/closed), DRAFT status, GitLab's detailed merge status and
+    conflicts, approvals (who approved, how many are still required, the assigned
+    reviewers), the head pipeline (failing and pending jobs named), the comment count,
+    and resolvable threads. Each UNRESOLVED thread is listed with its discussion_id,
+    which gitlab_comment takes. The last line lists what blocks the merge.
+
+    Use it to keep track of your own MRs: before marking a draft ready, before saying
+    an MR is done or green, and when picking work back up.
+
+    `mr` is an MR URL or `group/project!123`. Omit it for the MR this conversation is
+    linked to.
+    """
+    if mr:
+        target = parse_gitlab_resource_id(mr.strip())
+        if target is None or not target.is_mr:
+            return ToolResult.error(
+                f"Could not parse {mr!r} as a GitLab merge request. Pass an MR URL "
+                "(https://gitlab.com/group/project/-/merge_requests/123) or "
+                "`group/project!123`."
+            )
+    else:
+        target = await gitlab_mr_target(ctx)
+        if target is None:
+            return ToolResult.error(
+                "This conversation has no linked GitLab MR. Pass `mr` explicitly, as an "
+                "MR URL or `group/project!123`."
+            )
+    return await fetch_mr_summary(ctx.upstream, target)
 
 
 def gitlab_mcp_server() -> FastMCP:
