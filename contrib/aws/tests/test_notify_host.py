@@ -26,6 +26,9 @@ class _Risk:
     value: str = "low"
 
 
+_POLICY = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}
+
+
 @dataclass
 class _Req:
     """The PermissionRequest fields notify_host actually reads."""
@@ -37,10 +40,14 @@ class _Req:
     justification: str = "read terraform state"
     policy_summary: str = "s3:GetObject on the state bucket"
     risk_level: _Risk = None
+    policy_document: dict | None = None
+    managed_policy_arns: tuple = ()
 
     def __post_init__(self):
         if self.risk_level is None:
             self.risk_level = _Risk()
+        if self.policy_document is None:
+            self.policy_document = _POLICY
 
 
 @pytest.fixture(autouse=True)
@@ -82,7 +89,7 @@ async def test_posts_the_broker_notify_shape_to_the_short_id_url(monkeypatch):
     # Addressed by the short id, the only handle the broker has.
     assert req.url.path == "/conversations/k3f9zq/approvals/aws"
     body = json.loads(req.read().decode())
-    # The generic payload: an id and prose this side rendered.
+    # Prose for the plain card, plus the structured request for the aws card.
     assert body == {
         "request_id": "req-abc123",
         "message": (
@@ -90,6 +97,18 @@ async def test_posts_the_broker_notify_shape_to_the_short_id_url(monkeypatch):
             "s3:GetObject on the state bucket\n"
             "Reason: read terraform state"
         ),
+        "kind": "aws.permissions",
+        "data": {
+            "account": "dev",
+            "risk": "low",
+            "justification": "read terraform state",
+            "summary": "s3:GetObject on the state bucket",
+            "policy_document": _POLICY,
+            "managed_policy_arns": [],
+            "write_actions": [],
+            "requested_at": None,
+            "parent_request_id": None,
+        },
     }
     # The account, risk and policy facts must still reach the human inside the rendered message.
     for fact in ("dev", "low", "s3:GetObject", "read terraform state"):

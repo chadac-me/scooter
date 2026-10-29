@@ -276,3 +276,15 @@ def summarize_policy(policy_document: dict) -> str:
             resource_str += f" (+{len(resources) - 3} more)"
         parts.append(f"{action_str} on {resource_str}")
     return "; ".join(parts)
+
+
+def write_actions(policy_document: dict) -> list[str]:
+    """Every Allow action that is not read-only, in first-seen order."""
+    out: list[str] = []
+    for stmt in policy_document.get("Statement", []):
+        if stmt.get("Effect", "Allow") != "Allow":
+            continue
+        for a in _normalize_actions(stmt.get("Action", [])):
+            if not _is_read_only_action(a) and a not in out:
+                out.append(a)
+    return out

@@ -7,6 +7,7 @@
 import { RuntimeProvider, useConversationInterrupts } from "./RuntimeProvider.js";
 import { Sidebar } from "./Sidebar.js";
 import { RightPanel } from "./RightPanel.js";
+import { ApprovalDetail } from "./InterruptPanel.js";
 import { ThreadErrorBoundary } from "./ThreadErrorBoundary.js";
 import { UserBadge } from "./UserBadge.js";
 import { ThemePicker } from "./ThemePicker.js";
@@ -38,7 +39,12 @@ export function GuardedThread() {
 export function ConversationArea() {
   const { starting } = useSandboxStatus();
   if (starting) return <StartingPodLanding />;
-  return <GuardedThread />;
+  return (
+    <div className="relative h-full">
+      <GuardedThread />
+      <ApprovalDetail />
+    </div>
+  );
 }
 
 /** Header sandbox pill mirroring the Sandbox tab's status. */

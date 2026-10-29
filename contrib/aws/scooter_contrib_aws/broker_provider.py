@@ -12,7 +12,7 @@ import json
 import logging
 
 from .iam import IamProvisioner
-from .models import approval_message
+from .models import APPROVAL_KIND, approval_data, approval_message
 from .service import PermissionService, ServiceConfig
 from .store import PermissionStore
 from .config import settings
@@ -59,7 +59,7 @@ async def notify_host(req) -> None:
         return
     import httpx
 
-    # The conversation is addressed by the short id from the sandbox SA name, and the generic approvals route carries a rendered message rather than aws's fields.
+    # Addressed by the short id from the sandbox SA name.
     url = (
         f"{settings.aws_agent_host_url.rstrip('/')}"
         f"/conversations/{req.conversation_id}/approvals/aws"
@@ -67,6 +67,8 @@ async def notify_host(req) -> None:
     payload = {
         "request_id": req.request_id,
         "message": approval_message(req),
+        "kind": APPROVAL_KIND,
+        "data": approval_data(req),
     }
 
     attempts = max(1, settings.aws_notify_attempts)

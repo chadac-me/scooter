@@ -79,7 +79,7 @@ export function ContribInterruptCard({
     );
   }
   return (
-    <div className="mb-3 last:mb-0" data-testid="contrib-interrupt" data-contrib={renderer.contrib}>
+    <div data-testid="contrib-interrupt" data-contrib={renderer.contrib}>
       <RendererBoundary entry={renderer.entry} fallback={fallback}>
         <Suspense
           fallback={

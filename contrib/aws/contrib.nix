@@ -119,6 +119,8 @@ in
       # being what aws wants, and the broker verbs are deployment config under
       # scooter.approvals in ./deployment.nix.
       approvals = { };
+      # Draws the grant's full policy instead of the plain Approve/Deny card.
+      ui.interruptRenderers."aws.permissions".entry = "ui/PermissionsCard.tsx";
     };
   };
 }

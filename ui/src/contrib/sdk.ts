@@ -59,16 +59,46 @@ export function contribFetch(
   });
 }
 
+export { useRequestDraft } from "../approvalFocus.js";
+
+/**
+ * Where a request is drawn: `brief` is the narrow Approvals-tab card, enough to decide
+ * the common case; `detail` is the central column, with room for everything.
+ */
+export type ApprovalView = "brief" | "detail";
+
+/** One answer the request offers, e.g. Approve or Deny. */
+export interface InterruptOption {
+  optionId: string;
+  name: string;
+  kind: string;
+}
+
+/** An option this viewer may not use, with the words to explain why. */
+export interface BlockedOption {
+  optionId: string;
+  title: string;
+  hint: string;
+}
+
 /** What an interrupt renderer (a contrib's `ui.interruptRenderers` entry) receives for one pending request. */
 export interface InterruptRendererProps {
   /** The request's heading. */
   message: string;
   /** The request's data as the agent sent it, unvalidated: the renderer checks its own shape and throws on one it cannot draw. */
   data: unknown;
+  /** Which of the two views to draw. A renderer may ignore it and draw one card for both. */
+  view: ApprovalView;
   /** True while an answer is being sent. */
   busy: boolean;
-  /** Answer with a JSON object, which the agent receives as the request's result. */
+  /** The answers the request offers; a question-style request has one, an approval two. */
+  options: InterruptOption[];
+  /** Set when the host says this viewer may not use one of `options`. */
+  blocked?: BlockedOption;
+  /** Answer with the first option and a JSON result, which the agent receives. */
   resolve(result: Record<string, unknown>): void;
+  /** Answer with a named option, e.g. "approve" or "deny". */
+  choose(optionId: string, result?: Record<string, unknown>): void;
   /** Dismiss without answering; the agent is told the user did not answer. */
   dismiss(): void;
 }
