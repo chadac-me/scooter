@@ -576,6 +576,15 @@ export function MarkdownPane({
           narrow && !sheet && "hidden",
         )}
       >
+        {narrow && (
+          // Sticky, so closing never needs a scroll back up.
+          <div className="sticky -top-4 z-10 -mx-4 -mt-4 flex items-center justify-end bg-sidebar px-2 pt-2">
+            <span aria-hidden className="absolute left-1/2 top-2 h-1 w-10 -translate-x-1/2 rounded-full bg-border" />
+            <button className="icon-btn" onClick={() => setSheet(false)} aria-label="Close comments">
+              <X className="size-4" />
+            </button>
+          </div>
+        )}
         {!wide && toc.length > 1 && <Contents toc={toc} active={current} path={path} inRail folded={narrow} />}
         <h2 className="flex items-center gap-2 font-sans text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Comments
@@ -588,15 +597,6 @@ export function MarkdownPane({
             <span className="ml-auto font-normal normal-case tracking-normal">
               {threads.length - openThreads.length} resolved
             </span>
-          )}
-          {narrow && (
-            <button
-              className={clsx("icon-btn", threads.length <= openThreads.length && "ml-auto")}
-              onClick={() => setSheet(false)}
-              aria-label="Close comments"
-            >
-              <X className="size-4" />
-            </button>
           )}
         </h2>
         {draft && (
