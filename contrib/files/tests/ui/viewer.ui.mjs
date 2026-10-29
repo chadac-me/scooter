@@ -503,6 +503,10 @@ Second?
   check("an HTML <img> in a document renders", await loaded("html dot"));
   check("its width attribute is kept", (await page.locator('article img[alt="html dot"]').getAttribute("width")) === "40");
   check("an inline HTML <img> renders", await loaded("inline dot"));
+  check(
+    "an image inside a sentence stays on its line",
+    (await page.locator('article img[alt="inline dot"]').evaluate((i) => getComputedStyle(i).display)) === "inline",
+  );
 
   await page.goto(`${url}/?path=docs/dot.png`);
   const opened = page.locator("main img");

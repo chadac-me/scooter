@@ -242,3 +242,10 @@ body {
 .checkerboard {
   background: repeating-conic-gradient(var(--muted) 0% 25%, transparent 0% 50%) 50% / 16px 16px;
 }
+
+/* Preflight makes images blocks; one inside a sentence stays in it. */
+.prose img[data-inline] {
+  display: inline;
+  margin: 0;
+  vertical-align: middle;
+}

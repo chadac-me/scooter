@@ -16,7 +16,7 @@ import { MessageSquare, MessageSquarePlus } from "lucide-react";
 import clsx from "clsx";
 import { api, rawUrl, type Question, type Thread } from "./api";
 import { hrefFor, isExternal, navigate, resolveRel, slug } from "./nav";
-import { BLOCKS, blockAt, blockSource, findText, plainOf, previewOf, rehypeSourceLines, segments, sourceAnchor, remarkHtmlImages } from "./markdown";
+import { BLOCKS, blockAt, blockSource, findText, plainOf, previewOf, rehypeSourceLines, segments, sourceAnchor, remarkHtmlImages, remarkInlineImages } from "./markdown";
 import { Composer, Quote, ThreadCard } from "./Thread";
 import { QuestionCard } from "./Questions";
 
@@ -113,7 +113,7 @@ function DocImage({ node: _n, src, ...props }: React.ComponentProps<"img"> & { n
 const Chunk = memo(function Chunk({ text, offset }: { text: string; offset: number }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkHtmlImages]}
+      remarkPlugins={[remarkGfm, remarkHtmlImages, remarkInlineImages]}
       rehypePlugins={[[rehypeSourceLines, { offset }]]}
       components={components}
     >

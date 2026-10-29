@@ -221,3 +221,23 @@ export function remarkHtmlImages() {
     walk(tree);
   };
 }
+
+/** Marks images that share a paragraph with text, so they flow inline. */
+export function remarkInlineImages() {
+  const words = (n: MdNode): boolean =>
+    (n.type === "text" && !!n.value?.trim()) || (n.type !== "image" && !!n.children?.some(words));
+  const mark = (n: MdNode) => {
+    if (n.type === "image") {
+      const data = (n.data ??= {}) as { hProperties?: Record<string, unknown> };
+      data.hProperties = { ...data.hProperties, dataInline: "" };
+    }
+    n.children?.forEach(mark);
+  };
+  return (tree: MdNode) => {
+    const walk = (node: MdNode) => {
+      if (node.type === "paragraph") return void (node.children?.some(words) && mark(node));
+      node.children?.forEach(walk);
+    };
+    walk(tree);
+  };
+}
