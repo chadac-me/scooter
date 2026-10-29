@@ -15,5 +15,5 @@
     }
   },
   "include": ["src", "components", "lib", "../../contrib/*/ui/*.tsx"],
-  "exclude": ["**/*.test.ts", "**/*.test.tsx"]
+  "exclude": ["**/*.test.ts", "**/*.test.tsx", "../../contrib/*/ui/*.test.tsx"]
 }
