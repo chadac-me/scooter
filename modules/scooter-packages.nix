@@ -17,35 +17,22 @@ let
   mcpOverlay = _: prev: {
     pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [ (pf: _: { mcp = pf.mcp_1; }) ];
   };
+
+  # lib.cleanPackageSource, for every package's src.
+  libOverlay = _: prev: { lib = prev.lib.extend (import ../nix/package-source.nix); };
+
+  # A contrib's own packages, from beside each declaration, as platform.nix does deployment.nix.
+  contribPackageModules = lib.filter builtins.pathExists (map (p: builtins.dirOf p + "/module.nix")
+    (import ../contrib/all-modules.nix).imports);
 in
 {
   imports = [
-    ../contrib/module.nix
-    ../contrib/code-server/module.nix
-    ../lib/py/scooter-broker-lib/module.nix
-    ../lib/py/scooter-lib/module.nix
-    ../lib/py/scooter-schema/module.nix
-    ../lib/py/scooter-task/module.nix
-    ../lib/py/scooter-webhooks-lib/module.nix
-    ../lib/ts/scooter-schema/module.nix
-    ../lib/ts/scooter-svcauth/module.nix
-    ../pkgs/broker-tools/module.nix
-    ../pkgs/forge-shim/module.nix
-    ../pkgs/sandbox-os/module.nix
-    ../pkgs/scooter-prompt/module.nix
-    ../services/agent-host/module.nix
-    ../services/broker/module.nix
-    ../services/byoc-controller/module.nix
-    ../services/claude-sdk-provider/module.nix
-    ../services/conversation-controller/module.nix
-    ../services/conversation-router/module.nix
-    ../services/db-migrator/module.nix
-    ../services/remote-agent/module.nix
-    ../services/scheduler/module.nix
-    ../services/warm-store-controller/module.nix
-    ../services/webhooks/module.nix
+    ../services/all-modules.nix
+    ../lib/all-modules.nix
+    ../pkgs/all-modules.nix
     ../ui/module.nix
-  ];
+    ../contrib/module.nix
+  ] ++ contribPackageModules;
 
   options.scooter.packages = mkOption {
     type = types.lazyAttrsOf types.package;
@@ -83,7 +70,7 @@ in
           type = types.raw;
           default = import cfg.inputs.nixpkgs {
             inherit (cfg) system;
-            overlays = [ mcpOverlay (_: _: config.scooter.packages) ];
+            overlays = [ libOverlay mcpOverlay (_: _: config.scooter.packages) ];
           };
           defaultText = literalExpression "Scooter's nixpkgs, with scooter.packages overlaid";
           description = ''

@@ -47,7 +47,7 @@ and which eval reads which is the thing most easily got backwards:
 | `contrib.nix` | every eval that reads the registry | `contribs.<name>`: `src`, `services.*`, `ui`, `skills`, `approvals`, `sandbox.module`, `db`. What the contrib **is**. |
 | `deployment.nix` | kubenix, with `modules/platform.nix` | the manifests/env this deployment's `contribs.<name>.*` config renders |
 | `sandbox.nix` | NixOS, via `pkgs/sandbox-os` (and the baked re-converge list) | packages, systemd units, activation — anything in the agent's sandbox image |
-| `module.nix` | the platform eval, imported by `modules/scooter-packages.nix` | `scooter.packages.*` the contrib builds itself, as every service's `module.nix` does |
+| `module.nix` | the platform eval, found beside the contrib.nix listed in `all-modules.nix` | `scooter.packages.*` the contrib builds itself, as every service's `module.nix` does |
 
 `deployment.nix` is a module in the **same eval** as `modules/platform.nix`, so it
 reaches the whole `scooter.*` tree exactly as any other platform module does —

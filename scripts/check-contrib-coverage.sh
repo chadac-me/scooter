@@ -38,11 +38,7 @@ done
 # contrib directory is a half nothing imports.
 for f in contrib/*/*.nix; do
   case "${f##*/}" in
-    contrib.nix | deployment.nix | sandbox.nix) ;;
-    # Its packages, for the platform eval; imported by modules/scooter-packages.nix.
-    module.nix)
-      grep -qF "../$f" modules/scooter-packages.nix \
-        || note "$f is not imported by modules/scooter-packages.nix, so its packages are never built" ;;
+    contrib.nix | deployment.nix | sandbox.nix | module.nix) ;;
     *) note "$f is not one of contrib.nix / deployment.nix / sandbox.nix / module.nix — no eval imports it (see contrib/README.md)" ;;
   esac
 done

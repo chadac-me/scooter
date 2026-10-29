@@ -1,13 +1,10 @@
-# A package's directory, minus its module.nix and image.nix.
+# lib overlay: cleanSource, minus a package's own module and image files.
 # Editing a module then doesn't rebuild the package.
-{ lib }:
-
-rec {
-  moduleFiles = root: lib.fileset.unions
-    (map (n: lib.fileset.maybeMissing (root + "/${n}")) [ "module.nix" "image.nix" "image" ]);
-
-  of = root: lib.fileset.toSource {
-    inherit root;
-    fileset = lib.fileset.difference root (moduleFiles root);
+final: _: {
+  cleanPackageSource = src: final.cleanSourceWith {
+    name = "source";
+    src = final.cleanSource src;
+    filter = path: _: dirOf path != toString src
+      || !(builtins.elem (baseNameOf path) [ "module.nix" "image.nix" "image" ]);
   };
 }

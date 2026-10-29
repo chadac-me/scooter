@@ -10,7 +10,7 @@ in
 buildNpmPackage {
   pname = "byoc-controller";
   version = "0.0.0";
-  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
+  src = lib.cleanPackageSource ./.;
 
   npmDepsHash = "sha256-GKXAfTgZu7zqI8pOBIX1osgZyaePqPx8i4NyYAhvxHs=";
 

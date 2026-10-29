@@ -6,7 +6,7 @@
 python3Packages.buildPythonApplication {
   pname = "agent-scheduler";
   version = "0.0.0";
-  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
+  src = lib.cleanPackageSource ./.;
   pyproject = true;
 
   build-system = [ python3Packages.setuptools ];

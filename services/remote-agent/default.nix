@@ -7,7 +7,7 @@
 buildNpmPackage {
   pname = "scooter-remote-agent";
   version = "0.0.0";
-  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
+  src = lib.cleanPackageSource ./.;
 
   npmDepsHash = "sha256-1IBHrmPuDFmMxBSRkFKl+1Paq0r52Br5Kg+8yTObph4=";
   # The v2 fetcher resolves the SDK's transitive deps from the lockfile.

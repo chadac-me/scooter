@@ -7,7 +7,7 @@
 buildNpmPackage {
   pname = "claude-sdk-provider";
   version = "0.0.0";
-  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
+  src = lib.cleanPackageSource ./.;
 
   npmDepsHash = "sha256-7WJdCLigV9ioEeMnMgbwJzr+uGxYQP3VARbI68RxXp8=";
 

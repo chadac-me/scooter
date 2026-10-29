@@ -4,7 +4,7 @@
 # reference task built with mkScooterTask.
 
 let
-  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
+  src = lib.cleanPackageSource ./.;
   drv = mkScooterTask {
     name = "scooter-prompt";
     entry = "scooter_prompt:main";

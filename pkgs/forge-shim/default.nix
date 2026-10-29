@@ -5,7 +5,7 @@
 buildGoModule {
   pname = "scooter-forge-shim";
   version = "0.0.0";
-  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
+  src = lib.cleanPackageSource ./.;
   vendorHash = null;
   env.CGO_ENABLED = "0";
   postInstall = ''

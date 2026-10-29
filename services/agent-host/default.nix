@@ -13,7 +13,7 @@ in
 buildNpmPackage {
   pname = "agent-host";
   version = "0.0.0";
-  src = (import ../../nix/package-source.nix { inherit lib; }).of ./.;
+  src = lib.cleanPackageSource ./.;
 
   npmDepsHash = "sha256-yH3J82SWehFbJLmbDYtFBAnDrjK+3q5govyYUIn3h9g=";
 
