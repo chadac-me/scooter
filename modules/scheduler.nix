@@ -41,7 +41,7 @@ let
     };
 
   # Context discarded: rendering manifests must not build the tasks. The image carries
-  # the closures (pkgs/scheduler-image/image.nix).
+  # the closures (services/scheduler/image.nix).
   systemTasksJson = builtins.unsafeDiscardStringContext
     (builtins.toJSON (lib.mapAttrsToList renderTask enabledTasks));
 

@@ -1,4 +1,4 @@
-{ lib, python3Packages, scooterSchema, scooterLib, scooterWebhooksLib, contribs ? [ ], ... }:
+{ lib, python3Packages, scooter-schema, scooter-lib, scooter-webhooks-lib, contribs ? [ ], ... }:
 
 # Webhooks service (Python/FastAPI): spawns agent conversations from provider
 # threads via the agent-host /agui endpoint. `contribs` are handler packages
@@ -8,7 +8,7 @@
 python3Packages.buildPythonApplication {
   pname = "agent-webhooks";
   version = "0.0.0";
-  src = ./.;
+  src = lib.cleanPackageSource ./.;
   pyproject = true;
 
   build-system = [ python3Packages.setuptools ];
@@ -23,9 +23,9 @@ python3Packages.buildPythonApplication {
     sqlalchemy
     aiosqlite
     asyncpg
-    scooterSchema  # generated SQLAlchemy models for the webhooks DB
-    scooterLib     # shared structured-logging convention
-    scooterWebhooksLib # the extension surface a handler composes
+    scooter-schema  # generated SQLAlchemy models for the webhooks DB
+    scooter-lib     # shared structured-logging convention
+    scooter-webhooks-lib # the extension surface a handler composes
   ] ++ contribs;
 
   nativeCheckInputs = with python3Packages; [

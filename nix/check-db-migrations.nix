@@ -9,7 +9,7 @@ let
   # Every contrib with a database, shipped or not.
   dbContribs = lib.filterAttrs (_: c: c.db.enable) contribRegistry.eval.config.contribs;
 
-  inherit (import ../pkgs/db-migrator-image/migrator.nix {
+  inherit (import ../services/db-migrator/migrator.nix {
     inherit pkgs lib;
     contribSqlDirs = lib.mapAttrs' (_: c: lib.nameValuePair c.db.name (c.src + "/sql")) dbContribs;
   }) runScript sqlPayload;

@@ -1,18 +1,19 @@
-{ mkScooterTask, runCommand, python3, scooterLib, scooterTask }:
+{ lib, mkScooterTask, runCommand, python3, scooter-lib, scooter-task }:
 
 # scooter-prompt: a system task that spawns a prompt as --owner or --per-user. Also the
 # reference task built with mkScooterTask.
 
 let
+  src = lib.cleanPackageSource ./.;
   drv = mkScooterTask {
     name = "scooter-prompt";
     entry = "scooter_prompt:main";
-    src = ./.;
+    inherit src;
   };
   tests = runCommand "scooter-prompt-tests" {
-    nativeBuildInputs = [ (python3.withPackages (ps: [ scooterLib scooterTask ps.pytest ])) ];
+    nativeBuildInputs = [ (python3.withPackages (ps: [ scooter-lib scooter-task ps.pytest ])) ];
   } ''
-    cp -r ${./.}/. src && chmod -R u+w src && cd src
+    cp -r ${src}/. src && chmod -R u+w src && cd src
     PYTHONPATH=$PWD pytest -q tests
     touch $out
   '';

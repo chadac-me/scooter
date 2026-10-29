@@ -197,7 +197,7 @@ let
       (lib.filterAttrs (_: c: c.enable) config.contribs));
 
   # The UI's contrib manifest from THIS deployment's enabled contribs, mounted over
-  # the image's built-in one (pkgs/ui-image/nginx.nix). The image is built with its
+  # the image's built-in one (ui/image/nginx.nix). The image is built with its
   # repo's contrib list, so without this a contrib the deployment left off would still
   # show its settings tab, tool cards and source rows, and its tab would 404.
   uiContribManifest = builtins.toJSON (import ../contrib/ui-manifest-data.nix { inherit lib; }
@@ -246,7 +246,7 @@ in
   # ./testing.nix is absent on purpose (test-only overrides are opted into by a test
   # manifest), and the contribs arrive via `contribModules`, each declaring its own
   # `contribs.<name>` options and manifests with contrib/spec.nix as their schema.
-  imports = [ kubenix.modules.k8s ./images.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./contrib-db.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./network-policy.nix ./legacy-state-migration.nix ./event-backfill.nix ./skills ]
+  imports = [ kubenix.modules.k8s ./images.nix ./scooter-packages.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./contrib-db.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./network-policy.nix ./legacy-state-migration.nix ./event-backfill.nix ./skills ]
     ++ contribModules;
 
   # Declared only so a definition on the old root reaches `legacyRoot`'s message; no
@@ -1972,7 +1972,7 @@ in
                 value = uploadMaxBody;
               }] ++ lib.optional (cfg.ingress.sandboxDomain != "")
                 # nginx lets /chat/<id> be framed only by that conversation's own sandbox
-                # origin, <label>.<sandboxDomain> (pkgs/ui-image/nginx.nix).
+                # origin, <label>.<sandboxDomain> (ui/image/nginx.nix).
                 { name = "SANDBOX_DOMAIN"; value = cfg.ingress.sandboxDomain; }
               ++ lib.optionals cfg.observability.browserTelemetry.enable [
                 # Where nginx forwards /telemetry/, asserted rather than defaulted because

@@ -2,7 +2,7 @@
  * Tier 3 E2E for the conversation subpage, `/chat/<id>`: one conversation's thread, composer
  * and approvals, with no sidebar and no right panel, which a sandbox embeds beside its own
  * service and the main header pops out. This pins the route and what it shows; who may frame
- * it is nginx's job and is checked against the rendered config (pkgs/ui-image/check.nix).
+ * it is nginx's job and is checked against the rendered config (ui/image/check.nix).
  */
 
 import { test, expect, seedConversation } from "./fixtures.js";

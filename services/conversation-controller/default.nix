@@ -6,7 +6,7 @@
 python3Packages.buildPythonApplication {
   pname = "conversation-controller";
   version = "0.0.0";
-  src = ./.;
+  src = lib.cleanPackageSource ./.;
   pyproject = true;
 
   build-system = [ python3Packages.setuptools ];

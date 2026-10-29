@@ -29,6 +29,7 @@ contrib/<name>/
   contrib.nix               # the DECLARATION: `contribs.<name>` (see schema below)
   deployment.nix            # optional: a KUBENIX module -> renders manifests/env
   sandbox.nix               # optional: a NIXOS module  -> goes into the sandbox-os image
+  module.nix                # optional: its own packages -> scooter.packages, for the platform eval
   scooter_contrib_<name>/
     __init__.py             # neutral; imports NEITHER broker nor webhooks
     broker_provider.py      # imports broker.*  (only loaded in the broker image)
@@ -38,7 +39,7 @@ contrib/<name>/
   tests/
 ```
 
-**One file per half, named for what is in it** — the three are not interchangeable,
+**One file per half, named for what is in it** — the files are not interchangeable,
 and which eval reads which is the thing most easily got backwards:
 
 | file | eval | declares / contributes |
@@ -46,6 +47,7 @@ and which eval reads which is the thing most easily got backwards:
 | `contrib.nix` | every eval that reads the registry | `contribs.<name>`: `src`, `services.*`, `ui`, `skills`, `approvals`, `sandbox.module`, `db`. What the contrib **is**. |
 | `deployment.nix` | kubenix, with `modules/platform.nix` | the manifests/env this deployment's `contribs.<name>.*` config renders |
 | `sandbox.nix` | NixOS, via `pkgs/sandbox-os` (and the baked re-converge list) | packages, systemd units, activation — anything in the agent's sandbox image |
+| `module.nix` | the platform eval, found beside the contrib.nix listed in `all-modules.nix` | `scooter.packages.*` the contrib builds itself, as every service's `module.nix` does |
 
 `deployment.nix` is a module in the **same eval** as `modules/platform.nix`, so it
 reaches the whole `scooter.*` tree exactly as any other platform module does —
@@ -195,7 +197,7 @@ the sandbox proxies nothing.
 can't frame B's chat or the main app, and, being cross-origin, can't read the chat
 it does frame. Without `ingress.sandboxDomain`, services share the UI's origin and
 the subpage allows `'self'`. That is no weaker than before, since a same-origin
-sandbox page can already act as the user. `pkgs/ui-image/check.nix` pins these
+sandbox page can already act as the user. `ui/image/check.nix` pins these
 headers against the rendered nginx config.
 
 ### Contributing deployment config (`contrib/<name>/deployment.nix`)

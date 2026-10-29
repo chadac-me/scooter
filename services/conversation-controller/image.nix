@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, imageLayers, conversationController, ... }:
+{ pkgs, n2c, imageLayers, conversationController }:
 
 # OCI image for the conversation controller.
 
@@ -20,11 +20,4 @@ let
     };
   };
 in
-# A kubenix module: this image declares its own scooter.images entry.
-{
-  config.scooter.images.conversation-controller = {
-    package = lib.mkDefault image;
-    attr = "conversation-controller-image";
-    refKey = "conversationController";
-  };
-}
+image

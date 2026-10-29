@@ -8,7 +8,10 @@
 
 let
   cfg = config.programs.scooterForgeProxy;
-  shim = pkgs.callPackage ../../pkgs/forge-shim { };
+  # The lib extension the platform's package set carries.
+  shim = pkgs.callPackage ../../pkgs/forge-shim {
+    lib = pkgs.lib.extend (import ../../nix/package-source.nix);
+  };
   caFile = "/etc/scooter/forge-ca/ca.crt";
   # The names NixOS links the system bundle under; every one gets the forge CA.
   bundles = [

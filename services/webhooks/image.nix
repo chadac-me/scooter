@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, imageLayers, webhooks, ... }:
+{ pkgs, n2c, imageLayers, webhooks }:
 
 # OCI image for the webhooks service.
 
@@ -24,11 +24,4 @@ let
     };
   };
 in
-# A kubenix module: this image declares its own scooter.images entry.
-{
-  config.scooter.images.agent-webhooks = {
-    package = lib.mkDefault image;
-    attr = "webhooks-image";
-    refKey = "webhooks";
-  };
-}
+image

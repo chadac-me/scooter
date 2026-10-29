@@ -2,7 +2,7 @@
 
 # UI: assistant-ui frontend + the reusable AG-UI client library (ui/src/client.ts).
 # Builds the static site (vite -> dist/) and installs it to $out, ready to be
-# copied into an nginx image (pkgs/ui-image). The UI calls the agent-host via
+# copied into an nginx image (ui/image.nix). The UI calls the agent-host via
 # same-origin relative paths behind a reverse proxy, so VITE_AGENT_HOST_URL is left empty.
 
 let
@@ -18,7 +18,7 @@ buildNpmPackage {
   version = "0.0.0";
   src = fs.toSource {
     root = ../.;
-    fileset = fs.unions ([ ./. ] ++ contribUi);
+    fileset = fs.unions ([ (fs.fromSource (lib.cleanPackageSource ./.)) ] ++ contribUi);
   };
   sourceRoot = "source/ui";
 

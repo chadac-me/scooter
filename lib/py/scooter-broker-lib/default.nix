@@ -1,4 +1,4 @@
-{ lib, python3Packages, scooterLib, ... }:
+{ lib, python3Packages, scooter-lib, ... }:
 
 # scooter_broker_lib: the broker extension surface (provider/transport/source
 # contracts and building blocks) that a provider build-depends on instead of the
@@ -8,13 +8,13 @@
 python3Packages.buildPythonPackage {
   pname = "scooter-broker-lib";
   version = "0.0.0";
-  src = ./.;
+  src = lib.cleanPackageSource ./.;
   pyproject = true;
 
   build-system = [ python3Packages.hatchling ];
 
   dependencies = with python3Packages; [
-    scooterLib
+    scooter-lib
     fastapi
     httpx
     sqlalchemy

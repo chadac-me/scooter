@@ -1,8 +1,8 @@
-{ pkgs, lib, n2c, ui, contribManifest ? null, ... }:
+{ pkgs, n2c, ui, contribManifest ? null }:
 
 # OCI image for the conversation UI: nginx serving the static assistant-ui build
 # and reverse-proxying the agent-host API and the broker's /s/ shares on the same
-# origin. The config (nginx.nix) is templated from the env at container start.
+# origin. The config (image/nginx.nix) is templated from the env at container start.
 
 let
   # Runtime-writable dirs plus the passwd entries nginx looks up on start.
@@ -15,7 +15,7 @@ let
     echo 'nogroup:x:65534:' >> $out/etc/group
   '';
 
-  nginxConf = import ./nginx.nix { inherit pkgs ui contribManifest; };
+  nginxConf = import ./image/nginx.nix { inherit pkgs ui contribManifest; };
 
   # Renders the conf from the env, then execs nginx.
   entrypoint = pkgs.writeShellScript "ui-entrypoint" ''
@@ -49,11 +49,4 @@ let
     };
   };
 in
-# A kubenix module: this image declares its own scooter.images entry.
-{
-  config.scooter.images.agent-sandbox-ui = {
-    package = lib.mkDefault image;
-    attr = "ui-image";
-    refKey = "ui";
-  };
-}
+image

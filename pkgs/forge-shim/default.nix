@@ -1,11 +1,11 @@
 # The sandbox's local HTTPS proxy: forge CONNECTs go to the broker's forge proxy
 # with the pod's SA token, everything else is tunnelled directly. Standard library only.
-{ buildGoModule }:
+{ lib, buildGoModule }:
 
 buildGoModule {
   pname = "scooter-forge-shim";
   version = "0.0.0";
-  src = ./.;
+  src = lib.cleanPackageSource ./.;
   vendorHash = null;
   env.CGO_ENABLED = "0";
   postInstall = ''

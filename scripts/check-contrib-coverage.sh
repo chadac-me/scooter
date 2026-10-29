@@ -38,8 +38,8 @@ done
 # contrib directory is a half nothing imports.
 for f in contrib/*/*.nix; do
   case "${f##*/}" in
-    contrib.nix | deployment.nix | sandbox.nix) ;;
-    *) note "$f is not one of contrib.nix / deployment.nix / sandbox.nix — no eval imports it (see contrib/README.md)" ;;
+    contrib.nix | deployment.nix | sandbox.nix | module.nix) ;;
+    *) note "$f is not one of contrib.nix / deployment.nix / sandbox.nix / module.nix — no eval imports it (see contrib/README.md)" ;;
   esac
 done
 

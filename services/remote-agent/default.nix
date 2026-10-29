@@ -1,4 +1,4 @@
-{ lib, buildNpmPackage, nodejs, makeWrapper, claudeSdkProvider ? null, claude-code ? null, ... }:
+{ lib, buildNpmPackage, nodejs, makeWrapper, scooter-claude-sdk-provider ? null, claude-code ? null, ... }:
 
 # The bring-your-own-Claude container app: drives the user's local Claude via
 # @scooter/claude-sdk-provider and tunnels tool-exec back to the cloud sandbox over
@@ -7,7 +7,7 @@
 buildNpmPackage {
   pname = "scooter-remote-agent";
   version = "0.0.0";
-  src = ./.;
+  src = lib.cleanPackageSource ./.;
 
   npmDepsHash = "sha256-1IBHrmPuDFmMxBSRkFKl+1Paq0r52Br5Kg+8yTObph4=";
   # The v2 fetcher resolves the SDK's transitive deps from the lockfile.
@@ -20,9 +20,9 @@ buildNpmPackage {
   dontNpmPrune = true;
 
   # Symlink the separately-built provider so it resolves at build and runtime.
-  postConfigure = lib.optionalString (claudeSdkProvider != null) ''
+  postConfigure = lib.optionalString (scooter-claude-sdk-provider != null) ''
     mkdir -p node_modules/@scooter
-    ln -s ${claudeSdkProvider}/lib/node_modules/@scooter/claude-sdk-provider \
+    ln -s ${scooter-claude-sdk-provider}/lib/node_modules/@scooter/claude-sdk-provider \
       node_modules/@scooter/claude-sdk-provider
   '';
 

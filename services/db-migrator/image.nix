@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, contribSqlDirs ? { }, ... }:
+{ pkgs, lib, n2c, contribSqlDirs ? { } }:
 
 # OCI image for the shared-database migration Job (modules/db-migrate.nix): the
 # Atlas CLI, the migrations from lib/sql plus each shipped contrib's own `sql/`,
@@ -24,11 +24,4 @@ let
     };
   };
 in
-# A kubenix module: this image declares its own scooter.images entry.
-{
-  config.scooter.images.agent-db-migrator = {
-    package = lib.mkDefault image;
-    attr = "db-migrator-image";
-    refKey = "dbMigrator";
-  };
-}
+image

@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, imageLayers, warmStoreController, ... }:
+{ pkgs, n2c, imageLayers, warmStoreController }:
 
 # OCI image for the warm /nix/store PVC pool controller.
 
@@ -20,11 +20,4 @@ let
     };
   };
 in
-# A kubenix module: this image declares its own scooter.images entry.
-{
-  config.scooter.images.warm-store-controller = {
-    package = lib.mkDefault image;
-    attr = "warm-store-controller-image";
-    refKey = "warmStoreController";
-  };
-}
+image

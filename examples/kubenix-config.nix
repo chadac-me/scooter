@@ -4,7 +4,7 @@
 # Use it as a starting point for a deployment, and read modules/platform.nix for
 # the full option set. It is also what `just check-manifests` renders through
 # examples/check.nix, so a change that breaks eval or drops a resource fails CI.
-{ pkgs, lib, ... }:
+{ buildPkgs, lib, ... }:
 {
   # No platform.nix import: evalPlatform supplies it.
 
@@ -156,9 +156,9 @@
     # Recurring commands the scheduler runs. An operator task is any derivation's
     # executable; it changes the scheduler image, so build and push that image too.
     systemTasks.broker-health = {
-      command = lib.getExe (pkgs.writeShellApplication {
+      command = lib.getExe (buildPkgs.writeShellApplication {
         name = "broker-health";
-        runtimeInputs = [ pkgs.curl ];
+        runtimeInputs = [ buildPkgs.curl ];
         text = ''curl -fsS "$BROKER_URL/healthz" > /dev/null'';
       });
       every = "15m";
