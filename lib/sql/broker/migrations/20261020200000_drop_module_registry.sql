@@ -1,2 +1,2 @@
 -- Drop "module_registry" table
-DROP TABLE "module_registry";
+DROP TABLE IF EXISTS "module_registry";

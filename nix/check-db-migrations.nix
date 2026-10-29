@@ -35,6 +35,14 @@ let
     (builtins.readDir ../lib/sql));
   contribDbs = lib.mapAttrsToList (_: c: c.db.name) dbContribs;
 
+  # Already applied somewhere, so they stay as written.
+  bareDropAllowed = [
+    "agent_host/migrations/20261015190000_notify_conversation_activity.sql"
+    "agent_host/migrations/20261022200100_notify_conversation_turn_state.sql"
+    "agent_host/migrations/20261025172400_notify_conversation_visibility.sql"
+    "webhooks/migrations/20260921233000_drop_jira_tickets.sql"
+  ];
+
   mkCheck = name: { contribs, expect }:
     let
       job = jobEnv contribs;
@@ -52,6 +60,16 @@ let
       } ''
       set -euo pipefail
       export HOME="$TMPDIR" ATLAS_NO_UPDATE_NOTIFIER=1 ATLAS_NO_ANON_TELEMETRY=true
+
+      # A baseline-adopted database never ran the baseline, so a bare DROP fails.
+      bare="$(cd ${sqlPayload} && grep -inE '^[[:space:]]*DROP[[:space:]]+(TABLE|INDEX|VIEW|MATERIALIZED[[:space:]]+VIEW|SEQUENCE|TYPE|FUNCTION|TRIGGER)[[:space:]]' */migrations/*.sql \
+        | grep -viE 'IF[[:space:]]+EXISTS' \
+        | grep -vF ${lib.concatMapStringsSep " " (f: "-e ${lib.escapeShellArg "${f}:"}") bareDropAllowed} || true)"
+      if [ -n "$bare" ]; then
+        printf '%s\n' "$bare" >&2
+        echo "DROP without IF EXISTS in a migration; see nix/check-db-migrations.nix" >&2
+        exit 1
+      fi
       initdb -D "$TMPDIR/pg" -U postgres --auth=trust >/dev/null
       pg_ctl -D "$TMPDIR/pg" -l "$TMPDIR/pg.log" -w \
         -o "-k $TMPDIR -c listen_addresses=127.0.0.1 -p 5432" start >/dev/null
