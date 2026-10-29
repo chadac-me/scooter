@@ -81,6 +81,7 @@ builds, included as separate programs or dynamically linked shared libraries.
 | GNU C Library (glibc), libxcrypt, libcap-ng | LGPL-2.0-or-later / LGPL-2.1 | every image |
 | GCC runtime (`libgcc_s`, `libstdc++`) | GPL-3.0-or-later with the GCC Runtime Library Exception | every image |
 | xz / liblzma, util-linux libraries, systemd libraries | mixed GPL/LGPL (libraries LGPL or public domain) | various (transitive) |
+| Berkeley DB (via linux-pam's `pam_userdb`, linked by PostgreSQL) | Sleepycat | db-migrator |
 | psycopg | LGPL-3.0-or-later | conversation-controller |
 | websocket-client | LGPL-2.1-or-later | broker, conversation-controller, warm-store-controller (via the `kubernetes` client) |
 
