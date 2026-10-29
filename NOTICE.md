@@ -65,13 +65,11 @@ If you need a fully open-source deployment, use the default agent-host image
 ## Regenerating this inventory
 
 ```bash
-# npm (run at the repo root — workspaces hoist into ./node_modules):
-npx license-checker-rseidelsohn --summary --excludePrivatePackages
-
-# Python (per service venv):
-pip-licenses --summary          # or read each *.dist-info/METADATA
-
-# Nix component licenses:
-nix eval --raw nixpkgs#goose-cli.meta.license.spdxId
-nix eval nixpkgs#claude-code.meta.license --json
+nix develop -c just eval-licenses   # writes result-licenses/
 ```
+
+It reads every committed `package-lock.json`, the vendored modules of each Go
+service, and the Nix closure behind each shipped component (which also covers
+the Python dependencies, as nixpkgs pins them). It writes `licenses.json` and
+a static `index.html` dashboard. The Nix side is an eval-time
+approximation of the runtime closure, so it can list a few build-only inputs.

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scooter license inventory</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #ffffff; --raised: #f6f7f9; --border: #e3e6ea; --grid: #eceef1;
+    --ink: #1b1f24; --ink-2: #4a525c; --ink-3: #737c87;
+    --bar: #3b6fd4; --bar-hover: #2a56ad;
+    --good: #2f7d4f; --warn: #a76a00; --serious: #c2491d; --critical: #b3261e; --neutral: #6b7380;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #15181c; --raised: #1d2126; --border: #2c3239; --grid: #252a30;
+      --ink: #e8eaed; --ink-2: #b4bac2; --ink-3: #8a929c;
+      --bar: #6f9cf0; --bar-hover: #9dbcf6;
+      --good: #5fbf85; --warn: #e0a33a; --serious: #ee7b50; --critical: #f0726a; --neutral: #9aa2ad;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 28px 24px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 32px 0 12px; }
+  .sub { color: var(--ink-3); margin: 0 0 24px; }
+  .sub code { color: var(--ink-2); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .tile { background: var(--raised); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .tile .label { color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .tile .value { font-size: 28px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile .hint { color: var(--ink-3); font-size: 12px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+  .card { background: var(--raised); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h3 { font-size: 14px; margin: 0 0 12px; }
+  .bars { display: grid; grid-template-columns: max-content 1fr max-content; gap: 6px 10px; align-items: center; }
+  .bars .name { color: var(--ink-2); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 230px; }
+  .bars .track { position: relative; height: 18px; cursor: default; }
+  .bars .track::before { content: ""; position: absolute; inset: 0; border-left: 1px solid var(--grid); }
+  .bars .fill { height: 100%; background: var(--bar); border-radius: 0 4px 4px 0; min-width: 2px; }
+  .bars .track:hover .fill { background: var(--bar-hover); }
+  .bars .n { color: var(--ink-2); font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }
+  #tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--surface); padding: 6px 9px; border-radius: 6px; font-size: 12px; display: none; z-index: 10; max-width: 320px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .filters input, .filters select { background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font: inherit; }
+  .filters input { flex: 1; min-width: 200px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--ink-3); font-weight: 500; position: sticky; top: 0; background: var(--raised); }
+  td.v { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  td.where { color: var(--ink-3); font-size: 12px; }
+  a { color: inherit; }
+  .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; color: var(--ink-2); }
+  .badge .dot { font-size: 11px; line-height: 1; }
+  .scroll { max-height: 620px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .scroll table th { background: var(--raised); }
+  .muted { color: var(--ink-3); }
+  .note { color: var(--ink-2); font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Scooter license inventory</h1>
+  <p class="sub" id="sub"></p>
+
+  <section class="tiles" id="tiles"></section>
+
+  <h2>Distribution</h2>
+  <div class="grid2">
+    <div class="card"><h3>Packages by license category</h3><div class="bars" id="cat-bars"></div></div>
+    <div class="card"><h3>Most common licenses</h3><div class="bars" id="lic-bars"></div></div>
+  </div>
+
+  <h2>Needs attention</h2>
+  <p class="note">Runtime packages whose license carries an obligation beyond keeping a copyright notice, or that have no license metadata. Dev-only npm packages are excluded here.</p>
+  <div class="scroll"><table id="attn"></table></div>
+
+  <h2>All packages</h2>
+  <div class="filters">
+    <input id="q" type="search" placeholder="Filter by package or license…" aria-label="Filter">
+    <select id="f-eco" aria-label="Ecosystem"><option value="">All ecosystems</option></select>
+    <select id="f-cat" aria-label="Category"><option value="">All categories</option></select>
+    <select id="f-scope" aria-label="Scope"><option value="">Runtime + dev</option><option>runtime</option><option>dev</option></select>
+  </div>
+  <div class="scroll"><table id="all"></table></div>
+  <p class="muted" id="count"></p>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+const REPORT = /*REPORT*/null;
+
+const STATUS = {
+  "first-party":     { color: "var(--neutral)",  icon: "●", label: "First-party" },
+  "permissive":      { color: "var(--good)",     icon: "✓", label: "Permissive" },
+  "attribution":     { color: "var(--warn)",     icon: "!", label: "Attribution" },
+  "weak-copyleft":   { color: "var(--warn)",     icon: "▲", label: "Weak copyleft" },
+  "strong-copyleft": { color: "var(--serious)",  icon: "▲", label: "Strong copyleft" },
+  "proprietary":     { color: "var(--critical)", icon: "■", label: "Proprietary" },
+  "unknown":         { color: "var(--neutral)",  icon: "?", label: "Unknown" },
+};
+const ORDER = Object.keys(STATUS);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const badge = (c) => `<span class="badge"><span class="dot" style="color:${STATUS[c].color}">${STATUS[c].icon}</span>${STATUS[c].label}</span>`;
+const pkgs = REPORT.packages;
+
+document.getElementById("sub").innerHTML =
+  `Generated ${new Date(REPORT.generatedAt).toLocaleString()} from <code>${REPORT.commit.slice(0, 12)}</code> by <code>just eval-licenses</code>. ` +
+  `Nix and Python entries are an eval-time approximation of each image's runtime closure.`;
+
+const attention = pkgs.filter((p) => p.scope === "runtime" && ["attribution", "weak-copyleft", "strong-copyleft", "proprietary", "unknown"].includes(p.category));
+const cnt = (c) => REPORT.totals.byCategory[c] ?? 0;
+const tiles = [
+  ["Packages", REPORT.totals.packages, Object.entries(REPORT.totals.byEcosystem).map(([k, v]) => `${k} ${v}`).join(" · ")],
+  ["Permissive", cnt("permissive"), "MIT, Apache-2.0, BSD, ISC, …"],
+  ["Copyleft", cnt("weak-copyleft") + cnt("strong-copyleft"), `${cnt("strong-copyleft")} strong · ${cnt("weak-copyleft")} weak`],
+  ["Proprietary", cnt("proprietary"), "vendor terms apply"],
+  ["Unknown", cnt("unknown"), "no license metadata"],
+];
+document.getElementById("tiles").innerHTML = tiles.map(([l, v, h]) =>
+  `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="hint">${esc(h)}</div></div>`).join("");
+
+const tip = document.getElementById("tip");
+function bars(el, rows) {
+  const max = Math.max(...rows.map((r) => r.n));
+  el.innerHTML = rows.map((r, i) =>
+    `<div class="name" title="${esc(r.label)}">${r.html ?? esc(r.label)}</div>` +
+    `<div class="track" data-i="${i}"><div class="fill" style="width:${(r.n / max) * 100}%"></div></div>` +
+    `<div class="n">${r.n}</div>`).join("");
+  el.querySelectorAll(".track").forEach((t) => {
+    t.addEventListener("mousemove", (e) => {
+      tip.innerHTML = rows[t.dataset.i].tip; tip.style.display = "block";
+      tip.style.left = Math.min(e.clientX + 12, innerWidth - 330) + "px"; tip.style.top = e.clientY + 12 + "px";
+    });
+    t.addEventListener("mouseleave", () => (tip.style.display = "none"));
+  });
+}
+const byEco = (filter) => Object.entries(pkgs.filter(filter).reduce((a, p) => ((a[p.ecosystem] = (a[p.ecosystem] ?? 0) + 1), a), {}))
+  .map(([k, v]) => `${k}: ${v}`).join("<br>");
+bars(document.getElementById("cat-bars"), ORDER.filter(cnt).map((c) => ({
+  label: STATUS[c].label, html: badge(c), n: cnt(c), tip: `<b>${STATUS[c].label}</b> — ${cnt(c)}<br>${byEco((p) => p.category === c)}`,
+})));
+bars(document.getElementById("lic-bars"), Object.entries(REPORT.totals.byLicense).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([l, n]) => ({
+  label: l, n, tip: `<b>${esc(l)}</b> — ${n}<br>${byEco((p) => (p.license ?? "(none)") === l)}`,
+})));
+
+const link = (p) => p.homepage ? `<a href="${esc(p.homepage)}" target="_blank" rel="noopener">${esc(p.name)}</a>` : esc(p.name);
+const SEVERITY = ["proprietary", "strong-copyleft", "weak-copyleft", "attribution", "unknown"];
+const sortAttn = [...attention].sort((a, b) => SEVERITY.indexOf(a.category) - SEVERITY.indexOf(b.category) || a.name.localeCompare(b.name));
+document.getElementById("attn").innerHTML =
+  `<thead><tr><th>Category</th><th>Package</th><th>Version</th><th>License</th><th>Where</th><th>What it means</th></tr></thead><tbody>` +
+  sortAttn.map((p) => `<tr><td>${badge(p.category)}</td><td>${link(p)} <span class="muted">${p.ecosystem}</span></td><td class="v">${esc(p.version)}</td><td>${esc(p.license ?? "—")}</td><td class="where">${esc(p.sources.join(", "))}</td><td class="note">${esc(p.note)}</td></tr>`).join("") + "</tbody>";
+
+const fEco = document.getElementById("f-eco"), fCat = document.getElementById("f-cat"), fScope = document.getElementById("f-scope"), q = document.getElementById("q");
+Object.keys(REPORT.totals.byEcosystem).forEach((e) => fEco.add(new Option(e, e)));
+ORDER.filter(cnt).forEach((c) => fCat.add(new Option(STATUS[c].label, c)));
+function renderAll() {
+  const s = q.value.toLowerCase();
+  const rows = pkgs.filter((p) => (!fEco.value || p.ecosystem === fEco.value) && (!fCat.value || p.category === fCat.value)
+    && (!fScope.value || p.scope === fScope.value) && (!s || p.name.toLowerCase().includes(s) || (p.license ?? "").toLowerCase().includes(s)));
+  document.getElementById("all").innerHTML =
+    `<thead><tr><th>Package</th><th>Version</th><th>License</th><th>Category</th><th>Scope</th><th>Where</th></tr></thead><tbody>` +
+    rows.slice(0, 1500).map((p) => `<tr><td>${link(p)} <span class="muted">${p.ecosystem}</span></td><td class="v">${esc(p.version)}</td><td>${esc(p.license ?? "—")}</td><td>${badge(p.category)}</td><td>${p.scope}</td><td class="where">${esc(p.sources.join(", "))}</td></tr>`).join("") + "</tbody>";
+  document.getElementById("count").textContent = `${rows.length} of ${pkgs.length} packages` + (rows.length > 1500 ? " (first 1500 shown)" : "");
+}
+[q, fEco, fCat, fScope].forEach((el) => el.addEventListener("input", renderAll));
+renderAll();
+</script>
+</body>
+</html>
