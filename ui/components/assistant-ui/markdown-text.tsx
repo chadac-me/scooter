@@ -9,6 +9,7 @@ import {
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkDropHtmlComments from "@/src/remarkDropHtmlComments";
 import { type FC, memo, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
@@ -28,7 +29,7 @@ const shareEmbedComponentsByLanguage = {
 const MarkdownTextImpl = () => {
   return (
     <MarkdownTextPrimitive
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkDropHtmlComments]}
       preprocess={preprocessShareEmbeds}
       className="aui-md text-[15px] desk:text-base"
       components={defaultComponents}
