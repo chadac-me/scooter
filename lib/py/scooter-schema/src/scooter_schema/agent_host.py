@@ -90,6 +90,18 @@ class Conversations(Base):
     creator_pod: Mapped[Optional[str]] = mapped_column(Text)
 
 
+class UserHookSettings(Base):
+    __tablename__ = 'user_hook_settings'
+    __table_args__ = (
+        PrimaryKeyConstraint('owner', 'hook_id', name='user_hook_settings_pkey'),
+    )
+
+    owner: Mapped[str] = mapped_column(Text, primary_key=True)
+    hook_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class UserSkills(Base):
     __tablename__ = 'user_skills'
     __table_args__ = (

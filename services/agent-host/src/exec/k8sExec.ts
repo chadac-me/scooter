@@ -411,7 +411,7 @@ export function createK8sSandboxApiClient(
 
     execute(req: ExecRequest, signal?: AbortSignal): Promise<ExecResult> {
       const cmd = wrapCommand(req);
-      return execRaw(cmd, undefined, signal);
+      return execRaw(cmd, req.stdin === undefined ? undefined : Readable.from([req.stdin]), signal);
     },
 
     async download(path: string): Promise<string> {

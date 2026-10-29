@@ -38,6 +38,8 @@ import { isVisibility } from "../session/visibility.js";
 import { serviceUrl, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
 import { HUMAN_TRIGGER_SOURCES } from "../acp/remoteAgentRegistry.js";
+import type { HookDef } from "../hooks/types.js";
+import type { UserHookSettingsStore } from "../hooks/userHookSettingsStore.js";
 
 const log = logger("agent-host");
 const remoteAgentLog = logger("remote-agent");
@@ -135,6 +137,10 @@ export interface ManagementDeps {
   conversationOwner?: ConversationOwnerLookup;
   /** Personal-skills store for the settings page's CRUD, always scoped to the caller; absent (no agent_host DSN) means the routes report it unconfigured. */
   userSkills?: UserSkillStore;
+  /** The deployment's hooks, listed on the settings page. */
+  hooks?: readonly HookDef[];
+  /** Per-user hook opt-outs; absent makes the toggles read-only. */
+  userHookSettings?: UserHookSettingsStore;
   /** The /contrib-api relay for contrib settings tabs; absent means the routes are not mounted. */
   contribApi?: ContribApiDeps;
   /** The deployment skills' names, so the settings form can warn that a personal skill of the same name replaces one. */
@@ -1234,6 +1240,34 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (!userSkills) return noSkillStore;
     const gone = await userSkills.remove(skillOwner(ctx), ctx.params.id);
     return gone ? { status: 204, json: null } : { status: 404, json: { error: "not found" } };
+  });
+
+  // --- Hooks (UI settings page) ---------------------------------------------------
+  r.get("/user-hooks", async (ctx) => {
+    const choices = deps.userHookSettings ? await deps.userHookSettings.list(skillOwner(ctx)) : new Map<string, boolean>();
+    return {
+      json: {
+        configurable: deps.userHookSettings !== undefined,
+        hooks: (deps.hooks ?? []).map((h) => ({
+          id: h.id,
+          event: h.event,
+          description: h.description,
+          userCanDisable: h.userCanDisable,
+          enabled: !h.userCanDisable || (choices.get(h.id) ?? true),
+        })),
+      },
+    };
+  });
+
+  r.patch("/user-hooks/:id", async (ctx) => {
+    if (!deps.userHookSettings) return { status: 501, json: { error: "hook settings not configured" } };
+    const hook = (deps.hooks ?? []).find((h) => h.id === ctx.params.id);
+    if (!hook) return { status: 404, json: { error: "not found" } };
+    if (!hook.userCanDisable) return { status: 403, json: { error: "this hook is required by the deployment" } };
+    const body = await ctx.body<{ enabled?: unknown }>();
+    if (typeof body.enabled !== "boolean") return { status: 400, json: { error: "enabled must be a boolean" } };
+    await deps.userHookSettings.set(skillOwner(ctx), hook.id, body.enabled);
+    return { json: { id: hook.id, enabled: body.enabled } };
   });
 
   // --- Contrib settings-tab API -------------------------------------------------

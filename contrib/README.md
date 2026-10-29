@@ -621,7 +621,7 @@ A contrib can add a page under `/settings`, written in React:
 ```nix
 ui.settingsTabs = [{
   label = "Personalization";
-  order = 50;                    # built-ins take 10, 20, … 50; ties sort by id
+  order = 50;                    # built-ins take 10, 20, 25, … 50; ties sort by id
   entry = "ui/SettingsTab.tsx";  # relative to this contrib's directory
 }];
 ```

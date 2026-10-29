@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { autoAnswerPermission, isToolGate } from "../../src/acp/client.js";
+import { answerToolGate, autoAnswerPermission, isToolGate } from "../../src/acp/client.js";
 
 // A goose approve-mode tool gate: allow and reject options for running a tool.
 const OPTS = [
@@ -48,5 +48,39 @@ describe("autoAnswerPermission (goose approve-mode)", () => {
 
   it("returns undefined when there are no options (caller falls through)", () => {
     expect(autoAnswerPermission([], false)).toBeUndefined();
+  });
+});
+
+describe("answerToolGate (PreToolUse hooks at goose's approve-mode gate)", () => {
+  const call = { toolCallId: "c1", title: "Shell", rawInput: { command: "git push -f" } };
+
+  it("REJECTS when a hook refuses, and passes the hook the tool's title and input", async () => {
+    const seen: unknown[] = [];
+    const res = await answerToolGate(
+      { options: OPTS, toolCall: call },
+      { gateTool: async (c) => (seen.push(c), "no force-push") },
+    );
+    expect(res).toEqual({ outcome: { outcome: "selected", optionId: "reject" } });
+    expect(seen).toEqual([call]);
+  });
+
+  it("ALLOWS when hooks pass and nothing is waiting, and still yields to a priority item", async () => {
+    const pass = async () => undefined;
+    expect(await answerToolGate({ options: OPTS, toolCall: call }, { gateTool: pass })).toEqual({
+      outcome: { outcome: "selected", optionId: "allow" },
+    });
+    expect(await answerToolGate({ options: OPTS, toolCall: call }, { gateTool: pass, shouldYield: () => true })).toEqual({
+      outcome: { outcome: "selected", optionId: "reject" },
+    });
+  });
+
+  it("ALLOWS when a hook throws, since a broken hook must not wedge goose", async () => {
+    const res = await answerToolGate({ options: OPTS, toolCall: call }, { gateTool: async () => { throw new Error("x"); } });
+    expect(res).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+  });
+
+  it("leaves an agent-presented choice to the UI and answers nothing without hooks or back-pressure", async () => {
+    expect(await answerToolGate({ options: USER_CHOICE, toolCall: call }, { gateTool: async () => "no" })).toBeUndefined();
+    expect(await answerToolGate({ options: OPTS, toolCall: call }, {})).toBeUndefined();
   });
 });

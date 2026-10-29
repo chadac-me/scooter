@@ -33,6 +33,7 @@ export function createLocalSandboxApiClient(): SandboxApiClient {
         setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 500);
       };
       if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      if (req.stdin !== undefined) child.stdin.end(req.stdin);
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (d) => (stdout += d));

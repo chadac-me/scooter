@@ -22,6 +22,8 @@ import {
   createUserSkill,
   updateUserSkill,
   deleteUserSkill,
+  loadUserHooks,
+  setUserHookEnabled,
   loadRemoteAgentStatus,
   requestRemoteAgentJoinToken,
   type ScheduledTaskView,
@@ -29,6 +31,7 @@ import {
   type UserView,
   type UserSkillView,
   type UserSkillInput,
+  type UserHookView,
 } from "./client.js";
 import { viewStore, useSettingsTab, settingsTabList, resolveTab, isBuiltinTab, type BuiltinTab } from "./view.js";
 import { contribSettingsTabs } from "./contribManifest.js";
@@ -972,6 +975,101 @@ function ClaudeAgentSection() {
 }
 
 /** Admin Area — deployment-wide administration. Holds the user directory today. */
+/** Deployment hooks; changes apply to conversations started afterwards. */
+function HooksSection() {
+  const [hooks, setHooks] = useState<UserHookView[]>([]);
+  const [configurable, setConfigurable] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    const res = await loadUserHooks(agentHostConfig);
+    setConfigurable(res.configurable);
+    setHooks(res.hooks);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const toggle = async (h: UserHookView) => {
+    setBusy(h.id);
+    setError(null);
+    try {
+      await setUserHookEnabled(agentHostConfig, h.id, !h.enabled);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="flex flex-col gap-3">
+      <div>
+        <h2 className="font-medium">Hooks</h2>
+        <p className="text-sm text-muted-foreground">
+          Checks your deployment runs in the sandbox while Scooter works, such as making sure it
+          pushes its work before stopping. Changes apply to conversations you start afterwards.
+        </p>
+      </div>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      {loading ? (
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      ) : hooks.length === 0 ? (
+        <p data-testid="hooks-empty" className="rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground">
+          This deployment has no hooks.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {hooks.map((h) => (
+            <li
+              key={h.id}
+              data-testid="hook-item"
+              data-enabled={h.enabled}
+              className="flex list-none flex-col gap-2 rounded-md border p-3 sm:flex-row sm:items-start sm:gap-3"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="truncate font-mono font-medium">{h.id}</span>
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{h.event}</span>
+                  <span
+                    className={
+                      "rounded px-1.5 py-0.5 text-[10px] " +
+                      (h.enabled ? "bg-success/15 text-success" : "bg-muted text-muted-foreground")
+                    }
+                  >
+                    {h.enabled ? "on" : "off"}
+                  </span>
+                </div>
+                {h.description && <p className="mt-1 text-sm text-foreground/80">{h.description}</p>}
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                {h.userCanDisable && configurable ? (
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    data-testid="hook-toggle"
+                    disabled={busy === h.id}
+                    onClick={() => void toggle(h)}
+                  >
+                    {h.enabled ? "Turn off" : "Turn on"}
+                  </Button>
+                ) : (
+                  <span className="text-xs text-muted-foreground">{h.userCanDisable ? "Needs a database" : "Required"}</span>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function AdminAreaSection() {
   return (
     <div data-testid="admin-area" className="flex flex-col gap-6">
@@ -983,6 +1081,7 @@ function AdminAreaSection() {
 const TAB_BODIES: Record<BuiltinTab, FC> = {
   tasks: ScheduledTasksSection,
   skills: SkillsSection,
+  hooks: HooksSection,
   claude: ClaudeAgentSection,
   admin: AdminAreaSection,
 };

@@ -5,6 +5,6 @@
  */
 export { createSdkAcpClient, type SdkAcpClientDeps } from "./sdkClient.js";
 export { summarizeConversation, type SummaryTurn, type SummarizeDeps } from "./summarize.js";
-export type { AcpClient, ExecBackend, ExecRequest, ExecResult, TerminalHandle } from "./types.js";
+export type { AcpClient, ExecBackend, ExecRequest, ExecResult, TerminalHandle, ToolHooks, PreToolHookResult, PostToolHookResult } from "./types.js";
 // Exported for the transcript harness, which replays recorded raw SDK messages through the live adapter.
 export { sdkMessageToUpdates, type SdkMessage } from "./sdkAdapter.js";

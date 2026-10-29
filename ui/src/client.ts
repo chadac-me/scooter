@@ -794,6 +794,41 @@ export async function deleteUserSkill(config: AgentHostConfig, id: string): Prom
   return res.ok;
 }
 
+export interface UserHookView {
+  id: string;
+  event: string;
+  description: string;
+  /** False means the deployment requires it. */
+  userCanDisable: boolean;
+  enabled: boolean;
+}
+
+/** `configurable` is false without a database. */
+export async function loadUserHooks(config: AgentHostConfig): Promise<{ configurable: boolean; hooks: UserHookView[] }> {
+  try {
+    const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/user-hooks`, { headers: authHeaders(config) });
+    if (!res.ok) {
+      console.warn(`[client] loadUserHooks: HTTP ${res.status}`);
+      return { configurable: false, hooks: [] };
+    }
+    const body = (await res.json()) as { configurable?: boolean; hooks?: UserHookView[] };
+    return { configurable: body.configurable === true, hooks: body.hooks ?? [] };
+  } catch (e) {
+    console.warn("[client] loadUserHooks failed:", e);
+    return { configurable: false, hooks: [] };
+  }
+}
+
+/** Turn a hook on or off for the caller's future conversations. */
+export async function setUserHookEnabled(config: AgentHostConfig, id: string, enabled: boolean): Promise<void> {
+  const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/user-hooks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...authHeaders(config) },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) await skillError(res);
+}
+
 /** Which conversations to list: the caller's own ("mine", default) or all. */
 export type ConversationScope = "mine" | "all";
 

@@ -19,12 +19,35 @@ import type {
   SessionUpdate,
   ContentBlock,
 } from "./types.js";
-import type { BlockingTool, ExecBackend } from "./types.js";
+import type { BlockingTool, ExecBackend, ToolHooks } from "./types.js";
 import { sdkMessageToUpdates, type SdkMessage } from "./sdkAdapter.js";
-import { createSandboxMcpServer } from "./sandboxMcp.js";
+import { createSandboxMcpServer, TOOL_ALIASES } from "./sandboxMcp.js";
 import { decideTool } from "./toolPolicy.js";
 import { BLOCKING_TOOL_TIMEOUT_S, blockingToolHook } from "./blockingToolHook.js";
 import { debug, debugError } from "./debug.js";
+
+const denyTool = (reason: string) => ({
+  continue: true,
+  hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason },
+});
+
+/** Hooks match sandbox tools by built-in name: `Bash`, not `mcp__sandbox__bash`. */
+const BUILTIN_FOR: Record<string, string> = Object.fromEntries(Object.entries(TOOL_ALIASES).map(([k, v]) => [v, k]));
+export const hookToolName = (name: string): string => BUILTIN_FOR[name] ?? name;
+
+/** Hook feedback reaches the model with the tool result. */
+function postToolHook(hooks: ToolHooks) {
+  return async (input: unknown, toolUseId?: string) => {
+    const i = input as { tool_name?: string; tool_input?: unknown; tool_response?: unknown };
+    const h = await hooks.post(hookToolName(i.tool_name ?? ""), i.tool_input, i.tool_response, toolUseId);
+    if (!h.block && !h.context) return { continue: true };
+    return {
+      continue: true,
+      ...(h.block ? { decision: "block", reason: h.block } : {}),
+      ...(h.context ? { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: h.context } } : {}),
+    };
+  };
+}
 
 // Stream text/thinking as deltas, threaded into sdkMessageToUpdates so the final assistant message does not re-emit the text.
 const INCLUDE_PARTIALS = true;
@@ -62,6 +85,8 @@ export interface SdkAcpClientDeps {
   shouldYield?: () => boolean;
   /** Transcript recorder, called with each raw SDK query() message before normalization. */
   recordRaw?: (msg: unknown) => void;
+  /** Conversation tool hooks, run after the platform's tool policy. */
+  toolHooks?: ToolHooks;
 }
 
 /** The minimal shape of the SDK's query() this module depends on, declared locally so it type-checks without the SDK installed. */
@@ -206,32 +231,49 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
           hooks: [
             async (input: unknown, toolUseId?: string, opts?: { signal?: AbortSignal }) => {
               const name = (input as { tool_name?: string })?.tool_name ?? "";
-              const blocking = Object.hasOwn(blockingTools, name) ? blockingTools[name] : undefined;
+              let toolInput = (input as { tool_input?: unknown }).tool_input;
+              const found = Object.hasOwn(blockingTools, name) ? blockingTools[name] : undefined;
+              // With no one to ask, the policy redirects the tool.
+              const blocking = found && permissionHandler ? found : undefined;
+              if (!blocking) {
+                const decision = decideTool(name, Object.values(toolAliases));
+                if (!decision.allow) {
+                  debugError("[sdk:tool-denied]", `${name}: ${decision.reason}`);
+                  return denyTool(decision.reason);
+                }
+              }
+              let updatedInput: Record<string, unknown> | undefined;
+              let context: string | undefined;
+              if (deps.toolHooks) {
+                const h = await deps.toolHooks.pre(hookToolName(name), toolInput, toolUseId);
+                if (h.deny) return denyTool(h.deny);
+                if (h.updatedInput) toolInput = updatedInput = h.updatedInput;
+                context = h.context;
+              }
               if (blocking && permissionHandler) {
                 return blockingToolHook({
                   tool: blocking,
                   sessionId,
                   toolCallId: toolUseId ?? `block-${permissionNonce}-${++permissionSeq}`,
-                  toolInput: (input as { tool_input?: unknown }).tool_input,
+                  toolInput,
                   ask: permissionHandler,
                   signal: opts?.signal,
                 });
               }
-              const decision = decideTool(name, Object.values(toolAliases));
-              if (decision.allow) return { continue: true };
-              debugError("[sdk:tool-denied]", `${name}: ${decision.reason}`);
+              if (!updatedInput && !context) return { continue: true };
               return {
                 continue: true,
                 hookSpecificOutput: {
                   hookEventName: "PreToolUse",
-                  permissionDecision: "deny",
-                  permissionDecisionReason: decision.reason,
+                  ...(updatedInput ? { permissionDecision: "allow", updatedInput } : {}),
+                  ...(context ? { additionalContext: context } : {}),
                 },
               };
             },
           ],
         },
       ],
+      ...(deps.toolHooks ? { PostToolUse: [{ hooks: [postToolHook(deps.toolHooks)] }] } : {}),
     },
     includePartialMessages: INCLUDE_PARTIALS, // stream text deltas
     // Surface the spawned claude CLI's stderr so a CLI failure is not an opaque exit 1.

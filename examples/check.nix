@@ -1123,6 +1123,26 @@ let
     ++ (if !(builtins.tryEval (builtins.deepSeq (awaitingOf { contribs.aws.db.provides = [ "awaiting-input" ]; }) true)).success then [ ]
         else [ "two contribs providing awaiting-input rendered" ]);
 
+  # Hooks: finish-or-ask default, opt-out, contrib namespacing and gating.
+  hooksOf = env:
+    let m = builtins.filter (e: e.name == "AGENT_HOOKS_JSON") env;
+    in if m == [ ] then [ ] else builtins.fromJSON (builtins.head m).value;
+  hookIds = extra: map (h: h.id) (hooksOf (hostEnvOf extra));
+  echoHook = enable: {
+    contribs.echo.enable = nixpkgsLib.mkForce enable;
+    contribs.echo.agent.hooks.ping = { event = "PreToolUse"; command = "exit 0"; };
+  };
+  hookProblems =
+    (let f = builtins.filter (h: h.id == "finish-or-ask") (hooksOf (hostEnvOf { })); in
+     if f != [ ] && (builtins.head f).event == "Stop" && (builtins.head f).userCanDisable then [ ]
+     else [ "AGENT_HOOKS_JSON has no opt-out-able finish-or-ask Stop hook by default" ])
+    ++ (if !(builtins.elem "finish-or-ask" (hookIds { scooter.agent.hooks.finish-or-ask.enable = false; })) then [ ]
+        else [ "finish-or-ask still renders with enable = false" ])
+    ++ (if builtins.elem "echo.ping" (hookIds (echoHook true)) then [ ]
+        else [ "an enabled contrib's hook is not in AGENT_HOOKS_JSON as <contrib>.<id>" ])
+    ++ (if !(builtins.elem "echo.ping" (hookIds (echoHook false))) then [ ]
+        else [ "a disabled contrib's hook is in AGENT_HOOKS_JSON" ]);
+
   # The UI pod serves the DEPLOYMENT's contrib manifest, mounted from a ConfigMap, so a
   # contrib left off here shows no settings tab even though the image's built-in
   # manifest (built from the repo's list) has one.
@@ -1183,7 +1203,7 @@ let
     ++ (if bodyAnn overrideRes == "1g" then [ ]
         else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
 
-  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"

@@ -36,6 +36,9 @@ conversation_jobs   = { writers = ["agent-host"], readers = [] }
 # the table for GET /conversations; conversation-controller writes `phase` and
 # (re)assigns host_pod. A writer implies read, so none are also readers.
 conversations       = { writers = ["agent-host", "conversation-router", "conversation-controller"], readers = [] }
+# Per-user opt-outs from deployment hooks marked `userCanDisable`, set in the settings
+# page and read when a conversation's bridge is built.
+user_hook_settings  = { writers = ["agent-host"], readers = [] }
 # Per-user skills authored in the settings page, injected into that user's conversations
 # next to the deployment-wide `agent-skills` ConfigMap. agent-host both serves the CRUD
 # and reads them at conversation start, so it is the only writer and there are no

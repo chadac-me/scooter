@@ -30,6 +30,7 @@ import { modelAllowedFor, defaultFor, type ModelCatalog } from "./agent/models.j
 import { fingerprintOffered, type OfferedMcpServer } from "./agent/mcpServerRegistry.js";
 
 import { formatError, logger } from "./log.js";
+import type { HookEvent, HookOutcome, HookRunner } from "./hooks/types.js";
 
 const log = logger("bridge");
 
@@ -162,6 +163,8 @@ interface ReadySession {
   skillsFingerprint: string;
   /** Shown the conversation's history at least once. */
   historySeeded: boolean;
+  /** SessionStart hooks have run for this session. */
+  sessionStartFired?: boolean;
   /** Last run served; later events were missed. */
   lastRunId?: RunId;
 }
@@ -305,6 +308,15 @@ export interface SessionBridge {
    *  gate to deny the next tool so the run quiesces to a boundary. */
   shouldYieldToQueue(): boolean;
 
+  /** Run tool hooks in this run; `defer` saves feedback for turn end. */
+  runToolHook(
+    event: "PreToolUse" | "PostToolUse",
+    toolName: string,
+    toolInput: unknown,
+    extra?: Record<string, unknown>,
+    defer?: boolean,
+  ): Promise<HookOutcome>;
+
   /** Record one raw agent-input frame under the current run for the transcript recorder
    *  (a no-op when recording is off). */
   recordRawInput(data: unknown): void;
@@ -412,6 +424,13 @@ export interface BridgeDeps {
    *  events correlated by runId; `provider` labels the agent. */
   recorder?: Recorder;
   provider?: "goose" | "claude";
+
+  /** This conversation's deployment hooks. */
+  hooks?: HookRunner;
+  /** Stop-hook continuations allowed per turn (default 3). */
+  maxStopBlocks?: number;
+  /** The spawning conversation when this is a subagent. */
+  parentId?: () => string | undefined;
 }
 
 // Event ids must stay unique across agent-host restarts, so each is a UUID with a
@@ -444,6 +463,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
   let currentProviderId = "";
   /** The session this run resolved to. */
   let currentReady: ReadySession | undefined;
+  /** Goose runs need the bridge to fire tool hooks. */
+  let currentProviderKind: AcpProvider["kind"] | undefined;
   /** The session that served the previous run. */
   let lastRunReady: ReadySession | undefined;
   let started = false;
@@ -667,6 +688,14 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     // death, no activity, an ACP throw), never for a clean finish, a cancel or a
     // model-reported error.
     retryable?: boolean;
+    // The latest reply, for Stop's last_assistant_message.
+    lastText: string;
+    // Hook feedback delivered when the agent tries to stop.
+    hookFeedback: string[];
+    // Awaited before the turn may end.
+    pendingHooks: Promise<unknown>[];
+    toolInfo: Map<string, { name: string; input: unknown }>;
+    source?: string;
   }
 
   /** True when a tool_call_update's content is just a live terminal handle, meaning the
@@ -751,6 +780,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           messageId: st.openText,
           delta: text,
         });
+        st.lastText += text;
         break;
       }
       case "agent_thought_chunk": {
@@ -781,6 +811,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         closeOpenText(st);
         closeOpenReasoning(st);
         emit({ type: "TOOL_CALL_START", toolCallId: u.toolCallId, toolCallName: u.title });
+        st.toolInfo.set(u.toolCallId, { name: u.title, input: u.rawInput });
         emitArgsOnce(st, u.toolCallId, u.rawInput);
         emit({ type: "TOOL_CALL_END", toolCallId: u.toolCallId });
         st.toolMessage.set(u.toolCallId, nextId("msg"));
@@ -791,6 +822,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         // goose often sends the args on this update rather than the initial tool_call, so
         // emit them now if not yet emitted.
         emitArgsOnce(st, u.toolCallId, u.rawInput);
+        const info = st.toolInfo.get(u.toolCallId);
+        if (info && u.rawInput !== undefined && info.input === undefined) info.input = u.rawInput;
         // goose marks every shell update status="completed" and the empty ones bracket the
         // real work, so the TOOL_CALL_RESULT is emitted only on a genuine finish and the part
         // stays result-less (a running spinner) until then.
@@ -836,6 +869,14 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           messageId,
           content: typeof resultContent === "string" ? resultContent : JSON.stringify(resultContent ?? ""),
         });
+        // The SDK fires its own PostToolUse; goose needs ours.
+        if (deps.hooks && currentProviderKind === "goose" && info) {
+          st.pendingHooks.push(
+            self
+              .runToolHook("PostToolUse", info.name, info.input ?? {}, { tool_response: resultContent ?? null, tool_use_id: u.toolCallId }, true)
+              .catch(() => {}),
+          );
+        }
         break;
       }
       case "context_usage": {
@@ -854,6 +895,72 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       : "The user sent several messages while you were working — handle them together as one request:\n\n" +
         texts.map((t, i) => `[Message ${i + 1}]\n${t}`).join("\n\n");
 
+  const maxStopBlocks = deps.maxStopBlocks ?? 3;
+
+  const emitHookNote = (text: string) => emit({ type: "SYSTEM_MESSAGE", messageId: nextId("sys"), source: "hook", text });
+
+  // Run an event's hooks and show the user what they refused.
+  const fireHooks = async (
+    st: RunState | undefined,
+    event: HookEvent,
+    input: Record<string, unknown>,
+    target?: string,
+    scooterExtra: Record<string, unknown> = {},
+  ): Promise<HookOutcome> => {
+    const out = await deps.hooks!.run(
+      event,
+      {
+        session_id: conversationId,
+        transcript_path: "",
+        permission_mode: "default",
+        ...input,
+        scooter: {
+          conversation_id: conversationId,
+          owner: deps.owner ?? null,
+          parent_id: deps.parentId?.() ?? null,
+          provider: currentProviderKind ?? null,
+          run_id: st?.runId ?? null,
+          source: st?.source ?? null,
+          ...scooterExtra,
+        },
+      },
+      target,
+    );
+    for (const m of out.systemMessages) emitHookNote(m);
+    const refusers = out.runs.filter((r) => r.decision === "block" || r.decision === "stop").map((r) => r.id);
+    if (out.block) emitHookNote(`${event} hook ${refusers.join(", ")}: ${out.block}`);
+    else if (out.stop) emitHookNote(`${event} hook ${refusers.join(", ")} ended the turn: ${out.stop}`);
+    return out;
+  };
+
+  // The prompt sending a stopping agent back, or undefined.
+  const stopContinuation = async (st: RunState, stopBlocks: number): Promise<string | undefined> => {
+    if (!deps.hooks) return undefined;
+    const feedback = st.hookFeedback.splice(0);
+    // A waiting message outranks a hook's continuation.
+    if (queue.length > 0) return undefined;
+    let reason: string | undefined;
+    if (await deps.hooks.has("Stop")) {
+      const out = await fireHooks(
+        st,
+        "Stop",
+        { stop_hook_active: stopBlocks > 0, last_assistant_message: st.lastText },
+        undefined,
+        { stop_blocks: stopBlocks },
+      );
+      if (out.stop) return undefined;
+      reason = out.block;
+    }
+    const parts = [...feedback, ...(reason ? [reason] : [])];
+    if (parts.length === 0) return undefined;
+    if (stopBlocks >= maxStopBlocks) {
+      log.warn("hooks kept the agent going past the limit; letting it stop", { run_id: st.runId, limit: maxStopBlocks });
+      emitHookNote(`Hooks sent the agent back ${maxStopBlocks} times this turn; letting it stop.`);
+      return undefined;
+    }
+    return decorateSystemMessage("hook", parts.join("\n\n"));
+  };
+
   const runPrompt = async (
     input: PromptInput,
     batch: PromptInput[] = [input],
@@ -861,7 +968,19 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     alreadyPersisted = false,
   ): Promise<{ runId: RunId; retryable: boolean }> => {
     const runId = nextId("run");
-    const st: RunState = { runId, threadId: input.threadId, toolMessage: new Map(), argsEmitted: new Set(), inFlightTools: 0, terminalPending: new Set() };
+    const st: RunState = {
+      runId,
+      threadId: input.threadId,
+      toolMessage: new Map(),
+      argsEmitted: new Set(),
+      inFlightTools: 0,
+      terminalPending: new Set(),
+      lastText: "",
+      hookFeedback: [],
+      pendingHooks: [],
+      toolInfo: new Map(),
+      source: input.source,
+    };
     const startedAt = Date.now();
     st.startedAt = startedAt;
     currentRun = st; // visible to cancel() from the moment the run begins
@@ -880,7 +999,9 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
 
     // Dead-on-arrival watchdog: no ACP activity within firstActivityTimeoutMs ends the run
     // with a RUN_ERROR and cancels the agent so the stuck subprocess unblocks.
-    if (firstActivityTimeoutMs > 0) {
+    // Re-armed after pre-prompt hooks; their time isn't the agent's.
+    const armActivityWatchdog = () => {
+      if (firstActivityTimeoutMs <= 0) return;
       st.activityTimer = setTimeout(() => {
         if (st.sawActivity || st.ended) return;
         st.ended = true;
@@ -913,7 +1034,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         // Stop waiting regardless, since the cancel above is best-effort.
         signalWedged();
       }, firstActivityTimeoutMs);
-    }
+    };
+    armActivityWatchdog();
 
     // Liveness watchdog: force-terminates a run only when the agent process has died without
     // a terminal event, so silence (a long tool call, a paused permission request) just
@@ -1050,7 +1172,29 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       // A prompt-only note (not persisted) telling the agent where the files landed.
       const fileNoteBlocks: ContentBlock[] =
         savedFilePaths.length > 0 ? [{ type: "text", text: buildFileNote(savedFilePaths) }] : [];
-      const promptBlocks = [...textBlocks, ...fileNoteBlocks, ...imageBlocks];
+      const hookContext: string[] = [];
+      if (deps.hooks) {
+        if (st.activityTimer) clearTimeout(st.activityTimer);
+        if (ready && !ready.sessionStartFired) {
+          ready.sessionStartFired = true;
+          const started = await fireHooks(st, "SessionStart", { source: "startup" }, "startup");
+          hookContext.push(...started.context);
+        }
+        const submit = await fireHooks(st, "UserPromptSubmit", { prompt: combined });
+        if (submit.block || submit.stop) {
+          // A refused prompt never reaches the agent.
+          st.ended = true;
+          st.terminated = true;
+          emit({ type: "RUN_FINISHED", threadId: input.threadId, runId });
+          return { runId, retryable: false };
+        }
+        hookContext.push(...submit.context);
+        if (!st.sawActivity && !st.ended) armActivityWatchdog();
+      }
+      const hookBlocks: ContentBlock[] = hookContext.length
+        ? [{ type: "text", text: decorateSystemMessage("hook", hookContext.join("\n\n")) }]
+        : [];
+      const promptBlocks = [...textBlocks, ...hookBlocks, ...fileNoteBlocks, ...imageBlocks];
         // These two log lines bracket the one call that can hang and say which provider took
         // the run.
         log.info("acp prompt: sending", {
@@ -1060,25 +1204,38 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         });
       // Raced against the watchdogs: a rejection still lands in the catch below, and
       // Promise.race marks the loser handled.
-      const promptCall = acpClient!.prompt({ sessionId: acpSessionId!, prompt: promptBlocks });
-      const raced = await Promise.race([
-        promptCall.then((r) => ({ abandoned: false as const, stopReason: r.stopReason })),
-        wedged.then(() => ({ abandoned: true as const })),
-      ]);
-      if (raced.abandoned) {
-        // Record the abandoned call's eventual rejection, often the only account of why the
-        // run produced nothing.
-        promptCall.catch((err) => noteRunDiagnostic(err instanceof Error ? err.message : String(err)));
-        // A watchdog already emitted this run's terminal event and set `retryable`, so return
-        // and let the pump re-drive the batch.
-        return { runId, retryable: st.retryable === true };
-      }
-      const { stopReason } = raced;
-      debug("[bridge] prompt: stopReason=%s", stopReason);
+      // A Stop hook's block sends the agent back in this run.
+      let turnBlocks = promptBlocks;
+      let stopReason = "end_turn";
+      for (let stopBlocks = 0; ; stopBlocks++) {
+        st.lastText = "";
+        const promptCall = acpClient!.prompt({ sessionId: acpSessionId!, prompt: turnBlocks });
+        const raced = await Promise.race([
+          promptCall.then((r) => ({ abandoned: false as const, stopReason: r.stopReason })),
+          wedged.then(() => ({ abandoned: true as const })),
+        ]);
+        if (raced.abandoned) {
+          // Record the abandoned call's eventual rejection, often the only account of why the
+          // run produced nothing.
+          promptCall.catch((err) => noteRunDiagnostic(err instanceof Error ? err.message : String(err)));
+          // A watchdog already emitted this run's terminal event and set `retryable`, so return
+          // and let the pump re-drive the batch.
+          return { runId, retryable: st.retryable === true };
+        }
+        stopReason = raced.stopReason;
+        debug("[bridge] prompt: stopReason=%s", stopReason);
         log.info("acp prompt: returned", { run_id: st.runId, stop_reason: stopReason });
-      // The ACP response can resolve before the final session/update notifications dispatch,
-      // so drain a macrotask before closing messages and emitting RUN_FINISHED.
-      await drain();
+        // The ACP response can resolve before the final session/update notifications dispatch,
+        // so drain a macrotask before closing messages and emitting RUN_FINISHED.
+        await drain();
+        await Promise.allSettled(st.pendingHooks.splice(0));
+        if (st.cancelled || st.terminated || stopReason === "cancelled" || stopReason === "error") break;
+        const next = await stopContinuation(st, stopBlocks);
+        if (next === undefined || st.cancelled || st.terminated) break;
+        closeOpenText(st);
+        closeOpenReasoning(st);
+        turnBlocks = [{ type: "text", text: next }];
+      }
       st.ended = true; // stop routing further late updates into this run
       closeOpenText(st);
       closeOpenReasoning(st);
@@ -1510,6 +1667,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     acpClient = ready.client;
     acpSessionId = ready.acpSessionId;
     currentProviderId = provider.id;
+    currentProviderKind = provider.kind;
     currentReady = ready;
   };
 
@@ -1578,6 +1736,21 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
 
     shouldYieldToQueue() {
       return (topPriorityItem()?.priority ?? 0) >= PRIORITY_INTERRUPT;
+    },
+
+    async runToolHook(event, toolName, toolInput, extra = {}, defer = false) {
+      const st = currentRun;
+      if (!deps.hooks) return { context: [], systemMessages: [], runs: [] };
+      const out = await fireHooks(st, event, { tool_name: toolName, tool_input: toolInput ?? {}, ...extra }, toolName);
+      if (defer && st) {
+        if (out.block) {
+          st.hookFeedback.push(
+            event === "PreToolUse" ? `A hook refused your ${toolName} call: ${out.block}` : `Hook feedback on your ${toolName} call: ${out.block}`,
+          );
+        }
+        st.hookFeedback.push(...out.context);
+      }
+      return out;
     },
 
     recordRawInput,

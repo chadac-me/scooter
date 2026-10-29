@@ -75,6 +75,9 @@ import { catalogFromEnv, availableIds, contextLimitOf, modelAllowedFor, defaultF
 import { createJobManager, noticeTail, type JobStatus, type JobRegistry } from "./session/jobManager.js";
 import { createPgJobStore } from "./session/jobStore.js";
 import { createPgUserSkillStore } from "./session/userSkillStore.js";
+import { createHookRunner, parseHooks } from "./hooks/runner.js";
+import type { HookDef, HookRunner } from "./hooks/types.js";
+import { createPgUserHookSettingsStore } from "./hooks/userHookSettingsStore.js";
 import { mintConvToken } from "./auth/convToken.js";
 import { createMcpEndpoint, resolveConversation } from "./agent/mcpServer.js";
 import type { ImageToolsWiring } from "./agent/imageTools.js";
@@ -101,7 +104,7 @@ import type { IncomingMessage } from "node:http";
 import { createMetrics, type MetricsSink } from "./metrics/metrics.js";
 import { parsePriceTable } from "./metrics/pricing.js";
 import { createGooseUsageReader } from "./metrics/gooseUsage.js";
-import type { SandboxRef, SessionId } from "./types.js";
+import type { ExecBackend, SandboxRef, SessionId } from "./types.js";
 import { resumeUnlessEnded } from "./session/resumeGuard.js";
 import { formatError, logger, type Logger } from "./log.js";
 import { assertFileCount, uploadLimitsFromEnv } from "./config/uploads.js";
@@ -146,6 +149,10 @@ export interface AgentHostConfig {
   skillsDir: string;
   /** Agent tools contribs make wait on the user, from BLOCKING_TOOLS_JSON. */
   blockingTools?: Record<string, BlockingTool>;
+  /** Deployment hooks, from AGENT_HOOKS_JSON. */
+  hooks?: HookDef[];
+  /** Stop-hook continuations per turn, from AGENT_HOOKS_MAX_STOP_BLOCKS. */
+  maxStopBlocks?: number;
   /** Suspend conversations idle longer than this many ms, 0 for off. */
   idleSuspendMs: number;
   /** How often the idle sweep runs (ms). */
@@ -220,6 +227,8 @@ export function configFromEnv(): AgentHostConfig & AgentHostConfigExtra {
     agentName: process.env.AGENT_NAME ?? "Scooter",
     skillsDir: process.env.SKILLS_DIR ?? "/etc/agent-sandbox/skills",
     blockingTools: parseBlockingTools(process.env.BLOCKING_TOOLS_JSON, (m) => hostLog.warn(m)),
+    hooks: parseHooks(process.env.AGENT_HOOKS_JSON, (m) => hostLog.warn(m)),
+    maxStopBlocks: Number(process.env.AGENT_HOOKS_MAX_STOP_BLOCKS ?? "") || 3,
     observability: {
       // Off unless OTEL_METRICS_ENABLED=1; the OTLP endpoint comes from the standard
       // OTEL_EXPORTER_OTLP_* env.
@@ -988,6 +997,38 @@ export async function main(
     backend: userSkillStore ? "postgres" : "none",
     ...(userSkillStore ? {} : { reason: "no agent_host DSN — personal skills are disabled" }),
   });
+  // Without a database every hook stays on.
+  const userHookSettings = agentHostDsn ? createPgUserHookSettingsStore({ dsn: agentHostDsn }) : undefined;
+  const hooksLog = logger("hooks");
+  hostLog.info("conversation hooks", {
+    hooks: (config.hooks ?? []).map((h) => `${h.id}@${h.event}`),
+    opt_outs: userHookSettings ? "postgres" : "none",
+  });
+
+  const hookRunnerFor = (conversationId: string, exec: ExecBackend, owner?: string): HookRunner | undefined => {
+    const hooks = config.hooks ?? [];
+    if (hooks.length === 0) return undefined;
+    return createHookRunner({
+      hooks,
+      exec,
+      disabled: async () => {
+        if (!userHookSettings || !owner) return new Set<string>();
+        const choices = await userHookSettings.list(owner);
+        return new Set([...choices].filter(([, on]) => !on).map(([id]) => id));
+      },
+      onRun: (rec) => {
+        hooksLog.info("hook ran", {
+          conversation_id: conversationId,
+          hook: rec.id,
+          event: rec.event,
+          decision: rec.decision,
+          duration_ms: rec.ms,
+          ...(rec.error ? { error: rec.error } : {}),
+        });
+        metrics.hookRun?.({ event: rec.event, hook: rec.id, decision: rec.decision });
+      },
+    });
+  };
 
   /**
    * One owner's enabled personal skills, shaped to merge with the directory-loaded ones.
@@ -1405,6 +1446,8 @@ export async function main(
       scheduler: schedulerClient,
       conversationOwner,
       userSkills: userSkillStore,
+      hooks: config.hooks,
+      userHookSettings,
       // Settings tabs reach their contrib's broker half as the signed-in user.
       contribApi: {
         contribs: parseContribUserApi(process.env.CONTRIB_USER_API_JSON),
@@ -1717,6 +1760,8 @@ export async function main(
         : deferredSandboxApi(sandbox, healingResume(conversationId as SessionId, sandbox)),
       { commandTimeoutMs: config.commandTimeoutMs },
     );
+    const hookRunner = hookRunnerFor(conversationId, exec, owner);
+    const hasPreToolHooks = (config.hooks ?? []).some((h) => h.event === "PreToolUse");
     const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
     // Per-conversation model override: GOOSE_MODEL (and its GOOSE_CONTEXT_LIMIT) in the
     // agent's launch env, limited to models the floor provider serves.
@@ -1735,7 +1780,8 @@ export async function main(
     const backpressureOn = process.env.SUBAGENT_BACKPRESSURE !== "0";
     const agentEnv = {
       ...gooseLaunchEnv(cfg.agent.env, cfg.modelCatalog, resolved),
-      ...(backpressureOn ? { GOOSE_MODE: "approve" } : {}),
+      // Approve mode stops goose at every tool call, for PreToolUse.
+      ...(backpressureOn || hasPreToolHooks ? { GOOSE_MODE: "approve" } : {}),
     };
     // goose runs in this pod, so its cwd must be a real writable dir here: ephemeral
     // per-conversation scratch under scratchPath, while its tool calls exec into the
@@ -1852,6 +1898,19 @@ export async function main(
                 process.env.SUBAGENT_BACKPRESSURE === "0"
                   ? undefined
                   : () => bridge.shouldYieldToQueue(),
+              // Run inline by the SDK's own PreToolUse/PostToolUse.
+              toolHooks: hookRunner
+                ? {
+                    pre: async (name, input, id) => {
+                      const out = await bridge.runToolHook("PreToolUse", name, input, { tool_use_id: id ?? null });
+                      return { deny: out.block, updatedInput: out.updatedInput, context: out.context.join("\n\n") || undefined };
+                    },
+                    post: async (name, input, response, id) => {
+                      const out = await bridge.runToolHook("PostToolUse", name, input, { tool_response: response, tool_use_id: id ?? null });
+                      return { block: out.block, context: out.context.join("\n\n") || undefined };
+                    },
+                  }
+                : undefined,
             })
           : createAcpClient({
               command: cfg.agent.command,
@@ -1862,6 +1921,11 @@ export async function main(
               // next tool when a priority item waits; late-bound since `bridge` is assigned
               // below.
               shouldYield: backpressureOn ? () => bridge.shouldYieldToQueue() : undefined,
+              // A refusal's reason reaches goose when its turn ends.
+              gateTool: hasPreToolHooks
+                ? async (call) =>
+                    (await bridge.runToolHook("PreToolUse", call.title, call.rawInput ?? {}, { tool_use_id: call.toolCallId }, true)).block
+                : undefined,
               // Record the raw ACP updates under this run (no-op when off).
               recordRaw: (u) => bridge.recordRawInput(u),
             })
@@ -1971,6 +2035,9 @@ export async function main(
       },
       // Resolve an attached image's bytes so the run builds the ACP image block.
       readAsset: (assetId) => assets.read(conversationId as SessionId, assetId),
+      hooks: hookRunner,
+      maxStopBlocks: config.maxStopBlocks,
+      parentId: () => sessions.get(conversationId as SessionId)?.parentId,
     });
 
     // Mirror bridge events to UI subscribers.
