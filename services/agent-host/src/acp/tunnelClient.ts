@@ -55,6 +55,20 @@ export interface TunnelClient {
   close(): void;
 }
 
+/** Send each stream's frames one after another, in order; streams stay concurrent. */
+export function createOrderedSender(post: (frame: WireFrame) => Promise<void>): (frame: WireFrame) => void {
+  const tails = new Map<string, Promise<void>>();
+  return (frame) => {
+    const id = frame.id;
+    if (!id) return;
+    // A close that overtook a chunk made the container drop that chunk.
+    const next = (tails.get(id) ?? Promise.resolve()).then(() => post(frame));
+    const tail = next.catch(() => {});
+    tails.set(id, tail);
+    if (frame.type === "close") void tail.then(() => tails.get(id) === tail && tails.delete(id));
+  };
+}
+
 /** Follow a session's inbound tunnel stream, serving each frame and reconnecting on drop. */
 export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
   const doFetch = deps.fetchImpl ?? fetch;
@@ -65,9 +79,8 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
   const service = createTunnelService({
     ...deps,
     // Responses ride the reply route, since the stream is inbound-only.
-    send: (frame: WireFrame) => {
-      if (!frame.id) return;
-      void doFetch(`${base}/tunnel/${encodeURIComponent(frame.id)}`, {
+    send: createOrderedSender((frame: WireFrame) =>
+      doFetch(`${base}/tunnel/${encodeURIComponent(frame.id ?? "")}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(frame),
@@ -92,8 +105,8 @@ export function startTunnelClient(deps: TunnelClientDeps): TunnelClient {
             stream: frame.id,
             error: formatError(err),
           });
-        });
-    },
+        }),
+    ),
   });
 
   const idleMs = deps.idleMs ?? STREAM_IDLE_MS;
