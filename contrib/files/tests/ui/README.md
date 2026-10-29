@@ -46,6 +46,8 @@ What it asserts, each one a bug that shipped or a contract someone relies on:
   opens the file scrolled to that heading; a document's images load from the
   workspace; a relative link opens its target in the viewer and Back returns; an old
   `#/<file>` link still opens and is rewritten to `?path=`
+- images: a `/workspace/...` path and HTML `<img>` tags (block and inline, width
+  kept) load in a document; an image file opened on its own is shown with its size
 - in a code file, a range comment anchors to its first line, quotes the range, and
   its thread renders inline under those lines
 - no page errors

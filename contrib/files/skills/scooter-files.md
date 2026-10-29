@@ -53,8 +53,11 @@ platform auto-starts it.
 - **Markdown as a rendered document** — headings, tables, task lists, images, and
   highlighted code fences — with a `raw` toggle for the source. So link a design
   doc or a README when you want it *read*, not inspected.
-- Binaries and files past 2 MB report themselves instead of rendering — say so
-  rather than retrying.
+- **Images** (PNG, JPEG, GIF, WebP, SVG, AVIF, ICO, BMP, up to 16 MB): link one
+  directly to show it, or embed it in a document with `![alt](shot.png)`, a
+  `/workspace/...` path, or an HTML `<img src=… width=…>` to size it.
+- Other binaries and text files past 2 MB report themselves instead of rendering —
+  say so rather than retrying.
 
 Two things worth using in a link, because they land the user where you mean:
 

@@ -129,6 +129,9 @@ def resolve(root: Path, rel: str) -> Path:
     walked up to `/` turns every stray `../` in a link into a confusing 200.
     """
     candidate = (root / rel.lstrip("/")).resolve()
+    # Agents write host paths like /workspace/a.png; read them as meant.
+    if rel.startswith(f"{root}/") and not candidate.exists():
+        candidate = (root / rel[len(str(root)) :].lstrip("/")).resolve()
     if candidate != root and root not in candidate.parents:
         raise ValueError("path escapes the workspace root")
     return candidate
@@ -173,8 +176,20 @@ def etag_of(body: str) -> str:
 
 def read_file(root: Path, path: Path) -> dict:
     """One file as text, or metadata explaining why it is not being rendered."""
-    size = path.stat().st_size
+    st = path.stat()
+    size = st.st_size
     out = {"path": rel_of(root, path), "size": size, "body": "", "renderer": "code"}
+
+    suffix = path.suffix.lower()
+    if suffix in RAW_SUFFIXES and size <= MAX_RAW_BYTES:
+        # The page shows it via /api/raw; the stamp lets a poll see changes.
+        image = out | {"renderer": "image", "etag": etag_of(f"{size}:{st.st_mtime_ns}")}
+        if suffix != ".svg" or size > MAX_READ_BYTES:
+            return image
+        # An SVG is also text, so its Source view needs a body.
+        body = path.read_bytes().decode("utf-8", errors="replace")
+        return image | {"body": body, "lines": body.count("\n") + 1, "etag": etag_of(body)}
+
     if size > MAX_READ_BYTES:
         return out | {"renderer": "too-large"}
 

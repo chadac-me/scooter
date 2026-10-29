@@ -14,9 +14,9 @@ import remarkGfm from "remark-gfm";
 import { codeToHtml } from "shiki";
 import { MessageSquare, MessageSquarePlus } from "lucide-react";
 import clsx from "clsx";
-import { api, BASE, type Question, type Thread } from "./api";
+import { api, rawUrl, type Question, type Thread } from "./api";
 import { hrefFor, isExternal, navigate, resolveRel, slug } from "./nav";
-import { BLOCKS, blockAt, blockSource, findText, plainOf, previewOf, rehypeSourceLines, segments, sourceAnchor } from "./markdown";
+import { BLOCKS, blockAt, blockSource, findText, plainOf, previewOf, rehypeSourceLines, segments, sourceAnchor, remarkHtmlImages } from "./markdown";
 import { Composer, Quote, ThreadCard } from "./Thread";
 import { QuestionCard } from "./Questions";
 
@@ -102,9 +102,10 @@ function DocLink({ node: _n, href = "", ...props }: React.ComponentProps<"a"> & 
 /** Images in a document are workspace files, read through /api/raw. */
 function DocImage({ node: _n, src, ...props }: React.ComponentProps<"img"> & { node?: unknown }) {
   const path = useContext(DocPath);
+  // Absolute paths go as written: the server reads /workspace/… as a host path.
   const url =
-    typeof src === "string" && src && !isExternal(src) && !src.startsWith("data:")
-      ? `${BASE}/api/raw?path=${encodeURIComponent(resolveRel(path, src))}`
+    typeof src === "string" && src && !isExternal(src)
+      ? rawUrl(src.startsWith("/") ? src : resolveRel(path, src))
       : src;
   return <img {...props} src={url} loading="lazy" />;
 }
@@ -112,7 +113,7 @@ function DocImage({ node: _n, src, ...props }: React.ComponentProps<"img"> & { n
 const Chunk = memo(function Chunk({ text, offset }: { text: string; offset: number }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkHtmlImages]}
       rehypePlugins={[[rehypeSourceLines, { offset }]]}
       components={components}
     >

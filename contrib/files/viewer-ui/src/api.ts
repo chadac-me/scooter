@@ -19,7 +19,7 @@ export type FileView = {
   body: string;
   lines?: number;
   etag?: string;
-  renderer: "code" | "markdown" | "too-large" | "binary";
+  renderer: "code" | "markdown" | "image" | "too-large" | "binary";
 };
 
 export type Annotation = {
@@ -70,6 +70,10 @@ async function call<T>(method: string, route: string, body?: unknown, query?: Re
   if (!r.ok) throw new ApiError(data.error ?? `${r.status} ${r.statusText}`, r.status);
   return data as T;
 }
+
+/** An image file's bytes; `v` busts the cache when it changes. */
+export const rawUrl = (path: string, v = "") =>
+  `${BASE}/api/raw?${new URLSearchParams(v ? { path, v } : { path })}`;
 
 export const api = {
   list: (path: string) => call<Listing>("GET", "list", undefined, { path }),

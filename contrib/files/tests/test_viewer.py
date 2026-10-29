@@ -284,6 +284,43 @@ def test_raw_serves_svg_inert(client, workspace: Path) -> None:
     assert httpd_status == 200
 
 
+def test_an_image_file_gets_the_image_renderer(client, workspace: Path) -> None:
+    # Opened from the tree, an image is shown, not reported as binary.
+    (workspace / "shot.PNG").write_bytes(b"\x89PNG\r\n\x1a\n\x00" + b"\x00" * 64)
+    _, payload = client.json("/api/file?path=shot.PNG")
+    assert payload["renderer"] == "image"
+    assert payload["body"] == "" and payload["etag"]
+
+
+def test_an_image_past_the_text_cap_still_renders(client, workspace: Path) -> None:
+    (workspace / "big.jpg").write_bytes(b"\xff" * (server.MAX_READ_BYTES + 1))
+    _, payload = client.json("/api/file?path=big.jpg")
+    assert payload["renderer"] == "image"
+
+
+def test_an_svg_renders_as_an_image_and_keeps_its_source(client, workspace: Path) -> None:
+    svg = "<svg xmlns='http://www.w3.org/2000/svg'/>\n"
+    (workspace / "d.svg").write_text(svg)
+    _, payload = client.json("/api/file?path=d.svg")
+    assert payload["renderer"] == "image"
+    assert payload["body"] == svg
+
+
+def test_a_host_path_into_the_workspace_reads_the_file(cfg, client, workspace: Path) -> None:
+    # Agents write ![](/workspace/shot.png); that names the root, not a subdirectory.
+    (workspace / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert server.resolve(cfg.root, f"{cfg.root}/shot.png") == cfg.root / "shot.png"
+    status, _ = client(f"/api/raw?path={cfg.root}/shot.png")
+    assert status == 200
+
+
+def test_a_real_subdirectory_named_like_the_root_wins(cfg, workspace: Path) -> None:
+    nested = workspace / str(cfg.root).lstrip("/")
+    nested.mkdir(parents=True)
+    (nested / "a.png").write_bytes(b"x")
+    assert server.resolve(cfg.root, f"{cfg.root}/a.png") == nested / "a.png"
+
+
 # --- the built frontend -----------------------------------------------------------
 
 
