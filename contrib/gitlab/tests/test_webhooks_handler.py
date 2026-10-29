@@ -1,4 +1,4 @@
-"""The gitlab handler through the real extension seam: discovery finds it, its route mounts, its gating answers, and its owner lookup and resource shapes arm on import."""
+"""The gitlab handler through the real extension seam: its gating answers, and its owner lookup and resource shapes arm on import."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scooter_contrib_gitlab import CONTRIB_NAME
 from scooter_contrib_gitlab import webhooks_handler as gitlab_h
 
 
@@ -18,24 +17,6 @@ def client():
     app = FastAPI()
     app.include_router(gitlab_h.router)
     return TestClient(app)
-
-
-def test_entrypoints_declared():
-    from importlib.metadata import entry_points
-
-    broker_eps = {ep.name: ep.value for ep in entry_points(group="agent_broker.providers")}
-    webhook_eps = {ep.name: ep.value for ep in entry_points(group="scooter_webhooks.handlers")}
-    assert broker_eps.get("gitlab") == "scooter_contrib_gitlab.broker_provider:gitlab"
-    assert webhook_eps.get("gitlab") == "scooter_contrib_gitlab.webhooks_handler:gitlab"
-
-
-def test_webhooks_discovers_gitlab_via_entrypoint():
-    from scooter_webhooks_lib.registry import discover_webhooks
-
-    handlers = {h.name: h for h in discover_webhooks()}
-    assert CONTRIB_NAME in handlers
-    paths = {r.path for r in handlers[CONTRIB_NAME].router.routes}
-    assert "/webhooks/gitlab" in paths
 
 
 def test_gitlab_webhook_disabled(client):

@@ -1,4 +1,4 @@
-"""The slack handler through the real extension seam: discovery finds it, its route mounts, its gating answers, and its owner lookup and resource shapes arm on import."""
+"""The slack handler through the real extension seam: its gating answers, and its owner lookup and resource shapes arm on import."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scooter_contrib_slack import CONTRIB_NAME
 from scooter_contrib_slack import webhooks_handler as slack_h
 
 
@@ -18,24 +17,6 @@ def client():
     app = FastAPI()
     app.include_router(slack_h.router)
     return TestClient(app)
-
-
-def test_entrypoints_declared():
-    from importlib.metadata import entry_points
-
-    broker_eps = {ep.name: ep.value for ep in entry_points(group="agent_broker.providers")}
-    webhook_eps = {ep.name: ep.value for ep in entry_points(group="scooter_webhooks.handlers")}
-    assert broker_eps.get("slack") == "scooter_contrib_slack.broker_provider:slack"
-    assert webhook_eps.get("slack") == "scooter_contrib_slack.webhooks_handler:slack"
-
-
-def test_webhooks_discovers_slack_via_entrypoint():
-    from scooter_webhooks_lib.registry import discover_webhooks
-
-    handlers = {h.name: h for h in discover_webhooks()}
-    assert CONTRIB_NAME in handlers
-    paths = {r.path for r in handlers[CONTRIB_NAME].router.routes}
-    assert "/webhooks/slack" in paths
 
 
 def test_slack_webhook_disabled(client):

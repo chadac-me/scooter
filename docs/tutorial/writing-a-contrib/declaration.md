@@ -163,8 +163,6 @@ them.
 ```python
 # contrib/acme/scooter_contrib_acme/__init__.py
 """Acme Tracker integration for Scooter."""
-
-CONTRIB_NAME = "acme"
 ```
 
 Settings are read from environment variables, which your deployment half sets. Subclass

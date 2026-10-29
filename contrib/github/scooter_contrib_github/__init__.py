@@ -6,5 +6,3 @@ github.com), the webhooks handler and its comment responses, the owner-email
 lookup, and the URL shapes that say `https://github.com/o/r/pull/7` and `o/r#7`
 are the same PR. Nothing imports the broker or webhooks app.
 """
-
-CONTRIB_NAME = "github"
