@@ -858,20 +858,11 @@ export async function main(
         .relinquish(id as SessionId)
         .catch((err) => hostLog.errorWith("ownership-loss teardown failed", err, { conversation_id: id }));
     };
-    // A refused append means the cache may have missed a loss.
-    const guard = ownership.guard;
-    const confirming = new Set<SessionId>();
+    // A refused append is authoritative: stop the run, whatever the cache says.
     onAppendFenced = (id) => {
-      if (confirming.has(id) || !sessions.get(id)?.bridge) return;
-      confirming.add(id);
-      void guard
-        .confirmOwns(id)
-        .then(async (owned) => {
-          // A failed read also answers false; require another pod's row.
-          if (!owned && guard.observedGeneration(id) !== undefined) await sessions.relinquish(id);
-        })
-        .catch((err) => hostLog.errorWith("ownership re-check after a fenced append failed", err, { conversation_id: id }))
-        .finally(() => confirming.delete(id));
+      void sessions
+        .stopFencedRun(id)
+        .catch((err) => hostLog.errorWith("stopping a fenced run failed", err, { conversation_id: id }));
     };
   }
 

@@ -287,6 +287,8 @@ export interface SessionManager {
   reconcileDanglingRun(id: SessionId, expectedGen?: number): Promise<void>;
   /** Cancel and drop this pod's bridge for a conversation it lost. */
   relinquish(id: SessionId): Promise<void>;
+  /** A write was fenced: cancel and drop this pod's bridge, whatever the cache says. */
+  stopFencedRun(id: SessionId): Promise<void>;
   /** Make a conversation's history readable on this pod without starting its sandbox or bridge;
    *  returns false when the conversation is genuinely unknown. */
   ensureReadable(id: SessionId): Promise<boolean>;
@@ -679,6 +681,26 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   // refreshSandbox throttle: conversation -> last cluster read.
   const REFRESH_SANDBOX_MS = 5_000;
   const lastSandboxRefresh = new Map<SessionId, number>();
+  /** Cancel the run (and its sandbox execs) and drop the bridge. */
+  const stopLocalRun = async (id: SessionId, why: string): Promise<void> => {
+    // An in-flight revive would rebuild the bridge after teardown.
+    await reviving.get(id)?.catch(() => {});
+    const entry = entries.get(id);
+    const bridge = entry?.bridge;
+    if (!entry || !bridge) return;
+    // Detach first so no prompt reaches the dying bridge.
+    entry.bridge = undefined;
+    entry.status = "suspended";
+    const qs = bridge.queueState();
+    log.warn(`${why} — stopping this pod's run`, { conversation_id: id, running: qs.running, queued: qs.queued });
+    // cancel() kills sandbox execs; stop() alone leaves them running.
+    await bridge.cancel().catch((err: unknown) =>
+      log.warn("cancel of a fenced run failed", { conversation_id: id, error: formatError(err) }),
+    );
+    await bridge.stop().catch((err: unknown) =>
+      log.warn("bridge stop of a fenced run failed", { conversation_id: id, error: formatError(err) }),
+    );
+  };
   const wireEventLog = (e: Entry) => {
     if (!e.bridge) return;
     // Persist via onPersist only: it sees every event that should be logged exactly once, while
@@ -705,6 +727,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             dropped_so_far: n,
           });
         }
+        // A run that can't write is not this pod's to run.
+        if (n === 1) void stopLocalRun(e.id, "write fenced by the ownership cache");
         return;
       }
       // Not bare `void`: the store rethrows append failures after logging them, and an unhandled
@@ -1193,28 +1217,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     },
 
     async relinquish(id) {
-      // An in-flight revive would rebuild the bridge after teardown.
       await reviving.get(id)?.catch(() => {});
       if (ownershipGuard.owns?.(id)) return; // reassigned back meanwhile
-      const entry = entries.get(id);
-      const bridge = entry?.bridge;
-      if (!entry || !bridge) return;
-      // Detach first so no prompt reaches the dying bridge.
-      entry.bridge = undefined;
-      entry.status = "suspended";
-      const qs = bridge.queueState();
-      log.warn("ownership lost — stopping this pod's run", {
-        conversation_id: id,
-        running: qs.running,
-        queued: qs.queued,
-      });
-      // cancel() kills sandbox execs; stop() alone leaves them running.
-      await bridge.cancel().catch((err: unknown) =>
-        log.warn("cancel on ownership loss failed", { conversation_id: id, error: formatError(err) }),
-      );
-      await bridge.stop().catch((err: unknown) =>
-        log.warn("bridge stop on ownership loss failed", { conversation_id: id, error: formatError(err) }),
-      );
+      await stopLocalRun(id, "ownership lost");
+    },
+
+    async stopFencedRun(id) {
+      await stopLocalRun(id, "append refused by the fence");
     },
 
     async refreshSandbox(id) {
@@ -1610,6 +1619,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const candidates: SessionId[] = [];
       for (const entry of entries.values()) {
         if (entry.status === "ended") continue;
+        // Another pod's conversation: resuming it here would run it twice.
+        if (ownershipGuard.observedGeneration?.(entry.id) !== undefined && !ownershipGuard.owns?.(entry.id)) continue;
         try {
           const events = await collectEvents(store.readEvents(entry.id));
           // No `self`: at boot every RUN_STARTED in the log predates this process, even one stamped
