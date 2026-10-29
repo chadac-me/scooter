@@ -1,17 +1,16 @@
-{ config, lib, ... }:
+{ config, lib, scooterPkgs, ... }:
 
 let
   cfg = config.scooter.config;
-  inherit (cfg) pkgs;
 in
 {
-  scooter.packages.scooter-conversation-controller = lib.mkDefault (pkgs.callPackage ./. { });
+  scooter.packages.scooter-conversation-controller = lib.mkDefault (scooterPkgs.callPackage ./. { });
 
   scooter.images.conversation-controller = {
     package = lib.mkDefault (import ./image.nix {
-      inherit pkgs;
+      pkgs = scooterPkgs;
       inherit (cfg) n2c imageLayers;
-      conversationController = pkgs.scooter-conversation-controller;
+      conversationController = scooterPkgs.scooter-conversation-controller;
     });
     attr = "conversation-controller-image";
     refKey = "conversationController";

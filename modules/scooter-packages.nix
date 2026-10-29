@@ -34,6 +34,9 @@ in
     ../contrib/module.nix
   ] ++ contribPackageModules;
 
+  # kubenix's `pkgs` is the rendering machine's; packages build for the cluster's.
+  config._module.args.scooterPkgs = cfg.pkgs;
+
   options.scooter.packages = mkOption {
     type = types.lazyAttrsOf types.package;
     default = { };
@@ -77,6 +80,7 @@ in
             The package set every package builds from. It has `scooter.packages`
             overlaid, so `callPackage` resolves them by name. To build on another
             nixpkgs, overlay `config.scooter.packages` onto it the same way.
+            Modules receive it as the `scooterPkgs` argument.
           '';
         };
 

@@ -1,4 +1,4 @@
-{ config, lib, ... }:
+{ config, lib, scooterPkgs, ... }:
 {
-  scooter.packages.scooter-claude-sdk-provider = lib.mkDefault (config.scooter.config.pkgs.callPackage ./. { });
+  scooter.packages.scooter-claude-sdk-provider = lib.mkDefault (scooterPkgs.callPackage ./. { });
 }

@@ -1,5 +1,5 @@
-{ config, lib, ... }:
+{ config, lib, scooterPkgs, ... }:
 {
   # The generated @scooter/schema package: Drizzle tables plus guards.
-  scooter.packages.scooter-schema-js = lib.mkDefault (config.scooter.config.pkgs.callPackage ./. { });
+  scooter.packages.scooter-schema-js = lib.mkDefault (scooterPkgs.callPackage ./. { });
 }

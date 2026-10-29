@@ -1,4 +1,4 @@
-{ config, lib, ... }:
+{ config, lib, scooterPkgs, ... }:
 {
-  scooter.packages.scooter-webhooks-lib = lib.mkDefault (config.scooter.config.pkgs.callPackage ./. { });
+  scooter.packages.scooter-webhooks-lib = lib.mkDefault (scooterPkgs.callPackage ./. { });
 }

@@ -1,17 +1,16 @@
-{ config, lib, ... }:
+{ config, lib, scooterPkgs, ... }:
 
 let
   cfg = config.scooter.config;
-  inherit (cfg) pkgs;
 in
 {
-  scooter.packages.scooter-ui = lib.mkDefault (pkgs.callPackage ./. { });
+  scooter.packages.scooter-ui = lib.mkDefault (scooterPkgs.callPackage ./. { });
 
   scooter.images.agent-sandbox-ui = {
     package = lib.mkDefault (import ./image.nix {
-      inherit pkgs;
+      pkgs = scooterPkgs;
       inherit (cfg) n2c;
-      ui = pkgs.scooter-ui;
+      ui = scooterPkgs.scooter-ui;
       contribManifest = cfg.contribBuild.uiManifest;
     });
     attr = "ui-image";

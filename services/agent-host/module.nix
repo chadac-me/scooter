@@ -1,14 +1,13 @@
-{ config, lib, ... }:
+{ config, lib, scooterPkgs, ... }:
 
 let
   cfg = config.scooter.config;
-  inherit (cfg) pkgs;
 in
 {
   scooter.packages = {
     # The ACP agent each conversation runs.
-    scooter-agent = lib.mkDefault pkgs.goose-cli;
-    scooter-agent-host = lib.mkDefault (pkgs.callPackage ./. { });
+    scooter-agent = lib.mkDefault scooterPkgs.goose-cli;
+    scooter-agent-host = lib.mkDefault (scooterPkgs.callPackage ./. { });
   };
 
   scooter.images.agent-host = { config, ... }: {
@@ -16,10 +15,11 @@ in
 
     config = {
       package = lib.mkDefault (import ./image.nix {
-        inherit lib pkgs;
+        inherit lib;
+        pkgs = scooterPkgs;
         inherit (cfg) n2c imageLayers;
-        agentHost = pkgs.scooter-agent-host;
-        agent = pkgs.scooter-agent;
+        agentHost = scooterPkgs.scooter-agent-host;
+        agent = scooterPkgs.scooter-agent;
         withClaudeCode = config.claude.enable;
       });
       attr = "agent-host-image";

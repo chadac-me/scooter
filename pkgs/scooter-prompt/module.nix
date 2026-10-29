@@ -1,9 +1,9 @@
-{ config, lib, ... }:
+{ config, lib, scooterPkgs, ... }:
 
 let
   cfg = config.scooter.config;
 in
 {
   # The built-in prompt task, and the reference mkScooterTask user.
-  scooter.packages.scooter-prompt = lib.mkDefault (cfg.pkgs.callPackage ./. { inherit (cfg) mkScooterTask; });
+  scooter.packages.scooter-prompt = lib.mkDefault (scooterPkgs.callPackage ./. { inherit (cfg) mkScooterTask; });
 }

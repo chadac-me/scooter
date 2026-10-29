@@ -1,4 +1,4 @@
-{ config, lib, ... }:
+{ config, lib, scooterPkgs, ... }:
 
 let
   cfg = config.scooter.config;
@@ -8,7 +8,8 @@ in
   scooter.images.agent-db-migrator = {
     package = lib.mkDefault (import ./image.nix {
       inherit lib;
-      inherit (cfg) pkgs n2c;
+      inherit (cfg) n2c;
+      pkgs = scooterPkgs;
       contribSqlDirs = cfg.contribBuild.sqlDirs;
     });
     attr = "db-migrator-image";
