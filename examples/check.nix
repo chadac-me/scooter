@@ -1123,7 +1123,7 @@ let
     ++ (if !(builtins.tryEval (builtins.deepSeq (awaitingOf { contribs.aws.db.provides = [ "awaiting-input" ]; }) true)).success then [ ]
         else [ "two contribs providing awaiting-input rendered" ]);
 
-  # Hooks: finish-or-ask default, opt-out, contrib namespacing and gating.
+  # Hooks: none by default, opt-out, contrib namespacing and gating.
   hooksOf = env:
     let m = builtins.filter (e: e.name == "AGENT_HOOKS_JSON") env;
     in if m == [ ] then [ ] else builtins.fromJSON (builtins.head m).value;
@@ -1132,12 +1132,14 @@ let
     contribs.echo.enable = nixpkgsLib.mkForce enable;
     contribs.echo.agent.hooks.ping = { event = "PreToolUse"; command = "exit 0"; };
   };
+  stopHook = enable: { scooter.agent.hooks.nag = { inherit enable; event = "Stop"; command = "exit 0"; userCanDisable = true; }; };
   hookProblems =
-    (let f = builtins.filter (h: h.id == "finish-or-ask") (hooksOf (hostEnvOf { })); in
-     if f != [ ] && (builtins.head f).event == "Stop" && (builtins.head f).userCanDisable then [ ]
-     else [ "AGENT_HOOKS_JSON has no opt-out-able finish-or-ask Stop hook by default" ])
-    ++ (if !(builtins.elem "finish-or-ask" (hookIds { scooter.agent.hooks.finish-or-ask.enable = false; })) then [ ]
-        else [ "finish-or-ask still renders with enable = false" ])
+    (if hookIds { } == [ ] then [ ] else [ "AGENT_HOOKS_JSON has undeclared hooks: ${builtins.toJSON (hookIds { })}" ])
+    ++ (let f = builtins.filter (h: h.id == "nag") (hooksOf (hostEnvOf (stopHook true))); in
+        if f != [ ] && (builtins.head f).event == "Stop" && (builtins.head f).userCanDisable then [ ]
+        else [ "a declared opt-out-able Stop hook is not in AGENT_HOOKS_JSON" ])
+    ++ (if !(builtins.elem "nag" (hookIds (stopHook false))) then [ ]
+        else [ "a hook still renders with enable = false" ])
     ++ (if builtins.elem "echo.ping" (hookIds (echoHook true)) then [ ]
         else [ "an enabled contrib's hook is not in AGENT_HOOKS_JSON as <contrib>.<id>" ])
     ++ (if !(builtins.elem "echo.ping" (hookIds (echoHook false))) then [ ]

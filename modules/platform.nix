@@ -675,8 +675,7 @@ in
         description = ''
           Conversation hooks, keyed by id: bash scripts run in each conversation's sandbox
           at fixed points in a turn, speaking Claude Code's hook protocol. A contrib adds its
-          own under `contribs.<name>.agent.hooks` (ids `<name>.<id>`). `finish-or-ask` ships
-          on by default; set `finish-or-ask.enable = false` to drop it.
+          own under `contribs.<name>.agent.hooks` (ids `<name>.<id>`).
         '';
       };
 
@@ -1276,14 +1275,6 @@ in
   config = {
     # No package: the unfree claude CLI would force allowUnfree.
     scooter.images.remote-agent = { };
-
-    # On by default; users opt out in settings.
-    scooter.agent.hooks.finish-or-ask = {
-      event = "Stop";
-      command = builtins.readFile ./hooks/finish-or-ask.sh;
-      userCanDisable = lib.mkDefault true;
-      description = lib.mkDefault "Sends the agent back once when it stops with unpushed work or ends on a plain-text question.";
-    };
 
     # The agent_host database, which the provisioning Job creates with an owning
     # `agent_host` role whose password lands in `agent-pg-agent-host`.
