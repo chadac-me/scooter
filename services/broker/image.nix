@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, imageLayers, broker, ... }:
+{ pkgs, n2c, imageLayers, broker }:
 
 # OCI image for the credential broker.
 
@@ -24,11 +24,4 @@ let
     };
   };
 in
-# A kubenix module: this image declares its own scooter.images entry.
-{
-  config.scooter.images.agent-broker = {
-    package = lib.mkDefault image;
-    attr = "broker-image";
-    refKey = "broker";
-  };
-}
+image

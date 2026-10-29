@@ -199,11 +199,4 @@ let
   };
 in
 # Not only an image: the contrib-sandbox check reads nixos too.
-{
-  inherit toplevel nixos image;
-  module = { config.scooter.images.agent-sandbox-os = {
-    package = lib.mkDefault image;
-    attr = "sandbox-os-image";
-    refKey = "sandboxOs";
-  }; };
-}
+{ inherit toplevel nixos image; }

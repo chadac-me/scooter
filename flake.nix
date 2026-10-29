@@ -36,245 +36,65 @@
         }) (l.filterAttrs (n: t: t == "regular" && l.hasSuffix ".md" n)
           (builtins.readDir dir));
 
-      # name -> packages attr, as plain data because the tag pin runs in the
-      # top-level scope and reaching the per-system image tree from here would
-      # route through `self` and recurse.
-      imageMeta = {
-        agent-host.attr = "agent-host-image";
-        agent-sandbox-ui.attr = "ui-image";
-        agent-broker.attr = "broker-image";
-        agent-scheduler.attr = "scheduler-image";
-        agent-webhooks.attr = "webhooks-image";
-        agent-sandbox-os.attr = "sandbox-os-image";
-        agent-db-migrator.attr = "db-migrator-image";
-        byoc-controller.attr = "byoc-controller-image";
-        conversation-controller.attr = "conversation-controller-image";
-        conversation-router.attr = "conversation-router-image";
-        warm-store-controller.attr = "warm-store-controller-image";
-      };
+      # Scooter's own inputs, which scooter.config builds from.
+      inputsModule = { scooter.config.inputs = { inherit nixpkgs nix2container nix-stubs uv-nix; }; };
+      platformModule = { imports = [ ./modules/platform.nix inputsModule ]; };
 
-      # Tags hash the x86_64 image; publish-images runs there.
-      pubImages = self.packages.x86_64-linux;
-      imagePackageConfig = { lib, config, ... }: {
-        config.scooter.images = lib.mapAttrs
-          (_: img: { ref.tag = lib.mkForce (config.scooter.imagesContentTag pubImages.${img.attr}); })
-          imageMeta;
+      # The platform eval, which owns every package and image.
+      evalPlatformWith = { system, modules }: kubenix.evalModules.${system} {
+        module = { kubenix, ... }: {
+          imports = [ platformModule ] ++ modules;
+          kubenix.project = "agent-sandbox";
+          kubernetes.version = "1.31";
+        };
       };
 
       # k3d's registry: `.localhost` resolves on host and in-cluster.
       k3dRegistry = "k3d-scooter-reg.localhost:5800/";
-
-
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
 
-      perSystem = { pkgs, system, lib, ... }:
+      perSystem = { system, lib, ... }:
         let
-          n2c = nix2container.packages.${system}.nix2container;
+          # Packages build for the system they're listed under.
+          evalPlatform = { module }: evalPlatformWith { inherit system; modules = [ module native ]; };
+          native = { scooter.config.system = system; };
 
-          # The ACP agent the agent-host runs (first target: Goose)
-          agent = pkgs.goose-cli;
-
-          # agent-host (TypeScript)
-          claudeSdkProvider = pkgs.callPackage ./services/claude-sdk-provider { };
-
-          # The generated @scooter/schema package: Drizzle tables plus guards.
-          scooterSchemaJs = pkgs.callPackage ./lib/ts/scooter-schema { };
-
-          # @scooter/svcauth: ServiceAccount token auth shared by the TS services.
-          scooterSvcauthJs = pkgs.callPackage ./lib/ts/scooter-svcauth { };
-
-          # agent-host runs `goose acp` per conversation outside the sandbox; it takes the
-          # same `agent` derivation the image's goose layer bakes so the closure ships goose once.
-          agentHost = pkgs.callPackage ./services/agent-host {
-            scooter-agent = agent;
-            scooter-claude-sdk-provider = claudeSdkProvider;
-            scooter-schema-js = scooterSchemaJs;
-            scooter-svcauth-js = scooterSvcauthJs;
+          # `contribs` is at the module root, not under `scooter`.
+          mkPlatformWith = extraModules: full: evalPlatformWith {
+            inherit system;
+            modules = extraModules ++ [ native {
+              contribs = full.contribs or { };
+              scooter = builtins.removeAttrs full [ "contribs" ];
+            }];
           };
+          mkPlatform = mkPlatformWith [ ];
+          mkTestPlatform = mkPlatformWith [ ./modules/testing.nix ];
 
-          # Bring-your-own-Claude container app
-          remoteAgent = pkgs.callPackage ./services/remote-agent {
-            scooter-claude-sdk-provider = claudeSdkProvider;
-            claude-code = pkgs.claude-code;
-          };
-          # The same container WITHOUT the unfree claude CLI, for `--backend echo`:
-          # it drives no model, so it needs neither the CLI nor a subscription, and
-          # this variant evaluates in pure mode (CI, nixosTests).
-          remoteAgentEcho = pkgs.callPackage ./services/remote-agent {
-            scooter-claude-sdk-provider = claudeSdkProvider;
-            claude-code = null;
-          };
-
-          # agent-host OCI image.
-
-
-          # The contrib-free service builds, to break the cycle.
-          brokerBase = pkgs.callPackage ./services/broker { scooter-schema = scooterSchema; scooter-lib = scooterLib; scooter-broker-lib = scooterBrokerLib; };
-          webhooksBase = pkgs.callPackage ./services/webhooks { scooter-schema = scooterSchema; scooter-lib = scooterLib; scooter-webhooks-lib = scooterWebhooksLib; };
-
-          # Contrib modules
-          deploymentModules = [ ./.github/deployment/config.nix ];
+          # This repo's own build: the shipped contribs.
+          build = (mkPlatform { }).config.scooter;
+          p = build.packages;
+          inherit (build.config) pkgs contribBuild;
+          builtImages = build.images;
           shippedContribs = (import ./.github/deployment/config.nix).contribs;
 
-          contribs = pkgs.callPackage ./contrib {
-            inherit deploymentModules;
-            inherit mkScooterTask;
-            broker = brokerBase;
-            webhooks = webhooksBase;
-            inherit scooterBrokerLib scooterWebhooksLib;
-          };
-
           # The set CI tests: adds the contribs shipping nowhere.
-          contribsWithExamples = contribs.withModules [{
-            contribs.echo.enable = pkgs.lib.mkForce true;
+          contribsWithExamples = contribBuild.withModules [{
+            contribs.echo.enable = lib.mkForce true;
           }];
 
           # Keyed <name>-<service>
           contribsAll = pkgs.linkFarm "contribs-all"
-            (pkgs.lib.mapAttrsToList (name: path: { inherit name path; })
+            (lib.mapAttrsToList (name: path: { inherit name path; })
               contribsWithExamples.all);
 
-          # Credential broker (Python/FastAPI)
-          broker = brokerBase.override { contribs = contribs.broker; };
-
-          # Webhooks (Python/FastAPI): spawn agent conversations from GitHub/GitLab/Jira/Slack threads
-          webhooks = webhooksBase.override { contribs = contribs.webhooks; };
-
-          # Webhooks OCI image.
-
-          # Generated SQLAlchemy models for the shared databases.
-          scooterSchema = pkgs.callPackage ./lib/py/scooter-schema { };
-
-          # Shared Python libraries (the lib split)
-          scooterLib = pkgs.callPackage ./lib/py/scooter-lib { };
-          scooterBrokerLib = pkgs.callPackage ./lib/py/scooter-broker-lib { scooter-lib = scooterLib; };
-          scooterWebhooksLib = pkgs.callPackage ./lib/py/scooter-webhooks-lib { scooter-lib = scooterLib; scooter-schema = scooterSchema; };
-
-          # System tasks: the Python runtime, the builder, and the built-in prompt task.
-          scooterTask = pkgs.callPackage ./lib/py/scooter-task { scooter-lib = scooterLib; };
-          mkScooterTask = pkgs.callPackage ./nix/scooter-task.nix { scooter-lib = scooterLib; scooter-task = scooterTask; };
-          scooterPrompt = pkgs.callPackage ./pkgs/scooter-prompt { inherit mkScooterTask; scooter-lib = scooterLib; scooter-task = scooterTask; };
-
-          # Scheduler (Python/FastAPI)
-          scheduler = pkgs.callPackage ./services/scheduler { scooter-lib = scooterLib; };
-
-          # Scheduler OCI image.
-
-          # Bring-your-own-Claude remote agent OCI image (ghcr)
-
-          # Conversation controller (Python)
-          conversationController = pkgs.callPackage ./services/conversation-controller { };
-
-          # Conversation router (Go)
-          conversationRouter = pkgs.callPackage ./services/conversation-router { };
-          byocController = pkgs.callPackage ./services/byoc-controller { scooter-schema-js = scooterSchemaJs; };
-
-          # Warm /nix/store PVC pool controller (Python)
-          warmStoreController = pkgs.callPackage ./services/warm-store-controller { };
-
-          # Conversation controller OCI image.
-
-          # Conversation router OCI image.
-
-          # Warm-store controller OCI image.
-
-          # Broker OCI image.
-
-          # Shared-DB migration Job image
-
-          # Broker tools (agent-broker), prebuilt
-          brokerTools = pkgs.callPackage ./pkgs/broker-tools { };
-
-          # stubs.nix's arguments beyond `pkgs`, also vendored for the in-pod re-converge.
-          stubArgs = { uvNixSrc = uv-nix.outPath; };
-
-          # The stub overlay, applied at pkgs construction.
-          stubOverlay = import ./modules/sandbox-os/stub-overlay.nix {
-            inherit stubArgs;
-            lockLib = nix-stubs.lib;
-            flakeLock = ./flake.lock;
-            nix-stubs = nix-stubs.packages.${system}.nix-stubs;
-          };
-
-          # A pkgs with the stubs applied
-          sandboxPkgs = import nixpkgs { inherit system; overlays = [ stubOverlay ]; };
-
-          # The NixOS dev-environment sandbox image (systemd as PID 1).
-          sandboxOsImage = import ./pkgs/sandbox-os/image.nix {
-                inherit deploymentModules;
-            inherit lib n2c;
-            pkgs = sandboxPkgs;
-            # For the in-pod re-converge
-            nixStubs = {
-              src = nix-stubs;
-              package = nix-stubs.packages.${system}.nix-stubs;
-              inherit stubArgs;
-            };
-          };
-
-          # TypeScript UI (assistant-ui + AG-UI runtime)
-          ui = pkgs.callPackage ./ui { };
-
-          # UI OCI image
-
-          # The image modules, excluding remote-agent because its unfree claude CLI
-          # would force an allowUnfree check in every pure eval.
-          imageModules = map (m: import m imageArgs) [
-            ./pkgs/agent-host-image/image.nix
-            ./pkgs/ui-image/image.nix
-            ./pkgs/broker-image/image.nix
-            ./pkgs/scheduler-image/image.nix
-            ./pkgs/webhooks-image/image.nix
-            ./pkgs/db-migrator-image/image.nix
-            ./pkgs/byoc-controller-image/image.nix
-            ./pkgs/conversation-controller-image/image.nix
-            ./pkgs/conversation-router-image/image.nix
-            ./pkgs/warm-store-controller-image/image.nix
-          ] ++ [ sandboxOsImage.module imagePackageConfig ];
-
-          # Runtime layers the service images share.
-          imageLayers = import ./pkgs/image-layers.nix { inherit pkgs lib n2c; };
-
-          # Build inputs the image modules take as ordinary arguments.
-          imageArgs = {
-            inherit pkgs lib n2c imageLayers agent agentHost broker webhooks scheduler ui
-              remoteAgent byocController conversationController conversationRouter
-              warmStoreController;
-            contribManifest = contribs.uiManifest;
-            contribSqlDirs = contribs.sqlDirs;
-            # The registry's contrib tasks and the built-in prompt task, whose closures the scheduler image ships.
-            inherit mkScooterTask scooterPrompt;
-            contribTasks = contribs.tasks;
-          };
-
-          # `contribs` is at the module root, not under `scooter`.
-          mkPlatformWith = extraModules: full:
-            let scooter = builtins.removeAttrs full [ "contribs" ];
-            in kubenix.evalModules.${system} {
-              module = { kubenix, ... }: {
-                imports = [ ./modules/platform.nix ] ++ imageModules ++ extraModules;
-                kubenix.project = "agent-sandbox";
-                kubernetes.version = "1.31";
-                contribs = full.contribs or { };
-                inherit scooter;
-              };
-            };
-          # The vended entry point.
-          evalPlatform = { module }: kubenix.evalModules.${system} {
-            module = { kubenix, ... }: {
-              imports = [ ./modules/platform.nix module ] ++ imageModules;
-              kubenix.project = "agent-sandbox";
-              kubernetes.version = "1.31";
-            };
-          };
-
-          mkPlatform = mkPlatformWith [ ];
-
-          # The derivations, read back out of the evaluated module tree.
-          builtImages = (mkPlatform { }).config.scooter.images;
-          mkTestPlatform = mkPlatformWith [ ./modules/testing.nix ];
+          # The sandbox image, with the shipped build's inputs unless overridden.
+          mkSandboxOs = args: import ./pkgs/sandbox-os/image.nix ({
+            inherit lib;
+            inherit (build.config) n2c nixStubs deploymentModules;
+            pkgs = build.config.sandboxPkgs;
+          } // args);
 
           # What the test renders ship
           testContribs = lib.genAttrs
@@ -287,7 +107,6 @@
           };
           # Side-loaded into k3s, so bare names on :latest
           platform = mkTestPlatform (mkTestPlatformConfig "" // {
-            # Side-loaded: bare names on :latest, overriding the x86_64 tag pin.
             images = builtins.mapAttrs (_: _: { ref.tag = lib.mkOverride 40 "latest"; }) builtImages;
           });
           # `nix build .#platform-manifests-k3d`
@@ -313,11 +132,10 @@
             inherit scooterSkills testContribs;
           });
 
-          # attr -> k3d ref, for the push script
-          k3dImageRefs = platformK3d.config.scooter.images;
+          # The k3d render's pushable images, with their packages.
+          k3dImages = lib.filterAttrs (_: img: img.attr != null) platformK3d.config.scooter.images;
           # Every image's k3d ref, from which k3d-platform-up.sh picks what to push.
-          k3dPushRefs = lib.mapAttrs' (_: img: lib.nameValuePair img.attr img.ref.fullUrl)
-            (lib.filterAttrs (_: img: img.attr != null) k3dImageRefs);
+          k3dPushRefs = lib.mapAttrs' (_: img: lib.nameValuePair img.attr img.ref.fullUrl) k3dImages;
 
           # The camelCase refs server-config reads, from the ghcr render.
           ghcrImageRefs = platformGhcr.config.scooter.images;
@@ -328,7 +146,13 @@
           # Tier-1-style config-correctness tests for the dev-environment sandbox
           devEnvTests =
             if pkgs.stdenv.isLinux
-            then import ./nixos-tests { inherit pkgs lib stubOverlay deploymentModules byocController agentHost broker; }
+            then import ./nixos-tests {
+              inherit pkgs lib;
+              inherit (build.config) stubOverlay deploymentModules;
+              byocController = p.scooter-byoc-controller;
+              agentHost = p.scooter-agent-host;
+              broker = p.scooter-broker;
+            }
             else { };
 
           # The contrib sandbox surface, without building an image
@@ -337,55 +161,29 @@
               # What this repo ships first; a fixture layers on top.
               derive = extraModules: import ./contrib/sandbox-modules.nix {
                 inherit lib;
-                extraModules = deploymentModules ++ extraModules;
+                extraModules = build.config.deploymentModules ++ extraModules;
               };
               # echo pins `enable = false` (it must never ship)
               withEcho = derive [{ contribs.echo.enable = lib.mkForce true; }];
               # Just the fixture
               echoOnly = lib.subtractLists (derive [ ]).treeRelative withEcho.treeRelative;
               # Through `extraModuleFiles`
-              sandboxWithEcho = import ./pkgs/sandbox-os/image.nix {
-                inherit deploymentModules;
-                inherit lib n2c;
-                pkgs = sandboxPkgs;
-                nixStubs = {
-                  src = nix-stubs;
-                  package = nix-stubs.packages.${system}.nix-stubs;
-                  inherit stubArgs;
-                };
-                extraModuleFiles = echoOnly;
-              };
+              sandboxWithEcho = mkSandboxOs { extraModuleFiles = echoOnly; };
               # The vendored source tree, reached through the config.
               tree = lib.head (lib.filter
                 (d: lib.hasSuffix "-sandbox-os-src" (toString d))
                 sandboxWithEcho.nixos.config.system.extraDependencies);
 
               # The image as it ships.
-              shipped = import ./pkgs/sandbox-os/image.nix {
-                inherit deploymentModules;
-                inherit lib n2c;
-                pkgs = sandboxPkgs;
-                nixStubs = {
-                  src = nix-stubs;
-                  package = nix-stubs.packages.${system}.nix-stubs;
-                  inherit stubArgs;
-                };
-              };
+              shipped = mkSandboxOs { };
               # The baked re-converge list, as the image renders it
               listFile = sandboxWithEcho.nixos.config.environment.etc."scooter/reconverge-modules.json".source;
               shippedListFile = shipped.nixos.config.environment.etc."scooter/reconverge-modules.json".source;
 
               # echo enabled as a contrib (not just its module file), so its skill
               # DIRECTORY goes through modules/skills like a shipped one would.
-              withEchoSkills = import ./pkgs/sandbox-os/image.nix {
-                deploymentModules = deploymentModules ++ [{ contribs.echo.enable = lib.mkForce true; }];
-                inherit lib n2c;
-                pkgs = sandboxPkgs;
-                nixStubs = {
-                  src = nix-stubs;
-                  package = nix-stubs.packages.${system}.nix-stubs;
-                  inherit stubArgs;
-                };
+              withEchoSkills = mkSandboxOs {
+                deploymentModules = build.config.deploymentModules ++ [{ contribs.echo.enable = lib.mkForce true; }];
               };
               skillCfg = withEchoSkills.nixos.config;
               skillSrc = skillCfg.scooter.skillDirs.echo-skill;
@@ -486,20 +284,16 @@
           };
         in
         {
-          # fastmcp 3.4.x is marked broken against mcp>=2; pin mcp_1 until fastmcp supports it (PR #906).
-          _module.args.pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ (_: prev: { pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [ (pf: _: { mcp = pf.mcp_1; }) ]; }) ];
-          };
-          # Deprecated alias of `lib.evalPlatform` (which reads it); kept for existing deploys.
-          legacyPackages.evalPlatform = evalPlatform;
-          legacyPackages.imageModules = imageModules;
+          # Deprecated alias of `lib.evalPlatform`; kept for existing deploys.
+          legacyPackages.evalPlatform = { module }: evalPlatformWith { inherit system; modules = [ module ]; };
+          # Deprecated: platform.nix declares every image itself now.
+          legacyPackages.imageModules = [ ];
           # Package a Python system task: see nix/scooter-task.nix.
-          legacyPackages.mkScooterTask = mkScooterTask;
+          legacyPackages.mkScooterTask = build.config.mkScooterTask;
 
           packages = {
             # The NixOS systemd-PID-1 sandbox image.
-            default = sandboxOsImage.image;
+            default = builtImages.agent-sandbox-os.package;
 
             # `nix build .#options-doc` -> the scooter.* option reference as JSON
             options-doc =
@@ -538,54 +332,58 @@
                 install -D -m 644 ${pkgs.writeText "db-spec-file" text} $out/${path}
               '') spec.contribFiles));
 
-            inherit agentHost ui broker webhooks scheduler;
+            agentHost = p.scooter-agent-host;
+            ui = p.scooter-ui;
+            broker = p.scooter-broker;
+            webhooks = p.scooter-webhooks;
+            scheduler = p.scooter-scheduler;
 
             # nix build .#contrib-echo / .#contrib-echo-webhooks -> the reference contrib
             contrib-echo = contribsWithExamples.packages.echo.broker;
             contrib-echo-webhooks = contribsWithExamples.packages.echo.webhooks;
-            contrib-airtable = contribs.packages.airtable.broker;
-            contrib-brave = contribs.packages.brave.broker;
-            contrib-datadog = contribs.packages.datadog.broker;
-            contrib-duckduckgo = contribs.packages.duckduckgo.broker;
-            contrib-github = contribs.packages.github.broker;
-            contrib-github-webhooks = contribs.packages.github.webhooks;
-            contrib-gitlab = contribs.packages.gitlab.broker;
-            contrib-google = contribs.packages.google.broker;
-            contrib-gitlab-webhooks = contribs.packages.gitlab.webhooks;
-            contrib-grafana = contribs.packages.grafana.broker;
-            contrib-jira = contribs.packages.jira.broker;
-            contrib-jira-webhooks = contribs.packages.jira.webhooks;
-            contrib-kagi = contribs.packages.kagi.broker;
-            contrib-slack = contribs.packages.slack.broker;
-            contrib-slack-webhooks = contribs.packages.slack.webhooks;
+            contrib-airtable = contribBuild.packages.airtable.broker;
+            contrib-brave = contribBuild.packages.brave.broker;
+            contrib-datadog = contribBuild.packages.datadog.broker;
+            contrib-duckduckgo = contribBuild.packages.duckduckgo.broker;
+            contrib-github = contribBuild.packages.github.broker;
+            contrib-github-webhooks = contribBuild.packages.github.webhooks;
+            contrib-gitlab = contribBuild.packages.gitlab.broker;
+            contrib-google = contribBuild.packages.google.broker;
+            contrib-gitlab-webhooks = contribBuild.packages.gitlab.webhooks;
+            contrib-grafana = contribBuild.packages.grafana.broker;
+            contrib-jira = contribBuild.packages.jira.broker;
+            contrib-jira-webhooks = contribBuild.packages.jira.webhooks;
+            contrib-kagi = contribBuild.packages.kagi.broker;
+            contrib-slack = contribBuild.packages.slack.broker;
+            contrib-slack-webhooks = contribBuild.packages.slack.webhooks;
             # files' broker half is the annotation store; its build carries the whole
             # suite, the sandbox viewer's stdlib tests included, as check inputs.
-            contrib-files = contribs.packages.files.broker;
-            contrib-personalization = contribs.packages.personalization.broker;
+            contrib-files = contribBuild.packages.files.broker;
+            contrib-personalization = contribBuild.packages.personalization.broker;
 
             # nix build .#contribs-all -> every variant of every contrib
             contribs-all = contribsAll;
 
-            conversation-controller = conversationController;
-            conversation-router = conversationRouter;
-            byoc-controller = byocController;
+            conversation-controller = p.scooter-conversation-controller;
+            conversation-router = p.scooter-conversation-router;
+            byoc-controller = p.scooter-byoc-controller;
             # contrib/code-server's pieces (stubs in modules/sandbox-os/stubs.nix), built in CI
             # because nix-stubs check only compares their .drv paths.
-            scooter-vscode-ahp = pkgs.callPackage ./contrib/code-server/ahp { };
-            code-server-bin = pkgs.callPackage ./contrib/code-server/code-server-bin { };
-            warm-store-controller = warmStoreController;
-            inherit agent; # the ACP agent (goose)
+            inherit (p) scooter-vscode-ahp;
+            code-server-bin = p.scooter-code-server-bin;
+            warm-store-controller = p.scooter-warm-store-controller;
+            agent = p.scooter-agent; # the ACP agent (goose)
 
             # nix build .#sandbox-os-image -> the NixOS systemd-PID-1 dev sandbox image.
             sandbox-os-image = builtImages.agent-sandbox-os.package;
 
             # The broker tools (agent-broker)
-            broker-tools = brokerTools.agent-broker;
+            broker-tools = p.scooter-broker-tools;
 
             # nix build .#forge-shim  ->  the sandbox's local forge proxy shim (runs go test)
-            forge-shim = pkgs.callPackage ./pkgs/forge-shim { };
+            forge-shim = p.scooter-forge-shim;
             # One warm-store benchmark round, for the `bench` CI job.
-            bench-warm-store = pkgs.callPackage ./services/warm-store-controller/bench { };
+            bench-warm-store = p.scooter-bench-warm-store;
 
             # nix build .#broker-image  ->  broker OCI image
             broker-image = builtImages.agent-broker.package;
@@ -600,32 +398,28 @@
             scheduler-image = builtImages.agent-scheduler.package;
 
             # nix build .#scooter-schema  ->  generated SQLAlchemy models (runs pytest)
-            scooter-schema = scooterSchema;
+            inherit (p) scooter-schema;
 
             # nix build .#scooter-lib / .#scooter-broker-lib / .#scooter-webhooks-lib -> the shared Python libraries.
-            scooter-lib = scooterLib;
-            scooter-broker-lib = scooterBrokerLib;
-            scooter-webhooks-lib = scooterWebhooksLib;
+            inherit (p) scooter-lib scooter-broker-lib scooter-webhooks-lib;
 
             # nix build .#scooter-task -> the system-task runtime; nix run .#scooter-prompt -- --help
-            scooter-task = scooterTask;
-            scooter-prompt = scooterPrompt;
+            inherit (p) scooter-task scooter-prompt;
 
             # nix build .#scooter-schema-js  ->  generated Drizzle schema package (tsc)
-            scooter-schema-js = scooterSchemaJs;
-
             # nix build .#scooter-svcauth-js  ->  shared ServiceAccount token auth (tsc)
-            scooter-svcauth-js = scooterSvcauthJs;
+            inherit (p) scooter-schema-js scooter-svcauth-js;
 
             # nix build .#remote-agent  ->  the BYO-Claude container app (bin)
-            remote-agent = remoteAgent;
-            remote-agent-echo = remoteAgentEcho;
+            remote-agent = p.scooter-remote-agent;
+            remote-agent-echo = p.scooter-remote-agent-echo;
             # nix build .#remote-agent-image -> the BYO-Claude remote agent OCI image,
-            # evaluated alone because the unfree claude CLI keeps it out of the shared tree.
-            remote-agent-image =
-              (evalPlatform {
-                module = import ./pkgs/remote-agent-image/image.nix imageArgs;
-              }).config.scooter.images.remote-agent.package;
+            # outside scooter.images because of its unfree claude CLI.
+            remote-agent-image = import ./services/remote-agent/image.nix {
+              inherit pkgs;
+              inherit (build.config) n2c imageLayers;
+              remoteAgent = p.scooter-remote-agent;
+            };
 
             # nix build .#conversation-controller-image  ->  controller OCI image
             conversation-controller-image = builtImages.conversation-controller.package;
@@ -650,7 +444,7 @@
             ui-image = builtImages.agent-sandbox-ui.package;
 
             # nix build .#contrib-ui-manifest -> the contribs' UI metadata as one manifest.
-            contrib-ui-manifest = contribs.uiManifest;
+            contrib-ui-manifest = contribBuild.uiManifest;
 
             # nix build .#platform-manifests -> multi-doc YAML for kubectl apply on the e2e/local cluster.
             platform-manifests = platform.config.kubernetes.resultYAML;
@@ -666,10 +460,10 @@
               mkdir -p $out
               ln -s ${pkgs.writeText "k3d-image-refs.json" (builtins.toJSON k3dPushRefs)} $out/image-refs.json
               ln -s ${platformK3d.config.kubernetes.resultYAML} $out/platform-manifests-k3d.yaml
-              ${lib.concatMapStrings (a: ''
-                ln -s ${pubImages.${a}} $out/${a}.json
-                ln -s ${pubImages.${a}.copyTo} $out/${a}.copyTo
-              '') (builtins.attrNames k3dPushRefs)}
+              ${lib.concatMapStrings (img: ''
+                ln -s ${img.package} $out/${img.attr}.json
+                ln -s ${img.package.copyTo} $out/${img.attr}.copyTo
+              '') (builtins.attrValues k3dImages)}
             '';
 
             # nix build .#platform-manifests-ghcr -> the same manifests with every image on its ghcr ref.
@@ -685,43 +479,51 @@
           };
 
           # Dev shell
-          devShells.default = import ./nix/devshell.nix { inherit pkgs conversationRouter; };
+          devShells.default = import ./nix/devshell.nix {
+            inherit pkgs;
+            conversationRouter = p.scooter-conversation-router;
+          };
 
           checks = {
-            inherit agentHost ui;
+            agentHost = p.scooter-agent-host;
+            ui = p.scooter-ui;
             # Who may frame which UI page, against the rendered nginx config.
-            ui-nginx = import ./pkgs/ui-image/check.nix { inherit pkgs; };
+            ui-nginx = import ./ui/image/check.nix { inherit pkgs; };
             # Every contrib variant
             contribs-all = contribsAll;
             contrib-echo = contribsWithExamples.packages.echo.broker;
             contrib-echo-webhooks = contribsWithExamples.packages.echo.webhooks;
-            contrib-airtable = contribs.packages.airtable.broker;
-            contrib-brave = contribs.packages.brave.broker;
-            contrib-datadog = contribs.packages.datadog.broker;
-            contrib-duckduckgo = contribs.packages.duckduckgo.broker;
-            contrib-github = contribs.packages.github.broker;
-            contrib-github-webhooks = contribs.packages.github.webhooks;
-            contrib-gitlab = contribs.packages.gitlab.broker;
-            contrib-google = contribs.packages.google.broker;
-            contrib-gitlab-webhooks = contribs.packages.gitlab.webhooks;
-            contrib-grafana = contribs.packages.grafana.broker;
-            contrib-jira = contribs.packages.jira.broker;
-            contrib-jira-webhooks = contribs.packages.jira.webhooks;
-            contrib-kagi = contribs.packages.kagi.broker;
-            contrib-slack = contribs.packages.slack.broker;
-            contrib-slack-webhooks = contribs.packages.slack.webhooks;
-            contrib-files = contribs.packages.files.broker;
-            contrib-personalization = contribs.packages.personalization.broker;
+            contrib-airtable = contribBuild.packages.airtable.broker;
+            contrib-brave = contribBuild.packages.brave.broker;
+            contrib-datadog = contribBuild.packages.datadog.broker;
+            contrib-duckduckgo = contribBuild.packages.duckduckgo.broker;
+            contrib-github = contribBuild.packages.github.broker;
+            contrib-github-webhooks = contribBuild.packages.github.webhooks;
+            contrib-gitlab = contribBuild.packages.gitlab.broker;
+            contrib-google = contribBuild.packages.google.broker;
+            contrib-gitlab-webhooks = contribBuild.packages.gitlab.webhooks;
+            contrib-grafana = contribBuild.packages.grafana.broker;
+            contrib-jira = contribBuild.packages.jira.broker;
+            contrib-jira-webhooks = contribBuild.packages.jira.webhooks;
+            contrib-kagi = contribBuild.packages.kagi.broker;
+            contrib-slack = contribBuild.packages.slack.broker;
+            contrib-slack-webhooks = contribBuild.packages.slack.webhooks;
+            contrib-files = contribBuild.packages.files.broker;
+            contrib-personalization = contribBuild.packages.personalization.broker;
             # Every shipped handler and provider imports in its service's runtime env.
             webhooks-entrypoints = import ./nix/check-entrypoints.nix {
-              inherit pkgs; name = "webhooks-entrypoints"; package = webhooks; bin = "agent-webhooks"; group = "scooter_webhooks.handlers";
+              inherit pkgs; name = "webhooks-entrypoints"; package = p.scooter-webhooks; bin = "agent-webhooks"; group = "scooter_webhooks.handlers";
             };
             broker-entrypoints = import ./nix/check-entrypoints.nix {
-              inherit pkgs; name = "broker-entrypoints"; package = broker; bin = "agent-broker"; group = "agent_broker.providers";
+              inherit pkgs; name = "broker-entrypoints"; package = p.scooter-broker; bin = "agent-broker"; group = "agent_broker.providers";
             };
             # The shared Python libraries.
-            inherit scooterLib scooterBrokerLib scooterWebhooksLib scooterTask scooterPrompt;
-            scooter-prompt-tests = scooterPrompt.tests;
+            scooterLib = p.scooter-lib;
+            scooterBrokerLib = p.scooter-broker-lib;
+            scooterWebhooksLib = p.scooter-webhooks-lib;
+            scooterTask = p.scooter-task;
+            scooterPrompt = p.scooter-prompt;
+            scooter-prompt-tests = p.scooter-prompt.tests;
           } // devEnvTests // contribSandboxChecks;
         };
 
@@ -739,17 +541,14 @@
         # The entry point for a deployment: render the platform from your own config module.
         #   (scooter.lib.evalPlatform { system = "x86_64-linux"; module = ./scooter.nix; })
         #     .config.kubernetes.result
-        lib.evalPlatform = { system, module }:
-          self.legacyPackages.${system}.evalPlatform { inherit module; };
+        lib.evalPlatform = { system, module }: evalPlatformWith { inherit system; modules = [ module ]; };
 
         # kubenix modules
         kubenixModules.scooter = ./modules;
-        # The bare platform module
-        kubenixModules.platform = ./modules/platform.nix;
+        # The platform module, with the inputs its packages build from
+        kubenixModules.platform = platformModule;
         # The conventional entry point
-        kubenixModules.default = {
-          imports = [ ./modules/platform.nix imagePackageConfig ];
-        };
+        kubenixModules.default = platformModule;
       };
     };
 }

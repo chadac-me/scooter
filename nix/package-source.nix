@@ -1,5 +1,5 @@
-# A package's directory as its build source, minus the module-system files kept
-# beside it, so editing a module or image does not rebuild the package.
+# A package's directory, minus its module.nix and image.nix.
+# Editing a module then doesn't rebuild the package.
 { lib }:
 
 rec {

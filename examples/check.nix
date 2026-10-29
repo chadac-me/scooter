@@ -275,6 +275,8 @@ let
     "contribDbEnv"
     # declared per-service module; a deployer overrides a ref, not the tree
     "images" "imagesContentTag"
+    # the build itself; set only to patch a package
+    "packages" "config"
   ];
   uncovered = builtins.filter
     (n: !(builtins.elem n coverageExempt)
@@ -1064,6 +1066,12 @@ let
         else [ "with no operator task, the scheduler image differs from the published one, so its content tag would not exist on the registry" ])
     ++ (if schedImageOf platform != publishedSchedImage then [ ]
         else [ "an operator task did not change the scheduler image, so its command is not in the image" ])
+    # The Deployment names this config's image, not upstream's.
+    ++ (let
+          tag = platform.config.scooter.imagesContentTag platform.config.scooter.images.agent-scheduler.package;
+          ctrs = builtins.attrValues res.deployments.agent-scheduler.spec.template.spec.containers;
+        in if builtins.any (c: nixpkgsLib.hasSuffix ":${tag}" (c.image or "")) ctrs then [ ]
+           else [ "the scheduler Deployment does not name the image this config built (tag ${tag})" ])
     ++ (if schedEnvVal "SYSTEM_TASKS_PATH" != "" && schedEnvVal "SCHEDULER_URL" != "" then [ ]
         else [ "scheduler.env SYSTEM_TASKS_PATH / SCHEDULER_URL (the scheduler cannot find or hand out its system tasks)" ])
     ++ (if builtins.match ".*:agent-scheduler" (brokerEnvVal "SYSTEM_TASK_SERVICE_ACCOUNTS") != null then [ ]
@@ -1205,8 +1213,23 @@ let
     ++ (if bodyAnn overrideRes == "1g" then [ ]
         else [ "an explicit proxy-body-size annotation did not win over the derived one" ]);
 
-  allProblems = uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  # A replaced library rebuilds exactly the images shipping it.
+  forkedLib = evalPlatform {
+    module = { config, ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.packages.scooter-lib = config.scooter.config.pkgs.python3Packages.toolz;
+    };
+  };
+  imageDrv = p: n: p.config.scooter.images.${n}.package.drvPath;
+  packageProblems =
+    nixpkgsLib.concatMap (n: if imageDrv forkedLib n != imageDrv platform n then [ ]
+      else [ "scooter.packages.scooter-lib override did not reach the ${n} image" ])
+      [ "agent-broker" "agent-webhooks" "agent-scheduler" ]
+    ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
+        else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
+
+  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
-then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named\n"
+then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named; a scooter.packages override reaches exactly the images that use it\n"
 else builtins.throw "example manifests missing: ${builtins.concatStringsSep ", " allProblems}"

@@ -17,7 +17,7 @@ import type {
   ContribToolCard,
 } from "./contribTypes.js";
 
-/** Same-origin by construction — see the nginx route in pkgs/ui-image. */
+/** Same-origin by construction — see the nginx route in ui/image/nginx.nix. */
 const ENDPOINT = "/contrib/manifest.json";
 
 /** main.tsx blocks the first paint on this fetch, so a hung route must degrade to

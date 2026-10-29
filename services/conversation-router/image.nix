@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, conversationRouter, ... }:
+{ pkgs, n2c, conversationRouter }:
 
 # OCI image for the conversation router (Go binary).
 
@@ -20,11 +20,4 @@ let
     };
   };
 in
-# A kubenix module: this image declares its own scooter.images entry.
-{
-  config.scooter.images.conversation-router = {
-    package = lib.mkDefault image;
-    attr = "conversation-router-image";
-    refKey = "conversationRouter";
-  };
-}
+image

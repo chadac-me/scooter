@@ -1,6 +1,6 @@
 # The contribs' system tasks, built with mkScooterTask from each contrib's source.
 # Shared by contrib/default.nix (the registry, whose tasks the scheduler image ships)
-# and pkgs/scheduler-image/image.nix (the deployment's, which the ConfigMap names):
+# and services/scheduler/image.nix (the deployment's, which the ConfigMap names):
 # the same inputs give the same store path, so the two agree.
 { lib, mkScooterTask }:
 

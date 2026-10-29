@@ -1,4 +1,4 @@
-{ pkgs, lib, n2c, imageLayers, remoteAgent, ... }:
+{ pkgs, n2c, imageLayers, remoteAgent }:
 
 # OCI image for the bring-your-own-Claude remote agent, which users `docker run`:
 # the wrapped remote-agent bin, CA certs, and a minimal shell/coreutils for the
@@ -45,7 +45,4 @@ let
     };
   };
 in
-# A kubenix module: this image declares its own scooter.images entry.
-{
-  config.scooter.images.remote-agent.package = lib.mkDefault image;
-}
+image

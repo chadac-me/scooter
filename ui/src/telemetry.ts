@@ -1,7 +1,7 @@
 /**
  * Browser telemetry: OTLP traces from the UI, POSTed same-origin to `/telemetry/v1/traces`
  * where the UI's nginx forwards them to the cluster's collector (see
- * `pkgs/ui-image/default.nix`), so the browser holds no credential and the traffic stays
+ * `ui/image/nginx.nix`), so the browser holds no credential and the traffic stays
  * behind the ingress auth. Message content never leaves the browser through this path;
  * attributes are ids, counts, durations and error classes.
  */
