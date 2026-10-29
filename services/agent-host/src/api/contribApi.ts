@@ -1,8 +1,13 @@
 /**
- * The `/contrib-api` relay: a contrib's settings tab reaches its contrib's broker half
- * as the signed-in user.
+ * The `/contrib-api` relays: a contrib's UI reaches its contrib's broker half as the
+ * signed-in user, either for itself (settings tabs) or for one conversation (panels).
  *
  *   browser ── /contrib-api/<name>/<rest> ──▶ agent-host ── <brokerPrefix>/user/<rest> ──▶ broker
+ *   browser ── /conversations/<id>/contrib-api/<name>/<rest>
+ *           ──▶ agent-host ── <brokerPrefix>/conversation/<shortId>/<rest> ──▶ broker
+ *
+ * The conversation form sits under /conversations/:id, so the management API's access
+ * guard has already refused a caller who may not see that conversation.
  *
  * The agent-host is the only service that knows who the browser user is, so it names
  * them in X-Scooter-User on a request it signs with its own service-account token. The
@@ -34,6 +39,8 @@ export interface ContribApiDeps {
   brokerUrl: string;
   /** The agent-host's own broker auth headers (its SA token). */
   authHeaders: () => Promise<Record<string, string>>;
+  /** A conversation id or short id -> the broker's key for it; null when unknown. */
+  conversationKey?: (id: string) => Promise<string | null>;
   /** Injected for tests. */
   fetch?: typeof fetch;
 }
@@ -79,13 +86,14 @@ const readRaw = (req: IncomingMessage): Promise<Buffer | null> =>
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 
-/** Mount `/contrib-api/:contrib/*` on `r`. */
+/** Mount `/contrib-api/:contrib/*` and `/conversations/:id/contrib-api/:contrib/*` on `r`. */
 export function mountContribApi(r: Router, deps: ContribApiDeps): void {
   const doFetch = deps.fetch ?? fetch;
   const brokerUrl = deps.brokerUrl.replace(/\/$/, "");
 
-  const relay = async (ctx: Ctx) => {
-    if (ctx.user.anonymous) return { status: 401, json: { error: "sign in to use this settings tab" } };
+  // `subtree` is the broker path under the contrib's prefix; null means 404.
+  const relayTo = (subtree: (ctx: Ctx) => Promise<string | null>) => async (ctx: Ctx) => {
+    if (ctx.user.anonymous) return { status: 401, json: { error: "sign in first" } };
     const name = ctx.params.contrib;
     const cfg = Object.hasOwn(deps.contribs, name) ? deps.contribs[name] : undefined;
     if (!cfg) return { status: 404, json: { error: `no settings API for contrib '${name}'` } };
@@ -116,8 +124,10 @@ export function mountContribApi(r: Router, deps: ContribApiDeps): void {
     else if (!body?.length) delete headers["Content-Type"];
     headers[RELAYED_USER_HEADER] = ctx.user.id;
 
+    const base = await subtree(ctx);
+    if (base === null) return { status: 404, json: { error: "not found" } };
     const query = ctx.query.toString();
-    const url = `${brokerUrl}${cfg.brokerPrefix.replace(/\/$/, "")}/user/${rest}${query ? `?${query}` : ""}`;
+    const url = `${brokerUrl}${cfg.brokerPrefix.replace(/\/$/, "")}/${base}/${rest}${query ? `?${query}` : ""}`;
     let res: Response;
     try {
       res = await doFetch(url, { method, headers, body: body?.length ? new Uint8Array(body) : undefined });
@@ -136,5 +146,13 @@ export function mountContribApi(r: Router, deps: ContribApiDeps): void {
     return undefined;
   };
 
-  for (const m of METHODS) r.on(m, "/contrib-api/:contrib/*", relay);
+  const user = relayTo(async () => "user");
+  const conversation = relayTo(async (ctx) => {
+    const key = deps.conversationKey ? await deps.conversationKey(ctx.params.id) : null;
+    return key ? `conversation/${encodeURIComponent(key)}` : null;
+  });
+  for (const m of METHODS) {
+    r.on(m, "/contrib-api/:contrib/*", user);
+    r.on(m, "/conversations/:id/contrib-api/:contrib/*", conversation);
+  }
 }

@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createRouter, type JsonResult, type Router, type ResolveUser } from "../http/router.js";
 import type { SessionManager, Conversation } from "../session/manager.js";
 import type { ConversationStore, ChecksummedEvent, ConversationLink } from "../session/manager.js";
+import { shortId } from "../session/manager.js";
 import type { SessionId } from "../types.js";
 import { tailByRuns } from "../session/eventWindow.js";
 import { trimToBoundary } from "../session/eventStore.js";
@@ -149,8 +150,6 @@ export interface ManagementDeps {
   compact?: (conversationId: string) => Promise<{ summarizedTurns: number; keptRuns: number } | null>;
   /** The conversation's current sandbox resource requests/limits; wired only on the broker path. */
   sandboxResources?: (conversationId: string) => Promise<SandboxResources | undefined>;
-  /** The static shares a conversation has published, relayed to the broker under the host's own SA; wired only on the broker path. */
-  listShares?: (conversationId: string) => Promise<ConversationShares>;
   /** The named sandbox size presets and the default preset name; wired only on the broker path. */
   sandboxSizes?: () => Promise<{ sizes: Record<string, SandboxSizePreset>; default: string | null }>;
   /** Record a named size preset for a conversation, rejecting unknown names; absent means the route reports 501. */
@@ -196,62 +195,6 @@ export const DEFAULT_APPROVAL_OPTIONS: ReadonlyArray<{ optionId: string; name: s
   { optionId: "approve", name: "Approve", kind: "allow_once" },
   { optionId: "deny", name: "Deny", kind: "reject_once" },
 ];
-
-/** One published static share as the broker's /shares summary returns it (snake_case passed through). */
-export interface ShareSummary {
-  uuid: string;
-  url: string;
-  description?: string;
-  visibility?: string;
-  latest_version?: number;
-  created_at?: string;
-  updated_at?: string;
-}
-
-/** A conversation's static shares plus whether the broker's shares feature is on at all. */
-export interface ConversationShares {
-  configured: boolean;
-  shares: ShareSummary[];
-}
-
-/** List a conversation's static shares from the broker, keyed by the sandbox short-id
- *  (`shortId(threadId)`) rather than the thread UUID, reporting `configured:false` on
- *  404/501 and an empty list on any other error. */
-/** The broker answered the shares list with 503 even after a retry. */
-export class SharesUnavailableError extends Error {
-  constructor(readonly status: number) {
-    super(`broker /shares unavailable (${status})`);
-    this.name = "SharesUnavailableError";
-  }
-}
-
-export async function fetchConversationShares(
-  brokerUrl: string,
-  brokerConversationId: string,
-  authHeaders: Record<string, string>,
-  onWarn?: (status: number) => void,
-): Promise<ConversationShares> {
-  const base = brokerUrl.replace(/\/$/, "");
-  if (!base) return { configured: false, shares: [] };
-  const url = `${base}/shares?conversation_id=${encodeURIComponent(brokerConversationId)}`;
-  // The list is an idempotent read, so a network error or a 5xx is retried once.
-  let res: Response;
-  try {
-    res = await fetch(url, { method: "GET", headers: authHeaders });
-  } catch {
-    res = await fetch(url, { method: "GET", headers: authHeaders });
-  }
-  if (res.status >= 500) res = await fetch(url, { method: "GET", headers: authHeaders });
-  if (res.status === 503) throw new SharesUnavailableError(res.status);
-  if (!res.ok) {
-    // 404/501 means the shares feature is not enabled on the broker.
-    if (res.status === 404 || res.status === 501) return { configured: false, shares: [] };
-    onWarn?.(res.status);
-    return { configured: true, shares: [] };
-  }
-  const body = (await res.json().catch(() => ({}))) as { shares?: ShareSummary[] };
-  return { configured: true, shares: (body.shares ?? []).filter((s) => s.uuid) };
-}
 
 /** Query the broker for a conversation's still-pending approval requests, keyed by the
  *  sandbox short-id (`shortId(threadId)`) rather than the thread UUID; returns [] on any error. */
@@ -916,20 +859,6 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { json: { links } };
   });
 
-  // The static shares this conversation has published, for the Shares tab; `configured:false`
-  // when the broker path is not wired so the UI hides the tab.
-  r.get("/conversations/:id/shares", async (ctx) => {
-    if (!deps.listShares) return { json: { configured: false, shares: [] } };
-    const id = (await resolveConvId(ctx.params.id)) ?? ctx.params.id;
-    try {
-      return { json: await deps.listShares(id) };
-    } catch {
-      // Unreachable after a retry: a 503 lets the UI keep its last list instead of blanking it.
-      ctx.res.setHeader?.("Retry-After", "5");
-      return { status: 503, json: { error: "shares unavailable", configured: true, shares: [] } };
-    }
-  });
-
   r.post("/conversations/:id/links", async (ctx) => {
     const body = await ctx.body<{
       source?: string;
@@ -1279,7 +1208,16 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   // --- Contrib settings-tab API -------------------------------------------------
-  if (deps.contribApi) mountContribApi(r, deps.contribApi);
+  // The broker keys a conversation by its short id.
+  if (deps.contribApi) {
+    mountContribApi(r, {
+      conversationKey: async (id) => {
+        const convId = await resolveConvId(id);
+        return convId ? shortId(convId) : null;
+      },
+      ...deps.contribApi,
+    });
+  }
 
   return r;
 }

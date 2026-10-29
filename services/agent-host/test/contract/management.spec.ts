@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { createManagementApi, raiseApprovalInterrupt, fetchPendingApprovals, fetchConversationShares } from "../../src/api/management.js";
+import { createManagementApi, raiseApprovalInterrupt, fetchPendingApprovals } from "../../src/api/management.js";
 import { UserSkillError, type UserSkillStore } from "../../src/session/userSkillStore.js";
 import { createMemoryUserHookSettingsStore, type UserHookSettingsStore } from "../../src/hooks/userHookSettingsStore.js";
 import type { HookDef } from "../../src/hooks/types.js";
@@ -1395,7 +1395,7 @@ describe("management API", () => {
   // user. The user header is set by the relay alone: what the browser sends is dropped.
   describe("/contrib-api relay", () => {
     type Seen = { url: string; method: string; headers: Record<string, string>; body?: string };
-    const mk = (opts: { brokerUrl?: string; status?: number; reply?: unknown } = {}) => {
+    const mk = (opts: { brokerUrl?: string; status?: number; reply?: unknown; deny?: boolean } = {}) => {
       const seen: Seen[] = [];
       const fakeFetch = vi.fn(async (url: string, init: RequestInit) => {
         seen.push({
@@ -1414,6 +1414,7 @@ describe("management API", () => {
         store: fakeStore([]),
         server: stubServer,
         answerPermission: async () => {},
+        ...(opts.deny ? { accessCheck: async () => "deny" as const } : {}),
         contribApi: {
           contribs: parseContribUserApi(JSON.stringify({ echo: { brokerPrefix: "/echo" } })),
           brokerUrl: opts.brokerUrl ?? "http://broker:8080/",
@@ -1494,6 +1495,28 @@ describe("management API", () => {
       expect(res.status).toBe(503);
     });
 
+    it("forwards a conversation call to <brokerPrefix>/conversation/<shortId>/<rest>", async () => {
+      const { api, seen } = mk({ reply: { items: [] } });
+      const res = await call(api, "GET", "/conversations/c1/contrib-api/echo/list?x=1", undefined, { "x-auth-user": "alice" });
+      expect(res).toEqual({ status: 200, json: { items: [] } });
+      expect(seen[0].url).toBe(`http://broker:8080/echo/conversation/${shortId("c1")}/list?x=1`);
+      expect(seen[0].headers["X-Scooter-User"]).toBe("alice");
+    });
+
+    it("404s a conversation call for an unknown conversation without calling the broker", async () => {
+      const { api, seen } = mk();
+      const res = await call(api, "GET", "/conversations/nope/contrib-api/echo/list", undefined, { "x-auth-user": "alice" });
+      expect(res.status).toBe(404);
+      expect(seen).toHaveLength(0);
+    });
+
+    it("404s a conversation call the caller may not see", async () => {
+      const { api, seen } = mk({ deny: true });
+      const res = await call(api, "GET", "/conversations/c1/contrib-api/echo/list", undefined, { "x-auth-user": "mallory" });
+      expect(res.status).toBe(404);
+      expect(seen).toHaveLength(0);
+    });
+
     it("ignores malformed CONTRIB_USER_API_JSON rows", () => {
       expect(parseContribUserApi("not json")).toEqual({});
       expect(parseContribUserApi(JSON.stringify({ a: { brokerPrefix: "nope" }, b: {}, c: { brokerPrefix: "/c" } })))
@@ -1502,37 +1525,7 @@ describe("management API", () => {
   });
 });
 
-describe("shares list resilience", () => {
-  it("retries the broker /shares read once on a network error", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockRejectedValueOnce(new TypeError("fetch failed"))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ shares: [{ uuid: "u1" }] }), { status: 200 }));
-    vi.stubGlobal("fetch", fetchMock);
-    try {
-      const res = await fetchConversationShares("http://broker", "abc", {});
-      expect(res).toEqual({ configured: true, shares: [{ uuid: "u1" }] });
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("GET /conversations/:id/shares answers 503 when the broker stays unavailable", async () => {
-    const api = createManagementApi({
-      sessions: fakeSessions(),
-      store: fakeStore([]),
-      server: stubServer,
-      answerPermission: async () => {},
-      listShares: async () => {
-        throw new Error("broker down");
-      },
-    });
-    const { status, json } = await call(api, "GET", "/conversations/c1/shares");
-    expect(status).toBe(503);
-    expect((json as { error?: string }).error).toBe("shares unavailable");
-  });
-
+describe("links resilience", () => {
   it("GET /conversations/:id/links lets a database outage propagate for the server's 503", async () => {
     const { DbUnavailableError } = await import("../../src/db/pgPool.js");
     const store = { ...fakeStore([]), listLinks: async () => { throw new DbUnavailableError("listLinks", new Error("down")); } };
