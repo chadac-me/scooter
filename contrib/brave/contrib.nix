@@ -1,17 +1,13 @@
-# What brave is; its deployment options are in ./deployment.nix.
+# What brave is, and the one option a deployment sets.
 { lib, ... }:
 let
-  inherit (lib) mkOption types;
+  clib = import ../lib.nix { inherit lib; };
 in
 {
-  contribs.brave = {
-    options.apiKeySecret = mkOption {
-      type = types.submodule {
-        options = {
-          name = mkOption { type = types.str; description = "Secret name (in the broker namespace)."; };
-          key = mkOption { type = types.str; default = "BRAVE_SEARCH_API_KEY"; description = "Secret key holding the Brave subscription token."; };
-        };
-      };
+  contribs.brave = { config, ... }: {
+    options.apiKeySecret = clib.mkSecretOption {
+      key = "BRAVE_SEARCH_API_KEY";
+      holds = "the Brave subscription token";
       description = ''
         Secret holding a Brave Search subscription token (api-dashboard.search.brave.com).
         Injected as BRAVE_SEARCH_API_KEY; the broker delivers it upstream as an
@@ -26,7 +22,10 @@ in
 
     config = {
       src = ./.;
-      services.broker.enable = true;
+      services.broker = {
+        enable = true;
+        env.BRAVE_SEARCH_API_KEY = config.apiKeySecret;
+      };
 
       # No `ui` (the tool renders as a plain call and brave is not a linked-resource
       # source) and no `skills` (search guidance lives in skills/agent-tools.md and

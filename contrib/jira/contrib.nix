@@ -1,6 +1,6 @@
 { lib, ... }:
 {
-  contribs.jira = {
+  contribs.jira = { config, ... }: {
     options.siteUrl = lib.mkOption {
       type = lib.types.str;
       default = "";
@@ -24,8 +24,14 @@
 
     config = {
       src = ./.;
-      services.broker.enable = true;
-      services.webhooks.enable = true;
+      services.broker = {
+        enable = true;
+        env.JIRA_SITE_URL = lib.mkIf (config.siteUrl != "") config.siteUrl;
+      };
+      services.webhooks = {
+        enable = true;
+        env.JIRA_ENABLED = lib.boolToString config.webhooksEnabled;
+      };
 
       # The UI row: the Jira chip, icon and card.
       ui = {

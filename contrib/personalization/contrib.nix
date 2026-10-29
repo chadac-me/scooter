@@ -1,6 +1,5 @@
 # personalization's declaration: a per-user profile of notes, refreshed by a system
-# task, read by agents through a tool and edited on a settings tab. Its deployment
-# half is ./deployment.nix.
+# task, read by agents through a tool and edited on a settings tab.
 { lib, ... }:
 
 {
@@ -31,6 +30,7 @@
       services.broker = {
         enable = true;
         pythonDeps = ps: [ ps.aiosqlite ];
+        env.PERSONALIZATION_ENABLED = "true";
       };
 
       skills."personalization.md" = ./skills/personalization.md;

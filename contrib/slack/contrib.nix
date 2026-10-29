@@ -1,13 +1,12 @@
 { lib, ... }:
+let
+  clib = import ../lib.nix { inherit lib; };
+in
 {
-  contribs.slack = {
-    options.botTokenSecret = lib.mkOption {
-      type = lib.types.submodule {
-        options = {
-          name = lib.mkOption { type = lib.types.str; description = "Secret name (in the broker namespace)."; };
-          key = lib.mkOption { type = lib.types.str; default = "SLACK_BOT_TOKEN"; description = "Secret key holding the Slack bot token."; };
-        };
-      };
+  contribs.slack = { config, ... }: {
+    options.botTokenSecret = clib.mkSecretOption {
+      key = "SLACK_BOT_TOKEN";
+      holds = "the Slack bot token";
       description = ''
         Secret holding the Slack bot token (xoxb-…). Injected as SLACK_BOT_TOKEN. The
         secret must exist in the broker namespace.
@@ -25,7 +24,10 @@
         slack_react = { argKey = "emoji"; action = "reacted in Slack"; };
         get_slack_context = { argKey = ""; action = "read the Slack context"; };
       };
-      services.broker.enable = true;
+      services.broker = {
+        enable = true;
+        env.SLACK_BOT_TOKEN = config.botTokenSecret;
+      };
       services.webhooks.enable = true;
       # How to format for Slack (mrkdwn, not Markdown).
       skills."slack-formatting.md" = ./skills/slack-formatting.md;

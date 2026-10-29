@@ -11,17 +11,18 @@ Here is `acme`'s finished `contrib.nix`:
 # contrib/acme/contrib.nix
 # Only `lib` is available here; see "What this file can use" below.
 { lib, ... }:
+let
+  clib = import ../lib.nix { inherit lib; };
+in
 {
-  contribs.acme = {
+  # `config` is this contrib's own: contribs.acme.
+  contribs.acme = { config, ... }: {
     # ── What the operator configures, as contribs.acme.* ─────────────────────
-    # Read by deployment.nix, which turns them into env vars and mounts.
     options = {
       # The Secret holding the API token: contribs.acme.tokenSecret.{name,key}.
-      tokenSecret = lib.mkOption {
-        type = lib.types.submodule {
-          options.name = lib.mkOption { type = lib.types.str; };
-          options.key = lib.mkOption { type = lib.types.str; default = "ACME_TOKEN"; };
-        };
+      tokenSecret = clib.mkSecretOption {
+        key = "ACME_TOKEN";
+        holds = "the Acme API token";
         description = "Secret holding the Acme API token.";
       };
       # A plain setting: contribs.acme.siteUrl.
@@ -43,7 +44,15 @@ Here is `acme`'s finished `contrib.nix`:
       # Which images the Python package is built into. Each half loads only its
       # own module: broker_provider.py in the broker, webhooks_handler.py in
       # the webhooks service.
-      services.broker.enable = true;
+      services.broker = {
+        enable = true;
+        # The broker container's env: a string is a value, a Secret option a
+        # secretKeyRef, and `lib.mkIf` leaves a variable out.
+        env = {
+          ACME_TOKEN = config.tokenSecret;
+          ACME_SITE_URL = lib.mkIf (config.siteUrl != "") config.siteUrl;
+        };
+      };
       services.webhooks = {
         enable = true;
         # Extra Python dependencies for this half only.
@@ -105,8 +114,8 @@ Leave out any part your contrib doesn't need.
 `contrib.nix` is read by every evaluation that touches contribs: the package build, the
 Kubernetes render, and the sandbox image, including its in-pod rebuild. Some of those
 have no `pkgs` and no `scooter.*` options, so this file may use **only `lib`**. It
-declares; it doesn't render. Anything that becomes Kubernetes config goes in
-[`deployment.nix`](deployment.md).
+declares; it doesn't render. Env for the broker and webhooks containers goes in
+`services.<svc>.env`; any other Kubernetes config goes in [`deployment.nix`](deployment.md).
 
 ### Options
 
@@ -118,8 +127,9 @@ Everything under `options` is a deployment setting, declared with the ordinary
 - **Name options flatly.** Use `contribs.acme.siteUrl`, not `contribs.acme.acme.siteUrl`:
   `contribs.acme` already says which integration it is.
 - **Nest only where the thing is nested**, such as a Secret reference's `{ name, key }`.
-- **Refer to Secrets, never hold their values.** An option takes a Secret's name and key,
-  and `deployment.nix` turns that into a `secretKeyRef`.
+- **Refer to Secrets, never hold their values.** Declare one with `mkSecretOption` from
+  `contrib/lib.nix`. It takes a Secret's name and key, and putting it in
+  `services.<svc>.env` renders a `secretKeyRef`.
 
 Configuring an option of a contrib that isn't enabled fails the render, so a deployment
 can never half-configure an integration.
@@ -165,7 +175,7 @@ them.
 """Acme Tracker integration for Scooter."""
 ```
 
-Settings are read from environment variables, which your deployment half sets. Subclass
+Settings are read from environment variables, which `services.<svc>.env` sets. Subclass
 `ScooterBaseSettings`: each field reads the variable of the same name, upper-cased.
 
 ```python
@@ -195,7 +205,7 @@ imports = [
 
 The list is deliberately explicit, not a directory scan, and `just check-contrib-coverage`
 fails CI if a contrib directory is missing from it. Nothing else needs editing: the
-platform finds `deployment.nix` next to `contrib.nix` by name.
+platform finds a `deployment.nix` next to `contrib.nix` by name, if there is one.
 
 Then enable it in the images and in your deployment, as in
 [Turning it on](#turning-it-on).

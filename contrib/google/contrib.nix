@@ -1,13 +1,12 @@
 { lib, ... }:
+let
+  clib = import ../lib.nix { inherit lib; };
+in
 {
-  contribs.google = {
-    options.serviceAccountSecret = lib.mkOption {
-      type = lib.types.submodule {
-        options = {
-          name = lib.mkOption { type = lib.types.str; description = "Secret name (in the broker namespace)."; };
-          key = lib.mkOption { type = lib.types.str; default = "GOOGLE_SERVICE_ACCOUNT_JSON"; description = "Secret key holding the service-account key JSON."; };
-        };
-      };
+  contribs.google = { config, ... }: {
+    options.serviceAccountSecret = clib.mkSecretOption {
+      key = "GOOGLE_SERVICE_ACCOUNT_JSON";
+      holds = "the service-account key JSON";
       description = ''
         Secret holding a Google service-account key (the downloaded JSON file).
         Injected as GOOGLE_SERVICE_ACCOUNT_JSON. The secret must exist in the
@@ -62,6 +61,16 @@
       services.broker = {
         enable = true;
         pythonDeps = ps: [ ps.pyjwt ps.cryptography ];
+        env = {
+          GOOGLE_SERVICE_ACCOUNT_JSON = config.serviceAccountSecret;
+          GOOGLE_SUBJECT = lib.mkIf (config.subject != "") config.subject;
+          GOOGLE_SCOPES = lib.mkIf (config.scopes != [ ]) (lib.concatStringsSep " " config.scopes);
+          GOOGLE_IMPERSONATE_OWNER = lib.mkIf config.impersonateOwner "true";
+          GOOGLE_OWNER_DOMAINS = lib.mkIf config.impersonateOwner
+            # A throw, since kubenix has no `assertions` option.
+            (if config.ownerDomains == [ ] then throw "contribs.google.impersonateOwner needs contribs.google.ownerDomains"
+            else lib.concatStringsSep " " config.ownerDomains);
+        };
       };
       skills."scooter-google.md" = ./skills/scooter-google.md;
     };
