@@ -77,11 +77,11 @@ export function Composer({
         }}
         placeholder={placeholder}
         rows={3}
-        className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-sans text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
+        className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-sans text-base text-foreground md:text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
       />
       {error && <p className="text-xs text-destructive">{error}</p>}
       <div className="flex items-center justify-end gap-2">
-        <span className="mr-auto text-xs text-muted-foreground">⌘/Ctrl + Enter</span>
+        <span className="mr-auto text-xs text-muted-foreground pointer-coarse:invisible">⌘/Ctrl + Enter</span>
         {onCancel && (
           <button className="btn-ghost" onClick={onCancel}>
             Cancel
@@ -135,7 +135,7 @@ function DeleteButton({ a, thread, onChange }: { a: Annotation; thread: Thread; 
       aria-label={label}
       title={label}
       disabled={busy}
-      className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-50"
+      className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-50 pointer-coarse:opacity-100"
       onClick={async () => {
         if (opener && replies && !confirm(`Delete this comment and its ${replies} repl${replies === 1 ? "y" : "ies"}?`))
           return;

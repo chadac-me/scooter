@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Code2, Eye, FileSearch, Moon, PanelLeft, RefreshCw, Sun } from "lucide-react";
+import { ChevronRight, CircleHelp, Code2, Eye, FileSearch, MessageSquare, Moon, PanelLeft, RefreshCw, Sun } from "lucide-react";
 import clsx from "clsx";
 import { api, threadsOf, type Annotation, type FileView, type Question } from "./api";
 import { Tree } from "./Tree";
@@ -8,6 +8,7 @@ import { MarkdownPane } from "./MarkdownPane";
 import { ImagePane } from "./ImagePane";
 import { RetryAll } from "./Thread";
 import { current, navigate, onNavigate } from "./nav";
+import { useNarrow } from "./media";
 
 function useDark() {
   const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -66,7 +67,13 @@ export function App() {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [source, setSource] = useState(false);
-  const [tree, setTree] = useState(true);
+  const narrow = useNarrow();
+  const [wideTree, setWideTree] = useState(true);
+  // Narrow: a drawer, open only while no file is shown.
+  const [drawer, setDrawer] = useState(!path);
+  useEffect(() => setDrawer(!path), [path]);
+  const tree = narrow ? drawer : wideTree;
+  const setTree = narrow ? setDrawer : setWideTree;
   const [dark, toggleDark] = useDark();
 
   useEffect(() => {
@@ -171,43 +178,50 @@ export function App() {
   }, [path, docTitle]);
 
   return (
-    <div className="flex h-screen flex-col bg-background text-foreground">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-header px-3 font-sans text-sm">
+    <div className="flex h-dvh flex-col bg-background text-foreground">
+      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-header px-2 font-sans text-sm md:px-3">
         <button className="icon-btn" onClick={() => setTree(!tree)} title="Toggle file tree">
           <PanelLeft className="size-4" />
         </button>
         <nav aria-label="Path" className="flex min-w-0 items-center gap-0.5 text-muted-foreground">
-          {(path ? path.split("/") : ["Files"]).map((part, i, all) => (
+          {/* Narrow, only the filename fits; the tree shows its folder. */}
+          {(path ? path.split("/") : ["Files"]).slice(narrow ? -1 : 0).map((part, i, all) => (
             <span key={i} className={clsx("flex items-center gap-0.5", i === all.length - 1 ? "min-w-0" : "shrink-0")}>
               {i > 0 && <ChevronRight className="size-3.5 shrink-0 opacity-50" />}
               <span className={clsx("truncate", i === all.length - 1 && "font-medium text-foreground")}>{part}</span>
             </span>
           ))}
         </nav>
-        <div className="ml-auto flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-1 md:gap-2">
           {unanswered > 0 && (
-            <span className="pill bg-brand/15 text-brand">
-              {unanswered} question{unanswered > 1 ? "s" : ""}
+            <span className="pill flex items-center gap-1 bg-brand/15 text-brand" title={`${unanswered} unanswered`}>
+              <CircleHelp className="size-3 md:hidden" />
+              {unanswered}
+              <span className="max-md:sr-only">question{unanswered > 1 ? "s" : ""}</span>
             </span>
           )}
           {/* The preview's rail shows its own count. */}
           {open > 0 && !(md && !source) && (
-            <span className="pill bg-warning/15 text-warning">
-              {open} open comment{open > 1 ? "s" : ""}
+            <span className="pill flex items-center gap-1 bg-warning/15 text-warning" title={`${open} open`}>
+              <MessageSquare className="size-3 md:hidden" />
+              {open}
+              <span className="max-md:sr-only">open comment{open > 1 ? "s" : ""}</span>
             </span>
           )}
           <RetryAll failed={annotations.filter((a) => a.state === "failed")} onChange={refresh} />
           {previewable && (
             <div className="flex rounded-md border border-border p-0.5">
-              <button className={clsx("seg", !source && "seg-on")} onClick={() => setSource(false)}>
-                <Eye className="size-3.5" /> Preview
+              <button className={clsx("seg", !source && "seg-on")} onClick={() => setSource(false)} title="Preview">
+                <Eye className="size-3.5" />
+                <span className="max-md:sr-only">Preview</span>
               </button>
-              <button className={clsx("seg", source && "seg-on")} onClick={() => setSource(true)}>
-                <Code2 className="size-3.5" /> Source
+              <button className={clsx("seg", source && "seg-on")} onClick={() => setSource(true)} title="Source">
+                <Code2 className="size-3.5" />
+                <span className="max-md:sr-only">Source</span>
               </button>
             </div>
           )}
-          <span aria-hidden className="mx-0.5 h-5 w-px bg-border" />
+          <span aria-hidden className="mx-0.5 h-5 w-px bg-border max-md:hidden" />
           <button
             className={clsx("icon-btn", live && "text-brand")}
             onClick={toggleLive}
@@ -222,10 +236,24 @@ export function App() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
+        {tree && narrow && path && (
+          <div aria-hidden className="absolute inset-0 z-30 bg-black/30" onClick={() => setDrawer(false)} />
+        )}
         {tree && (
-          <aside className="w-64 shrink-0 overflow-y-auto border-r border-border bg-sidebar p-2">
-            <Tree selected={path} onSelect={(p) => navigate(p)} />
+          <aside
+            className={clsx(
+              "shrink-0 overflow-y-auto border-r border-border bg-sidebar p-2",
+              narrow ? "absolute inset-y-0 left-0 z-40 w-[min(20rem,85vw)] shadow-xl" : "w-64",
+            )}
+          >
+            <Tree
+              selected={path}
+              onSelect={(p) => {
+                setDrawer(false);
+                navigate(p);
+              }}
+            />
           </aside>
         )}
         <main className="flex min-w-0 flex-1 flex-col">

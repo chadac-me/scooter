@@ -162,7 +162,7 @@ body {
     @apply inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-sans text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground;
   }
   .icon-btn {
-    @apply inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground;
+    @apply inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground pointer-coarse:size-9;
   }
   .pill {
     @apply rounded-full px-2 py-0.5 text-xs font-medium;

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { File, type LineAnnotation, type SelectedLineRange } from "@pierre/diffs/react";
 import { api, type Thread } from "./api";
 import { Composer, ThreadCard } from "./Thread";
+import { useNarrow } from "./media";
 
 type Meta = { kind: "thread"; thread: Thread } | { kind: "draft"; range: SelectedLineRange };
 
@@ -31,6 +32,8 @@ export function CodePane({
 }) {
   const [draft, setDraft] = useState<SelectedLineRange | null>(null);
   const lines = useMemo(() => body.split("\n"), [body]);
+  // A phone has no room to scroll code sideways.
+  const narrow = useNarrow();
 
   const annotations = useMemo(() => {
     const out: LineAnnotation<Meta>[] = threads
@@ -48,7 +51,7 @@ export function CodePane({
       options={{
         theme: { dark: "solarized-dark", light: "solarized-light" },
         themeType: dark ? "dark" : "light",
-        overflow: "scroll",
+        overflow: narrow ? "wrap" : "scroll",
         disableFileHeader: true,
         lineHoverHighlight: "both",
         enableLineSelection: true,
