@@ -163,6 +163,59 @@ jobs:
           node scripts/ci-report.mjs post --section images --status "$status" \
             --summary "$summary" --body images.md --labels "$LABELS"
 
+  # Runs the deploy's migrator against a scratch Postgres for both renders (see
+  # nix/check-db-migrations.nix), so a migration that cannot apply fails its PR
+  # instead of the deploy's migrate Job.
+  db-migrations:
+    name: db migrations (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [no-contribs, all-contribs]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: nixbuild/nix-quick-install-action@v30
+      - uses: cachix/cachix-action@v15
+        with:
+          name: scooter
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: nix build .#checks.x86_64-linux.db-migrate-${{ matrix.variant }}
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: nix build ".#checks.x86_64-linux.db-migrate-$VARIANT" --no-link --print-build-logs
+
+  # Reports both legs as the `migrations` gate; always() so a red leg still
+  # resolves the gate for `ci-summary`.
+  db-migrations-report:
+    name: report db migrations
+    needs: db-migrations
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: post migrations section
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          RESULT: ${{ needs.db-migrations.result }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" = "success" ]; then
+            status=pass; summary="db migrations — apply cleanly with and without contribs"
+            printf 'The migrator applied, re-applied and matched every schema.sql, with no contribs and with every database-owning contrib.\n' > migrations.md
+          else
+            status=fail; summary="db migrations — FAILED ($RESULT)"
+            printf 'A migration failed to apply against a fresh database; see the failing "db migrations (…)" job.\n' > migrations.md
+          fi
+          node scripts/ci-report.mjs post --section migrations --status "$status" \
+            --summary "$summary" --body migrations.md --labels "$LABELS"
+
   # Measures every shipped image on the PR, rebuilds the baseline from origin/main in
   # the same job (Cachix substitutes the unchanged images) and posts the diff as a
   # report-only section. PR-only, since it needs a PR to compare against.
@@ -1844,7 +1897,7 @@ jobs:
   # always() so a red producer still yields a verdict.
   ci-summary:
     name: ci summary (gates)
-    needs: [ci, image-build-report, image-sizes, bench, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
+    needs: [ci, image-build-report, db-migrations-report, image-sizes, bench, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:

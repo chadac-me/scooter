@@ -717,7 +717,12 @@
             # The shared Python libraries.
             inherit scooterLib scooterBrokerLib scooterWebhooksLib scooterTask scooterPrompt;
             scooter-prompt-tests = scooterPrompt.tests;
-          } // devEnvTests // contribSandboxChecks;
+          } // devEnvTests // contribSandboxChecks
+          # The deploy's migrator against a scratch Postgres, without and with contribs.
+          // import ./nix/check-db-migrations.nix {
+            inherit pkgs lib evalPlatform;
+            contribRegistry = contribsWithExamples;
+          };
         };
 
       flake = {
