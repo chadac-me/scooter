@@ -181,6 +181,21 @@ let
   blockingTools = import ../contrib/blocking-tools.nix { inherit lib; }
     (lib.filterAttrs (_: c: c.enable) config.contribs);
 
+  # Deployment hooks plus enabled contribs' (`<contrib>.<id>`), for AGENT_HOOKS_JSON.
+  agentHooks =
+    let
+      row = id: h: {
+        inherit id;
+        inherit (h) event matcher command failClosed userCanDisable description;
+        timeoutSec = h.timeout;
+      };
+      enabledRows = prefix: hooks:
+        lib.mapAttrsToList (id: row "${prefix}${id}") (lib.filterAttrs (_: h: h.enable) hooks);
+    in
+    enabledRows "" cfg.agent.hooks
+    ++ lib.concatLists (lib.mapAttrsToList (name: c: enabledRows "${name}." c.agent.hooks)
+      (lib.filterAttrs (_: c: c.enable) config.contribs));
+
   # The UI's contrib manifest from THIS deployment's enabled contribs, mounted over
   # the image's built-in one (pkgs/ui-image/nginx.nix). The image is built with its
   # repo's contrib list, so without this a contrib the deployment left off would still
@@ -642,6 +657,38 @@ in
     };
 
     agent = {
+      hooks = mkOption {
+        type = types.attrsOf (types.submodule (import ../contrib/hook-module.nix { inherit lib; }));
+        default = { };
+        example = literalExpression ''
+          {
+            no-force-push = {
+              event = "PreToolUse";
+              matcher = "Bash|Shell";
+              command = '''
+                jq -e '.tool_input.command | test("push.*--force")' >/dev/null || exit 0
+                echo "Force-pushing is not allowed here." >&2; exit 2
+              ''';
+            };
+          }
+        '';
+        description = ''
+          Conversation hooks, keyed by id: bash scripts run in each conversation's sandbox
+          at fixed points in a turn, speaking Claude Code's hook protocol. A contrib adds its
+          own under `contribs.<name>.agent.hooks` (ids `<name>.<id>`). `finish-or-ask` ships
+          on by default; set `finish-or-ask.enable = false` to drop it.
+        '';
+      };
+
+      maxStopBlocks = mkOption {
+        type = types.ints.positive;
+        default = 3;
+        description = ''
+          How many times Stop hooks may send the agent back to work in one turn before it
+          is allowed to stop anyway, so a hook and an agent that disagree cannot loop.
+        '';
+      };
+
       provider = mkOption {
         type = types.str;
         default = "aws_bedrock";
@@ -1230,6 +1277,14 @@ in
     # No package: the unfree claude CLI would force allowUnfree.
     scooter.images.remote-agent = { };
 
+    # On by default; users opt out in settings.
+    scooter.agent.hooks.finish-or-ask = {
+      event = "Stop";
+      command = builtins.readFile ./hooks/finish-or-ask.sh;
+      userCanDisable = lib.mkDefault true;
+      description = lib.mkDefault "Sends the agent back once when it stops with unpushed work or ends on a plain-text question.";
+    };
+
     # The agent_host database, which the provisioning Job creates with an owning
     # `agent_host` role whose password lands in `agent-pg-agent-host`.
     scooter.postgres.consumers.agent-host = { db = "agent_host"; user = "agent_host"; };
@@ -1270,6 +1325,12 @@ in
             next to the deployment-wide `agent-skills` ConfigMap. agent-host both serves the CRUD
             and reads them at conversation start, so it is the only writer and there are no
             readers: a skill body is user prose about their own repos, not shared config.'';
+        };
+        user_hook_settings = {
+          writers = [ "agent-host" ];
+          note = ''
+            Per-user opt-outs from deployment hooks marked `userCanDisable`, set in the settings
+            page and read when a conversation's bridge is built.'';
         };
       };
     };
@@ -1600,6 +1661,10 @@ in
                   # The contribs that raise human approvals, name -> where its verbs live
                   # on the broker, so the agent-host can relay a user's Approve/Deny.
                   { name = "APPROVAL_CONTRIBS_JSON"; value = approvalContribsJson; }
+                ++ lib.optional (agentHooks != [ ])
+                  # Conversation hooks the agent-host runs in each sandbox.
+                  { name = "AGENT_HOOKS_JSON"; value = builtins.toJSON agentHooks; }
+                ++ [ { name = "AGENT_HOOKS_MAX_STOP_BLOCKS"; value = toString cfg.agent.maxStopBlocks; } ]
                 ++ lib.optional (blockingTools != { })
                   # Agent tools that block on the user's answer, tool -> { kind, title, dismissed }.
                   { name = "BLOCKING_TOOLS_JSON"; value = builtins.toJSON blockingTools; }

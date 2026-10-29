@@ -57,6 +57,16 @@ export const userSkills = pgTable("user_skills", {
 	uniqueIndex("user_skills_owner_name").using("btree", table.owner.asc().nullsLast().op("text_ops"), table.name.asc().nullsLast().op("text_ops")),
 ]);
 
+export const userHookSettings = pgTable("user_hook_settings", {
+	owner: text().notNull(),
+	hookId: text("hook_id").notNull(),
+	enabled: boolean().notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+}, (table) => [
+	primaryKey({ columns: [table.owner, table.hookId], name: "user_hook_settings_pkey"}),
+]);
+
 export const conversationJobs = pgTable("conversation_jobs", {
 	conversationId: text("conversation_id").notNull(),
 	jobId: text("job_id").notNull(),

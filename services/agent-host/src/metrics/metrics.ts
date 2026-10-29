@@ -44,6 +44,9 @@ export interface MetricsSink {
   /** A durable conversation-log append failed, losing a turn. */
   persistenceError?(attrs: { conversationId: string }): void;
 
+  /** A conversation hook ran. */
+  hookRun?(attrs: { event: string; hook: string; decision: string }): void;
+
   /** Flush + shut down the exporter (called on graceful shutdown). */
   shutdown(): Promise<void>;
 }
@@ -99,6 +102,9 @@ export function createMetrics(config: MetricsConfig): MetricsSink {
   });
   const persistenceErrors: Counter = meter.createCounter("agent_persistence_errors_total", {
     description: "Durable conversation-log append failures (a turn was lost).",
+  });
+  const hookRuns: Counter = meter.createCounter("scooter_hook_runs_total", {
+    description: "Conversation hook runs, by event, hook and decision.",
   });
 
   // Sandbox population is set from outside and read by the gauge at collection time.
@@ -193,6 +199,10 @@ export function createMetrics(config: MetricsConfig): MetricsSink {
       persistenceErrors.add(1, { conversationId: attrs.conversationId });
     },
 
+    hookRun(attrs) {
+      hookRuns.add(1, attrs);
+    },
+
     async shutdown() {
       try {
         await provider.shutdown(); // flushes the exporter
@@ -212,6 +222,7 @@ export function noopMetrics(): MetricsSink {
     setSandboxCounts() {},
     brokerRequest() {},
     persistenceError() {},
+    hookRun() {},
     async shutdown() {},
   };
 }

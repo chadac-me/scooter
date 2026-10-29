@@ -58,6 +58,8 @@ export interface ExecRequest {
   args: string[];
   cwd?: string;
   env?: Record<string, string>;
+  /** Fed on stdin, so large input avoids the argv limit. */
+  stdin?: string;
 }
 
 export interface ExecResult {

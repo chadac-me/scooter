@@ -191,3 +191,13 @@ CREATE INDEX "user_skills_by_owner" ON "user_skills" ("owner");
 
 -- A name is the agent-visible filename, so one owner cannot have two.
 CREATE UNIQUE INDEX "user_skills_owner_name" ON "user_skills" ("owner", "name");
+
+-- A user's choice for a deployment hook that allows opting out (`userCanDisable`). No row
+-- means the hook's default, which is on; the bridge reads one owner's rows per conversation.
+CREATE TABLE "user_hook_settings" (
+  "owner"      text NOT NULL,
+  "hook_id"    text NOT NULL,
+  "enabled"    boolean NOT NULL,
+  "updated_at" bigint NOT NULL,
+  PRIMARY KEY ("owner", "hook_id")
+);

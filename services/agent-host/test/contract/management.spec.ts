@@ -10,6 +10,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { createManagementApi, raiseApprovalInterrupt, fetchPendingApprovals, fetchConversationShares } from "../../src/api/management.js";
 import { UserSkillError, type UserSkillStore } from "../../src/session/userSkillStore.js";
+import { createMemoryUserHookSettingsStore, type UserHookSettingsStore } from "../../src/hooks/userHookSettingsStore.js";
+import type { HookDef } from "../../src/hooks/types.js";
 import { parseContribUserApi } from "../../src/api/contribApi.js";
 import { shortId } from "../../src/session/manager.js";
 import type { Conversation, SessionManager, ConversationStore, ConversationLink } from "../../src/session/manager.js";
@@ -1536,5 +1538,58 @@ describe("shares list resilience", () => {
     const store = { ...fakeStore([]), listLinks: async () => { throw new DbUnavailableError("listLinks", new Error("down")); } };
     const api = createManagementApi({ sessions: fakeSessions(), store, server: stubServer, answerPermission: async () => {} });
     await expect(call(api, "GET", "/conversations/c1/links")).rejects.toBeInstanceOf(DbUnavailableError);
+  });
+});
+
+// Users may opt out of userCanDisable hooks, for themselves only.
+describe("hook settings", () => {
+  const hook = (id: string, userCanDisable: boolean): HookDef => ({
+    id,
+    event: "Stop",
+    matcher: "",
+    command: "true",
+    timeoutSec: 30,
+    failClosed: false,
+    userCanDisable,
+    description: `${id} hook`,
+  });
+  const hooks = [hook("finish-or-ask", true), hook("policy", false)];
+  const mk = (userHookSettings?: UserHookSettingsStore) =>
+    createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {}, hooks, userHookSettings });
+  const alice = { "x-auth-user": "alice" };
+
+  it("lists every hook, on by default, and whether the caller may change it", async () => {
+    const res = await call(mk(createMemoryUserHookSettingsStore()), "GET", "/user-hooks", undefined, alice);
+    expect(res.json).toEqual({
+      configurable: true,
+      hooks: [
+        { id: "finish-or-ask", event: "Stop", description: "finish-or-ask hook", userCanDisable: true, enabled: true },
+        { id: "policy", event: "Stop", description: "policy hook", userCanDisable: false, enabled: true },
+      ],
+    });
+  });
+
+  it("records an opt-out for the caller only", async () => {
+    const store = createMemoryUserHookSettingsStore();
+    const api = mk(store);
+    const res = await call(api, "PATCH", "/user-hooks/finish-or-ask", { enabled: false }, alice);
+    expect(res.status).toBe(200);
+    const mine = (await call(api, "GET", "/user-hooks", undefined, alice)).json as { hooks: Array<{ id: string; enabled: boolean }> };
+    expect(mine.hooks.find((h) => h.id === "finish-or-ask")?.enabled).toBe(false);
+    const bobs = (await call(api, "GET", "/user-hooks", undefined, { "x-auth-user": "bob" })).json as { hooks: Array<{ id: string; enabled: boolean }> };
+    expect(bobs.hooks.find((h) => h.id === "finish-or-ask")?.enabled).toBe(true);
+  });
+
+  it("refuses to turn off a required hook, an unknown one, or a non-boolean", async () => {
+    const api = mk(createMemoryUserHookSettingsStore());
+    expect((await call(api, "PATCH", "/user-hooks/policy", { enabled: false }, alice)).status).toBe(403);
+    expect((await call(api, "PATCH", "/user-hooks/nope", { enabled: false }, alice)).status).toBe(404);
+    expect((await call(api, "PATCH", "/user-hooks/finish-or-ask", { enabled: "no" }, alice)).status).toBe(400);
+  });
+
+  it("is read-only without a database", async () => {
+    const api = mk(undefined);
+    expect(((await call(api, "GET", "/user-hooks", undefined, alice)).json as { configurable: boolean }).configurable).toBe(false);
+    expect((await call(api, "PATCH", "/user-hooks/finish-or-ask", { enabled: false }, alice)).status).toBe(501);
   });
 });

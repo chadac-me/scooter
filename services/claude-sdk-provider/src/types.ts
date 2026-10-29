@@ -97,3 +97,21 @@ export interface ExecBackend {
   readTextFile(path: string): Promise<string>;
   writeTextFile(path: string, content: string): Promise<void>;
 }
+
+// --- tool hooks (the agent-host's, fired from the SDK's own) ---
+
+/** A PreToolUse answer: `deny` refuses the call, `updatedInput` rewrites it. */
+export interface PreToolHookResult {
+  deny?: string;
+  updatedInput?: Record<string, unknown>;
+  context?: string;
+}
+/** Both fields reach the model with the tool result. */
+export interface PostToolHookResult {
+  block?: string;
+  context?: string;
+}
+export interface ToolHooks {
+  pre(toolName: string, toolInput: unknown, toolUseId: string | undefined): Promise<PreToolHookResult>;
+  post(toolName: string, toolInput: unknown, toolResponse: unknown, toolUseId: string | undefined): Promise<PostToolHookResult>;
+}

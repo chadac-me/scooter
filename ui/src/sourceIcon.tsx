@@ -15,7 +15,7 @@ import { FaSlack, FaTerminal } from "react-icons/fa";
 // The Scooter mark for the "show the conversation title" option.
 import { MdElectricScooter } from "react-icons/md";
 // Platform event sources have no brand, so they take a neutral glyph.
-import { AlarmClockIcon, BotIcon, CogIcon, KeyRoundIcon } from "lucide-react";
+import { AlarmClockIcon, BotIcon, CogIcon, KeyRoundIcon, ShieldCheckIcon } from "lucide-react";
 import type { ContribIcon } from "./contribTypes.js";
 import { contribSources } from "./contribManifest.js";
 
@@ -47,6 +47,7 @@ const BUILTIN_SOURCES: Record<string, SourceRow> = {
   "background job": { label: "Background job", mark: CogIcon, color: "currentColor" },
   broker: { label: "Broker", mark: KeyRoundIcon, color: "currentColor" },
   subagent: { label: "Subagent", mark: BotIcon, color: "currentColor" },
+  hook: { label: "Hook", mark: ShieldCheckIcon, color: "currentColor" },
 };
 
 /** Built-ins plus the deployment's contribs merged on top, resolved per call because

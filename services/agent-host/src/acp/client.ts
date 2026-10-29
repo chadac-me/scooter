@@ -152,6 +152,8 @@ export interface AcpClientDeps {
   exec: ExecBackend;
   /** Back-pressure: when set, goose runs with GOOSE_MODE=approve and each per-tool permission request is auto-answered, allowed normally but rejected when this returns true so goose ends the turn and the queued item injects. */
   shouldYield?: () => boolean;
+  /** PreToolUse hooks at the tool gate; a returned reason rejects. */
+  gateTool?: (call: { toolCallId: string; title: string; rawInput: unknown }) => Promise<string | undefined>;
   /** Transcript recorder for the test harness, called with each normalized ACP session/update goose sends. */
   recordRaw?: (update: SessionUpdate) => void;
 }
@@ -178,6 +180,21 @@ export function autoAnswerPermission(
   }
   const allow = pick(["allow_once", "allow_always"]) ?? options[0].optionId;
   return { outcome: { outcome: "selected", optionId: allow } };
+}
+
+/** Answer goose's tool gate from hooks and back-pressure, else undefined. */
+export async function answerToolGate(
+  params: { options: ReadonlyArray<{ optionId: string; kind: string }>; toolCall: { toolCallId: string; title?: string | null; rawInput?: unknown } },
+  deps: Pick<AcpClientDeps, "gateTool" | "shouldYield">,
+): Promise<schema.RequestPermissionResponse | undefined> {
+  if (!isToolGate(params.options)) return undefined;
+  if (deps.gateTool) {
+    const deny = await deps
+      .gateTool({ toolCallId: params.toolCall.toolCallId, title: params.toolCall.title ?? "", rawInput: params.toolCall.rawInput })
+      .catch(() => undefined);
+    return autoAnswerPermission(params.options, deny !== undefined || (deps.shouldYield?.() ?? false));
+  }
+  return deps.shouldYield ? autoAnswerPermission(params.options, deps.shouldYield()) : undefined;
 }
 
 /** Handle a session/update the SDK could not parse: `usage_update` is salvaged as `context_usage`, and every other variant is logged once per variant by the returned stateful handler. */
@@ -268,12 +285,9 @@ export async function createAcpClient(deps: AcpClientDeps): Promise<AcpClient> {
     async requestPermission(
       params: schema.RequestPermissionRequest,
     ): Promise<schema.RequestPermissionResponse> {
-      // Back-pressure: with shouldYield wired, goose's per-tool gates are auto-answered
-      // here, and a non-tool-gate (an agent-presented choice) falls through to the UI handler.
-      if (deps.shouldYield) {
-        const auto = autoAnswerPermission(params.options, deps.shouldYield());
-        if (auto) return auto;
-      }
+      // An agent-presented choice falls through to the UI handler.
+      const auto = await answerToolGate(params, deps);
+      if (auto) return auto;
       if (!permissionHandler) {
         // No handler is a host wiring bug, not a user cancel; still answer cancelled so
         // the run does not hang, but log loudly.
