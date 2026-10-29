@@ -4,9 +4,13 @@
  * fence is emitted from the command's output; the command text must stay backtick-free
  * because the fake agent echoes it inside an inline-code span, so the backticks come from
  * octal (\140) via a command substitution. Only assistant messages run MarkdownText,
- * which turns the fence into the iframe. The full publish -> embed -> serve loop needs the
+ * which turns the fence into the iframe through the shares contrib, whose manifest rows a
+ * route serves, since the fast stack's vite dev server has no /contrib/manifest.json.
+ * The full publish -> embed -> serve loop needs the
  * broker's `shares` subsystem enabled in-cluster (see the fullOnly block).
  */
+
+import type { Page } from "@playwright/test";
 
 import { test, expect } from "./fixtures.js";
 import { fullOnly } from "./target.js";
@@ -23,15 +27,28 @@ function embedCmd(share: string, ...extra: string[]): string {
   return `!printf '%s\\n' ${args.join(" ")}`;
 }
 
+const SHARES = {
+  panels: { shares: { contrib: "shares", label: "Shares", order: 100, entry: "shares/ui/Panel.tsx" } },
+  markdownFences: { "scooter-embed": { contrib: "shares", entry: "shares/ui/Embed.tsx" } },
+};
+
+/** Serve a manifest whose shares rows are `rows`, or none. */
+async function serveManifest(page: Page, rows: { panels?: unknown; markdownFences?: unknown } = SHARES) {
+  await page.route("**/contrib/manifest.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(rows) }),
+  );
+}
+
 test.describe("share embed markdown block", () => {
   test.setTimeout(120_000);
+  test.beforeEach(({ page }) => serveManifest(page));
 
   test("an assistant scooter-embed block renders a sandboxed iframe", async ({ chat, page }) => {
     await chat.open();
     // sendTurn waits until this turn's assistant reply has landed.
     await chat.sendTurn(embedCmd(UUID, "width: 400", "center: true"), 90_000);
 
-    // The fence is replaced by <ShareEmbed>, so assert the iframe, not the raw text.
+    // The fence is replaced by the shares contrib's Embed, so assert the iframe, not the raw text.
     const frame = page.locator('[data-testid="share-embed"] iframe');
     await expect(frame).toBeVisible({ timeout: 30_000 });
 
@@ -51,6 +68,25 @@ test.describe("share embed markdown block", () => {
       timeout: 30_000,
     });
     await expect(page.locator('[data-testid="share-embed"] iframe')).toHaveCount(0);
+  });
+
+  test("the Shares tab renders the contrib panel's empty state", async ({ chat, page }) => {
+    await chat.open();
+    await page.getByTestId("right-panel-tab-shares").click();
+    await expect(page.getByTestId("shares-empty")).toBeVisible({ timeout: 30_000 });
+  });
+});
+
+test.describe("share embed without the shares contrib", () => {
+  test.setTimeout(120_000);
+  test.beforeEach(({ page }) => serveManifest(page, {}));
+
+  test("the fence renders as code and there is no Shares tab", async ({ chat, page }) => {
+    await chat.open();
+    await chat.sendTurn(embedCmd(UUID), 90_000);
+    await expect(chat.assistantMessages().last()).toContainText(`share: ${UUID}`);
+    await expect(page.locator('[data-testid="share-embed"]')).toHaveCount(0);
+    await expect(page.getByTestId("right-panel-tab-shares")).toHaveCount(0);
   });
 });
 

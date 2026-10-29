@@ -1202,6 +1202,27 @@ let
     else (if off.settingsTabs ? echo then [ "the UI manifest has the echo settings tab while echo is disabled" ] else [ ])
       ++ (if on.settingsTabs ? echo then [ ] else [ "enabling echo did not put its settings tab in the UI's mounted manifest" ]);
 
+  # shares' Shares tab and scooter-embed fence reach the mounted manifest and the relay
+  # only while it is enabled, and a clashing fence or a missing entry fails the eval.
+  sharesOff = { contribs.shares.enable = nixpkgsLib.mkForce false; };
+  convUiThrow = extra: !(builtins.tryEval (builtins.deepSeq (uiManifestOf extra) true)).success;
+  conversationUiProblems =
+    let on = uiManifestOf { }; off = uiManifestOf sharesOff; in
+    (if (on.panels.shares.entry or null) == "shares/ui/Panel.tsx" then [ ]
+     else [ "the UI manifest has no shares panel at shares/ui/Panel.tsx while shares is enabled" ])
+    ++ (if (on.markdownFences."scooter-embed".entry or null) == "shares/ui/Embed.tsx" then [ ]
+        else [ "the UI manifest has no scooter-embed fence at shares/ui/Embed.tsx while shares is enabled" ])
+    ++ (if (off.panels or { }) ? shares || (off.markdownFences or { }) ? "scooter-embed"
+        then [ "the UI manifest has shares' panel or fence while shares is disabled" ] else [ ])
+    ++ (if ((userApiOf hostEnv).shares.brokerPrefix or null) == "/shares" then [ ]
+        else [ "shares' panel sets api = true but host.env.CONTRIB_USER_API_JSON has no /shares row" ])
+    ++ (if userApiOf (hostEnvOf sharesOff) ? shares
+        then [ "host.env.CONTRIB_USER_API_JSON has a shares row while shares is disabled" ] else [ ])
+    ++ (if convUiThrow { contribs.echo.enable = nixpkgsLib.mkForce true; contribs.echo.ui.markdownFences."scooter-embed".entry = "ui/SettingsTab.tsx"; } then [ ]
+        else [ "two contribs claiming one fence language rendered" ])
+    ++ (if convUiThrow { contribs.shares.ui.panel.entry = nixpkgsLib.mkForce "ui/Missing.tsx"; } then [ ]
+        else [ "a panel whose entry does not exist rendered" ]);
+
   # scooter.uploads: the body-limit formula, and that every layer gets it. The example
   # sets 50MB x 4 on an nginx-class Ingress.
   uploadBody = import ../modules/upload-max-body.nix;
@@ -1256,7 +1277,7 @@ let
     ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
         else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
 
-  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named; a scooter.packages override reaches exactly the images that use it\n"

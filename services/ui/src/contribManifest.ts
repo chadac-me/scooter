@@ -1,6 +1,6 @@
 /**
  * The deployment's contrib UI metadata (brand rows, tool cards, filter chips,
- * settings tabs, Approvals-tab cards), fetched at runtime from `/contrib/manifest.json`,
+ * settings tabs, Approvals-tab cards, right-panel tabs, fenced-block renderers), fetched at runtime from `/contrib/manifest.json`,
  * which the UI's nginx serves from the contrib set that deployment enabled. Loading
  * never throws: a 404, a network error, a timeout or a malformed body all mean "no
  * contribs", and the app renders its built-ins. Rows are validated one at a time, so
@@ -12,6 +12,8 @@ import type {
   ContribIcon,
   ContribInterruptRenderer,
   ContribManifest,
+  ContribMarkdownFence,
+  ContribPanel,
   ContribSettingsTab,
   ContribSource,
   ContribToolCard,
@@ -32,6 +34,8 @@ const EMPTY: ContribManifest = {
   approvals: {},
   settingsTabs: {},
   interruptRenderers: {},
+  panels: {},
+  markdownFences: {},
 };
 
 let manifest: ContribManifest = EMPTY;
@@ -89,6 +93,24 @@ function asInterruptRenderer(kind: string, v: unknown): ContribInterruptRenderer
   return { contrib: r.contrib, entry: r.entry };
 }
 
+/** A panel row, keyed by its own contrib, so a bad row cannot load another contrib's module. */
+function asPanel(contrib: string, v: unknown): ContribPanel | undefined {
+  const r = asRecord(v);
+  if (r.contrib !== contrib || !isStr(r.label) || !isStr(r.entry)) return undefined;
+  if (typeof r.order !== "number" || !Number.isFinite(r.order)) return undefined;
+  if (!r.entry.startsWith(`${contrib}/ui/`)) return undefined;
+  return { contrib, label: r.label, order: r.order, entry: r.entry };
+}
+
+/** A fenced-block renderer row; the language is a slug and the entry sits in its contrib's ui/. */
+const FENCE_LANG = /^[a-z][a-z0-9-]*$/;
+function asMarkdownFence(lang: string, v: unknown): ContribMarkdownFence | undefined {
+  const r = asRecord(v);
+  if (!FENCE_LANG.test(lang) || !isStr(r.contrib) || !isStr(r.entry)) return undefined;
+  if (!r.entry.startsWith(`${r.contrib}/ui/`)) return undefined;
+  return { contrib: r.contrib, entry: r.entry };
+}
+
 /** Keep the rows that validate, drop the ones that don't. */
 function rows<T>(v: unknown, as: (x: unknown, key: string) => T | undefined): Record<string, T> {
   const out: Record<string, T> = {};
@@ -110,6 +132,8 @@ function parse(doc: unknown): ContribManifest {
     approvals: rows(d.approvals, asApproval),
     settingsTabs: rows(d.settingsTabs, (v, id) => asSettingsTab(id, v)),
     interruptRenderers: rows(d.interruptRenderers, (v, kind) => asInterruptRenderer(kind, v)),
+    panels: rows(d.panels, (v, contrib) => asPanel(contrib, v)),
+    markdownFences: rows(d.markdownFences, (v, lang) => asMarkdownFence(lang, v)),
     // A link provider whose source row failed validation would be a chip with no
     // icon, so it is dropped too.
     linkProviders: (Array.isArray(d.linkProviders) ? d.linkProviders : []).filter(
@@ -169,4 +193,14 @@ export function contribSettingsTabs(): Record<string, ContribSettingsTab> {
 /** Contrib Approvals-tab cards, keyed by request kind (InterruptPanel.tsx). */
 export function contribInterruptRenderers(): Record<string, ContribInterruptRenderer> {
   return manifest.interruptRenderers;
+}
+
+/** Contrib right-panel tabs, by contrib name. */
+export function contribPanels(): Record<string, ContribPanel> {
+  return manifest.panels;
+}
+
+/** Contrib fenced-block renderers, by fence language. */
+export function contribMarkdownFences(): Record<string, ContribMarkdownFence> {
+  return manifest.markdownFences;
 }

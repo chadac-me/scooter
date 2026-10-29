@@ -15,25 +15,29 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
-import { ShareEmbed, SHARE_EMBED_TOKEN, preprocessShareEmbeds } from "@/src/ShareEmbed";
+import { contribMarkdownFences } from "@/src/contribManifest";
+import { fenceComponents, preprocessFences } from "@/src/contribPanels";
 
-// A fenced scooter-embed block renders as a sandboxed iframe of a static share (see ShareEmbed) via `componentsByLanguage`, keyed on the hyphen-free SHARE_EMBED_TOKEN that preprocessShareEmbeds rewrites the fence to because assistant-ui's /language-(\w+)/ stops at a hyphen.
-// The code body becomes the ShareEmbed spec, with no code-chrome header.
-const shareEmbedComponentsByLanguage = {
-  [SHARE_EMBED_TOKEN]: {
-    SyntaxHighlighter: ({ code }: { code: string }) => <ShareEmbed body={code} />,
-    CodeHeader: () => null,
-  },
+// Fenced blocks whose language an enabled contrib claims (`ui.markdownFences`) render
+// through that contrib. The manifest is loaded before first paint and fixed after.
+let fences: { preprocess: (t: string) => string; components: ReturnType<typeof fenceComponents> } | undefined;
+const contribFences = () => {
+  if (!fences) {
+    const claimed = contribMarkdownFences();
+    const langs = Object.keys(claimed);
+    fences = { preprocess: (t) => preprocessFences(t, langs), components: fenceComponents(claimed) };
+  }
+  return fences;
 };
 
 const MarkdownTextImpl = () => {
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm, remarkDropHtmlComments]}
-      preprocess={preprocessShareEmbeds}
+      preprocess={contribFences().preprocess}
       className="aui-md text-[15px] desk:text-base"
       components={defaultComponents}
-      componentsByLanguage={shareEmbedComponentsByLanguage}
+      componentsByLanguage={contribFences().components}
       defer
     />
   );

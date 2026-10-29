@@ -212,11 +212,12 @@ let
       backend.service = { name = "agent-broker"; port.number = 8080; };
     }) uiContribData.brokerPublicPaths);
 
-  # The contribs whose settings tab opened the /contrib-api relay (`api = true`), and
-  # where the agent-host reaches their broker routes. Read off the declarations, so a
+  # The contribs whose settings tab or panel opened the /contrib-api relay (`api = true`),
+  # and where the agent-host reaches their broker routes. Read off the declarations, so a
   # disabled contrib contributes no row and its relay answers 404.
   contribUserApi = lib.mapAttrs (name: _: { brokerPrefix = "/${name}"; })
-    (lib.filterAttrs (_: c: c.enable && c.ui.enable && lib.any (t: t.api) c.ui.settingsTabs) config.contribs);
+    (lib.filterAttrs (_: c: c.enable && c.ui.enable
+      && (lib.any (t: t.api) c.ui.settingsTabs || (c.ui.panel != null && c.ui.panel.api))) config.contribs);
   # Skill DIRECTORIES ship SKILL.md to the agent as `<name>.md`, with a note naming
   # the sandbox copy (modules/skills/sandbox.nix) after the frontmatter,
   # since a skill resolves its scripts/ against "the directory it was loaded from"

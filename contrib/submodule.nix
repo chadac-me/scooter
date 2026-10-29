@@ -128,6 +128,56 @@ let
     };
   };
 
+  # A tab in the conversation's right-hand panel.
+  panelModule = {
+    options = {
+      label = mkOption {
+        type = types.str;
+        example = "Shares";
+        description = "The tab's label.";
+      };
+      order = mkOption {
+        type = types.int;
+        default = 100;
+        description = "Sort key after the built-in tabs (Sandbox, Approvals, Subagents); ties sort by contrib name.";
+      };
+      entry = mkOption {
+        type = types.str;
+        example = "ui/Panel.tsx";
+        description = ''
+          The tab's module, relative to this contrib's directory and inside its `ui/`.
+          Its default export is a React component taking `PanelProps` from
+          @/src/contrib/sdk. It stays mounted while the tab is hidden, so its badge
+          count stays current. Same import rules as a settings tab's `entry`.
+        '';
+      };
+      api = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Open `/conversations/<id>/contrib-api/<name>/<rest>` for this panel: the
+          agent-host checks the user may see the conversation, then relays to this
+          contrib's broker routes at `/<name>/conversation/<shortId>/<rest>`, naming the
+          user. A broker route guards itself with `scooter_broker_lib.user.user_identity`.
+          Needs `services.broker.enable`. The panel calls it with `conversationFetch`.
+        '';
+      };
+    };
+  };
+
+  # Renders one fenced code block language in assistant messages.
+  markdownFenceModule = {
+    options.entry = mkOption {
+      type = types.str;
+      example = "ui/Embed.tsx";
+      description = ''
+        The renderer's module, relative to this contrib's directory and inside its `ui/`.
+        Its default export is a React component taking `MarkdownFenceProps` from
+        @/src/contrib/sdk. Same import rules as a settings tab's `entry`.
+      '';
+    };
+  };
+
   # The card that draws one kind of request in the Approvals tab.
   interruptRendererModule = {
     options.entry = mkOption {
@@ -170,9 +220,8 @@ let
       enable = mkOption {
         type = types.bool;
         description = ''
-          Contribute UI metadata. Defaults to true once `source`, `tools` or `settingsTabs` is
-          set, so a declared row cannot silently render nothing; set it false to
-          build the contrib with its UI half dropped.
+          Contribute UI metadata. Defaults to true once any row below is set, so a declared row cannot
+          silently render nothing; set it false to build the contrib with its UI half dropped.
         '';
       };
 
@@ -227,10 +276,34 @@ let
           contrib/interrupt-renderers.nix.
         '';
       };
+
+      panel = mkOption {
+        type = types.nullOr (types.submodule panelModule);
+        default = null;
+        example = literalExpression ''
+          { label = "Shares"; entry = "ui/Panel.tsx"; api = true; }
+        '';
+        description = "This contrib's tab in the conversation's right-hand panel. Checked by contrib/conversation-ui.nix.";
+      };
+
+      markdownFences = mkOption {
+        type = types.attrsOf (types.submodule markdownFenceModule);
+        default = { };
+        example = literalExpression ''
+          { "scooter-embed" = { entry = "ui/Embed.tsx"; }; }
+        '';
+        description = ''
+          Fenced code blocks this contrib renders in assistant messages, keyed by the
+          fence's language. A block whose language no enabled contrib claims renders as
+          code. Two contribs may not claim one language. Checked by
+          contrib/conversation-ui.nix.
+        '';
+      };
     };
 
     config.enable = lib.mkDefault
-      (config.source != null || config.tools != { } || config.settingsTabs != [ ] || config.interruptRenderers != { });
+      (config.source != null || config.tools != { } || config.settingsTabs != [ ] || config.interruptRenderers != { }
+        || config.panel != null || config.markdownFences != { });
   };
 
   # One recurring task this contrib ships, built by mkScooterTask (contrib/tasks.nix)

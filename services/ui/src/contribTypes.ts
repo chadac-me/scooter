@@ -69,6 +69,26 @@ export interface ContribInterruptRenderer {
   entry: string;
 }
 
+/** A contrib's tab in the conversation's right-hand panel, keyed by contrib name. */
+export interface ContribPanel {
+  /** The contrib that declared it. */
+  contrib: string;
+  /** Tab label. */
+  label: string;
+  /** Sort key among contrib panels. */
+  order: number;
+  /** `<contrib>/ui/<file>.tsx`, the key into the lazy module table (contribTabs.tsx). */
+  entry: string;
+}
+
+/** A contrib's renderer for one fenced code block language, keyed by that language. */
+export interface ContribMarkdownFence {
+  /** The contrib that declared it. */
+  contrib: string;
+  /** `<contrib>/ui/<file>.tsx`, the key into the lazy module table (contribTabs.tsx). */
+  entry: string;
+}
+
 /** The whole `/contrib/manifest.json` document, normalized: the loader fills every
  *  absent key with an empty value, so consumers never branch on undefined. */
 export interface ContribManifest {
@@ -86,4 +106,8 @@ export interface ContribManifest {
   settingsTabs: Record<string, ContribSettingsTab>;
   /** Contrib interrupt renderers, keyed by request kind. */
   interruptRenderers: Record<string, ContribInterruptRenderer>;
+  /** Contrib right-panel tabs, keyed by contrib name. */
+  panels: Record<string, ContribPanel>;
+  /** Contrib fenced-block renderers, keyed by fence language. */
+  markdownFences: Record<string, ContribMarkdownFence>;
 }

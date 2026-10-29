@@ -1,12 +1,13 @@
 /**
- * The supported surface for contrib UI code (contrib/<name>/ui/*.tsx: settings tabs
- * and interrupt renderers). Such a module may import only from here, @/components/*,
- * @/lib/* and services/ui/package.json deps; the ESLint rule in services/ui/eslint.config.js enforces it.
+ * The supported surface for contrib UI code (contrib/<name>/ui/*.tsx: settings tabs,
+ * interrupt renderers, right-panel tabs and fenced-block renderers). Such a module may
+ * import only from here, @/components/*, @/lib/* and services/ui/package.json deps; the
+ * ESLint rule in services/ui/eslint.config.js enforces it.
  * Anything a module needs from the app belongs here, so
  * the app's internals can change without breaking contribs.
  */
 
-import { useCurrentUser } from "../sessions.js";
+import { currentConversation, useCurrentUser, useSessions } from "../sessions.js";
 
 export { Button } from "@/components/ui/button";
 export { Spinner } from "@/components/ui/spinner";
@@ -57,6 +58,42 @@ export function contribFetch(
     body: json !== undefined ? JSON.stringify(json) : rest.body,
     credentials: "same-origin",
   });
+}
+
+/**
+ * Call this contrib's broker routes for the open conversation, as the signed-in user.
+ * Needs `api = true` on the contrib's `ui.panel`. `conversationFetch("shares", "list")`
+ * reaches the broker's `/shares/conversation/<id>/list` once the agent-host has checked
+ * the user may see the conversation. Resolves null before the conversation exists on
+ * the server, so a panel shows its empty state without a request.
+ */
+export function conversationFetch(
+  contrib: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response | null> {
+  const url = currentConversation()?.url(
+    `/contrib-api/${encodeURIComponent(contrib)}/${path.replace(/^\/+/, "")}`,
+  );
+  if (!url) return Promise.resolve(null);
+  return fetch(url, { ...init, credentials: "same-origin" });
+}
+
+/** Changes when the user opens another conversation, for a panel's effect deps. */
+export function useConversationKey(): string {
+  return useSessions().currentId;
+}
+
+/** What a contrib's right-panel tab (its `ui.panel` entry) receives. */
+export interface PanelProps {
+  /** Set the tab's badge; 0 or null hides it. */
+  setCount(count: number | null): void;
+}
+
+/** What a contrib's fenced-block renderer (a `ui.markdownFences` entry) receives. */
+export interface MarkdownFenceProps {
+  /** The text inside the fence. */
+  body: string;
 }
 
 export { useRequestDraft } from "../approvalFocus.js";

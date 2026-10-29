@@ -20,6 +20,8 @@ import {
   contribLinkProviders,
   contribSettingsTabs,
   contribInterruptRenderers,
+  contribPanels,
+  contribMarkdownFences,
 } from "./contribManifest.js";
 import { sourceLabel, SourceBadge } from "./sourceIcon.js";
 import { matchToolCall } from "./toolCallView.js";
@@ -286,5 +288,38 @@ describe("interrupt renderers", () => {
     serve({});
     await loadContribManifest();
     expect(contribInterruptRenderers()).toEqual({});
+  });
+});
+
+describe("panels and markdown fences", () => {
+  const PANEL = { contrib: "shares", label: "Shares", order: 100, entry: "shares/ui/Panel.tsx" };
+  const FENCE = { contrib: "shares", entry: "shares/ui/Embed.tsx" };
+
+  it("keeps well-formed rows", async () => {
+    serve({ panels: { shares: PANEL }, markdownFences: { "scooter-embed": FENCE } });
+    await loadContribManifest();
+    expect(contribPanels()).toEqual({ shares: PANEL });
+    expect(contribMarkdownFences()).toEqual({ "scooter-embed": FENCE });
+  });
+
+  it("drops a row naming another contrib's module, without costing its neighbours", async () => {
+    serve({
+      panels: { shares: PANEL, aws: PANEL, echo: { ...PANEL, contrib: "echo" } },
+      markdownFences: {
+        "scooter-embed": FENCE,
+        "foreign": { ...FENCE, entry: "aws/ui/Embed.tsx" },
+        "Bad Lang": FENCE,
+      },
+    });
+    await loadContribManifest();
+    expect(Object.keys(contribPanels())).toEqual(["shares"]);
+    expect(Object.keys(contribMarkdownFences())).toEqual(["scooter-embed"]);
+  });
+
+  it("is empty when the manifest has neither key", async () => {
+    serve({});
+    await loadContribManifest();
+    expect(contribPanels()).toEqual({});
+    expect(contribMarkdownFences()).toEqual({});
   });
 });

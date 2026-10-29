@@ -1,7 +1,6 @@
 # shares' declaration: agents publish static bundles that the broker serves at
 # /s/<uuid>/, stored in this contrib's own database. Its deployment half is
-# ./deployment.nix. The Shares tab and the inline `scooter-embed` block stay in the
-# core UI, which hides both when the broker answers 404.
+# ./deployment.nix. Its UI half is the Shares tab and the inline `scooter-embed` block.
 { lib, ... }:
 
 {
@@ -51,6 +50,13 @@
       };
 
       skills."scooter-publish.md" = ./skills/scooter-publish.md;
+
+      ui = {
+        # Lists this conversation's shares through the conversation relay.
+        panel = { label = "Shares"; entry = "ui/Panel.tsx"; api = true; };
+        # A published share drawn inline as a sandboxed iframe.
+        markdownFences."scooter-embed".entry = "ui/Embed.tsx";
+      };
     };
   };
 }
