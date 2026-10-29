@@ -183,3 +183,14 @@ async def test_no_checks_is_said_plainly():
     pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"] = None
     res, _ = await _summary(pr)
     assert "CI (abcdef1): no checks reported" in res.text
+
+
+async def test_a_ruleset_block_shows_though_review_decision_is_null():
+    # Shape seen live: ruleset needs an approval, reviewDecision stays null.
+    pr = copy.deepcopy(PR)
+    pr.update(isDraft=False, mergeable="MERGEABLE", mergeStateStatus="BLOCKED", reviewDecision=None)
+    pr["latestOpinionatedReviews"]["nodes"] = []
+    res, _ = await _summary(pr)
+    assert "Reviews: no decision reported" in res.text
+    assert "no review required" not in res.text
+    assert "blocked by branch rules (likely a required approval)" in res.text.splitlines()[-1]

@@ -97,7 +97,7 @@ def render(target: GithubTarget, pr: dict[str, Any]) -> str:
             merge += f"; auto-merge on ({auto.get('mergeMethod', '').lower()})"
         lines.append(merge)
 
-    review_line, changes_requested = _reviews(pr)
+    review_line, changes_requested, approved = _reviews(pr)
     lines.append(review_line)
 
     checks = _checks(pr)
@@ -126,6 +126,9 @@ def render(target: GithubTarget, pr: dict[str, Any]) -> str:
             blockers.append("changes requested")
         elif pr.get("reviewDecision") == "REVIEW_REQUIRED":
             blockers.append("review required")
+        elif pr.get("mergeStateStatus") == "BLOCKED":
+            # Rulesets leave reviewDecision null, so BLOCKED is the only signal.
+            blockers.append("blocked by branch rules" + ("" if approved else " (likely a required approval)"))
         if threads.unresolved:
             blockers.append(f"{len(threads.unresolved)} unresolved thread(s)")
         lines.append(f"Blockers: {', '.join(blockers) if blockers else 'none'}")
@@ -148,7 +151,7 @@ def _state(pr: dict[str, Any]) -> str:
     return "OPEN, DRAFT" if pr.get("isDraft") else "OPEN, ready for review"
 
 
-def _reviews(pr: dict[str, Any]) -> tuple[str, bool]:
+def _reviews(pr: dict[str, Any]) -> tuple[str, bool, bool]:
     by_state: dict[str, list[str]] = {}
     for review in (pr.get("latestOpinionatedReviews") or {}).get("nodes") or []:
         by_state.setdefault(review.get("state", ""), []).append("@" + _login(review.get("author")))
@@ -156,7 +159,7 @@ def _reviews(pr: dict[str, Any]) -> tuple[str, bool]:
     for req in (pr.get("reviewRequests") or {}).get("nodes") or []:
         who = req.get("requestedReviewer") or {}
         awaiting.append(f"team {who['slug']}" if who.get("slug") else "@" + _login(who))
-    parts = [f"Reviews: {pr.get('reviewDecision') or 'no review required'}"]
+    parts = [f"Reviews: {pr.get('reviewDecision') or 'no decision reported'}"]
     for label, state in (("approved", "APPROVED"), ("changes requested", "CHANGES_REQUESTED")):
         if by_state.get(state):
             parts.append(f"{label} by {', '.join(by_state[state])}")
@@ -164,7 +167,7 @@ def _reviews(pr: dict[str, Any]) -> tuple[str, bool]:
         parts.append(f"awaiting {', '.join(awaiting)}")
     elif not by_state:
         parts.append("no reviewers requested")
-    return "; ".join(parts), bool(by_state.get("CHANGES_REQUESTED"))
+    return "; ".join(parts), bool(by_state.get("CHANGES_REQUESTED")), bool(by_state.get("APPROVED"))
 
 
 class _Checks:
