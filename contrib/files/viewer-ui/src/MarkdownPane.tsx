@@ -12,13 +12,14 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { codeToHtml } from "shiki";
-import { MessageSquare, MessageSquarePlus } from "lucide-react";
+import { MessageSquare, MessageSquarePlus, X } from "lucide-react";
 import clsx from "clsx";
 import { api, rawUrl, type Question, type Thread } from "./api";
 import { hrefFor, isExternal, navigate, resolveRel, slug } from "./nav";
 import { BLOCKS, blockAt, blockSource, findText, plainOf, previewOf, rehypeSourceLines, segments, sourceAnchor, remarkHtmlImages, remarkInlineImages } from "./markdown";
 import { Composer, Quote, ThreadCard } from "./Thread";
 import { QuestionCard } from "./Questions";
+import { useMedia, useNarrow } from "./media";
 
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const [html, setHtml] = useState("");
@@ -129,7 +130,19 @@ type Heading = { id: string; text: string; level: number };
 const TOC_MIN_WIDTH = (64 + 14) * 16;
 
 /** The document's h1–h3, linking each section and marking the one in view. */
-function Contents({ toc, active, path, inRail }: { toc: Heading[]; active: string; path: string; inRail?: boolean }) {
+function Contents({
+  toc,
+  active,
+  path,
+  inRail,
+  folded,
+}: {
+  toc: Heading[];
+  active: string;
+  path: string;
+  inRail?: boolean;
+  folded?: boolean;
+}) {
   const top = Math.min(...toc.map((h) => h.level));
   const list = (
     <ul className="flex flex-col gap-0.5 border-l border-border">
@@ -162,7 +175,7 @@ function Contents({ toc, active, path, inRail }: { toc: Heading[]; active: strin
   // Narrow: a collapsible block atop the comment rail, rather than squeezing the doc.
   if (inRail)
     return (
-      <details open className="font-sans text-sm" aria-label="Contents">
+      <details open={!folded} className="font-sans text-sm" aria-label="Contents">
         <summary className={clsx(label, "mb-2 cursor-pointer select-none")}>Contents</summary>
         <nav aria-label="Contents" className="max-h-64 overflow-y-auto">
           {list}
@@ -217,9 +230,20 @@ export function MarkdownPane({
   const [active, setActive] = useState<string | null>(null);
   // Counted, so re-picking a thread unfolds it again. Card clicks don't count.
   const [reveal, setReveal] = useState<{ id: string; n: number }>({ id: "", n: 0 });
+  const narrow = useNarrow();
+  // No hover to find the margin button by, so a tap shows it.
+  const touch = useMedia("(pointer: coarse)");
+  // Narrow, the comment rail is a bottom sheet over the doc.
+  const [sheet, setSheet] = useState(false);
+  /** Selects a thread and brings its card into view. */
   const pick = (id: string) => {
     setActive(id);
     setReveal((r) => ({ id, n: r.n + 1 }));
+    setSheet(true);
+    // Next frame: cards in a hidden sheet have no box.
+    requestAnimationFrame(() =>
+      document.getElementById(`thread-${id}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" }),
+    );
   };
   const ranges = useRef(new Map<string, Range>());
   // Block threads: no highlight and no click-to-jump; the margin marker shows them.
@@ -320,7 +344,7 @@ export function MarkdownPane({
   }, [threads, active, body, draft]);
 
   // By height, not e.target: the margin and gaps between blocks are in no block.
-  const onMouseMove = useCallback((e: React.MouseEvent) => {
+  const hoverAt = useCallback((e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("[data-gutter]")) return;
     const root = doc.current;
     const col = wrap.current;
@@ -356,8 +380,23 @@ export function MarkdownPane({
     const anchor = sourceAnchor(body, Number(block.dataset.line), sel.toString());
     const rect = range.getBoundingClientRect();
     const box = col.getBoundingClientRect();
-    setPop({ top: rect.top - box.top - 40, left: rect.left - box.left + rect.width / 2, anchor });
-  }, [body]);
+    // Touch: below the selection, clear of the system copy menu.
+    const top = touch ? rect.bottom - box.top + 12 : rect.top - box.top - 40;
+    const left = Math.min(Math.max(rect.left - box.left + rect.width / 2, 60), box.width - 60);
+    setPop({ top, left, anchor });
+  }, [body, touch]);
+
+  // Touch selections fire no mouseup; follow selectionchange instead.
+  useEffect(() => {
+    if (!touch) return;
+    document.addEventListener("selectionchange", onMouseUp);
+    return () => document.removeEventListener("selectionchange", onMouseUp);
+  }, [touch, onMouseUp]);
+
+  // New comments are written in the sheet, so open it.
+  useEffect(() => {
+    if (draft) setSheet(true);
+  }, [draft]);
 
   const commentOnBlock = (el: HTMLElement) => {
     setActive(null);
@@ -369,14 +408,15 @@ export function MarkdownPane({
   // A click inside a highlighted quote opens its thread.
   const onClick = useCallback((e: React.MouseEvent) => {
     const pos = document.caretPositionFromPoint?.(e.clientX, e.clientY);
-    if (!pos) return;
-    for (const [id, r] of ranges.current)
-      if (!whole.current.has(id) && r.isPointInRange(pos.offsetNode, pos.offset)) {
-        pick(id);
-        document.getElementById(`thread-${id}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-        return;
-      }
-  }, []);
+    if (pos)
+      for (const [id, r] of ranges.current)
+        if (!whole.current.has(id) && r.isPointInRange(pos.offsetNode, pos.offset)) {
+          pick(id);
+          return;
+        }
+    if (touch) hoverAt(e);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [touch, hoverAt]);
 
   const focusThread = (t: Thread) => {
     setActive(t.id);
@@ -423,11 +463,11 @@ export function MarkdownPane({
         {wide && toc.length > 1 && <Contents toc={toc} active={current} path={path} />}
         <div
           ref={wrap}
-          className="relative mx-auto min-w-0 max-w-5xl flex-1 self-start px-8 py-10"
+          className="relative mx-auto min-w-0 max-w-5xl flex-1 self-start px-7 pb-24 pt-6 md:px-8 md:py-10"
           onMouseUp={onMouseUp}
           onClick={onClick}
-          onMouseMove={onMouseMove}
-          onMouseLeave={() => setHover(null)}
+          onMouseMove={touch ? undefined : hoverAt}
+          onMouseLeave={touch ? undefined : () => setHover(null)}
         >
           <DocPath.Provider value={path}>
             <article
@@ -466,7 +506,7 @@ export function MarkdownPane({
               data-gutter
               aria-label="Comment on this paragraph"
               title="Comment on this paragraph"
-              className="absolute left-1 flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-brand"
+              className="absolute left-0.5 flex size-6 md:left-1 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-brand"
               style={{ top: hover.top }}
               onMouseDown={(e) => e.preventDefault()}
               onMouseUp={(e) => e.stopPropagation()}
@@ -489,7 +529,7 @@ export function MarkdownPane({
                 aria-label={`${n} ${m.open ? "open " : "resolved "}comment${n === 1 ? "" : "s"}`}
                 title={`${n} ${m.open ? "open" : "resolved"} comment${n === 1 ? "" : "s"}`}
                 className={clsx(
-                  "absolute right-1 flex h-6 min-w-6 items-center justify-center gap-0.5 rounded-full px-1.5 font-sans text-[11px] font-semibold transition-colors",
+                  "absolute right-0.5 flex h-6 md:right-1 min-w-6 items-center justify-center gap-0.5 rounded-full px-1.5 font-sans text-[11px] font-semibold transition-colors",
                   on
                     ? "bg-brand text-brand-foreground"
                     : m.open
@@ -503,7 +543,6 @@ export function MarkdownPane({
                   const t = threads.find((x) => m.ids.includes(x.id) && !x.resolved) ?? threads.find((x) => x.id === m.ids[0]);
                   if (!t) return;
                   pick(t.id);
-                  document.getElementById(`thread-${t.id}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
                 }}
               >
                 <MessageSquare className="size-3" />
@@ -514,11 +553,30 @@ export function MarkdownPane({
         </div>
       </div>
 
+      {narrow && !sheet && (
+        <button
+          className="btn-primary fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 z-30 rounded-full px-4 py-2.5 text-sm shadow-lg"
+          onClick={() => setSheet(true)}
+          aria-label="Show comments"
+        >
+          <MessageSquare className="size-4" />
+          {openThreads.length || "Comments"}
+        </button>
+      )}
+      {narrow && sheet && (
+        <div aria-hidden className="fixed inset-0 z-30 bg-black/30" onClick={() => setSheet(false)} />
+      )}
       <aside
         data-comments
-        className="flex w-[22rem] shrink-0 flex-col gap-3 overflow-y-auto border-l border-border bg-sidebar/50 p-4"
+        className={clsx(
+          "flex flex-col gap-3 overflow-y-auto border-border p-4",
+          narrow
+            ? "fixed inset-x-0 bottom-0 z-40 max-h-[75dvh] rounded-t-2xl border-t bg-sidebar pb-[max(1rem,env(safe-area-inset-bottom))] shadow-2xl"
+            : "w-[22rem] shrink-0 border-l bg-sidebar/50",
+          narrow && !sheet && "hidden",
+        )}
       >
-        {!wide && toc.length > 1 && <Contents toc={toc} active={current} path={path} inRail />}
+        {!wide && toc.length > 1 && <Contents toc={toc} active={current} path={path} inRail folded={narrow} />}
         <h2 className="flex items-center gap-2 font-sans text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Comments
           {openThreads.length > 0 && (
@@ -530,6 +588,15 @@ export function MarkdownPane({
             <span className="ml-auto font-normal normal-case tracking-normal">
               {threads.length - openThreads.length} resolved
             </span>
+          )}
+          {narrow && (
+            <button
+              className={clsx("icon-btn", threads.length <= openThreads.length && "ml-auto")}
+              onClick={() => setSheet(false)}
+              aria-label="Close comments"
+            >
+              <X className="size-4" />
+            </button>
           )}
         </h2>
         {draft && (
@@ -552,7 +619,8 @@ export function MarkdownPane({
         {!draft && !threads.length && (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border px-4 py-6 text-center font-sans text-sm text-muted-foreground">
             <MessageSquarePlus className="size-5 opacity-60" />
-            Hover a paragraph and click the comment icon in its margin, or select a passage to comment on just that.
+            {touch ? "Tap a paragraph, then the comment icon in its margin" : "Hover a paragraph and click the comment icon in its margin"}, or
+            select a passage to comment on just that.
           </div>
         )}
         {threads.map((t) => (

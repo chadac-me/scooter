@@ -7,7 +7,7 @@ export function ImagePane({ file }: { file: FileView }) {
   const [failed, setFailed] = useState(false);
   const kb = file.size < 1024 ? `${file.size} B` : `${(file.size / 1024).toFixed(1)} KB`;
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center gap-3 overflow-auto p-6">
+    <div className="flex min-h-0 flex-1 flex-col items-center gap-3 overflow-auto p-3 md:p-6">
       {failed ? (
         <p className="m-auto font-sans text-sm text-muted-foreground">This image could not be loaded.</p>
       ) : (
