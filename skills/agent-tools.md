@@ -95,6 +95,9 @@ this (by purpose — find them in your tool list):
   one of them on GitHub).
 - **Comment on the GitLab MR** — comment on the MR this conversation came from.
   (Optional discussion id to reply inside a review discussion.)
+  React 👀 to a forwarded note right away: `agent-broker
+  'gitlab/api/v4/projects/<project>/merge_requests/<iid>/notes/<note_id>/award_emoji?name=eyes'
+  -X POST` (`issues/<iid>` for an issue; `<project>` URL-encoded, e.g. `group%2Frepo`).
 - **Comment on the Jira issue** — comment on the Jira issue this conversation came from.
 
 **These provider tools appear ONLY when that resource is attached** to this

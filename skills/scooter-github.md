@@ -93,8 +93,10 @@ gap: it is one call, it lands immediately, and it does not add a comment to the
 thread.
 
 **So when a comment arrives, react 👀 as the first action of the turn** — before
-reading the repo, before planning, before any of the work. Then do the task, then
-reply with `github_comment`.
+reading the repo, before planning, before any of the work.
+
+Then, for real work, **comment a short plan before starting** and go ahead
+without waiting for approval. Finish with a `github_comment` of the results.
 
 The forwarded message hands you the id, and nothing else — picking the endpoint
 is yours:
