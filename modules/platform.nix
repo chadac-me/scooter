@@ -379,6 +379,16 @@ in
       defaultText = literalExpression "config.scooter.images.agent-sandbox-os.ref.fullUrl";
       description = "OCI ref of the generic Nix sandbox image.";
     };
+    workspaceStorageClass = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "gp3-crun";
+      description = ''
+        StorageClass for each sandbox's /workspace PVC; null uses the cluster
+        default. Set it when the default class can't attach to sandbox nodes.
+        Applies to new conversations only: an existing claim keeps its class.
+      '';
+    };
     sandboxRuntimeClass = mkOption {
       type = types.nullOr types.str;
       default = null;
@@ -1530,6 +1540,8 @@ in
                   # run non-privileged in a private cgroup namespace; unset means the
                   # cluster default.
                   { name = "SANDBOX_RUNTIME_CLASS"; value = cfg.sandboxRuntimeClass; }
+                ++ lib.optional (cfg.workspaceStorageClass != null)
+                  { name = "SANDBOX_WORKSPACE_STORAGE_CLASS"; value = cfg.workspaceStorageClass; }
                 ++ lib.optional cfg.sandboxUserNamespace
                   { name = "SANDBOX_USER_NAMESPACE"; value = "1"; }
                 ++ lib.optional (cfg.retentionMaxAgeMs > 0)

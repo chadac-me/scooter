@@ -82,7 +82,7 @@ let
   # A sandbox can reach the broker but not the agent-host, so sandbox-shaping config
   # must stay off the broker.
   sandboxShapingEnv = [
-    "SANDBOX_IMAGE" "SANDBOX_PULL_POLICY" "SANDBOX_RUNTIME_CLASS" "SANDBOX_RESOURCES"
+    "SANDBOX_IMAGE" "SANDBOX_PULL_POLICY" "SANDBOX_RUNTIME_CLASS" "SANDBOX_WORKSPACE_STORAGE_CLASS" "SANDBOX_RESOURCES"
     "SANDBOX_SIZES_JSON" "SANDBOX_MANIFEST_OVERLAY_CONFIGMAP"
     "SCOOTER_CONFIGMAP" "SCOOTER_CONFIG_FILES_CONFIGMAP" "SCOOTER_TOKEN_AUDIENCES" "SCOOTER_ENV"
   ];
@@ -268,7 +268,7 @@ let
   # approvals) that the seam checks below cover more strongly.
   coverageExempt = [
     "conversationController" "postgres" "legacyStateMigration"
-    "sandboxRuntimeClass" "sandboxUserNamespace" "serviceAccountRoleArn"
+    "sandboxRuntimeClass" "sandboxUserNamespace" "workspaceStorageClass" "serviceAccountRoleArn"
     "agentHostImage" "sandboxImage" "uiImage" "defaultSandboxSizeName"
     "db" "dbSpec" "sandboxPod" "approvals"
     # internal output of modules/contrib-db.nix, not a deployer setting

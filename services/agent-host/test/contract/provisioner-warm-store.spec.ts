@@ -138,6 +138,18 @@ describe("overlay PVC storage class", () => {
   it("leaves the default class without a warm store", () => {
     expect(vct({}).find((v) => v.metadata.name === "scooter-rw")?.spec.storageClassName).toBeUndefined();
   });
+
+  it("puts only the workspace claim on the workspace class", () => {
+    const t = vct({ workspaceStorageClass: "gp3-crun" });
+    expect(t.find((v) => v.metadata.name === "workspace")?.spec.storageClassName).toBe("gp3-crun");
+    expect(t.find((v) => v.metadata.name === "scooter-rw")?.spec.storageClassName).toBeUndefined();
+  });
+
+  it("keeps each claim on its own class when both are set", () => {
+    const t = vct({ workspaceStorageClass: "gp3-crun", overlayStorageClass: "warm-store-retain" });
+    expect(t.find((v) => v.metadata.name === "workspace")?.spec.storageClassName).toBe("gp3-crun");
+    expect(t.find((v) => v.metadata.name === "scooter-rw")?.spec.storageClassName).toBe("warm-store-retain");
+  });
 });
 
 describe("createWarmStoreReserver", () => {

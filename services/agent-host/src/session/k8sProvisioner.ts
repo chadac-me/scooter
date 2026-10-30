@@ -193,6 +193,8 @@ export interface K8sProvisionerOptions {
    *  systemd PID 1 a writable cgroup subtree without `privileged`; unset means the cluster default,
    *  and it is ignored for the generic image. */
   sandboxRuntimeClass?: string;
+  /** Workspace PVC StorageClass (SANDBOX_WORKSPACE_STORAGE_CLASS); unset means the cluster default. */
+  workspaceStorageClass?: string;
   /** Backoff before each image-reconcile retry (default 3s, 6s). */
   reconcileRetryDelaysMs?: number[];
   /** Warm overlay pool: reserve on start, release on suspend. */
@@ -585,6 +587,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         overlayStorageClass: opts.warmStore?.storageClass,
         pullPolicy: opts.sandboxPullPolicy,
         sandboxRuntimeClass: opts.sandboxRuntimeClass,
+        workspaceStorageClass: opts.workspaceStorageClass,
         userNamespace: opts.sandboxUserNamespace ?? false,
         resources,
         overlay: await loadManifestOverlay(),
@@ -858,6 +861,8 @@ export function sandboxManifest(
     overlayStorage?: string;
     /** Overlay PVC StorageClass; unset means the cluster default. */
     overlayStorageClass?: string;
+    /** Workspace PVC StorageClass; unset means the cluster default. */
+    workspaceStorageClass?: string;
     /** imagePullPolicy for the sandbox container; default "Always", with "IfNotPresent"/"Never" for
      *  a side-loaded local cluster that has no registry to pull from. */
     pullPolicy?: "Always" | "IfNotPresent" | "Never";
@@ -1002,6 +1007,7 @@ export function sandboxManifest(
           spec: {
             accessModes: ["ReadWriteOnce"],
             resources: { requests: { storage } },
+            ...(deploy.workspaceStorageClass ? { storageClassName: deploy.workspaceStorageClass } : {}),
           },
         },
         // The overlay-store upper PVC, persisting runtime builds across suspend/resume.
