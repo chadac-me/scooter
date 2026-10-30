@@ -63,7 +63,8 @@ re-converge*, which runs with `lib` and no flake. A `scooter.broker.extraEnv`
 definition there is "option does not exist" in two of the three (#615, #607). So
 `contrib.nix` writes service env into its own `services.<svc>.env`, which
 `modules/contrib-env.nix` copies into `scooter.<svc>.extraEnv`, and anything else that
-reads `scooter.*` goes in `deployment.nix`.
+reads `scooter.*` goes in `deployment.nix`. The broker's env always includes
+`<NAME>_ENABLED=true` (dashes become underscores), so no contrib writes that flag itself.
 
 `contrib/aws` and `contrib/files` are the two contribs with all three — aws because
 a grant needs a human and the sandbox needs the CLIs, files because the review

@@ -177,6 +177,8 @@ them.
 
 Settings are read from environment variables, which `services.<svc>.env` sets. Subclass
 `ScooterBaseSettings`: each field reads the variable of the same name, upper-cased.
+The broker always gets `ACME_ENABLED=true` while the contrib is enabled, so a provider
+with no credential to gate on can gate on that flag instead.
 
 ```python
 # contrib/acme/scooter_contrib_acme/config.py

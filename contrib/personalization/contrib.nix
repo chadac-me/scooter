@@ -30,7 +30,6 @@
       services.broker = {
         enable = true;
         pythonDeps = ps: [ ps.aiosqlite ];
-        env.PERSONALIZATION_ENABLED = "true";
       };
 
       skills."personalization.md" = ./skills/personalization.md;

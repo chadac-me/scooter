@@ -2,10 +2,7 @@
 {
   contribs.duckduckgo = {
     src = ./.;
-    services.broker = {
-      enable = true;
-      env.DUCKDUCKGO_ENABLED = "true";
-    };
+    services.broker.enable = true;
 
     # No `ui` and no `skills`, for the reasons in contrib/brave/contrib.nix.
   };

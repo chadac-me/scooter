@@ -25,7 +25,6 @@ in
     (lib.mkIf (config.scooter.broker.enable && ccfg.enable) {
       scooter.broker = {
         extraEnv = [
-          { name = "AWS_ENABLED"; value = "true"; }
           { name = "AWS_REGION"; value = ccfg.region; }
           { name = "AWS_STS_EXTERNAL_ID"; value = ccfg.externalId; }
           { name = "AWS_BROKER_PRINCIPAL_ARN"; value = ccfg.brokerPrincipalArn; }

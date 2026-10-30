@@ -292,7 +292,13 @@ let
     };
   };
 
+  # e.g. code-server -> CODE_SERVER_ENABLED.
+  enabledVar = "${lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] name)}_ENABLED";
+
   serviceModule = svc: { ... }: {
+    # Every enabled contrib flags itself on the broker.
+    config.env = lib.mkIf (svc == "broker") { ${enabledVar} = lib.mkDefault "true"; };
+
     options = {
       enable = mkEnableOption "the ${svc} half of this contrib";
 
@@ -328,6 +334,9 @@ let
           deployed. A string is the value; a `{ name; key; }` (what
           contrib/lib.nix's `mkSecretOption` holds) is a secretKeyRef. Rendered by
           modules/contrib-env.nix. Use `lib.mkIf` to leave a variable unset.
+        '' + lib.optionalString (svc == "broker") ''
+
+          Includes `${enabledVar} = "true"` by default, so the provider can gate on it.
         '';
       };
     };
