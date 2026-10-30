@@ -332,6 +332,24 @@ describe("management API", () => {
     expect(sessions.restartSandbox).not.toHaveBeenCalled();
   });
 
+  it("POST /conversations/:id/restart lets an anonymous caller restart an owned conversation only in single-user mode", async () => {
+    const restart = async (authEnforced: boolean) => {
+      const sessions = fakeSessions();
+      (sessions.get("c1") as any).owner = "bob";
+      sessions.restartSandbox = vi.fn(async () => ({}) as never);
+      const api = createManagementApi({
+        sessions,
+        store: fakeStore([]),
+        server: stubServer,
+        answerPermission: async () => {},
+        authEnforced,
+      });
+      return (await call(api, "POST", "/conversations/c1/restart")).status;
+    };
+    expect(await restart(false)).toBe(200);
+    expect(await restart(true)).toBe(403);
+  });
+
   it("GET /whoami returns the caller's identity (header)", async () => {
     const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
     const me = await call(api, "GET", "/whoami", undefined, { "x-auth-user": "alice", "x-auth-email": "a@x.io" });
