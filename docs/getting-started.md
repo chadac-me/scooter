@@ -15,7 +15,9 @@ the options most deployments change.
   [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller installed.
   Scooter creates one `Sandbox` per conversation; the controller turns it into a pod.
 - **A CNI that enforces NetworkPolicy** (k3s's built-in controller, Calico, Cilium, …).
-  Scooter isolates sandbox pods with a NetworkPolicy.
+  Scooter isolates sandbox pods with a NetworkPolicy. Pod IPs must survive the hop
+  between nodes (no per-pod masquerade), or `podSelector` rules never match. If your
+  resolver pods do not listen on 53, set `scooter.networkPolicy.dnsPorts`.
 - **Nix with flakes enabled**, on the machine you deploy from.
 - **An ingress controller** (nginx, Traefik, …), so the UI is reachable from a browser.
 - **An authenticating proxy** in front of the UI, such as
@@ -181,9 +183,12 @@ scooter.agent = {
 };
 ```
 
+`claude setup-token` is interactive: capturing it with `$(…)` stores its screen text,
+not the token. Run it in a terminal, copy the `sk-ant-oat01-…` line it prints, then:
+
 ```bash
 kubectl -n scooter create secret generic agent-claude-code-token \
-  --from-literal=token="$(claude setup-token)"
+  --from-literal=token='sk-ant-oat01-…'
 ```
 
 <!-- TODO: the agent-host-claude image currently has to be pinned by hand
