@@ -566,6 +566,31 @@ let
     ++ (if builtins.any (e: e.name == "AUTH_MODE" && e.value == "alb-oidc") albRouterEnv then [ ]
         else [ "alb-oidc: router.env.AUTH_MODE (the router reads x-auth-user, which an ALB never sets — every caller looks anonymous and sees every conversation)" ]);
 
+  # Enforcement needs a session check, else every browser request is refused.
+  enforcePlatform = evalPlatform {
+    module = { ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.auth = {
+        enforce = true;
+        sessionCheckUrl = "http://oauth2-proxy.example.svc.cluster.local/oauth2/auth";
+        emailHeader = "x-forwarded-email";
+      };
+    };
+  };
+  enforceRouterEnv =
+    let ctrs = builtins.attrValues (enforcePlatform.config.kubernetes.resources.deployments.conversation-router.spec.template.spec.containers or { });
+    in builtins.concatMap (c: c.env or [ ]) ctrs;
+  enforceProblems =
+    (if renders { scooter.auth.enforce = true; }
+     then [ "auth.enforce rendered without sessionCheckUrl: the router would refuse every browser request" ]
+     else [ ])
+    ++ (if builtins.elem { name = "AUTH_ENFORCE"; value = "true"; } enforceRouterEnv then [ ]
+        else [ "auth.enforce did not reach router.env.AUTH_ENFORCE" ])
+    ++ (if builtins.elem { name = "AUTH_EMAIL_HEADER"; value = "x-forwarded-email"; } enforceRouterEnv then [ ]
+        else [ "router.env.AUTH_EMAIL_HEADER missing: an enforcing router would leave a client-sent email header in place" ])
+    ++ (if builtins.any (e: e.name == "AUTH_ENFORCE") routerEnv
+        then [ "the example enforces auth without opting in" ] else [ ]);
+
   # The shared broker database reaches the broker regardless of which feature wants
   # it: present with aws off, and never declared twice with aws on.
   awsOffPlatform = evalPlatform {
@@ -1303,7 +1328,7 @@ let
     ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
         else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
 
-  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ volumeProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ volumeProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems ++ enforceProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named; a scooter.packages override reaches exactly the images that use it\n"

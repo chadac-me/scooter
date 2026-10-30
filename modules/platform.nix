@@ -1042,8 +1042,22 @@ in
           `/oauth2/auth`, which Authelia and Pomerium also provide). The router
           sends it each browser request's session cookies to confirm who is signed
           in, rather than trusting `userHeader`. The proxy must return the user in
-          `X-Auth-Request-User` (oauth2-proxy: `set_xauthrequest = true`). For now
-          a mismatch or rejection is only logged ("auth would reject").
+          `X-Auth-Request-User` (oauth2-proxy: `set_xauthrequest = true`). Unless
+          `enforce` is on, a mismatch or rejection is only logged ("auth would reject").
+        '';
+      };
+      enforce = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Make the router refuse every request it cannot attribute to a signed-in
+          browser session or an allowed service token (401, or 403 for a token
+          from a service not on the allowlist), and replace `userHeader` and
+          `emailHeader` with the proven caller's before forwarding. Requires
+          `sessionCheckUrl` in header mode, or `albRegion` in alb-oidc mode. Off,
+          the router only logs what it would refuse; check those logs
+          ("auth would reject", "auth identity mismatch") are quiet before turning
+          this on.
         '';
       };
       sandboxSessionCheckUrl = mkOption {
