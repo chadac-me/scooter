@@ -57,8 +57,8 @@ async def handle_acme(request: Request, x_acme_token: str = Header("")):
     return {"status": "ok"}
 ```
 
-The factory registers the router. Its function name must match the entry point in
-`pyproject.toml`:
+The factory registers the router. Its function name must be the contrib's
+name, which is what the generated entry point calls:
 
 ```python
 @register_webhook

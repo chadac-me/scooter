@@ -52,7 +52,7 @@ class EchoTransport(Transport):
 
 
 @register_provider
-def echo_contrib() -> Provider:
+def echo() -> Provider:
     """Build the echo provider, always enabled because it is only installed in test and example images."""
     return Provider(
         name=PROVIDER_NAME,

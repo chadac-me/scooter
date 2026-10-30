@@ -25,9 +25,9 @@ services.
 
 ```
 contrib/<name>/
-  pyproject.toml            # package + entry points (both groups if it spans services); hatchling backend
+  pyproject.toml            # optional: overrides the generated one (contrib/build.nix)
   contrib.nix               # the DECLARATION: `contribs.<name>` (see schema below)
-  deployment.nix            # optional: a KUBENIX module -> renders manifests/env
+  deployment.nix            # optional: a KUBENIX module -> renders manifests
   sandbox.nix               # optional: a NIXOS module  -> goes into the sandbox-os image
   module.nix                # optional: its own packages -> scooter.packages, for the platform eval
   scooter_contrib_<name>/
@@ -44,8 +44,8 @@ and which eval reads which is the thing most easily got backwards:
 
 | file | eval | declares / contributes |
 |---|---|---|
-| `contrib.nix` | every eval that reads the registry | `contribs.<name>`: `src`, `services.*`, `ui`, `skills`, `approvals`, `sandbox.module`, `db`. What the contrib **is**. |
-| `deployment.nix` | kubenix, with `modules/platform.nix` | the manifests/env this deployment's `contribs.<name>.*` config renders |
+| `contrib.nix` | every eval that reads the registry | `contribs.<name>`: `src`, `services.*` (including each service's `env`), `ui`, `skills`, `approvals`, `sandbox.module`, `db`. What the contrib **is**. |
+| `deployment.nix` | kubenix, with `modules/platform.nix` | the manifests this deployment's `contribs.<name>.*` config renders, beyond service env |
 | `sandbox.nix` | NixOS, via `pkgs/sandbox-os` (and the baked re-converge list) | packages, systemd units, activation — anything in the agent's sandbox image |
 | `module.nix` | the platform eval, found beside the contrib.nix listed in `all-modules.nix` | `scooter.packages.*` the contrib builds itself, as every service's `module.nix` does |
 
@@ -60,17 +60,18 @@ under `contribs.<name>`, so one tree holds both halves of an integration. See
 file rather than the top of `deployment.nix`: it is read by evals that have no
 `scooter.*` tree at all — the package build, and the sandbox image *plus its in-pod
 re-converge*, which runs with `lib` and no flake. A `scooter.broker.extraEnv`
-definition there is "option does not exist" in two of the three (#615, #607) — which
-is exactly the split: `contrib.nix` *declares* `contribs.<name>.siteUrl`, and
-`deployment.nix` is what reads it and writes `scooter.broker.extraEnv`.
+definition there is "option does not exist" in two of the three (#615, #607). So
+`contrib.nix` writes service env into its own `services.<svc>.env`, which
+`modules/contrib-env.nix` copies into `scooter.<svc>.extraEnv`, and anything else that
+reads `scooter.*` goes in `deployment.nix`.
 
 `contrib/aws` and `contrib/files` are the two contribs with all three — aws because
 a grant needs a human and the sandbox needs the CLIs, files because the review
 surface is split across both sides (a viewer in the sandbox, the annotation store
 in the broker). `contrib/echo` has `contrib.nix` +
 `sandbox.nix`, which was the whole shape of a contrib before the deployment half
-existed (#607 added the sandbox half, #636 the deployment half three days later). A
-contrib with only a deployment half is the common case — every broker integration.
+existed (#607 added the sandbox half, #636 the deployment half three days later). Most
+broker integrations need only `contrib.nix`, since their settings are env.
 
 **Rule: the top-level module stays import-light.** The service-coupled modules
 import their host service (`broker.*` / `webhooks.*`), which is present at
@@ -237,8 +238,9 @@ what that integration is configured with.
 `sandbox.nix` the NixOS module baked into the agent's image, `contrib.nix` the
 declaration both of them hang off. `contrib/aws` ships all three, and they are not
 interchangeable — the names are what keep a reader from reaching for the wrong one.
-A contrib with only a deployment half still gets its own `deployment.nix`, even when
-that is two options and one env entry.
+A contrib whose deployment config is only broker or webhooks env has no
+`deployment.nix`: `services.<svc>.env` holds it, and a Secret option from
+`contrib/lib.nix`'s `mkSecretOption` renders as a `secretKeyRef` there.
 
 `modules/platform.nix` imports it, so it reads its own config
 (`config.contribs.aws.*`) and renders its own `kubernetes.resources`. It
@@ -247,7 +249,7 @@ redeclaring the container:
 
 | what it needs to add | the seam |
 |---|---|
-| env on the broker container | `scooter.broker.extraEnv` |
+| env on the broker or webhooks container | `services.<svc>.env` in `contrib.nix` |
 | a mounted ConfigMap | `broker.extraVolumes` + `broker.extraVolumeMounts` |
 | a rollout when its config changes | `broker.podAnnotations` (hash the ConfigMap) |
 | an IRSA / cloud identity annotation | `broker.serviceAccountAnnotations` |
@@ -514,7 +516,8 @@ The store connects with `ctx.contrib_store_config("<name>")`, which is the broke
 `store_config` pointed at the contrib's database. Core's generated bindings
 (`scooter_schema`, `@scooter/schema`) skip contrib databases, because core must not
 know contribs exist. The contrib keeps its own row model, and a
-`tests/test_schema_matches.py` holds it to `sql/schema.sql`.
+`tests/test_db.py` holds it to `sql/schema.sql` with
+`scooter_broker_lib.testing.assert_rows_match_schema_sql`.
 
 **Moving an existing table out of a core database.** Set
 `db.tables.<t>.copyFrom = "<old db>"`. After migrating, the migrator copies the old

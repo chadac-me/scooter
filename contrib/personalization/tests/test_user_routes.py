@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from scooter_broker_lib.types import Identity, Provider
 
-from conftest import create_schema, sqlite_config
+from scooter_broker_lib.testing import create_schema, sqlite_config
 from scooter_contrib_personalization.store import PersonalizationStore, _Base
 from scooter_contrib_personalization.transport import Personalization
 

@@ -11,7 +11,7 @@ from scooter_contrib_aws.store import PermissionStore
 from scooter_broker_lib.store import StoreConfig
 from scooter_broker_lib.authz import NoopAuthorizer
 
-from conftest import create_schema
+from scooter_broker_lib.testing import create_schema
 from scooter_contrib_aws import store as aws_store
 
 

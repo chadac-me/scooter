@@ -1,9 +1,11 @@
 # The deployment half
 
-`deployment.nix` turns the operator's `contribs.acme.*` settings into Kubernetes
-configuration: environment variables on the broker, a mounted ConfigMap, an IAM
-annotation. It's a **kubenix module** in the same evaluation as the rest of the platform,
-so it can read the whole `scooter.*` tree and write to the seams the services expose.
+A contrib whose settings are only environment variables needs no deployment half: its
+`services.<svc>.env` in [`contrib.nix`](declaration.md) puts them on the broker and
+webhooks containers. `deployment.nix` is for everything else a contrib renders into
+Kubernetes: env in every sandbox, a mounted ConfigMap, an IAM annotation. It's a
+**kubenix module** in the same evaluation as the rest of the platform, so it can read
+the whole `scooter.*` tree and write to the seams the services expose.
 
 There's nothing to register. The platform imports `deployment.nix` from next to each
 `contrib.nix` automatically.
@@ -18,15 +20,10 @@ in
 {
   # Render nothing unless the contrib is enabled and its service is deployed.
   config = lib.mkIf (config.scooter.broker.enable && ccfg.enable) {
-    scooter.broker.extraEnv = [
-      {
-        name = "ACME_TOKEN";
-        valueFrom.secretKeyRef = { inherit (ccfg.tokenSecret) name key; };
-      }
-    ] ++ lib.optional (ccfg.siteUrl != "") {
-      name = "ACME_SITE_URL";
-      value = ccfg.siteUrl;
-    };
+    # Tell the `acme` CLI in every sandbox where the instance is.
+    scooter.sandboxPod.extraEnv = [
+      { name = "ACME_SITE_URL"; value = ccfg.siteUrl; }
+    ];
   };
 }
 ```
@@ -45,7 +42,7 @@ containers:
 
 | To add… | Use |
 |---|---|
-| env on the broker | `scooter.broker.extraEnv` |
+| env on the broker or webhooks | `services.<svc>.env` in `contrib.nix` |
 | a volume on the broker | `scooter.broker.extraVolumes` and `scooter.broker.extraVolumeMounts` |
 | a rollout when your config changes | `scooter.broker.podAnnotations` (put a hash of the ConfigMap in it) |
 | a cloud identity (e.g. IRSA) | `scooter.broker.serviceAccountAnnotations` |
@@ -76,13 +73,11 @@ scooter.broker = {
 
 ## Webhooks settings
 
-The webhooks service has no `extraEnv` seam yet. Its provider settings come from one
-Secret, `scooter.webhooks.secretName`, whose keys become environment variables. So the
-webhook half of `acme` reads `ACME_ENABLED` and `ACME_WEBHOOK_SECRET`, and the operator
-adds them to that Secret, as for the [Jira webhook](../webhooks.md#jira).
-
-If your contrib needs more than that, add a `scooter.webhooks.extraEnv` option shaped like
-the broker's in `modules/webhooks.nix`. It's one option and one `++`.
+Set the webhooks container's env with `services.webhooks.env`, as for the broker; jira
+sets `JIRA_ENABLED` that way. A webhook signing secret usually lives in the one Secret
+the service already reads, `scooter.webhooks.secretName`, whose keys become environment
+variables. So the operator adds `ACME_WEBHOOK_SECRET` to that Secret, as for the
+[Jira webhook](../webhooks.md#jira).
 
 ## Check the render
 

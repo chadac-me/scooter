@@ -310,6 +310,26 @@ let
           which is the only place a package is resolved.
         '';
       };
+
+      env = mkOption {
+        type = types.attrsOf (types.either types.str
+          (types.submodule {
+            options = {
+              name = mkOption { type = types.str; description = "Secret name."; };
+              key = mkOption { type = types.str; description = "Key within the Secret."; };
+            };
+          }));
+        default = { };
+        example = literalExpression ''
+          { EXAMPLE_URL = config.url; EXAMPLE_TOKEN = config.tokenSecret; }
+        '';
+        description = ''
+          Env the ${svc} container gets while this contrib is enabled and ${svc} is
+          deployed. A string is the value; a `{ name; key; }` (what
+          contrib/lib.nix's `mkSecretOption` holds) is a secretKeyRef. Rendered by
+          modules/contrib-env.nix. Use `lib.mkIf` to leave a variable unset.
+        '';
+      };
     };
   };
 in

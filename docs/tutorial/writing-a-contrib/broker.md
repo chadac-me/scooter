@@ -37,8 +37,9 @@ def acme() -> Provider:
     )
 ```
 
-The factory name (`acme`) must match the entry point in `pyproject.toml`. The broker
-calls every registered factory at startup and mounts the enabled providers.
+The factory name (`acme`) must be the contrib's name: the generated entry point
+calls it. The broker calls every registered factory at startup and mounts the enabled
+providers.
 
 **Gate `enabled` on the credential.** A provider without its token should be absent, so
 calls get a clear `404` instead of an upstream `401` that looks like a bug. Its

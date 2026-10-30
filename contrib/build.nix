@@ -10,8 +10,8 @@ contribs:
 let
   # Built once per service against only that service's surface.
   surfaces = {
-    broker = { surface = scooterBrokerLib; entryModule = "broker_provider"; };
-    webhooks = { surface = scooterWebhooksLib; entryModule = "webhooks_handler"; };
+    broker = { surface = scooterBrokerLib; entryModule = "broker_provider"; group = "agent_broker.providers"; };
+    webhooks = { surface = scooterWebhooksLib; entryModule = "webhooks_handler"; group = "scooter_webhooks.handlers"; };
   };
 
   enabledServices = c: lib.filterAttrs (_: s: s.enable) c.services;
@@ -27,6 +27,26 @@ let
   checkDepsFor = c: svc: lib.concatMap (s: s.pythonDeps (pkgsFor svc))
     (lib.attrValues (enabledServices c));
 
+  # Used when the contrib ships no pyproject.toml; Nix owns its deps either way.
+  # Every enabled service's group, since tests/ exercises each one in every variant.
+  defaultPyproject = name: c: builtins.toFile "pyproject.toml" (''
+    [build-system]
+    requires = ["hatchling"]
+    build-backend = "hatchling.build"
+
+    [project]
+    name = "${c.distName}"
+    version = "${c.version}"
+    requires-python = ">=3.11"
+
+    [tool.pytest.ini_options]
+    asyncio_mode = "auto"
+  '' + lib.concatStrings (lib.mapAttrsToList (svc: _: ''
+
+    [project.entry-points."${surfaces.${svc}.group}"]
+    ${name} = "${c.pyModule}.${surfaces.${svc}.entryModule}:${name}"
+  '') (enabledServices c)));
+
   buildFor = name: c: svc:
     let s = surfaces.${svc}; in
     python3Packages.buildPythonPackage {
@@ -35,6 +55,10 @@ let
       inherit (c) version src;
       pyproject = true;
       build-system = [ python3Packages.hatchling ];
+
+      postPatch = lib.optionalString (!builtins.pathExists (c.src + "/pyproject.toml")) ''
+        cp ${defaultPyproject name c} pyproject.toml
+      '';
 
       dependencies = [ python3Packages.fastapi s.surface ]
         ++ c.services.${svc}.pythonDeps (pkgsFor svc);

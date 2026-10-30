@@ -16,7 +16,7 @@ from scooter_broker_lib.mcp import ToolContext, collect_mcp_servers, gate_for, t
 from scooter_broker_lib.types import Identity, Provider
 
 from scooter_contrib_echo import mcp_tools as echo_tools
-from scooter_contrib_echo.broker_provider import echo_contrib
+from scooter_contrib_echo.broker_provider import echo
 
 
 @dataclass
@@ -177,7 +177,7 @@ async def test_attached_lists_only_echo_links():
 
 async def test_the_provider_contributes_its_tool_server_through_the_transport():
     """collect_mcp_servers is what the broker core calls."""
-    collected = collect_mcp_servers([echo_contrib()])
+    collected = collect_mcp_servers([echo()])
     assert [p.name for p, _ in collected] == ["echo"]
     tools = await collected[0][1].list_tools(run_middleware=False)
     assert {t.name for t in tools} == {

@@ -1,15 +1,14 @@
-# What kagi is; its deployment options are in ./deployment.nix.
+# What kagi is, and the one option a deployment sets.
 { lib, ... }:
+let
+  clib = import ../lib.nix { inherit lib; };
+in
 {
-  contribs.kagi = {
-    options.apiKeySecret = lib.mkOption {
-      type = lib.types.nullOr (lib.types.submodule {
-        options = {
-          name = lib.mkOption { type = lib.types.str; description = "Secret name (in the broker namespace)."; };
-          key = lib.mkOption { type = lib.types.str; default = "KAGI_API_KEY"; description = "Secret key holding the Kagi API token."; };
-        };
-      });
-      default = null;
+  contribs.kagi = { config, ... }: {
+    options.apiKeySecret = clib.mkSecretOption {
+      key = "KAGI_API_KEY";
+      holds = "the Kagi API token";
+      nullable = true;
       example = lib.literalExpression ''{ name = "kagi-search-key"; key = "KAGI_API_KEY"; }'';
       description = ''
         Secret holding a Kagi API token (kagi.com/settings?p=api). Injected as
@@ -29,7 +28,10 @@
 
     config = {
       src = ./.;
-      services.broker.enable = true;
+      services.broker = {
+        enable = true;
+        env.KAGI_API_KEY = lib.mkIf (config.apiKeySecret != null) config.apiKeySecret;
+      };
 
       # Shipped alongside brave and enableable with it, since each tool is named for
       # its provider and each provider mounts only when its own key is set.

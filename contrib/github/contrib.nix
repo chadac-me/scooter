@@ -1,6 +1,9 @@
 { lib, ... }:
+let
+  clib = import ../lib.nix { inherit lib; };
+in
 {
-  contribs.github = {
+  contribs.github = { config, ... }: {
     options = {
       appId = lib.mkOption {
         type = lib.types.str;
@@ -37,13 +40,9 @@
         '';
       };
 
-      privateKeySecret = lib.mkOption {
-        type = lib.types.submodule {
-          options = {
-            name = lib.mkOption { type = lib.types.str; description = "Secret name (in the broker namespace)."; };
-            key = lib.mkOption { type = lib.types.str; default = "private-key"; description = "Secret key holding the PEM."; };
-          };
-        };
+      privateKeySecret = clib.mkSecretOption {
+        key = "private-key";
+        holds = "the PEM";
         description = ''
           Secret holding the GitHub App private key (PEM). The secret must exist in
           the broker namespace.
@@ -64,10 +63,18 @@
       services.broker = {
         enable = true;
         pythonDeps = ps: [ ps.pyjwt ps.cryptography ];
+        env = {
+          GITHUB_HOST = config.host;
+          GITHUB_APP_ID = config.appId;
+          GITHUB_APP_INSTALLATION_ID = config.installationId;
+          GITHUB_APP_PRIVATE_KEY = config.privateKeySecret;
+          GITHUB_FORGE_POLICY = lib.mkIf (config.forgePolicy != "") config.forgePolicy;
+        };
       };
       services.webhooks = {
         enable = true;
         pythonDeps = ps: [ ps.pyjwt ps.cryptography ];
+        env.GITHUB_HOST = config.host;
       };
     };
   };

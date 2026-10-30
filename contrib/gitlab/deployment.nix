@@ -1,29 +1,13 @@
-# gitlab's deployment half, gated on contribs.gitlab.enable.
+# gitlab's deployment half: env that points `glab` in every sandbox pod at the forge proxy.
 { config, lib, ... }:
 
 let
   ccfg = config.contribs.gitlab;
-  hostEnv = { name = "GITLAB_HOST"; value = ccfg.host; };
 in
 {
-  config = lib.mkIf (config.scooter.broker.enable && ccfg.enable) {
-    scooter.broker.extraEnv = [
-      hostEnv
-      {
-        name = "GITLAB_TOKEN";
-        valueFrom.secretKeyRef = {
-          name = ccfg.tokenSecret.name;
-          key = ccfg.tokenSecret.key;
-        };
-      }
-    ] ++ lib.optional (ccfg.forgePolicy != "") { name = "GITLAB_FORGE_POLICY"; value = ccfg.forgePolicy; };
-
-    scooter.webhooks.extraEnv = [ hostEnv ];
-
-    # Placeholder token; the forge proxy swaps in the real one.
-    scooter.sandboxPod.extraEnv = [
-      hostEnv
-      { name = "GITLAB_TOKEN"; value = "scooter-forge-proxy"; }
-    ];
-  };
+  # Placeholder token; the forge proxy swaps in the real one.
+  config.scooter.sandboxPod.extraEnv = lib.mkIf (config.scooter.broker.enable && ccfg.enable) [
+    { name = "GITLAB_HOST"; value = ccfg.host; }
+    { name = "GITLAB_TOKEN"; value = "scooter-forge-proxy"; }
+  ];
 }

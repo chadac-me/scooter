@@ -6,7 +6,7 @@
 { lib, ... }:
 
 {
-  contribs.files = {
+  contribs.files = { config, ... }: {
     options.annotations.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -48,6 +48,8 @@
         # The SQLite driver behind StoreConfig's local default, which is also what
         # the suite runs the store against (Postgres owns the deployed schema).
         pythonDeps = ps: [ ps.aiosqlite ];
+        # Annotations reach contrib_files with the broker's own credentials, so no DSN.
+        env.FILES_ANNOTATIONS_ENABLED = lib.mkIf config.annotations.enable "true";
       };
 
       sandbox.module = ./sandbox.nix;

@@ -41,7 +41,7 @@ and a broker provider.
 
 | Part | File | What it does | Page |
 |---|---|---|---|
-| Declaration | `contrib.nix`, `pyproject.toml` | Names the contrib, declares its options and which services it plugs into | [Declaration](declaration.md) |
+| Declaration | `contrib.nix` | Names the contrib, declares its options and which services it plugs into | [Declaration](declaration.md) |
 | Deployment half | `deployment.nix` | Turns the operator's options into Kubernetes config (env, Secrets, ConfigMaps) | [Deployment](deployment.md) |
 | Broker provider | `broker_provider.py` | API routes in the broker, with the credential added | [Broker provider](broker.md) |
 | Agent tools | `mcp_tools.py` | Typed tools the agent calls, such as `acme_comment` | [Agent tools](tools.md) |
@@ -57,7 +57,6 @@ When it's finished, `acme` looks like this:
 contrib/acme/
 ├── contrib.nix                  # declaration + options + UI metadata
 ├── deployment.nix               # kubenix: options -> broker/webhooks env
-├── pyproject.toml               # Python package + entry points
 ├── icon.svg
 ├── skills/
 │   └── scooter-acme.md

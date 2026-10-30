@@ -1,13 +1,12 @@
 { lib, ... }:
+let
+  clib = import ../lib.nix { inherit lib; };
+in
 {
-  contribs.airtable = {
-    options.tokenSecret = lib.mkOption {
-      type = lib.types.submodule {
-        options = {
-          name = lib.mkOption { type = lib.types.str; description = "Secret name (in the broker namespace)."; };
-          key = lib.mkOption { type = lib.types.str; default = "AIRTABLE_TOKEN"; description = "Secret key holding the Airtable personal access token."; };
-        };
-      };
+  contribs.airtable = { config, ... }: {
+    options.tokenSecret = clib.mkSecretOption {
+      key = "AIRTABLE_TOKEN";
+      holds = "the Airtable personal access token";
       description = ''
         Secret holding an Airtable personal access token (pat…). Injected as
         AIRTABLE_TOKEN. The secret must exist in the broker namespace.
@@ -19,7 +18,10 @@
 
     config = {
       src = ./.;
-      services.broker.enable = true;
+      services.broker = {
+        enable = true;
+        env.AIRTABLE_TOKEN = config.tokenSecret;
+      };
       skills."scooter-airtable.md" = ./skills/scooter-airtable.md;
     };
   };

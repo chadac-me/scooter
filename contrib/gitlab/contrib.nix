@@ -1,6 +1,9 @@
 { lib, ... }:
+let
+  clib = import ../lib.nix { inherit lib; };
+in
 {
-  contribs.gitlab = {
+  contribs.gitlab = { config, ... }: {
     options.host = lib.mkOption {
       type = lib.types.str;
       default = "gitlab.com";
@@ -24,13 +27,9 @@
       '';
     };
 
-    options.tokenSecret = lib.mkOption {
-      type = lib.types.submodule {
-        options = {
-          name = lib.mkOption { type = lib.types.str; description = "Secret name (in the broker namespace)."; };
-          key = lib.mkOption { type = lib.types.str; default = "GITLAB_TOKEN"; description = "Secret key holding the GitLab token."; };
-        };
-      };
+    options.tokenSecret = clib.mkSecretOption {
+      key = "GITLAB_TOKEN";
+      holds = "the GitLab token";
       description = ''
         Secret holding the GitLab token (glpat-…). Injected as GITLAB_TOKEN. The
         secret must exist in the broker namespace.
@@ -53,9 +52,17 @@
           titles = [ "Comment on the GitLab MR" ];
         };
       };
-      services.broker.enable = true;
+      services.broker = {
+        enable = true;
+        env = {
+          GITLAB_HOST = config.host;
+          GITLAB_TOKEN = config.tokenSecret;
+          GITLAB_FORGE_POLICY = lib.mkIf (config.forgePolicy != "") config.forgePolicy;
+        };
+      };
       services.webhooks = {
         enable = true;
+        env.GITLAB_HOST = config.host;
         # Only this half reads Jira keys, and the grammar is jira's.
         pythonDeps = ps: [ ps.scooterContrib.jira ];
       };
