@@ -446,7 +446,7 @@ describe("management API", () => {
     const { status, json } = await call(api, "GET", "/models");
     expect(status).toBe(200);
     expect(json).toEqual({
-      default: "opus", available: ["opus", "sonnet"], hints: { sonnet: "fast/cheap" },
+      default: "opus", defaultProvider: null, available: ["opus", "sonnet"], hints: { sonnet: "fast/cheap" },
       providers: {}, // id -> provider tags offering it; {} when the deployment doesn't tag
       // id -> the providers it is the default for, so a UI marks "(default)" per group.
       defaultFor: {},
@@ -460,7 +460,7 @@ describe("management API", () => {
     });
     const { json } = await call(api, "GET", "/models");
     expect(json).toEqual({
-      default: "opus", available: ["opus"], hints: {}, providers: {}, defaultFor: {},
+      default: "opus", defaultProvider: null, available: ["opus"], hints: {}, providers: {}, defaultFor: {},
     });
   });
 
@@ -480,6 +480,29 @@ describe("management API", () => {
       opus: ["byoc"],
       sonnet: ["cloud"],
     });
+  });
+
+  it("GET /models resolves the default for the caller and conversation", async () => {
+    // A connected BYOC container serves the run, so its model is the default, not the floor's.
+    const resolveDefault = vi.fn(async () => ({ model: "claude-opus-5-5", provider: "byoc" }));
+    const api = createManagementApi({
+      sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {},
+      resolveUser: () => ({ id: "alice", anonymous: false }),
+      models: { default: "grok", available: ["grok", "claude-opus-5-5"], resolveDefault },
+    });
+    const { json } = await call(api, "GET", "/models?conversation=c1");
+    expect(resolveDefault).toHaveBeenCalledWith("alice", "c1");
+    expect(json).toMatchObject({ default: "claude-opus-5-5", defaultProvider: "byoc" });
+  });
+
+  it("GET /models keeps the static default when resolving fails", async () => {
+    const api = createManagementApi({
+      sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {},
+      models: { default: "grok", available: ["grok", "opus"], resolveDefault: async () => { throw new Error("controller down"); } },
+    });
+    const { status, json } = await call(api, "GET", "/models");
+    expect(status).toBe(200);
+    expect(json).toMatchObject({ default: "grok", defaultProvider: null });
   });
 
   it("POST /conversations/:id/suspend + resume flip status", async () => {

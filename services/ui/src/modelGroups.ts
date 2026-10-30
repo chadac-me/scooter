@@ -112,7 +112,10 @@ const PROVIDER_PRIORITY = ["byoc", "claude-code"] as const;
 export function defaultServingProvider(catalog: {
   default?: string | null;
   defaultFor?: Record<string, string[]>;
+  defaultProvider?: string | null;
 }): string | undefined {
+  // The server's answer wins; it knows whether the caller's BYOC is connected.
+  if (catalog.defaultProvider) return catalog.defaultProvider;
   const forDefault = catalog.default ? (catalog.defaultFor?.[catalog.default] ?? []) : [];
   return PROVIDER_PRIORITY.find((p) => forDefault.includes(p)) ?? forDefault[0];
 }

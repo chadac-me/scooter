@@ -308,6 +308,30 @@ export function resolveFloorModel(
   return defaultFor(cat, tag, conversationId) ?? resolveModel(undefined, config);
 }
 
+/** An unset conversation's model; connected BYOC outranks the floor. */
+export async function resolveUnsetDefault(
+  config: Pick<AgentHostConfig, "model" | "availableModels" | "modelCatalog"> & { fakeSandbox?: boolean },
+  byocConnected: ((owner: string) => Promise<boolean>) | undefined,
+  owner: string | undefined,
+  conversationId: string | undefined,
+): Promise<{ model: string | undefined; provider: string | undefined }> {
+  const cat = config.modelCatalog;
+  const offersByoc = cat?.models.some((m) => m.providers.includes("byoc"));
+  if (cat && offersByoc && owner && byocConnected && (await byocConnected(owner))) {
+    return { model: defaultFor(cat, "byoc", conversationId), provider: "byoc" };
+  }
+  const tag = floorTagOf(config);
+  const model = resolveFloorModel(undefined, config, tag, conversationId);
+  // An untagged floor names no group, so the UI keeps its own guess.
+  const tagged = cat?.models.some((m) => m.id === model && m.providers.includes(tag));
+  return { model, provider: tagged ? tag : undefined };
+}
+
+/** The catalog tag of the in-pod floor provider. */
+function floorTagOf(config: { fakeSandbox?: boolean }): "claude-code" | "goose" {
+  return process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox ? "claude-code" : "goose";
+}
+
 /** No-op provisioner for local UI testing (no cluster). */
 function createNoopProvisioner(): SandboxProvisioner {
   return {
@@ -1488,6 +1512,13 @@ export async function main(
         defaultFor: Object.fromEntries(
           config.modelCatalog.models.map((m) => [m.id, m.defaultFor]),
         ),
+        resolveDefault: (owner, conversationId) =>
+          resolveUnsetDefault(
+            config,
+            remoteAgentUi && (async (o: string) => (await remoteAgentUi.status(o)).connected),
+            owner,
+            conversationId,
+          ),
       },
       resolveUser,
       mcpHandler: mcpEndpoint ? (req, res, body) => mcpEndpoint.handle(req, res, body) : undefined,
@@ -1746,13 +1777,14 @@ export async function main(
     );
     const hookRunner = hookRunnerFor(conversationId, exec, owner);
     const hasPreToolHooks = (config.hooks ?? []).some((h) => h.event === "PreToolUse");
-    const usingClaude = process.env.GOOSE_PROVIDER === "claude-code" && !config.fakeSandbox;
+    const floorTag = floorTagOf(config);
+    const usingClaude = floorTag === "claude-code";
     // Per-conversation model override: GOOSE_MODEL (and its GOOSE_CONTEXT_LIMIT) in the
     // agent's launch env, limited to models the floor provider serves.
-    const floorTag = usingClaude ? "claude-code" : "goose";
     const resolved = resolveFloorModel(model, cfg, floorTag, conversationId);
     if (model && resolved !== model) {
-      hostLog.info("substituted the floor provider's model", {
+      // Debug: the floor may never serve this conversation's runs.
+      hostLog.debug("floor provider would launch with its own model", {
         conversation_id: conversationId,
         requested: model,
         model: resolved ?? null,
