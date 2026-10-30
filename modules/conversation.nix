@@ -14,6 +14,7 @@ let
   mkConversation = { id, sandboxImage ? cfg.sandboxImage, brokerAudience ? "agent-broker", overlayStore ? false, overlayStorage ? "20Gi"
     # Pool class, so the overlay PVC can bind a reserved PV.
   , overlayStorageClass ? (if cfg.warmStore.enable then cfg.warmStore.storageClass else null)
+  , workspaceStorageClass ? cfg.workspaceStorageClass
     # The default size preset rendered with requests == limits (Guaranteed QoS), including a GPU under its extended-resource name on both sides.
   , sandboxResources ? let
       defaultPreset =
@@ -92,7 +93,7 @@ let
           spec = {
             accessModes = [ "ReadWriteOnce" ];
             resources.requests.storage = "10Gi";
-          };
+          } // lib.optionalAttrs (workspaceStorageClass != null) { storageClassName = workspaceStorageClass; };
         }] ++ lib.optionals overlayStore [{
           # The overlay-store upper PVC, only when the overlay-store image is in use.
           metadata.name = "scooter-rw";
