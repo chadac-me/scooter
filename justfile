@@ -432,15 +432,15 @@ typecheck:
     npm -w @scooter/schema run build
     npm -w @scooter/svcauth run build
     npm -w services/agent-host run typecheck
-    npm -w ui run typecheck
+    npm -w services/ui run typecheck
     npm -w contrib/code-server/ahp run typecheck
     # The generated Drizzle schema (catches broken/drifted generation at the type level).
     npm -w @scooter/schema run typecheck
 
-# The contrib settings-tab import boundary (ui/eslint.config.js); the rest of the UI
+# The contrib settings-tab import boundary (services/ui/eslint.config.js); the rest of the UI
 # is not linted yet.
 lint: typecheck
-    npm -w ui run lint:contrib
+    npm -w services/ui run lint:contrib
 
 # Guard against a stale stubs.lock: re-evaluate stubs.nix and fail if any recorded .drv
 # differs. An in-repo stub (contrib/code-server/ahp) changes its .drv with every source edit, and a
@@ -451,18 +451,18 @@ check-stubs:
 
 # Guard against a stale package-lock.json: regenerate every lockfile
 # (package-lock-only) with the flake's npm and fail if anything changes; the
-# standalone ui/, services/agent-host/, byoc-controller and scooter-schema
+# standalone services/ui/, services/agent-host/, byoc-controller and scooter-schema
 # lockfiles are the ones buildNpmPackage uses.
 check-lockfiles:
     npm install --package-lock-only --workspaces --include-workspace-root
-    npm install --package-lock-only --prefix ui --workspaces=false
+    npm install --package-lock-only --prefix services/ui --workspaces=false
     npm install --package-lock-only --prefix services/agent-host --workspaces=false
     npm install --package-lock-only --prefix services/byoc-controller --workspaces=false
     npm install --package-lock-only --prefix lib/ts/scooter-schema --workspaces=false
     npm install --package-lock-only --prefix lib/ts/scooter-svcauth --workspaces=false
     npm install --package-lock-only --prefix contrib/files/viewer-ui --workspaces=false
     npm install --package-lock-only --prefix contrib/code-server/ahp --workspaces=false
-    @git diff --exit-code -- package-lock.json ui/package-lock.json services/agent-host/package-lock.json services/byoc-controller/package-lock.json lib/ts/scooter-schema/package-lock.json lib/ts/scooter-svcauth/package-lock.json contrib/files/viewer-ui/package-lock.json contrib/code-server/ahp/package-lock.json \
+    @git diff --exit-code -- package-lock.json services/ui/package-lock.json services/agent-host/package-lock.json services/byoc-controller/package-lock.json lib/ts/scooter-schema/package-lock.json lib/ts/scooter-svcauth/package-lock.json contrib/files/viewer-ui/package-lock.json contrib/code-server/ahp/package-lock.json \
       || (echo "❌ lockfile drift: a package.json changed without regenerating the lockfile. Run 'nix develop -c just check-lockfiles' and commit the result." && exit 1)
     @echo "✅ lockfiles are in sync with package.json"
 
@@ -481,7 +481,7 @@ check-npm-hashes:
         fail=1
       fi
     }
-    check ui/package-lock.json ui/default.nix
+    check services/ui/package-lock.json services/ui/default.nix
     check services/agent-host/package-lock.json services/agent-host/default.nix
     check services/byoc-controller/package-lock.json services/byoc-controller/default.nix
     check lib/ts/scooter-schema/package-lock.json lib/ts/scooter-schema/default.nix

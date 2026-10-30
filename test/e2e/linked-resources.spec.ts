@@ -81,7 +81,7 @@ test.describe("linked resources panel", () => {
 
     const threadId = await currentThreadId(page);
 
-    // Five links, the auto-collapse threshold (ui/src/LinkedResources.tsx).
+    // Five links, the auto-collapse threshold (services/ui/src/LinkedResources.tsx).
     for (let i = 1; i <= 5; i++) {
       const r = await request.post(`${base}/conversations/${threadId}/links`, {
         data: {

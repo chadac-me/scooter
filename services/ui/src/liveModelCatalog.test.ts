@@ -4,7 +4,7 @@
 //   kubectl get deploy -n agent-sandbox agent-host -o json \
 //     | jq -r '.spec.template.spec.containers[0].env[]
 //              | select(.name=="AGENT_MODELS_JSON") | .value' \
-//     | jq -S . > ui/src/__fixtures__/live-model-catalog.json
+//     | jq -S . > services/ui/src/__fixtures__/live-model-catalog.json
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import {

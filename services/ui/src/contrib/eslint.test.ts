@@ -1,5 +1,5 @@
 /**
- * The contrib-tab import boundary (ui/eslint.config.js) must actually reject. A broken
+ * The contrib-tab import boundary (services/ui/eslint.config.js) must actually reject. A broken
  * glob or regex would make `lint:contrib` pass everything, so this lints the fixture
  * that breaks the rule on purpose and asserts every escape is reported, and lints the
  * allowed imports and asserts none is.
@@ -9,10 +9,10 @@ import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import { ESLint } from "eslint";
 
-const repo = fileURLToPath(new URL("../../../", import.meta.url));
+const repo = fileURLToPath(new URL("../../../../", import.meta.url));
 
 // Run as lint:contrib does: from the repo root, with the ui config passed explicitly.
-const eslint = new ESLint({ cwd: repo, overrideConfigFile: "ui/eslint.config.js", ignore: false });
+const eslint = new ESLint({ cwd: repo, overrideConfigFile: "services/ui/eslint.config.js", ignore: false });
 
 /** The no-restricted-imports messages for `code` linted as if it were a tab at `path`. */
 async function restricted(code: string, path = "contrib/echo/ui/Probe.tsx"): Promise<string[]> {

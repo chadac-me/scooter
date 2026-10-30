@@ -161,7 +161,7 @@ async def test_a_refused_caller_never_reaches_a_tool():
 # --- the mount keeps names flat ---------------------------------------------------
 
 async def test_tool_names_are_flat_not_namespaced():
-    """The skills and ui/src/toolCallView.ts match on the flat tool name."""
+    """The skills and services/ui/src/toolCallView.ts match on the flat tool name."""
     async with _Mcp(_app(_build_provider(attached=True), authenticate=_ok_auth)) as mcp:
         names = await mcp.tool_names()
     assert "probe_conversation" in names

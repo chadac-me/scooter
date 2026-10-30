@@ -4,7 +4,7 @@
 # base64-encoded (4/3) inside the AG-UI JSON. The headroom (10% of the payload, at
 # least 1MiB) covers the envelope, the message text and the thread history the client
 # resends. Rounded up to whole MiB. The ui nginx (`client_max_body_size`) and the
-# ingress-nginx annotation both use it, and ui/image/nginx.nix defaults to the
+# ingress-nginx annotation both use it, and services/ui/image/nginx.nix defaults to the
 # value for the defaults (4 x 25MiB = 144m).
 { maxFileBytes, maxFilesPerMessage }:
 let

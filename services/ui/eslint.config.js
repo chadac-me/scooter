@@ -2,7 +2,7 @@
 // is not linted; widening this is adding globs to `files`.
 //
 // One rule: a contrib tab imports only @/components/*, @/lib/*, @/src/contrib/sdk and
-// ui/package.json deps, so the app's internals can change without breaking contribs.
+// services/ui/package.json deps, so the app's internals can change without breaking contribs.
 // The message names the fix, since whoever hits it is usually an agent writing a tab.
 import tseslint from "typescript-eslint";
 
@@ -27,8 +27,8 @@ export const contribImportRule = {
           regex: "^(@/src/(?!contrib/sdk(\\.js)?$)|\\.\\./|/)",
           message:
             "Contrib tabs may import only @/components/*, @/lib/*, @/src/contrib/sdk " +
-            "and ui/package.json deps. Need something else? Add it to the SDK " +
-            "(ui/src/contrib/sdk.ts).",
+            "and services/ui/package.json deps. Need something else? Add it to the SDK " +
+            "(services/ui/src/contrib/sdk.ts).",
         },
       ],
     },

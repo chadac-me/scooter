@@ -10,6 +10,7 @@
     ./conversation-router/module.nix
     ./db-migrator/module.nix
     ./remote-agent/module.nix
+    ./ui/module.nix
     ./scheduler/module.nix
     ./warm-store-controller/module.nix
     ./webhooks/module.nix

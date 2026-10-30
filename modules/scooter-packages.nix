@@ -30,7 +30,6 @@ in
     ../services/all-modules.nix
     ../lib/all-modules.nix
     ../pkgs/all-modules.nix
-    ../ui/module.nix
     ../contrib/module.nix
   ] ++ contribPackageModules;
 

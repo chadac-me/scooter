@@ -1,4 +1,4 @@
-// The deployed catalog as a fixture, refreshed per ui/src/__fixtures__.
+// The deployed catalog as a fixture, refreshed per services/ui/src/__fixtures__.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { catalogFromEnv, modelAllowedFor, defaultFor } from "../../src/agent/models.js";
 
 const RAW = readFileSync(
-  join(__dirname, "../../../../ui/src/__fixtures__/live-model-catalog.json"),
+  join(__dirname, "../../../ui/src/__fixtures__/live-model-catalog.json"),
   "utf8",
 );
 

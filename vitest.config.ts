@@ -96,14 +96,14 @@ export default defineConfig({
         },
       },
       {
-        // Match ui/vite.config.ts's "@" -> ui/ alias so tests can import the app's components.
+        // Match services/ui/vite.config.ts's "@" alias so tests can import the app's components.
         resolve: {
-          alias: { "@": fileURLToPath(new URL("./ui/", import.meta.url)) },
+          alias: { "@": fileURLToPath(new URL("./services/ui/", import.meta.url)) },
         },
         test: {
           name: "ui",
           // Contrib UI tests sit beside their cards in contrib/<name>/ui/.
-          include: ["ui/src/**/*.{test,spec}.{ts,tsx}", "contrib/*/ui/*.{test,spec}.{ts,tsx}"],
+          include: ["services/ui/src/**/*.{test,spec}.{ts,tsx}", "contrib/*/ui/*.{test,spec}.{ts,tsx}"],
           environment: "node",
         },
       },

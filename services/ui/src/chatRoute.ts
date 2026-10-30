@@ -6,7 +6,7 @@
  *
  * Embedding is gated by origin, not by anything here: nginx lets `/chat/<id>` be framed only by
  * that conversation's own sandbox origin (`<label>.<sandboxDomain>`) and every other UI route
- * by nothing (ui/image/nginx.nix). What this page adds is that it never leaves its one
+ * by nothing (services/ui/image/nginx.nix). What this page adds is that it never leaves its one
  * conversation: there is no thread switcher, the selection is pinned (sessionStore.pin), and
  * links open in a new tab rather than inside the host's iframe.
  */

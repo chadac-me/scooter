@@ -1,7 +1,7 @@
 /**
  * The supported surface for contrib UI code (contrib/<name>/ui/*.tsx: settings tabs
  * and interrupt renderers). Such a module may import only from here, @/components/*,
- * @/lib/* and ui/package.json deps; the ESLint rule in ui/eslint.config.js enforces it.
+ * @/lib/* and services/ui/package.json deps; the ESLint rule in services/ui/eslint.config.js enforces it.
  * Anything a module needs from the app belongs here, so
  * the app's internals can change without breaking contribs.
  */

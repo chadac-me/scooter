@@ -16,7 +16,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // Proxy the agent-host API to avoid CORS in dev; every prefix must mirror the prod nginx proxy in ui/image/nginx.nix, since a missing path falls through to the SPA.
+    // Proxy the agent-host API to avoid CORS in dev; every prefix must mirror the prod nginx proxy in services/ui/image/nginx.nix, since a missing path falls through to the SPA.
     proxy: {
       // The e2e fault proxy sets AGENT_HOST_STREAM_URL so only the integrity stream (this regex matches first) routes through it; absent, this points at the same agent-host.
       "^/conversations/[^/]+/events\\.integrity": {

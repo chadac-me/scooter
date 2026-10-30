@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "lint:contrib": "cd .. && eslint --config ui/eslint.config.js --max-warnings 0 \"contrib/*/ui/*.tsx\""
+    "lint:contrib": "cd ../.. && eslint --config services/ui/eslint.config.js --max-warnings 0 \"contrib/*/ui/*.tsx\""
   },
   "dependencies": {
     "@ag-ui/client": "^0.0.57",
