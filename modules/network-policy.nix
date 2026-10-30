@@ -24,6 +24,8 @@ let
   notSandbox = { matchExpressions = [{ key = sandboxLabel; operator = "DoesNotExist"; }]; };
 
   tcp = port: { protocol = "TCP"; inherit port; };
+  udp = port: { protocol = "UDP"; inherit port; };
+  anyPorts = map udp npcfg.udpPorts ++ map tcp npcfg.tcpPorts;
 
   # Named container ports, so a port change in the owning module cannot drift from here.
   brokerPorts = [ (tcp "http") (tcp "forge-proxy") ];
@@ -56,6 +58,26 @@ in
         directly. Extend this if your cluster uses public address space internally.
       '';
     };
+    udpPorts = mkOption {
+      type = types.listOf types.port;
+      default = [ 53 ];
+      example = [ 53 10053 ];
+      description = ''
+        UDP ports the sandbox may reach at any destination, including in-cluster
+        addresses. The default allows DNS. The policy is evaluated after kube-proxy's
+        DNAT, so list the resolver pods' *target* port, not the Service port (NixOS's
+        coredns addon listens on 10053).
+      '';
+    };
+    tcpPorts = mkOption {
+      type = types.listOf types.port;
+      default = [ 53 ];
+      example = [ 53 10053 ];
+      description = ''
+        TCP ports the sandbox may reach at any destination, including in-cluster
+        addresses. The default allows DNS over TCP. See `udpPorts` for the DNAT caveat.
+      '';
+    };
     extraEgress = mkOption {
       type = types.listOf types.attrs;
       default = [ ];
@@ -76,14 +98,13 @@ in
         # The agent-host and router dial the pod IP directly; nothing else needs to.
         ingress = [{ from = [{ podSelector = notSandbox; }]; }];
 
-        egress = [
-          # DNS to any destination: NodeLocal DNSCache answers on a host-network address
-          # that no podSelector matches.
-          { ports = [ { protocol = "UDP"; port = 53; } (tcp 53) ]; }
-          {
+        egress =
+          # Any destination: NodeLocal DNSCache's host-network IP matches no podSelector.
+          # Skipped when empty: a rule with no ports allows everything.
+          lib.optional (anyPorts != [ ]) { ports = anyPorts; }
+          ++ [{
             to = [{ ipBlock = { cidr = "0.0.0.0/0"; except = npcfg.internetExcept; }; }];
-          }
-        ]
+          }]
         ++ lib.optional cfg.broker.enable {
           to = [{ podSelector.matchLabels.app = "agent-broker"; }];
           ports = brokerPorts;

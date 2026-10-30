@@ -181,9 +181,11 @@ scooter.agent = {
 };
 ```
 
+Run `claude setup-token`, copy the `sk-ant-oat01-…` token it prints, then:
+
 ```bash
 kubectl -n scooter create secret generic agent-claude-code-token \
-  --from-literal=token="$(claude setup-token)"
+  --from-literal=token='sk-ant-oat01-…'
 ```
 
 <!-- TODO: the agent-host-claude image currently has to be pinned by hand

@@ -769,7 +769,18 @@ let
     ++ (if builtins.all (b: b.ipBlock.cidr == "0.0.0.0/0" && builtins.all (c: builtins.elem c b.ipBlock.except) [ "10.0.0.0/8" "100.64.0.0/10" "169.254.0.0/16" ]) npInternet && npInternet != [ ] then [ ]
         else [ "sandbox-isolation internet egress must except the pod/tailnet/metadata ranges" ])
     ++ (if ((evalPlatform { module = { lib, ... }: { imports = [ ./kubenix-config.nix ]; scooter.networkPolicy.enable = lib.mkForce false; }; }).config.kubernetes.resources.networkPolicies or { }) ? sandbox-isolation
-        then [ "networkPolicy.enable = false still renders sandbox-isolation" ] else [ ]);
+        then [ "networkPolicy.enable = false still renders sandbox-isolation" ] else [ ])
+    # The any-destination rule (no `to`) carries exactly udpPorts and tcpPorts.
+    ++ (let
+          np = platform.config.scooter.networkPolicy;
+          anyRules = builtins.filter (r: !(r ? to)) npEgress;
+          want = map (port: { protocol = "UDP"; inherit port; }) np.udpPorts
+            ++ map (port: { protocol = "TCP"; inherit port; }) np.tcpPorts;
+        in if builtins.length anyRules == 1 && (builtins.head anyRules).ports == want then [ ]
+           else [ "sandbox-isolation any-destination rule must allow networkPolicy.udpPorts/tcpPorts ${builtins.toJSON want}, got ${builtins.toJSON (map (r: r.ports or [ ]) anyRules)}" ])
+    # With no ports, the rule must vanish: an empty `ports` allows all egress.
+    ++ (if builtins.any (r: !(r ? to)) (((evalPlatform { module = { lib, ... }: { imports = [ ./kubenix-config.nix ]; scooter.networkPolicy = { udpPorts = lib.mkForce [ ]; tcpPorts = lib.mkForce [ ]; }; }; }).config.kubernetes.resources.networkPolicies.sandbox-isolation.spec.egress))
+        then [ "sandbox-isolation renders a port-less any-destination rule when udpPorts and tcpPorts are empty" ] else [ ]);
 
   # A contrib's approval declaration reaches the agent-host, and with aws off it does not.
   approvalsJson =

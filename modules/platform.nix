@@ -852,8 +852,10 @@ in
             When `agent.provider = "claude-code"`, the name of the Secret holding the
             long-lived subscription OAuth token (`claude setup-token`) under key `token`.
             Wired to CLAUDE_CODE_OAUTH_TOKEN on the agent-host. Requires the claude CLI in
-            the image (build .#agent-host-image-claude). Create the Secret out-of-band:
-            kubectl create secret generic <name> --from-literal=token=$(claude setup-token).
+            the image (build .#agent-host-image-claude). Create the Secret out-of-band
+            from the token `claude setup-token` prints (it is interactive; `$(...)`
+            captures its screen, not the token):
+            kubectl create secret generic <name> --from-literal=token=sk-ant-oat01-...
           '';
         };
       };
