@@ -40,6 +40,7 @@ pkgs.testers.runNixOSTest {
       "SCOOTER_SERVICES_ORIGIN=https://5a515e73.scooter.example.com"
     ];
     webServices.demo = { enable = true; port = 9911; displayName = "Demo"; command = "${demoServer}"; };
+    webServices.ssh.enable = true;
   };
 
   nodes.machine = { lib, ... }: {
@@ -165,5 +166,21 @@ pkgs.testers.runNixOSTest {
     origin.succeed("grep -qx 'SCOOTER_SERVICE_PREFIX=' /run/webservice-demo/conv.env")
     url = origin.succeed("scooter-service start demo | sed -n 's/^url: //p'").strip()
     assert url == "https://5a515e73.scooter.example.com/demo/", url
+
+    # 7. The built-in `ssh` takes any client key over its WebSocket, as root, with a
+    #    host key kept on the workspace PVC.
+    origin.succeed("systemctl start webservice-ssh.service")
+    origin.wait_for_open_port(2222)
+    origin.succeed("${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N \'\' -f /tmp/client")
+    ssh = (
+        "${pkgs.openssh}/bin/ssh -F none -i /tmp/client -o IdentitiesOnly=yes "
+        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        "-o 'ProxyCommand=${pkgs.websocat}/bin/websocat --binary ws://127.0.0.1:2222/ssh/' "
+    )
+    out = origin.succeed(ssh + "-l root sandbox 'id -un'")
+    assert out.strip() == "root", out
+    origin.succeed("test -s /workspace/.scooter/ssh/ssh_host_ed25519_key")
+    # Only root: the key command authorizes nobody else.
+    origin.fail(ssh + "-o BatchMode=yes -l nobody sandbox true")
   '';
 }
