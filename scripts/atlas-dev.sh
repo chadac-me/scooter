@@ -20,31 +20,10 @@ if [ -z "${ATLAS_DEV_NIX:-}" ] && { ! command -v initdb >/dev/null 2>&1 || ! com
 fi
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
-tmp="$(mktemp -d)"
-pgdata="$tmp/data"
-sock="$tmp/sock"
-mkdir -p "$sock"
-
-cleanup() {
-  pg_ctl -D "$pgdata" -m immediate stop >/dev/null 2>&1 || true
-  rm -rf "$tmp"
-}
-trap cleanup EXIT
-
 # A random high port avoids collisions with any local server / parallel runs.
 port=$(( (RANDOM % 20000) + 40000 ))
-
-# Keep stderr: initdb's root refusal is its only diagnostic.
-initdb -D "$pgdata" -U postgres --auth=trust >/dev/null
-pg_ctl -D "$pgdata" \
-  -o "-k $sock -c listen_addresses=127.0.0.1 -c port=$port" \
-  -l "$tmp/pg.log" start >/dev/null || { cat "$tmp/pg.log" >&2; exit 1; }
-
-# Wait until it accepts connections.
-for _ in $(seq 1 30); do
-  if psql -h 127.0.0.1 -p "$port" -U postgres -c 'SELECT 1' >/dev/null 2>&1; then break; fi
-  sleep 0.5
-done
+pg="$("$here/scripts/pg-ephemeral.sh" start "$port")"
+trap '"$here/scripts/pg-ephemeral.sh" stop "$pg"' EXIT
 createdb -h 127.0.0.1 -p "$port" -U postgres atlasdev
 
 export ATLAS_DEV_URL="postgres://postgres@127.0.0.1:$port/atlasdev?sslmode=disable&search_path=public"
