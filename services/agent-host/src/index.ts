@@ -30,7 +30,7 @@ import { createRemoteAgentUi } from "./acp/remoteAgentOneliner.js";
 import { createPgRemoteAgentStore } from "./acp/remoteAgentStore.js";
 import type { AcpProvider } from "./acp/provider.js";
 import { historyAfterCompaction, compactConversation } from "./session/compaction.js";
-import { createK8sProvisioner, type K8sProvisioner } from "./session/k8sProvisioner.js";
+import { createK8sProvisioner, parseVolumeClaims, type K8sProvisioner } from "./session/k8sProvisioner.js";
 import { createWarmStoreReserver } from "./session/warmStore.js";
 import type { SandboxResources } from "./session/resources.js";
 import { brokerAuthHeaders as sharedBrokerAuthHeaders } from "./session/brokerAuth.js";
@@ -503,7 +503,7 @@ export async function main(
         // cgroup-delegating runtime lets systemd PID 1 run non-privileged in a private
         // cgroup namespace.
         sandboxRuntimeClass: process.env.SANDBOX_RUNTIME_CLASS || undefined,
-        workspaceStorageClass: process.env.SANDBOX_WORKSPACE_STORAGE_CLASS || undefined,
+        volumeClaims: parseVolumeClaims(process.env.SANDBOX_VOLUME_CLAIMS),
         // SANDBOX_USER_NAMESPACE=1 runs the sandbox in its own user namespace with an unmasked /proc.
         sandboxUserNamespace: process.env.SANDBOX_USER_NAMESPACE === "1",
         // SANDBOX_RESOURCES is a JSON {requests,limits} override of the provisioner's

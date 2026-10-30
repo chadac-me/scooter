@@ -193,8 +193,8 @@ export interface K8sProvisionerOptions {
    *  systemd PID 1 a writable cgroup subtree without `privileged`; unset means the cluster default,
    *  and it is ignored for the generic image. */
   sandboxRuntimeClass?: string;
-  /** Workspace PVC StorageClass (SANDBOX_WORKSPACE_STORAGE_CLASS); unset means the cluster default. */
-  workspaceStorageClass?: string;
+  /** Sandbox PVCs keyed by claim name (SANDBOX_VOLUME_CLAIMS), each replacing the built-in claim. */
+  volumeClaims?: VolumeClaims;
   /** Backoff before each image-reconcile retry (default 3s, 6s). */
   reconcileRetryDelaysMs?: number[];
   /** Warm overlay pool: reserve on start, release on suspend. */
@@ -587,7 +587,7 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
         overlayStorageClass: opts.warmStore?.storageClass,
         pullPolicy: opts.sandboxPullPolicy,
         sandboxRuntimeClass: opts.sandboxRuntimeClass,
-        workspaceStorageClass: opts.workspaceStorageClass,
+        volumeClaims: opts.volumeClaims,
         userNamespace: opts.sandboxUserNamespace ?? false,
         resources,
         overlay: await loadManifestOverlay(),
@@ -842,6 +842,28 @@ export function createK8sProvisioner(opts: K8sProvisionerOptions): K8sProvisione
   };
 }
 
+/** One sandbox PVC template, as scooter.sandbox.volumes renders it. */
+export interface VolumeClaim {
+  metadata?: Record<string, unknown>;
+  spec: Record<string, unknown>;
+}
+export type VolumeClaims = Record<string, VolumeClaim>;
+
+/** Parse SANDBOX_VOLUME_CLAIMS; unset is no override, and a malformed value throws so a
+ *  bad deploy fails at startup rather than creating wrong claims. */
+export function parseVolumeClaims(raw: string | undefined): VolumeClaims | undefined {
+  if (!raw) return undefined;
+  const parsed: unknown = JSON.parse(raw);
+  const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  if (!isObj(parsed)) throw new Error("SANDBOX_VOLUME_CLAIMS must be a JSON object keyed by claim name");
+  for (const [name, c] of Object.entries(parsed)) {
+    if (!isObj(c) || !isObj(c.spec) || (c.metadata !== undefined && !isObj(c.metadata))) {
+      throw new Error(`SANDBOX_VOLUME_CLAIMS.${name} must be { metadata?, spec } objects`);
+    }
+  }
+  return parsed as VolumeClaims;
+}
+
 /** The Sandbox CR body, a mirror of modules/conversation.nix. */
 export function sandboxManifest(
   id: string,
@@ -861,8 +883,8 @@ export function sandboxManifest(
     overlayStorage?: string;
     /** Overlay PVC StorageClass; unset means the cluster default. */
     overlayStorageClass?: string;
-    /** Workspace PVC StorageClass; unset means the cluster default. */
-    workspaceStorageClass?: string;
+    /** Claims keyed by name, each replacing the built-in `workspace` / `scooter-rw` claim. */
+    volumeClaims?: VolumeClaims;
     /** imagePullPolicy for the sandbox container; default "Always", with "IfNotPresent"/"Never" for
      *  a side-loaded local cluster that has no registry to pull from. */
     pullPolicy?: "Always" | "IfNotPresent" | "Never";
@@ -891,6 +913,10 @@ export function sandboxManifest(
   // The overlay store's writable upper: a disk-backed PVC at /nix/.scooter-rw.
   const overlayStore = deploy.overlayStore ?? false;
   const overlayStorage = deploy.overlayStorage ?? "20Gi";
+  const claim = (name: string, fallback: VolumeClaim): VolumeClaim => {
+    const given = deploy.volumeClaims?.[name];
+    return given ? { metadata: { ...given.metadata, name }, spec: given.spec } : fallback;
+  };
   const userNamespace = systemdImage && (deploy.userNamespace ?? false);
   const base = {
     apiVersion: `${GROUP}/${VERSION}`,
@@ -1002,25 +1028,21 @@ export function sandboxManifest(
         },
       },
       volumeClaimTemplates: [
-        {
+        claim("workspace", {
           metadata: { name: "workspace" },
-          spec: {
-            accessModes: ["ReadWriteOnce"],
-            resources: { requests: { storage } },
-            ...(deploy.workspaceStorageClass ? { storageClassName: deploy.workspaceStorageClass } : {}),
-          },
-        },
+          spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage } } },
+        }),
         // The overlay-store upper PVC, persisting runtime builds across suspend/resume.
         ...(overlayStore
           ? [
-              {
+              claim("scooter-rw", {
                 metadata: { name: "scooter-rw" },
                 spec: {
                   accessModes: ["ReadWriteOnce"],
                   resources: { requests: { storage: overlayStorage } },
                   ...(deploy.overlayStorageClass ? { storageClassName: deploy.overlayStorageClass } : {}),
                 },
-              },
+              }),
             ]
           : []),
       ],

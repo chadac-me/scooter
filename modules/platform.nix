@@ -260,7 +260,7 @@ in
   # ./testing.nix is absent on purpose (test-only overrides are opted into by a test
   # manifest), and the contribs arrive via `contribModules`, each declaring its own
   # `contribs.<name>` options and manifests with contrib/spec.nix as their schema.
-  imports = [ kubenix.modules.k8s ./images.nix ./scooter-packages.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./contrib-db.nix ./contrib-env.nix ./broker.nix ./sandbox-pod.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./network-policy.nix ./legacy-state-migration.nix ./event-backfill.nix ./skills ]
+  imports = [ kubenix.modules.k8s ./images.nix ./scooter-packages.nix ./db-spec.nix ./postgres.nix ./db-migrate.nix ./contrib-db.nix ./contrib-env.nix ./broker.nix ./sandbox-pod.nix ./sandbox-volumes.nix ./webhooks.nix ./byoc.nix ./scheduler.nix ./conversation-controller.nix ./warm-store-controller.nix ./network-policy.nix ./legacy-state-migration.nix ./event-backfill.nix ./skills ]
     ++ contribModules;
 
   # Declared only so a definition on the old root reaches `legacyRoot`'s message; no
@@ -388,16 +388,6 @@ in
       default = cfg.images.agent-sandbox-os.ref.fullUrl;
       defaultText = literalExpression "config.scooter.images.agent-sandbox-os.ref.fullUrl";
       description = "OCI ref of the generic Nix sandbox image.";
-    };
-    workspaceStorageClass = mkOption {
-      type = types.nullOr types.str;
-      default = null;
-      example = "gp3-crun";
-      description = ''
-        StorageClass for each sandbox's /workspace PVC; null uses the cluster
-        default. Set it when the default class can't attach to sandbox nodes.
-        Applies to new conversations only: an existing claim keeps its class.
-      '';
     };
     sandboxRuntimeClass = mkOption {
       type = types.nullOr types.str;
@@ -1550,8 +1540,10 @@ in
                   # run non-privileged in a private cgroup namespace; unset means the
                   # cluster default.
                   { name = "SANDBOX_RUNTIME_CLASS"; value = cfg.sandboxRuntimeClass; }
-                ++ lib.optional (cfg.workspaceStorageClass != null)
-                  { name = "SANDBOX_WORKSPACE_STORAGE_CLASS"; value = cfg.workspaceStorageClass; }
+                ++ [
+                  # The sandbox PVCs, built from scooter.sandbox.volumes.
+                  { name = "SANDBOX_VOLUME_CLAIMS"; value = builtins.toJSON cfg.sandbox.renderedVolumeClaims; }
+                ]
                 ++ lib.optional cfg.sandboxUserNamespace
                   { name = "SANDBOX_USER_NAMESPACE"; value = "1"; }
                 ++ lib.optional (cfg.retentionMaxAgeMs > 0)

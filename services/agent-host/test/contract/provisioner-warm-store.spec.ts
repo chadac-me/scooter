@@ -2,7 +2,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 
-import { createK8sProvisioner, sandboxManifest, RELEASE_LABEL } from "../../src/session/k8sProvisioner.js";
+import { createK8sProvisioner, parseVolumeClaims, sandboxManifest, RELEASE_LABEL } from "../../src/session/k8sProvisioner.js";
 import { createWarmStoreReserver, type ReserveFn } from "../../src/session/warmStore.js";
 
 type Call = [string, ...unknown[]];
@@ -139,16 +139,52 @@ describe("overlay PVC storage class", () => {
     expect(vct({}).find((v) => v.metadata.name === "scooter-rw")?.spec.storageClassName).toBeUndefined();
   });
 
-  it("puts only the workspace claim on the workspace class", () => {
-    const t = vct({ workspaceStorageClass: "gp3-crun" });
-    expect(t.find((v) => v.metadata.name === "workspace")?.spec.storageClassName).toBe("gp3-crun");
-    expect(t.find((v) => v.metadata.name === "scooter-rw")?.spec.storageClassName).toBeUndefined();
+});
+
+describe("volumeClaims (SANDBOX_VOLUME_CLAIMS)", () => {
+  type Claim = { metadata: { name: string; labels?: Record<string, string> }; spec: Record<string, unknown> };
+  const vct = (deploy: Record<string, unknown>) =>
+    (sandboxManifest("abc", "conv-abc", "sa", "img:t", "ns", "aud", "10Gi", true, { overlayStore: true, ...deploy }) as {
+      spec: { volumeClaimTemplates: Claim[] };
+    }).spec.volumeClaimTemplates;
+  const named = (t: Claim[], n: string) => t.find((v) => v.metadata.name === n);
+
+  it("replaces only the claim it names, keeping the claim name", () => {
+    const t = vct({
+      overlayStorageClass: "warm-store-retain",
+      volumeClaims: {
+        workspace: { metadata: { name: "ignored", labels: { a: "b" } }, spec: { storageClassName: "gp3", resources: { requests: { storage: "50Gi" } } } },
+      },
+    });
+    expect(named(t, "workspace")).toEqual({
+      metadata: { name: "workspace", labels: { a: "b" } },
+      spec: { storageClassName: "gp3", resources: { requests: { storage: "50Gi" } } },
+    });
+    expect(named(t, "scooter-rw")?.spec.storageClassName).toBe("warm-store-retain");
   });
 
-  it("keeps each claim on its own class when both are set", () => {
-    const t = vct({ workspaceStorageClass: "gp3-crun", overlayStorageClass: "warm-store-retain" });
-    expect(t.find((v) => v.metadata.name === "workspace")?.spec.storageClassName).toBe("gp3-crun");
-    expect(t.find((v) => v.metadata.name === "scooter-rw")?.spec.storageClassName).toBe("warm-store-retain");
+  it("drops the overlay claim when the overlay store is off, even if configured", () => {
+    const t = vct({ overlayStore: false, volumeClaims: { "scooter-rw": { spec: { storageClassName: "x" } } } });
+    expect(t.map((v) => v.metadata.name)).toEqual(["workspace"]);
+  });
+});
+
+describe("parseVolumeClaims", () => {
+  it("is undefined when unset", () => {
+    expect(parseVolumeClaims(undefined)).toBeUndefined();
+    expect(parseVolumeClaims("")).toBeUndefined();
+  });
+
+  it("parses claims keyed by name", () => {
+    expect(parseVolumeClaims('{"workspace":{"metadata":{"name":"workspace"},"spec":{"storageClassName":"gp3"}}}')).toEqual({
+      workspace: { metadata: { name: "workspace" }, spec: { storageClassName: "gp3" } },
+    });
+  });
+
+  it("throws on a malformed value", () => {
+    expect(() => parseVolumeClaims("[]")).toThrow(/keyed by claim name/);
+    expect(() => parseVolumeClaims('{"workspace":{}}')).toThrow(/workspace/);
+    expect(() => parseVolumeClaims("{nope")).toThrow();
   });
 });
 
