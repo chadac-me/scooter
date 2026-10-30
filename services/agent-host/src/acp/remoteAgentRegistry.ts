@@ -6,6 +6,7 @@
 
 import { formatError, logger } from "../log.js";
 import type { AcpClient } from "./client.js";
+import type { AguiEvent } from "../bridge.js";
 import type { ExecBackend } from "../types.js";
 import type { AcpProvider, RunContext } from "./provider.js";
 import { createRemoteAcpClient } from "./remoteAcpClient.js";
@@ -24,6 +25,22 @@ export const HUMAN_TRIGGER_SOURCES: ReadonlySet<string> = new Set(["ui", "slack"
 /** Whether this run is human-initiated and so eligible for a BYO remote agent. */
 export function isHumanTrigger(source: string | undefined): boolean {
   return source === undefined || HUMAN_TRIGGER_SOURCES.has(source);
+}
+
+/** Platform-injected follow-up sources; they inherit their cause's trigger. */
+export const DERIVED_SOURCES: ReadonlySet<string> = new Set(["resume", "subagent", "background job", "parent-clarification"]);
+
+/** Whether the log's latest direct trigger was human; none fails closed. */
+export function humanTriggerFromLog(events: readonly AguiEvent[]): boolean {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type === "TEXT_MESSAGE_START" && e.role === "user") return true;
+    // Hook notes are run output, not prompts.
+    if (e.type === "SYSTEM_MESSAGE" && e.source !== "hook" && !DERIVED_SOURCES.has(e.source)) {
+      return isHumanTrigger(e.source);
+    }
+  }
+  return false;
 }
 
 /** One connected remote agent: its live transport, bound to the owner it registered as. */
@@ -134,12 +151,13 @@ export function createRemotePersonalizedProvider(deps: {
     priority: deps.priority ?? 10,
     async eligible(ctx: RunContext): Promise<boolean> {
       const hasOwner = ctx.owner !== undefined;
-      const human = isHumanTrigger(ctx.source);
+      const human = ctx.humanInitiated ?? isHumanTrigger(ctx.source);
       if (!hasOwner || !human) {
         log.info("SKIP — falling to the cloud floor", {
           conversation_id: ctx.conversationId,
           owner: ctx.owner,
           source: ctx.source,
+          inherited: ctx.humanInitiated !== undefined,
           has_owner: hasOwner,
           human_trigger: human,
         });

@@ -20,6 +20,8 @@ export interface RunContext {
   owner?: string;
   /** The trigger source of this run ("ui", "slack", "github", "gitlab", "scheduler", "webhook", "nudge", ...); undefined means a plain interactive prompt. */
   source?: string;
+  /** Inherited human trigger for derived runs; overrides `source` when set. */
+  humanInitiated?: boolean;
   /** The resolved model for this run. */
   model?: string;
   /** The provider the user explicitly picked; undefined = priority decides. */

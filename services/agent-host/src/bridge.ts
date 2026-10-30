@@ -250,6 +250,8 @@ export interface PromptInput {
   /** Set when the platform injected this prompt: the agent receives a system-message
    *  decoration and the turn persists as a SYSTEM_MESSAGE event. */
   source?: string;
+  /** The inherited trigger, passed to RunContext.humanInitiated. */
+  humanInitiated?: boolean;
 }
 
 /** How a priority prompt preempts the running turn: "timeout" waits priorityInterruptMs
@@ -302,7 +304,7 @@ export interface SessionBridge {
 
   /** Remove every queued item and return it for persistence across a bridge teardown,
    *  rejecting each drained prompt() and emitting a clearing QUEUE_UPDATED. */
-  drainQueue(): Array<{ text: string; priority: number }>;
+  drainQueue(): Array<{ text: string; priority: number; source?: string; humanInitiated?: boolean }>;
 
   /** True when a PRIORITY_INTERRUPT item is waiting, which tells a provider's pre-tool
    *  gate to deny the next tool so the run quiesces to a boundary. */
@@ -1440,6 +1442,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
     conversationId,
     owner: deps.owner,
     source: input.source,
+    humanInitiated: input.humanInitiated,
     model: deps.model,
     provider: deps.pickedProvider,
   });
@@ -1779,7 +1782,12 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       }
       // Preserve both for replay; the in-flight item is re-enqueued on revive, so a completed
       // turn simply re-asks.
-      return [...inFlight, ...waiting].map((q) => ({ text: q.input.text, priority: q.priority }));
+      return [...inFlight, ...waiting].map((q) => ({
+        text: q.input.text,
+        priority: q.priority,
+        source: q.input.source,
+        humanInitiated: q.input.humanInitiated,
+      }));
     },
 
     async stop() {
