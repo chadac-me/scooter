@@ -43,7 +43,7 @@ def test_github_webhook_invalid_signature(client):
         assert resp.status_code == 401
 
 
-def test_github_webhook_rejects_all_without_a_secret(client):
+def test_github_webhook_rejects_all_without_a_secret(client, caplog):
     with patch.object(gh, "settings") as mock_settings:
         mock_settings.github_enabled = True
         mock_settings.github_webhook_secret = ""
@@ -53,6 +53,7 @@ def test_github_webhook_rejects_all_without_a_secret(client):
             json={},
         )
         assert resp.status_code == 401
+        assert "GITHUB_WEBHOOK_SECRET is not set" in caplog.text
 
 
 def test_importing_the_handler_arms_the_owner_lookup_and_shapes():

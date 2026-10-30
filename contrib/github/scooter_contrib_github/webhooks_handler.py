@@ -34,6 +34,7 @@ router = APIRouter()
 def _verify_signature(body: bytes, signature: str) -> bool:
     # Fail closed: an unset secret must not admit forged events.
     if not settings.github_webhook_secret:
+        logger.warning("GITHUB_WEBHOOK_SECRET is not set; rejecting the unverifiable delivery", extra=_C)
         return False
     if not signature.startswith("sha256="):
         return False

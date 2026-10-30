@@ -27,7 +27,7 @@ def test_slack_webhook_disabled(client):
         assert resp.json()["status"] == "disabled"
 
 
-def test_slack_webhook_rejects_all_without_a_secret(client):
+def test_slack_webhook_rejects_all_without_a_secret(client, caplog):
     with patch.object(slack_h, "settings") as mock_settings:
         mock_settings.slack_enabled = True
         mock_settings.slack_signing_secret = ""
@@ -37,6 +37,7 @@ def test_slack_webhook_rejects_all_without_a_secret(client):
             json={"type": "event_callback"},
         )
         assert resp.status_code == 401
+        assert "SLACK_SIGNING_SECRET is not set" in caplog.text
 
 
 def test_slack_event_deduped_by_event_id(client):

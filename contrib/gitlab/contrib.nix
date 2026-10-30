@@ -31,10 +31,7 @@ in
       type = lib.types.bool;
       default = config.enable;
       defaultText = lib.literalExpression "config.contribs.gitlab.enable";
-      description = ''
-        Enable the GitLab webhook handler (/webhooks/gitlab). Set GITLAB_WEBHOOK_SECRET in the
-        webhooks provider Secret: without it every delivery gets a 401.
-      '';
+      description = "Enable webhooks.";
     };
 
     options.tokenSecret = clib.mkSecretOption {

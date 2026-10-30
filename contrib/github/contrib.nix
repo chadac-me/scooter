@@ -44,10 +44,7 @@ in
         type = lib.types.bool;
         default = config.enable;
         defaultText = lib.literalExpression "config.contribs.github.enable";
-        description = ''
-          Enable the GitHub webhook handler (/webhooks/github). Set GITHUB_WEBHOOK_SECRET in the
-          webhooks provider Secret: without it every delivery gets a 401.
-        '';
+        description = "Enable webhooks.";
       };
 
       privateKeySecret = clib.mkSecretOption {
