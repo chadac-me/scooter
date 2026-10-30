@@ -18,6 +18,7 @@ from .store import PermissionStore
 from .config import settings
 from .objects import aws_account_object
 from scooter_broker_lib.authz import NoopAuthorizer, user_object
+from scooter_broker_lib.autolink import router_headers
 from scooter_broker_lib.context import BrokerContext
 from scooter_broker_lib.registry import register_provider
 from scooter_broker_lib.types import Provider
@@ -77,7 +78,7 @@ async def notify_host(req) -> None:
         last = attempt == attempts
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(url, json=payload)
+                resp = await client.post(url, json=payload, headers=router_headers())
         except httpx.HTTPError as e:
             if last:
                 logger.error(
