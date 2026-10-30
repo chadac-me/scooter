@@ -10,12 +10,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scooter_broker_lib.testing import create_schema, sqlite_config
 from scooter_broker_lib.types import Identity
 from scooter_contrib_shares import store as shares_store
 from scooter_contrib_shares.store import ShareFile, ShareStore
 from scooter_contrib_shares.transport import _DEFAULT_FAVICON_LINK, create_shares_router
-
-from conftest import create_schema, sqlite_config
 
 
 def _identity(conv: str) -> Identity:

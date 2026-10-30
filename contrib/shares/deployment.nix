@@ -1,4 +1,4 @@
-# shares' deployment half, reading contribs.shares.
+# shares' deployment half: option renames, legacy broker tables, ingress-derived env.
 #
 # `{ config, lib, ... }` only, and nothing built: an external deployer imports
 # modules/platform.nix with no `pkgs`, so forcing a package here is an eval error.
@@ -35,12 +35,12 @@ in
       };
     })
 
-    (lib.mkIf (cfg.broker.enable && ccfg.enable) {
-      scooter.broker.extraEnv =
-        lib.optional (publicBaseUrl != "")
-          { name = "SHARES_PUBLIC_BASE_URL"; value = publicBaseUrl; }
-        ++ lib.optional (frameAncestors != "")
-          { name = "SHARES_FRAME_ANCESTORS"; value = frameAncestors; };
-    })
+    # Rendered by modules/contrib-env.nix with the rest of the contrib env.
+    {
+      contribs.shares.services.broker.env = {
+        SHARES_PUBLIC_BASE_URL = lib.mkIf (publicBaseUrl != "") publicBaseUrl;
+        SHARES_FRAME_ANCESTORS = lib.mkIf (frameAncestors != "") frameAncestors;
+      };
+    }
   ];
 }
