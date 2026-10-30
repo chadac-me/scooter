@@ -42,11 +42,9 @@ in
 
       webhooksEnabled = lib.mkOption {
         type = lib.types.bool;
-        default = false;
-        description = ''
-          Enable the GitHub webhook handler (/webhooks/github). Set GITHUB_WEBHOOK_SECRET in the
-          webhooks provider Secret: unset, deliveries are accepted unsigned.
-        '';
+        default = config.enable;
+        defaultText = lib.literalExpression "config.contribs.github.enable";
+        description = "Enable webhooks.";
       };
 
       privateKeySecret = clib.mkSecretOption {

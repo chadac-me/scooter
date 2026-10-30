@@ -100,15 +100,10 @@ reviews are forwarded to it, and so are CI results on its PRs (`workflow_run`: a
     A plain repository or org webhook works too (Settings → Webhooks, content type
     `application/json`, the same URL, secret and events).
 
-3. **Enable the handler:**
-
-    ```nix
-    contribs.github.webhooksEnabled = true;
-    ```
-
-    The handler uses the contrib's App credentials to recognize the agent's own
-    comments and ignore them. Without an `appId` it falls back to ignoring every bot
-    comment that doesn't mention the agent (`ignoreBotAuthors`). To ignore other noisy bots, list them:
+3. **Ignore the agent's own comments.** The handler uses the contrib's App credentials
+    to recognize the agent's own comments and ignore them. Without an `appId` it falls
+    back to ignoring every bot comment that doesn't mention the agent
+    (`ignoreBotAuthors`). To ignore other noisy bots, list them:
 
     ```nix
     scooter.webhooks.ignoreUsernames = [ "dependabot[bot]" "renovate[bot]" ];
@@ -131,15 +126,9 @@ label to one. Later comments on a linked issue or MR are forwarded.
     - **Secret token:** the `GITLAB_WEBHOOK_SECRET` value
     - **Triggers:** *Comments*, *Issues events* and *Merge request events*
 
-3. **Enable the handler:**
-
-    ```nix
-    contribs.gitlab.webhooksEnabled = true;
-    ```
-
-    GitLab payloads don't mark bot accounts, so add the agent's own GitLab user (the
-    owner of `contribs.gitlab`'s token) and any other bots to `ignoreUsernames`, or the
-    agent will hear its own comments:
+3. **Ignore the agent's own comments.** GitLab payloads don't mark bot accounts, so
+    add the agent's own GitLab user (the owner of `contribs.gitlab`'s token) and any
+    other bots to `ignoreUsernames`, or the agent will hear its own comments:
 
     ```nix
     scooter.webhooks.ignoreUsernames = [ "scooter-bot" ];
@@ -171,13 +160,7 @@ mention event is used, so `mentionPattern` doesn't apply.
    `SLACK_SIGNING_SECRET`, and the bot token as `SLACK_BOT_TOKEN`. The webhooks service
    needs its own copy of the token to read threads and files.
 
-3. **Enable the handler:**
-
-    ```nix
-    contribs.slack.webhooksEnabled = true;
-    ```
-
-4. **Test it:** invite the app to a channel and mention it.
+3. **Test it:** invite the app to a channel and mention it.
 
 ## Jira
 
@@ -218,7 +201,7 @@ kubectl -n scooter logs deploy/agent-webhooks -f
 
 | Symptom | Likely cause |
 |---|---|
-| Provider shows a 401 | The signing secret in the Secret doesn't match the provider's, or the pod hasn't restarted since you changed it |
+| Provider shows a 401 | The signing secret is missing from the Secret or doesn't match the provider's, or the pod hasn't restarted since you changed it |
 | Provider shows a 302 or a login page | An auth proxy is in front of the webhooks host |
 | `{"status": "disabled"}` | The contrib's `webhooksEnabled` option is off |
 | Delivered, but nothing happens | The comment doesn't contain `mentionPattern`, or its author is in `ignoreUsernames` |

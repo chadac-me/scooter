@@ -74,7 +74,7 @@ def _env(existing: str | None = None):
     with (
         # The trigger pattern is bound by the conftest.
         patch.object(settings, "slack_enabled", True),
-        patch.object(settings, "slack_signing_secret", ""),
+        patch.object(slack_h, "_verify_slack_signature", return_value=True),
         patch("webhooks.app.db") as app_db,
         patch.object(slack_h, "db") as db,
         patch.object(slack_h, "send_message", side_effect=spy_send),
