@@ -23,6 +23,7 @@
     ./kagi/contrib.nix
     ./marimo/contrib.nix
     ./personalization/contrib.nix
+    ./shares/contrib.nix
     ./slack/contrib.nix
   ];
 }

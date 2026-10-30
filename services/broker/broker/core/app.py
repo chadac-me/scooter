@@ -37,20 +37,6 @@ def create_app() -> FastAPI:
 
     # Sandbox provisioning lives in the agent-host (session/k8sProvisioner.ts), not here.
 
-    # Static shares served at /s/<uuid>/, mounted top-level when enabled.
-    shares_store = None
-    shares_router = None
-    if settings.shares_enabled:
-        from ..shares.routes import create_shares_router
-        from ..shares.store import ShareStore
-
-        shares_store = ShareStore(settings.store_config(dsn=settings.shares_db_dsn))
-        shares_router = create_shares_router(
-            shares_store,
-            public_base_url=settings.shares_public_base_url,
-            frame_ancestors=settings.shares_frame_ancestors,
-        )
-
     # The agent-facing MCP server aggregates every enabled provider's tools behind one
     # endpoint with its own authentication, and is built before the lifespan that composes its own.
     mcp_app = None
@@ -93,9 +79,6 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="kubenix-agent-manager broker", lifespan=lifespan)
     install_db_unavailable_handler(app)
-
-    if shares_router is not None:
-        app.include_router(shares_router)
 
     # Deployment-default modules at GET /modules/default.tar.gz, unauthenticated since the
     # pod fetches them at boot and module Nix is not a secret.
@@ -143,7 +126,7 @@ def create_app() -> FastAPI:
         for transport in provider.transports:
             app.include_router(
                 transport.routes(provider, authed=authenticate),
-                prefix=f"/{provider.name}",
+                prefix="" if provider.mount_at_root else f"/{provider.name}",
             )
         logger.info(
             "mounted provider",

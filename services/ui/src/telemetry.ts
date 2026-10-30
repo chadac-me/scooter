@@ -62,6 +62,8 @@ export function classifyRoute(url: string): string {
   // among the routes we simply do not classify.
   if (!url) return "unknown";
   const path = url.replace(/^https?:\/\/[^/]+/, "").replace(/\?.*$/, "");
+  // A contrib route can end in anything, so it is matched before the suffixes below.
+  if (path.includes("/contrib-api/")) return "contrib-api";
   if (path.endsWith("/messages")) return "send-message";
   if (path.includes("events.integrity")) return "stream";
   if (path.endsWith("/conversations/events")) return "list-stream";
@@ -70,7 +72,6 @@ export function classifyRoute(url: string): string {
   if (path.endsWith("/links")) return "links";
   if (path.endsWith("/history")) return "history";
   if (path.endsWith("/tail")) return "tail";
-  if (path.endsWith("/shares")) return "shares";
   if (path.includes("/web-services")) return "web-services";
   if (path.endsWith("/resources") || path.endsWith("/size")) return "sandbox-resources";
   if (path.endsWith("/resume")) return "resume";

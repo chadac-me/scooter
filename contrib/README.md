@@ -308,7 +308,7 @@ asserts it still covers all of them.
 
 `modules/broker.nix` declares only the broker's OWN options (`enable`, `image`,
 `testProvider`, `agentHostUrl`, `extraEnv`, `extraVolumes`, `extraVolumeMounts`,
-`podAnnotations`, `serviceAccountAnnotations`, `mcp`, `shares`, `fga`); no
+`podAnnotations`, `serviceAccountAnnotations`, `mcp`, `fga`); no
 integration's options live there, and nothing under `scooter.broker` is named after
 a contrib.
 
@@ -442,6 +442,14 @@ with two search tools listed, that docstring is all the agent has to choose on.
 A reply tool for an attachable resource should also be **attachment-gated** with
 `@gate`, so it is unlisted in a conversation it could not act in. Search needs no
 gate: there is no resource to be attached to.
+
+### Where a provider's routes mount (`mount_at_root`)
+
+The broker mounts each transport's router under `/<provider name>`. A provider that
+must own a path outside its prefix sets `Provider(mount_at_root=True)`, and its
+transports then declare full paths. `contrib/shares` does this, because the share
+URLs it already published are `/s/<uuid>/` and must keep resolving. Core routes
+(`/health`, `/link`, `/mcp`, `/modules`) are registered first and win a clash.
 
 ### Extending the preset
 
@@ -616,8 +624,9 @@ ui = {
 };
 ```
 
-`enable` defaults to true as soon as `source`, `tools`, `settingsTabs` or `interruptRenderers` is set,
-so a declared row cannot silently render nothing.
+`enable` defaults to true as soon as `source`, `tools`, `settingsTabs`,
+`interruptRenderers`, `panel` or `markdownFences` is set, so a declared row cannot
+silently render nothing.
 
 #### Settings tabs (`ui.settingsTabs`)
 
@@ -679,6 +688,49 @@ ui.interruptRenderers."ask-user.questions".entry = "ui/QuestionCard.tsx";
   inside either; it caps `data` at 64 KiB and `result` at 16 KiB. An ACP agent raises
   one with `_meta["scooter.dev/interrupt"] = { kind, data }` on `requestPermission`,
   and reads the answer from `_meta["scooter.dev/interrupt-result"]`.
+
+#### Right-panel tabs (`ui.panel`)
+
+A contrib can add one tab to the conversation's right-hand panel, after Sandbox,
+Approvals and Subagents:
+
+```nix
+ui.panel = {
+  label = "Shares";
+  entry = "ui/Panel.tsx";
+  api = true;                    # open the conversation relay to this contrib's broker
+};
+```
+
+- **The module.** Same file and import rules as a settings tab. Its default export
+  takes `PanelProps`: `setCount(n)` sets the tab's badge. It stays mounted while the
+  tab is hidden, so the badge stays current. `useConversationKey()` changes when the
+  user opens another conversation, for the module's effect deps.
+- **Talking to the broker.** With `api = true`, `conversationFetch("<name>", "<rest>")`
+  reaches the broker at `/<name>/conversation/<id>/<rest>`, after the agent-host has
+  checked the user may see that conversation. It resolves null before the
+  conversation exists on the server. `api` needs `services.broker.enable`.
+- **Failure is contained.** A missing entry, a chunk that fails to load or a render
+  that throws shows an error card in that tab only.
+
+`contrib/shares/ui/Panel.tsx` is the example.
+
+#### Fenced blocks in messages (`ui.markdownFences`)
+
+A contrib can draw a fenced code block of its own language in assistant messages:
+
+```nix
+ui.markdownFences."scooter-embed".entry = "ui/Embed.tsx";
+```
+
+- **Language.** Lowercase letters, digits and `-`. Two enabled contribs may not claim
+  one language; `contrib/conversation-ui.nix` throws at eval on a clash or an `entry`
+  that does not exist. A language no enabled contrib claims renders as code.
+- **The module.** Same file and import rules as a settings tab. Its default export
+  takes `MarkdownFenceProps`: `body`, the text inside the fence. The agent wrote
+  that text, so validate it before you use it.
+- **Failure is contained.** A block that fails to load or throws shows an error card
+  in place of that block only.
 
 #### Tools that wait on the user (`agent.blockingTools`)
 

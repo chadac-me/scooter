@@ -61,13 +61,38 @@ let
     ++ (if builtins.any (e: e.name == "DUCKDUCKGO_ENABLED" && (e.value or "") == "true") brokerEnv then [ ]
         else [ "broker.env.DUCKDUCKGO_ENABLED (duckduckgo.enable = true not wired, so the keyless provider stays off)" ]);
 
-  # Static shares: the broker must carry SHARES_ENABLED and a derived public base URL.
+  # Static shares: the broker must carry a public base URL derived from ingress.host.
   sharesEnvVal = name: let m = builtins.filter (e: e.name == name) brokerEnv; in if m == [ ] then "" else (builtins.head m).value;
   sharesProblems =
-    (if builtins.any (e: e.name == "SHARES_ENABLED") brokerEnv then [ ]
-     else [ "broker.env.SHARES_ENABLED (shares.enable = true not wired)" ])
-    ++ (if builtins.match "https://.+" (sharesEnvVal "SHARES_PUBLIC_BASE_URL") != null then [ ]
-        else [ "broker.env.SHARES_PUBLIC_BASE_URL (should derive from ingress.host)" ]);
+    (if builtins.match "https://.+" (sharesEnvVal "SHARES_PUBLIC_BASE_URL") != null then [ ]
+        else [ "broker.env.SHARES_PUBLIC_BASE_URL (should derive from ingress.host)" ])
+    ++ map (t: "migrate.env.DB_COPIES lacks contrib_shares:${t}:broker — published shares would be left behind in broker")
+      (builtins.filter (t: !hasWord "contrib_shares:${t}:broker" (toString (contribEnvValue migrateEnv "DB_COPIES")))
+        [ "static_shares" "static_share_versions" ])
+    ++ (if contribEnvValue legacySharesEnv "SHARES_PUBLIC_BASE_URL" == "https://legacy.example.com" then [ ]
+        else [ "scooter.broker.shares.* no longer reaches contribs.shares — an existing deployment's config is dropped" ])
+    ++ (if brokerPathsAt res == [ ] then [ ]
+        else [ "ingress routes /s/ to the broker with the UI on — the UI's nginx proxies it" ])
+    ++ (if brokerPathsAt (uiOffRes { }) == [ "/s/" ] then [ ]
+        else [ "ui-off: the Ingress lacks /s/ -> agent-broker, so share links 404" ])
+    ++ (if brokerPathsAt (uiOffRes ({ lib, ... }: { contribs.shares.enable = lib.mkForce false; })) == [ ] then [ ]
+        else [ "ui-off, shares disabled: the Ingress still routes /s/ to the broker" ]);
+  # The main Ingress's paths that go to the broker.
+  brokerPathsAt = r: map (p: p.path) (builtins.filter (p: p.backend.service.name == "agent-broker")
+    (builtins.concatMap (rule: rule.http.paths) r.ingresses.agent-host.spec.rules));
+  uiOffRes = extra: (evalPlatform {
+    module = { lib, ... }: {
+      imports = [ ./kubenix-config.nix extra ];
+      scooter.ui.enable = lib.mkForce false;
+    };
+  }).config.kubernetes.resources;
+  # The pre-contrib option path still configures the contrib.
+  legacySharesEnv = deployEnv (evalPlatform {
+    module = { ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.broker.shares.publicBaseUrl = "https://legacy.example.com";
+    };
+  }).config.kubernetes.resources "agent-broker";
 
   # deployTools.configFiles must render its ConfigMap and tell the agent-host to mount it.
   hostEnv =
@@ -548,7 +573,7 @@ let
       imports = [ ./kubenix-config.nix ];
       # mkForce the attr so the config goes with it.
       contribs.aws = lib.mkForce { enable = false; };
-      scooter.broker.shares.enable = lib.mkForce false;
+      contribs.shares = lib.mkForce { enable = false; };
     };
   };
   awsOffBrokerEnv =
@@ -1177,6 +1202,27 @@ let
     else (if off.settingsTabs ? echo then [ "the UI manifest has the echo settings tab while echo is disabled" ] else [ ])
       ++ (if on.settingsTabs ? echo then [ ] else [ "enabling echo did not put its settings tab in the UI's mounted manifest" ]);
 
+  # shares' Shares tab and scooter-embed fence reach the mounted manifest and the relay
+  # only while it is enabled, and a clashing fence or a missing entry fails the eval.
+  sharesOff = { contribs.shares.enable = nixpkgsLib.mkForce false; };
+  convUiThrow = extra: !(builtins.tryEval (builtins.deepSeq (uiManifestOf extra) true)).success;
+  conversationUiProblems =
+    let on = uiManifestOf { }; off = uiManifestOf sharesOff; in
+    (if (on.panels.shares.entry or null) == "shares/ui/Panel.tsx" then [ ]
+     else [ "the UI manifest has no shares panel at shares/ui/Panel.tsx while shares is enabled" ])
+    ++ (if (on.markdownFences."scooter-embed".entry or null) == "shares/ui/Embed.tsx" then [ ]
+        else [ "the UI manifest has no scooter-embed fence at shares/ui/Embed.tsx while shares is enabled" ])
+    ++ (if (off.panels or { }) ? shares || (off.markdownFences or { }) ? "scooter-embed"
+        then [ "the UI manifest has shares' panel or fence while shares is disabled" ] else [ ])
+    ++ (if ((userApiOf hostEnv).shares.brokerPrefix or null) == "/shares" then [ ]
+        else [ "shares' panel sets api = true but host.env.CONTRIB_USER_API_JSON has no /shares row" ])
+    ++ (if userApiOf (hostEnvOf sharesOff) ? shares
+        then [ "host.env.CONTRIB_USER_API_JSON has a shares row while shares is disabled" ] else [ ])
+    ++ (if convUiThrow { contribs.echo.enable = nixpkgsLib.mkForce true; contribs.echo.ui.markdownFences."scooter-embed".entry = "ui/SettingsTab.tsx"; } then [ ]
+        else [ "two contribs claiming one fence language rendered" ])
+    ++ (if convUiThrow { contribs.shares.ui.panel.entry = nixpkgsLib.mkForce "ui/Missing.tsx"; } then [ ]
+        else [ "a panel whose entry does not exist rendered" ]);
+
   # scooter.uploads: the body-limit formula, and that every layer gets it. The example
   # sets 50MB x 4 on an nginx-class Ingress.
   uploadBody = import ../modules/upload-max-body.nix;
@@ -1231,7 +1277,7 @@ let
     ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
         else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
 
-  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named; a scooter.packages override reaches exactly the images that use it\n"

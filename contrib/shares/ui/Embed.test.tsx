@@ -1,5 +1,5 @@
 /**
- * The scooter-embed parser and ShareEmbed render (pure): UUID extraction from
+ * The scooter-embed parser and Embed render (pure): UUID extraction from
  * uuid/path/url, width/height clamping and centering, and the security invariants
  * that the iframe src is a /s/<uuid>/ path and it is sandboxed without allow-same-origin.
  */
@@ -8,13 +8,7 @@ import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  ShareEmbed,
-  parseShareEmbed,
-  extractShareUuid,
-  preprocessShareEmbeds,
-  SHARE_EMBED_TOKEN,
-} from "./ShareEmbed.js";
+import Embed, { parseShareEmbed, extractShareUuid } from "./Embed.js";
 
 const UUID = "7f3c2a1e-1b2c-4d5e-8f90-abcdef012345";
 
@@ -54,47 +48,17 @@ describe("parseShareEmbed", () => {
   });
 });
 
-describe("ShareEmbed render", () => {
+describe("Embed render", () => {
   it("renders a sandboxed iframe whose src is the share path, not external", () => {
-    const html = renderToStaticMarkup(createElement(ShareEmbed, { body: `share: ${UUID}` }));
+    const html = renderToStaticMarkup(createElement(Embed, { body: `share: ${UUID}` }));
     expect(html).toContain(`/s/${UUID}/`);
     expect(html).toContain('sandbox="allow-scripts allow-popups"');
     expect(html).not.toContain("allow-same-origin");
   });
   it("shows an error (not an iframe) for a bad spec", () => {
-    const html = renderToStaticMarkup(createElement(ShareEmbed, { body: "share: nope" }));
+    const html = renderToStaticMarkup(createElement(Embed, { body: "share: nope" }));
     expect(html).toContain('data-testid="share-embed-error"');
     expect(html).not.toContain("<iframe");
   });
 });
 
-describe("preprocessShareEmbeds", () => {
-  // assistant-ui reads a fence language via /language-(\w+)/, which stops at a hyphen, so the opening fence must be rewritten to the hyphen-free SHARE_EMBED_TOKEN.
-  const fence = "```";
-
-  it("rewrites the opening ```scooter-embed fence to the hyphen-free token", () => {
-    const src = `${fence}scooter-embed\nshare: ${UUID}\n${fence}`;
-    const out = preprocessShareEmbeds(src);
-    expect(out).toContain(`${fence}${SHARE_EMBED_TOKEN}\n`);
-    expect(out).not.toContain(`${fence}scooter-embed`);
-    // body + closing fence are untouched
-    expect(out).toContain(`share: ${UUID}`);
-    expect(out.endsWith(fence)).toBe(true);
-  });
-
-  it("rewrites the fence even after a preceding paragraph (the agent-reply shape)", () => {
-    const src = `some text (exit 0):\n${fence}scooter-embed\nshare: ${UUID}\n${fence}`;
-    expect(preprocessShareEmbeds(src)).toContain(`${fence}${SHARE_EMBED_TOKEN}\n`);
-  });
-
-  it("does NOT touch `scooter-embed` that isn't an opening fence", () => {
-    // inline mention, and the literal word inside prose / inline code
-    const src = "talking about scooter-embed and `scooter-embed` inline";
-    expect(preprocessShareEmbeds(src)).toBe(src);
-  });
-
-  it("leaves other fenced languages alone", () => {
-    const src = `${fence}scooter\nnot an embed\n${fence}`;
-    expect(preprocessShareEmbeds(src)).toBe(src);
-  });
-});

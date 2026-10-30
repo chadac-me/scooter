@@ -100,6 +100,8 @@ export default defineConfig({
         resolve: {
           alias: { "@": fileURLToPath(new URL("./services/ui/", import.meta.url)) },
         },
+        // contrib/*/ui/ sits outside services/ui/tsconfig.json, so set its JSX runtime here.
+        esbuild: { jsx: "automatic" },
         test: {
           name: "ui",
           // Contrib UI tests sit beside their cards in contrib/<name>/ui/.

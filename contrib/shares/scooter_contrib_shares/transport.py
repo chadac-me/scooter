@@ -1,4 +1,4 @@
-"""The static-shares HTTP API: publish a bundle, serve it at /s/<uuid>/.
+"""The shares transport: publish a bundle, serve it at /s/<uuid>/.
 
     POST   /shares            publish a new share (authed), minting a UUID and url
     PUT    /shares/{uuid}     update an existing share (authed, owner-only) with a new version
@@ -32,14 +32,16 @@ import mimetypes
 import posixpath
 import re
 import zipfile
+from dataclasses import dataclass, field
 from typing import Callable
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import Response
 
+from scooter_broker_lib.types import AuthDependency, Identity, Provider
+from scooter_broker_lib.user import user_identity
+
 from .store import ShareFile, ShareStore
-from ..core.auth import authenticate
-from scooter_broker_lib.types import Identity
 
 logger = logging.getLogger(__name__)
 
@@ -185,10 +187,10 @@ def _resolve_entry_point(files: dict[str, ShareFile], requested: str | None) -> 
 def create_shares_router(
     store: ShareStore,
     *,
+    authed: AuthDependency,
     public_base_url: str = "",
     frame_ancestors: str = "'self'",
     now: Callable[[], str] = lambda: "",
-    is_admin: Callable[[Identity], bool] = lambda identity: identity.is_approver,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -206,7 +208,7 @@ def create_shares_router(
 
     # --- management API (authed, owner-scoped) ------------------------------
     @router.post("/shares", status_code=201)
-    async def publish(body: dict = Body(...), identity: Identity = Depends(authenticate)):
+    async def publish(body: dict = Body(...), identity: Identity = Depends(authed)):
         owner = identity.conversation_id
         if not owner:
             raise HTTPException(status_code=403, detail="a conversation identity is required to publish")
@@ -223,7 +225,7 @@ def create_shares_router(
         return {**share.summary(), "url": _url(share.uuid), "entry_point": entry_point}
 
     @router.put("/shares/{uuid}")
-    async def update(uuid: str, body: dict = Body(...), identity: Identity = Depends(authenticate)):
+    async def update(uuid: str, body: dict = Body(...), identity: Identity = Depends(authed)):
         owner = identity.conversation_id
         if not owner:
             raise HTTPException(status_code=403, detail="a conversation identity is required")
@@ -241,19 +243,22 @@ def create_shares_router(
             raise HTTPException(status_code=403, detail=str(e)) from e
         return {**share.summary(), "url": _url(share.uuid), "entry_point": entry_point}
 
-    @router.get("/shares")
-    async def list_shares(
-        identity: Identity = Depends(authenticate), conversation_id: str = "",
-    ):
-        # Only an admin caller (the agent-host relaying a UI request) may list another conversation's shares.
-        if conversation_id and conversation_id != identity.conversation_id and not is_admin(identity):
-            raise HTTPException(status_code=403, detail="not permitted to list another conversation's shares")
-        owner = conversation_id or identity.conversation_id
+    async def _listing(owner: str) -> dict:
         shares = await store.list_by_owner(owner)
         return {"shares": [{**s.summary(), "url": _url(s.uuid)} for s in shares]}
 
+    @router.get("/shares")
+    async def list_shares(identity: Identity = Depends(authed)):
+        return await _listing(identity.conversation_id)
+
+    # The UI's Shares tab, through the agent-host's conversation relay, which has
+    # already checked the user may see this conversation.
+    @router.get("/shares/conversation/{conversation_id}/list")
+    async def list_for_conversation(conversation_id: str, _user: str = Depends(user_identity(authed))):
+        return await _listing(conversation_id)
+
     @router.get("/shares/{uuid}")
-    async def get_share(uuid: str, identity: Identity = Depends(authenticate)):
+    async def get_share(uuid: str, identity: Identity = Depends(authed)):
         share = await store.get(uuid)
         if share is None or share.owner != identity.conversation_id:
             # A share the caller does not own is indistinguishable from missing.
@@ -267,7 +272,7 @@ def create_shares_router(
         }
 
     @router.delete("/shares/{uuid}", status_code=204)
-    async def delete_share(uuid: str, identity: Identity = Depends(authenticate)):
+    async def delete_share(uuid: str, identity: Identity = Depends(authed)):
         try:
             ok = await store.delete(uuid, owner=identity.conversation_id)
         except PermissionError:
@@ -309,3 +314,21 @@ def create_shares_router(
         return await _serve(uuid, None, "")
 
     return router
+
+
+@dataclass
+class Shares:
+    """The transport the provider mounts at the broker root, so its paths are absolute."""
+
+    store: ShareStore
+    public_base_url: str = ""
+    frame_ancestors: str = "'self'"
+    name: str = field(default="shares", init=False)
+
+    def routes(self, provider: Provider, authed: AuthDependency) -> APIRouter:
+        return create_shares_router(
+            self.store,
+            authed=authed,
+            public_base_url=self.public_base_url,
+            frame_ancestors=self.frame_ancestors,
+        )

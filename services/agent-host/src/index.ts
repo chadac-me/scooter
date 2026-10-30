@@ -23,7 +23,6 @@ import {
   raiseApprovalInterrupt,
   fetchPendingApprovals,
   type ApprovalContrib,
-  fetchConversationShares,
 } from "./api/management.js";
 import { createSessionManager, isPlaceholderTitle, shortId } from "./session/manager.js";
 import { createRemoteAgentRegistry, createRemotePersonalizedProvider } from "./acp/remoteAgentRegistry.js";
@@ -1454,17 +1453,6 @@ export async function main(
       // The current sandbox size for the Sandbox tab, read off the CR by shortId.
       sandboxResources: k8sProvisioner
         ? (id: string) => k8sProvisioner.getSize(shortId(id))
-        : undefined,
-      // The conversation's published static shares, keyed by shortId since the broker owns
-      // shares by the short id.
-      listShares: (process.env.BROKER_URL ?? "").trim()
-        ? async (id: string) =>
-            fetchConversationShares(
-              (process.env.BROKER_URL ?? "").replace(/\/$/, ""),
-              shortId(id),
-              await brokerAuthHeaders(),
-              (status) => hostLog.warn("broker /shares list failed", { conversation_id: id, status }),
-            )
         : undefined,
       // The named sandbox size presets and the default, for the UI dropdown and the agent's
       // size discovery.

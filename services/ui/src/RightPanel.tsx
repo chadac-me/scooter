@@ -1,9 +1,10 @@
 /**
- * RightPanel: the single right-side panel hosting the Sandbox, Approvals,
- * Subagents and Shares tabs. Approvals is a gate the user cannot miss, so a new
- * interrupt auto-focuses that tab. (Queued messages render inline in the thread.) Each tab carries a
- * count badge, and a tab with an empty backing list is still selectable. The tab
- * bodies are existing components, e.g. InterruptList (data-testid `interrupt-panel`).
+ * RightPanel: the single right-side panel hosting the Sandbox, Approvals and
+ * Subagents tabs, then one tab per enabled contrib that declares a `ui.panel`.
+ * Approvals is a gate the user cannot miss, so a new interrupt auto-focuses that tab.
+ * (Queued messages render inline in the thread.) Each tab carries a count badge, and a
+ * tab with an empty backing list is still selectable. The tab bodies are existing
+ * components, e.g. InterruptList (data-testid `interrupt-panel`).
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -12,13 +13,15 @@ import { mobileNav, useDrawer } from "./mobileNav.js";
 import { InterruptList } from "./InterruptPanel.js";
 import { SandboxPanelView, useSandboxStatus } from "./SandboxPanel.js";
 import { SubagentsPanel, subagentsOf } from "./SubagentsPanel.js";
-import { PublishedShares, useShares } from "./PublishedShares.js";
+import { contribPanels } from "./contribManifest.js";
+import { ContribPanelBody } from "./contribPanels.js";
 import { useSessions } from "./sessions.js";
 import { useConversationInterrupts } from "./RuntimeProvider.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-type Tab = "sandbox" | "approvals" | "subagents" | "shares";
+// A contrib panel's tab is keyed by its contrib name.
+type Tab = "sandbox" | "approvals" | "subagents" | `contrib:${string}`;
 
 function TabButton({
   active,
@@ -75,8 +78,20 @@ export function RightPanel() {
   const nInterrupts = interrupts.length;
   const subagents = subagentsOf(sessions, currentId);
   const nSubagents = subagents.length;
-  // `configured` is false when the broker path is not wired, which hides the Shares tab.
-  const { shares: publishedShares, configured: sharesConfigured } = useShares();
+  const panels = Object.values(contribPanels()).sort(
+    (a, b) => a.order - b.order || a.contrib.localeCompare(b.contrib),
+  );
+  const [panelCounts, setPanelCounts] = useState<Record<string, number | null>>({});
+  // One setter per contrib, stable across renders, so a panel's effects do not re-run.
+  const counters = useRef(new Map<string, (n: number | null) => void>());
+  const counterFor = (contrib: string) => {
+    let set = counters.current.get(contrib);
+    if (!set) {
+      set = (n) => setPanelCounts((c) => (c[contrib] === n ? c : { ...c, [contrib]: n }));
+      counters.current.set(contrib, set);
+    }
+    return set;
+  };
 
   // Sandbox is the leftmost, always-present tab, so it is the default.
   const [active, setActive] = useState<Tab>("sandbox");
@@ -141,14 +156,15 @@ export function RightPanel() {
             count={nSubagents}
           />
         )}
-        {sharesConfigured && (
+        {panels.map((p) => (
           <TabButton
-            active={active === "shares"}
-            onClick={() => setActive("shares")}
-            label="Shares"
-            count={publishedShares.length}
+            key={p.contrib}
+            active={active === `contrib:${p.contrib}`}
+            onClick={() => setActive(`contrib:${p.contrib}`)}
+            label={p.label}
+            count={panelCounts[p.contrib] ?? 0}
           />
-        )}
+        ))}
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
@@ -174,9 +190,13 @@ export function RightPanel() {
           )
         ) : active === "subagents" ? (
           <SubagentsPanel />
-        ) : (
-          <PublishedShares shares={publishedShares} />
-        )}
+        ) : null}
+        {/* Mounted while hidden, so a panel keeps its badge count current. */}
+        {panels.map((p) => (
+          <div key={p.contrib} hidden={active !== `contrib:${p.contrib}`} data-testid={`contrib-panel-${p.contrib}`}>
+            <ContribPanelBody panel={p} setCount={counterFor(p.contrib)} />
+          </div>
+        ))}
       </div>
     </aside>
   );

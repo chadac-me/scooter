@@ -1,7 +1,7 @@
 /**
  * The agent-host HTTP client: an @ag-ui/client HttpAgent against POST /agui plus
  * typed fetch helpers for the management API (conversations, models, links, web
- * services, sandbox sizing, scheduled tasks, shares, remote agents).
+ * services, sandbox sizing, scheduled tasks, remote agents).
  */
 
 import { HttpAgent } from "@ag-ui/client";
@@ -296,65 +296,6 @@ export async function setConversationVisibility(
   } catch (e) {
     console.warn(`[client] setConversationVisibility ${conversationId} failed:`, e);
     return null;
-  }
-}
-
-/** One published static share as the Shares tab shows it, mapped to camelCase by loadShares. */
-export interface ShareView {
-  uuid: string;
-  url: string;
-  description: string;
-  visibility: string;
-  latestVersion: number;
-  updatedAt: string;
-}
-
-export interface SharesResult {
-  /** False when the broker path is not wired, which hides the tab. */
-  configured: boolean;
-  shares: ShareView[];
-}
-
-/** List the static pages this conversation has published, never throwing (501 = not configured). */
-export async function loadShares(
-  config: AgentHostConfig,
-  conversationId: string,
-): Promise<SharesResult> {
-  try {
-    const res = await fetch(
-      `${config.baseUrl.replace(/\/$/, "")}/conversations/${encodeURIComponent(conversationId)}/shares`,
-      { headers: authHeaders(config) },
-    );
-    if (res.status === 501) return { configured: false, shares: [] };
-    if (!res.ok) {
-      console.warn(`[client] loadShares ${conversationId}: HTTP ${res.status}`);
-      return { configured: true, shares: [] };
-    }
-    const body = (await res.json()) as {
-      configured?: boolean;
-      shares?: Array<{
-        uuid: string;
-        url: string;
-        description?: string;
-        visibility?: string;
-        latest_version?: number;
-        updated_at?: string;
-      }>;
-    };
-    return {
-      configured: body.configured ?? true,
-      shares: (body.shares ?? []).map((s) => ({
-        uuid: s.uuid,
-        url: s.url,
-        description: s.description ?? "",
-        visibility: s.visibility ?? "public",
-        latestVersion: s.latest_version ?? 1,
-        updatedAt: s.updated_at ?? "",
-      })),
-    };
-  } catch (e) {
-    console.warn(`[client] loadShares ${conversationId} failed:`, e);
-    return { configured: true, shares: [] };
   }
 }
 

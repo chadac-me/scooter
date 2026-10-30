@@ -152,14 +152,8 @@ let
           return 503 '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="3"><title>Scooter</title><style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#111;color:#eee}div{text-align:center}p{color:#999}</style></head><body><div><h1>Scooter is updating</h1><p>This service is briefly unavailable while the platform redeploys.<br>Retrying automatically&hellip;</p></div></body></html>';
         }
 
-        # Static shares go to the broker, proxied same-origin so the broker stays
-        # cluster-internal; the UUID is the capability and the broker 404s when
-        # shares is disabled.
-        location /s/ {
-          proxy_pass ''${BROKER_URL};
-          proxy_set_header Host $host;
-          proxy_buffering on;
-        }
+        # Enabled contribs' public broker paths (services.broker.publicPaths).
+        ''${BROKER_PUBLIC_LOCATIONS}
 
         # SPA fallback to index.html for client routes.
         location / {
@@ -187,7 +181,7 @@ let
     AGENT_HOST_SERVER="$agent_host_authority"
     AGENT_HOST_PROXY="$agent_host_scheme://agent_host"
     export AGENT_HOST_SERVER AGENT_HOST_PROXY
-    # Where nginx forwards /s/.
+    # Where nginx forwards the contribs' broker public paths.
     : "''${BROKER_URL:=http://agent-broker:8080}"
     # Decide telemetry before the placeholder default below is applied.
     if [ -n "''${OTEL_COLLECTOR_URL:-}" ]; then TELEMETRY_ENABLED=true; else TELEMETRY_ENABLED=false; fi
@@ -218,7 +212,15 @@ let
       CONTRIB_MANIFEST=${builtinManifest}
     fi
     export CONTRIB_MANIFEST
-    ${pkgs.gettext}/bin/envsubst '$AGENT_HOST_SERVER $AGENT_HOST_PROXY $BROKER_URL $OTEL_COLLECTOR_URL $TELEMETRY_ENABLED $TELEMETRY_SAMPLE_RATIO $CHAT_FRAME_ANCESTORS $CONTRIB_MANIFEST $UPLOAD_MAX_BODY' \
+    # One proxied location per public path the manifest lists; none without a broker.
+    BROKER_PUBLIC_LOCATIONS=""
+    if [ -n "''${BROKER_URL:-}" ]; then
+      BROKER_PUBLIC_LOCATIONS="$(${pkgs.jq}/bin/jq -r --arg up "$BROKER_URL" \
+        '(.brokerPublicPaths // [])[] | "location \(.) { proxy_pass \($up); proxy_set_header Host $host; proxy_buffering on; }"' \
+        "$CONTRIB_MANIFEST")"
+    fi
+    export BROKER_PUBLIC_LOCATIONS
+    ${pkgs.gettext}/bin/envsubst '$AGENT_HOST_SERVER $AGENT_HOST_PROXY $BROKER_URL $OTEL_COLLECTOR_URL $TELEMETRY_ENABLED $TELEMETRY_SAMPLE_RATIO $CHAT_FRAME_ANCESTORS $CONTRIB_MANIFEST $UPLOAD_MAX_BODY $BROKER_PUBLIC_LOCATIONS' \
       < ${confTemplate} > "$1"
   '';
 in

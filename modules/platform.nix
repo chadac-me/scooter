@@ -204,14 +204,24 @@ let
   # the image's built-in one (services/ui/image/nginx.nix). The image is built with its
   # repo's contrib list, so without this a contrib the deployment left off would still
   # show its settings tab, tool cards and source rows, and its tab would 404.
-  uiContribManifest = builtins.toJSON (import ../contrib/ui-manifest-data.nix { inherit lib; }
-    (lib.filterAttrs (_: c: c.enable) config.contribs));
+  uiContribData = import ../contrib/ui-manifest-data.nix { inherit lib; }
+    (lib.filterAttrs (_: c: c.enable) config.contribs);
+  uiContribManifest = builtins.toJSON uiContribData;
 
-  # The contribs whose settings tab opened the /contrib-api relay (`api = true`), and
-  # where the agent-host reaches their broker routes. Read off the declarations, so a
+  # Without the UI's nginx to proxy them, contribs' public paths route at the Ingress.
+  ingressBrokerPaths = lib.optionals (!cfg.ui.enable && cfg.broker.enable)
+    (map (path: {
+      inherit path;
+      pathType = "Prefix";
+      backend.service = { name = "agent-broker"; port.number = 8080; };
+    }) uiContribData.brokerPublicPaths);
+
+  # The contribs whose settings tab or panel opened the /contrib-api relay (`api = true`),
+  # and where the agent-host reaches their broker routes. Read off the declarations, so a
   # disabled contrib contributes no row and its relay answers 404.
   contribUserApi = lib.mapAttrs (name: _: { brokerPrefix = "/${name}"; })
-    (lib.filterAttrs (_: c: c.enable && c.ui.enable && lib.any (t: t.api) c.ui.settingsTabs) config.contribs);
+    (lib.filterAttrs (_: c: c.enable && c.ui.enable
+      && (lib.any (t: t.api) c.ui.settingsTabs || (c.ui.panel != null && c.ui.panel.api))) config.contribs);
   # Skill DIRECTORIES ship SKILL.md to the agent as `<name>.md`, with a note naming
   # the sandbox copy (modules/skills/sandbox.nix) after the frontmatter,
   # since a skill resolves its scripts/ against "the directory it was loaded from"
@@ -1697,9 +1707,8 @@ in
                   # user through /contrib-api, name -> broker prefix.
                   { name = "CONTRIB_USER_API_JSON"; value = builtins.toJSON contribUserApi; }
                 ++ lib.optionals cfg.broker.enable [
-                  # BROKER_URL and the projected broker token for the approve/deny relay
-                  # and the shares/links queries the agent-host makes on a conversation's
-                  # behalf.
+                  # BROKER_URL and the projected broker token for the approve/deny and
+                  # /contrib-api relays, and the links queries the agent-host makes.
                   { name = "BROKER_URL"; value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080"; }
                   { name = "BROKER_TOKEN_PATH"; value = "/var/run/secrets/broker/token"; }
                 ] ++ lib.optionals overlayCmNeeded [
@@ -1792,8 +1801,8 @@ in
                   # Per-model price table -> cost derivation (AGENT_PRICING_FILE).
                   { name = "pricing"; mountPath = "/etc/agent-sandbox/pricing"; readOnly = true; }
                 ++ lib.optional cfg.broker.enable
-                  # The agent-host's own broker token for the approve/deny relay and the
-                  # shares/links queries it makes on a conversation's behalf.
+                  # The agent-host's own broker token for the approve/deny and /contrib-api
+                  # relays, and the links queries it makes.
                   { name = "broker-token"; mountPath = "/var/run/secrets/broker"; readOnly = true; }
                 ++ [
                   { name = "conversation-router-token"; mountPath = "/var/run/secrets/conversation-router"; readOnly = true; }
@@ -1995,8 +2004,7 @@ in
                 name = "AGENT_HOST_URL";
                 value = "http://agent-host.${cfg.namespace}.svc.cluster.local:8080";
               } {
-                # nginx forwards /s/ (static shares) here so the broker stays
-                # cluster-internal; harmless when shares is off.
+                # Where nginx proxies contribs' public broker paths (brokerPublicPaths).
                 name = "BROKER_URL";
                 value = "http://agent-broker.${cfg.namespace}.svc.cluster.local:8080";
               } {
@@ -2066,7 +2074,7 @@ in
                 path = "/";
                 pathType = "Prefix";
                 backend.service = { name = ingressBackend; port.number = 8080; };
-              }];
+              }] ++ ingressBrokerPaths;
             }
           )];
           # Only emit a tls entry when there is a host to name.

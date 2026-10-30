@@ -136,9 +136,9 @@ in
       type = types.bool;
       default = false;
       description = ''
-        Drop the source table of every `copyFrom` copy (today broker's `annotations`
-        and `permission_requests`) after the copy runs. The migrator first checks
-        that every source primary key is in the new database, and fails the Job
+        Drop the source table of every `copyFrom` copy (broker tables that moved into
+        a contrib's own database, such as shares) after the copy runs. The migrator
+        first checks that every source primary key is in the new database, and fails the Job
         instead of dropping if any row is missing. Set it per deployment once release
         N's copy has run and the moved data checks out. Temporary: it is removed,
         with the tables, once every deployment has set it.

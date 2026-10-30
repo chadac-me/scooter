@@ -1,27 +1,13 @@
 """Tier 1: services must never create tables on Postgres.
 
-Tables are declared in lib/sql/<db>/schema.sql and applied by the Atlas migration Job;
-schema creation is a test concern (create_schema, SQLite only), so these tests
-assert the production code has no way to do it.
+Tables are declared in lib/sql/<db>/schema.sql and applied by the Atlas migration Job,
+so the production code must have no way to create them.
 """
 
 import ast
 import pathlib
 
-import pytest
-
-from scooter_broker_lib.store import StoreConfig
-from scooter_schema.broker import Base as _SchemaBase
-from broker.shares.store import ShareStore
-
 SERVICE_SRC = pathlib.Path(__file__).resolve().parents[1] / "broker"
-
-
-@pytest.mark.parametrize(
-    "store_cls", [ShareStore], ids=lambda c: c.__name__
-)
-def test_stores_expose_NO_schema_creating_method(store_cls):
-    assert not hasattr(store_cls, "init")
 
 
 def test_no_service_module_calls_create_all():
@@ -34,23 +20,5 @@ def test_no_service_module_calls_create_all():
                 offenders.append(f"{path.relative_to(SERVICE_SRC)}:{node.lineno}")
     assert offenders == [], (
         f"schema DDL in service code: {offenders}. Tables are declared in lib/sql and "
-        "applied by the migration Job; tests build SQLite schemas via create_schema."
+        "applied by the migration Job."
     )
-
-
-@pytest.mark.asyncio
-async def test_create_schema_REFUSES_a_postgres_engine():
-    from scooter_broker_lib.testing import create_schema
-
-    store = ShareStore(StoreConfig(dsn="postgresql+asyncpg://u:p@127.0.0.1:1/nope"))
-    with pytest.raises(AssertionError, match="SQLite-only"):
-        await create_schema(store, _SchemaBase)
-
-
-@pytest.mark.asyncio
-async def test_create_schema_DOES_build_tables_on_sqlite():
-    from scooter_broker_lib.testing import create_schema, sqlite_config
-
-    store = ShareStore(sqlite_config())
-    await create_schema(store, _SchemaBase)
-    assert await store.list_by_owner("someone") == []

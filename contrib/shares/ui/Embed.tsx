@@ -1,6 +1,7 @@
 /**
- * ShareEmbed renders a published static share (/s/<uuid>/) as a sandboxed, fixed-width
- * <iframe> inline in the conversation, driven by a fenced markdown block the agent emits:
+ * The `scooter-embed` fence (`ui.markdownFences`): renders a published static share
+ * (/s/<uuid>/) as a sandboxed, fixed-width <iframe> inline in the conversation, driven
+ * by a fenced markdown block the agent emits:
  *
  *     ```scooter-embed
  *     share: 7f3c2a1e-1b2c-4d5e-8f90-abcdef012345   # uuid or /s/<uuid>/ path
@@ -9,10 +10,12 @@
  *     center: true    # optional, centers the frame in the message
  *     ```
  *
- * The src is always rebuilt as `<base>/s/<uuid>/` from a validated UUID, so an agent can
+ * The src is always rebuilt as `/s/<uuid>/` from a validated UUID, so an agent can
  * only point the frame at a share, and the sandbox omits allow-same-origin so the frame
  * runs in an opaque origin that cannot read the parent, cookies or same-origin storage.
  */
+
+import type { MarkdownFenceProps } from "@/src/contrib/sdk";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -22,9 +25,6 @@ const MIN_WIDTH = 160;
 const MAX_WIDTH = 1200;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 4000;
-
-// Absolute origin the broker serves shares from; empty means a relative `/s/<uuid>/`.
-const SHARES_BASE = (import.meta.env.VITE_SHARES_BASE_URL ?? "").replace(/\/$/, "");
 
 export interface ShareEmbedSpec {
   uuid: string;
@@ -78,18 +78,7 @@ export function parseShareEmbed(body: string): ShareEmbedParse {
   };
 }
 
-// The fence language agents author and the hyphen-free token it is normalised to for rendering (see markdown-text.tsx).
-export const SHARE_EMBED_LANG = "scooter-embed";
-export const SHARE_EMBED_TOKEN = "scooterembed";
-
-const SHARE_EMBED_FENCE_RE = /^([ \t]{0,3}(?:`{3,}|~{3,}))[ \t]*scooter-embed[ \t]*$/gm;
-
-/** Rewrite each opening ```scooter-embed fence to ```scooterembed so assistant-ui keeps the whole language token. */
-export function preprocessShareEmbeds(text: string): string {
-  return text.replace(SHARE_EMBED_FENCE_RE, `$1${SHARE_EMBED_TOKEN}`);
-}
-
-export function ShareEmbed({ body }: { body: string }) {
+export default function Embed({ body }: MarkdownFenceProps) {
   const parsed = parseShareEmbed(body);
   if (!parsed.ok) {
     return (
@@ -102,7 +91,7 @@ export function ShareEmbed({ body }: { body: string }) {
     );
   }
   const { uuid, width, height, center } = parsed.spec;
-  const src = `${SHARES_BASE}/s/${uuid}/`;
+  const src = `/s/${uuid}/`;
   return (
     <div
       data-testid="share-embed"

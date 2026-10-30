@@ -68,16 +68,6 @@ class BrokerSettings(ScooterBaseSettings):
     # default modules at GET /modules/default.tar.gz; empty serves an empty tarball.
     sandbox_default_modules_dir: str = ""
 
-    # --- Static shares (broker/shares/) ----------------------------------------
-    # Agents publish static bundles the broker serves at /s/<uuid>/; `shares_public_base_url`
-    # is the external origin of the returned share URL, or empty for a relative one.
-    shares_enabled: bool = False
-    shares_db_dsn: str = "sqlite+aiosqlite:////tmp/broker-shares.db"
-    shares_public_base_url: str = ""
-    # The CSP frame-ancestors allowlist for a served share, which is meant to be embedded
-    # only inside the Scooter conversation UI (space-separated origins, or 'self').
-    shares_frame_ancestors: str = "'self'"
-
     # --- The forge egress proxy (broker/forge/) --------------------------------
     # Sandboxes reach git/gh/glab hosts through this CONNECT proxy, which injects the provider credential.
     forge_proxy_port: int = 3128

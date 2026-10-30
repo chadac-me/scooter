@@ -121,11 +121,15 @@ describe("tracedRequestUrl", () => {
 
 describe("classifyRoute", () => {
   it("separates the high-volume polled routes from each other", () => {
-    // These four were a single "other" bucket, which is why their cost was invisible.
+    // These were a single "other" bucket, which is why their cost was invisible.
     expect(classifyRoute("https://host/conversations/abc/ready")).toBe("ready");
     expect(classifyRoute("https://host/conversations/abc/web-services")).toBe("web-services");
-    expect(classifyRoute("https://host/conversations/abc/shares")).toBe("shares");
     expect(classifyRoute("https://host/conversations/abc/links")).toBe("links");
+  });
+
+  it("buckets every contrib relay call together, whatever its path ends in", () => {
+    expect(classifyRoute("https://host/conversations/abc/contrib-api/shares/list")).toBe("contrib-api");
+    expect(classifyRoute("https://host/contrib-api/echo/links")).toBe("contrib-api");
   });
 
   it("distinguishes the two SSE streams, which have very different lifetimes", () => {

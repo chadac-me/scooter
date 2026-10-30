@@ -1,4 +1,4 @@
-"""The static-shares store and HTTP API on in-memory SQLite."""
+"""The shares store and HTTP API on in-memory SQLite."""
 
 from __future__ import annotations
 
@@ -10,13 +10,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scooter_schema.broker import Base as _SchemaBase, StaticShares, StaticShareVersions
-
-from scooter_broker_lib.store import StoreConfig
-from broker.core.auth import authenticate
+from scooter_broker_lib.testing import create_schema, sqlite_config
 from scooter_broker_lib.types import Identity
-from broker.shares.routes import _DEFAULT_FAVICON_LINK, create_shares_router
-from broker.shares.store import ShareFile, ShareStore
+from scooter_contrib_shares import store as shares_store
+from scooter_contrib_shares.store import ShareFile, ShareStore
+from scooter_contrib_shares.transport import _DEFAULT_FAVICON_LINK, create_shares_router
 
 
 def _identity(conv: str) -> Identity:
@@ -26,22 +24,17 @@ def _identity(conv: str) -> Identity:
 
 @pytest.fixture
 async def store():
-    s = ShareStore(StoreConfig(dsn="sqlite+aiosqlite:///:memory:"))
-    # The store issues no DDL, so the throwaway SQLite tables are built here.
-    async with s._engine.begin() as conn:
-        await conn.run_sync(
-            _SchemaBase.metadata.create_all,
-            tables=[StaticShares.__table__, StaticShareVersions.__table__],
-        )
+    s = ShareStore(sqlite_config())
+    await create_schema(s, shares_store._Base)
     return s
 
 
 def _client(store, conv="conv-alice", frame_ancestors="'self'"):
     app = FastAPI()
     app.include_router(create_shares_router(
-        store, public_base_url="https://scooter.example.com", frame_ancestors=frame_ancestors,
+        store, authed=lambda: _identity(conv),
+        public_base_url="https://scooter.example.com", frame_ancestors=frame_ancestors,
     ))
-    app.dependency_overrides[authenticate] = lambda: _identity(conv)
     return TestClient(app)
 
 
@@ -170,36 +163,37 @@ async def test_list_and_delete_owner_scoped(store):
     assert alice.get(f"/s/{uuid}/").status_code == 404
 
 
-def _admin_client(store):
-    """An approver caller with no conversation of its own, like the agent-host relaying a UI request."""
+def _relay_client(store, relayed_user="alice"):
+    """The agent-host relaying a UI request, as the broker core authenticates it."""
     app = FastAPI()
-    app.include_router(create_shares_router(store, public_base_url="https://scooter.example.com"))
-    app.dependency_overrides[authenticate] = lambda: Identity(
+    host = Identity(
         conversation_id="", namespace="agent-sandbox",
-        service_account="system:serviceaccount:agent-sandbox:agent-host", is_approver=True,
+        service_account="system:serviceaccount:agent-sandbox:agent-host", relayed_user=relayed_user,
     )
+    app.include_router(create_shares_router(
+        store, authed=lambda: host, public_base_url="https://scooter.example.com",
+    ))
     return TestClient(app)
 
 
 @pytest.mark.asyncio
-async def test_admin_lists_named_conversation_shares(store):
+async def test_relay_lists_named_conversation_shares(store):
     alice = _client(store, "conv-alice")
     uuid = alice.post("/shares", json=_inline("mine")).json()["uuid"]
 
-    admin = _admin_client(store)
-    shares = admin.get("/shares", params={"conversation_id": "conv-alice"}).json()["shares"]
+    shares = _relay_client(store).get("/shares/conversation/conv-alice/list").json()["shares"]
     assert [s["uuid"] for s in shares] == [uuid]
-    # Without the param the admin sees nothing of alice's.
-    assert admin.get("/shares").json()["shares"] == []
+    assert shares[0]["url"] == f"https://scooter.example.com/s/{uuid}/"
 
 
 @pytest.mark.asyncio
-async def test_non_admin_cannot_list_another_conversation(store):
+async def test_only_the_relay_lists_another_conversation(store):
     alice = _client(store, "conv-alice")
     alice.post("/shares", json=_inline("mine"))
-    bob = _client(store, "conv-bob")
-    assert bob.get("/shares", params={"conversation_id": "conv-alice"}).status_code == 403
-    assert bob.get("/shares", params={"conversation_id": "conv-bob"}).status_code == 200
+    # A sandbox, even the owning one, is not the relay.
+    assert _client(store, "conv-bob").get("/shares/conversation/conv-alice/list").status_code == 403
+    assert alice.get("/shares/conversation/conv-alice/list").status_code == 403
+    assert _relay_client(store, relayed_user=None).get("/shares/conversation/conv-alice/list").status_code == 403
 
 
 @pytest.mark.asyncio

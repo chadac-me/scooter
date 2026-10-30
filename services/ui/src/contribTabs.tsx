@@ -14,11 +14,14 @@ import { Spinner } from "@/components/ui/spinner";
 
 import type { ContribSettingsTab } from "./contribTypes.js";
 
-type TabModule = { default: ComponentType };
+type TabModule = { default: ComponentType<never> };
 
 /** `<contrib>/ui/<file>.tsx` -> loader. Keys match the manifest's `entry`. */
 const MODULES: Record<string, () => Promise<TabModule>> = Object.fromEntries(
-  Object.entries(import.meta.glob<TabModule>("../../../contrib/*/ui/*.tsx")).map(([path, load]) => [
+  Object.entries(import.meta.glob<TabModule>([
+    "../../../contrib/*/ui/*.tsx",
+    "!../../../contrib/*/ui/*.test.tsx",
+  ])).map(([path, load]) => [
     path.replace(/^(\.\.\/)+contrib\//, ""),
     load,
   ]),
@@ -31,18 +34,19 @@ export const contribModuleLoader = (entry: string): (() => Promise<unknown>) | u
 export const bundledTabEntries = (): string[] => Object.keys(MODULES);
 
 // One lazy component per entry, so switching tabs back and forth does not re-suspend.
-const lazyCache = new Map<string, ComponentType>();
-function lazyFor(entry: string): ComponentType | undefined {
+const lazyCache = new Map<string, unknown>();
+/** The lazy component for one bundled contrib module, or undefined when this build lacks it. */
+export function lazyContrib<P extends object = object>(entry: string): ComponentType<P> | undefined {
   const load = MODULES[entry];
   if (!load) return undefined;
-  let C = lazyCache.get(entry);
+  let C = lazyCache.get(entry) as ComponentType<P> | undefined;
   if (!C) {
     C = lazy(async () => {
       const mod = await load();
       if (typeof mod.default !== "function") {
         throw new Error(`${entry} has no default-exported component`);
       }
-      return mod;
+      return mod as { default: ComponentType<P> };
     });
     lazyCache.set(entry, C);
   }
@@ -91,7 +95,7 @@ function TabError({ label, error }: { label: string; error: string | Error }) {
 /** One contrib tab's body. Keyed by the caller on the tab id, so the boundary resets
  *  when the user moves to another contrib tab. */
 export function ContribTabBody({ tab }: { tab: ContribSettingsTab }) {
-  const Tab = lazyFor(tab.entry);
+  const Tab = lazyContrib(tab.entry);
   if (!Tab) {
     return (
       <TabError
