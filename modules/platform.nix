@@ -1048,6 +1048,7 @@ in
       };
       enforce = mkOption {
         type = types.bool;
+        # TODO: default to true once enforcement is confirmed stable.
         default = false;
         description = ''
           Make the router refuse every request it cannot attribute to a signed-in
