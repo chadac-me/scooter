@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import String, Text, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from scooter_broker_lib.store import StoreConfig, open_sessions
@@ -52,9 +53,21 @@ class _Row(_Base):
     role_expires_at: Mapped[str | None] = mapped_column(String, nullable=True)
     credentials_issued_at: Mapped[str | None] = mapped_column(String, nullable=True)
     expires_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    approval_obligations: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-def _to_model(row: _Row) -> PermissionRequest:
+class _ApprovalRow(_Base):
+    """One approver's approval and the obligations it satisfied."""
+
+    __tablename__ = "aws_request_approvals"
+
+    request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    approver: Mapped[str] = mapped_column(String, primary_key=True)
+    approved_at: Mapped[str] = mapped_column(String)
+    obligation_ids: Mapped[str] = mapped_column(Text)
+
+
+def _to_model(row: _Row, approvals: list[_ApprovalRow] = ()) -> PermissionRequest:
     return PermissionRequest(
         request_id=row.request_id,
         conversation_id=row.conversation_id,
@@ -79,11 +92,16 @@ def _to_model(row: _Row) -> PermissionRequest:
         role_expires_at=row.role_expires_at,
         credentials_issued_at=row.credentials_issued_at,
         expires_at=row.expires_at,
+        approval_obligations=json.loads(row.approval_obligations) if row.approval_obligations else None,
+        approvals=[
+            {"approver": a.approver, "approved_at": a.approved_at, "obligations": json.loads(a.obligation_ids)}
+            for a in sorted(approvals, key=lambda a: a.approved_at)
+        ],
     )
 
 
 # Columns stored as JSON-encoded text.
-_JSON_FIELDS = {"policy_document", "managed_policy_arns"}
+_JSON_FIELDS = {"policy_document", "managed_policy_arns", "approval_obligations"}
 
 
 def _row_kwargs(req: PermissionRequest) -> dict[str, Any]:
@@ -111,7 +129,18 @@ def _row_kwargs(req: PermissionRequest) -> dict[str, Any]:
         "role_expires_at": req.role_expires_at,
         "credentials_issued_at": req.credentials_issued_at,
         "expires_at": req.expires_at,
+        "approval_obligations": json.dumps(req.approval_obligations) if req.approval_obligations is not None else None,
     }
+
+
+async def _models(s, rows: list[_Row]) -> list[PermissionRequest]:
+    """Rows as models, each with its recorded approvals."""
+    ids = [r.request_id for r in rows]
+    by_id: dict[str, list[_ApprovalRow]] = {}
+    if ids:
+        for a in (await s.execute(select(_ApprovalRow).where(_ApprovalRow.request_id.in_(ids)))).scalars():
+            by_id.setdefault(a.request_id, []).append(a)
+    return [_to_model(r, by_id.get(r.request_id, [])) for r in rows]
 
 
 class PermissionStore:
@@ -128,14 +157,14 @@ class PermissionStore:
     async def get(self, request_id: str) -> PermissionRequest | None:
         async with self._session() as s:
             row = await s.get(_Row, request_id)
-            return _to_model(row) if row else None
+            return (await _models(s, [row]))[0] if row else None
 
     async def get_for_conversation(self, request_id: str, conversation_id: str) -> PermissionRequest | None:
         async with self._session() as s:
             row = await s.get(_Row, request_id)
             if row is None or row.conversation_id != conversation_id:
                 return None
-            return _to_model(row)
+            return (await _models(s, [row]))[0]
 
     async def update(self, request_id: str, **fields: Any) -> None:
         async with self._session() as s, s.begin():
@@ -149,10 +178,22 @@ class PermissionStore:
                     v = v.value
                 setattr(row, k, v)
 
+    async def add_approval(self, request_id: str, approver: str, approved_at: str, obligation_ids: list[str]) -> bool:
+        """Record an approval; False if this approver already approved."""
+        try:
+            async with self._session() as s, s.begin():
+                s.add(_ApprovalRow(
+                    request_id=request_id, approver=approver, approved_at=approved_at,
+                    obligation_ids=json.dumps(obligation_ids),
+                ))
+        except IntegrityError:
+            return False
+        return True
+
     async def list_for_conversation(self, conversation_id: str) -> list[PermissionRequest]:
         async with self._session() as s:
             rows = (await s.execute(select(_Row).where(_Row.conversation_id == conversation_id))).scalars()
-            return [_to_model(r) for r in rows]
+            return await _models(s, list(rows))
 
     async def list_expired_active(self, now_iso: str) -> list[PermissionRequest]:
         async with self._session() as s:
@@ -161,7 +202,7 @@ class PermissionStore:
                 _Row.role_expires_at.is_not(None),
                 _Row.role_expires_at <= now_iso,
             )
-            return [_to_model(r) for r in (await s.execute(stmt)).scalars()]
+            return await _models(s, list((await s.execute(stmt)).scalars()))
 
     async def query_audit(
         self,
@@ -180,4 +221,4 @@ class PermissionStore:
             if status:
                 stmt = stmt.where(_Row.status == status.value)
             stmt = stmt.order_by(_Row.requested_at.desc()).limit(limit)
-            return [_to_model(r) for r in (await s.execute(stmt)).scalars()]
+            return await _models(s, list((await s.execute(stmt)).scalars()))

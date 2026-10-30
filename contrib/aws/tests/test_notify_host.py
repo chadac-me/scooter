@@ -108,6 +108,7 @@ async def test_posts_the_broker_notify_shape_to_the_short_id_url(monkeypatch):
             "write_actions": [],
             "requested_at": None,
             "parent_request_id": None,
+            "obligations": [],
         },
     }
     # The account, risk and policy facts must still reach the human inside the rendered message.

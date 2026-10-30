@@ -493,6 +493,7 @@
             ui-nginx = import ./services/ui/image/check.nix { inherit pkgs; };
             # Every contrib variant
             contribs-all = contribsAll;
+            contrib-aws-rules = import ./contrib/aws/tests/rules-eval.nix { inherit pkgs lib; };
             contrib-echo = contribsWithExamples.packages.echo.broker;
             contrib-echo-webhooks = contribsWithExamples.packages.echo.webhooks;
             contrib-airtable = contribs.packages.airtable.broker;

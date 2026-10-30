@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { allowedActionCount, grantOf, statementsOf } from "./PermissionsCard.js";
+import { allowedActionCount, grantOf, obligationsOf, statementsOf } from "./PermissionsCard.js";
 
 const DATA = {
   account: "dev",
@@ -22,6 +22,10 @@ const DATA = {
   managed_policy_arns: ["arn:aws:iam::aws:policy/ReadOnlyAccess"],
   write_actions: ["kms:ScheduleKeyDeletion"],
   parent_request_id: null,
+  obligations: [
+    { id: "0", rules: ["secrets-guard/secret-values"], parts: ["secretsmanager:GetSecretValue on *"], approved_by: "sec@x" },
+    { id: "1", rules: ["account default"], parts: [], approved_by: null },
+  ],
 };
 
 describe("grantOf", () => {
@@ -67,5 +71,19 @@ describe("statementsOf", () => {
 
   it("returns none for no policy", () => {
     expect(statementsOf(null)).toEqual([]);
+  });
+});
+
+describe("obligationsOf", () => {
+  it("reads each approval and who gave it", () => {
+    expect(grantOf(DATA)?.obligations).toEqual([
+      { rules: ["secrets-guard/secret-values"], parts: ["secretsmanager:GetSecretValue on *"], approvedBy: "sec@x" },
+      { rules: ["account default"], parts: [], approvedBy: null },
+    ]);
+  });
+
+  it("returns none for a missing or malformed list", () => {
+    expect(obligationsOf(undefined)).toEqual([]);
+    expect(obligationsOf([null, 3])).toEqual([]);
   });
 });

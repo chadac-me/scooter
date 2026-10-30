@@ -32,8 +32,19 @@ CREATE TABLE "permission_requests" (
   "role_expires_at"       character varying NULL,
   "credentials_issued_at" character varying NULL,
   "expires_at"            character varying NULL,
+  -- JSON: the approvals the request needs, fixed when it is made (rules.Obligation).
+  "approval_obligations"  text NULL,
   PRIMARY KEY ("request_id")
 );
 CREATE INDEX "ix_permission_requests_conversation_id" ON "permission_requests" ("conversation_id");
 CREATE INDEX "ix_permission_requests_status" ON "permission_requests" ("status");
 CREATE INDEX "ix_permission_requests_target_account" ON "permission_requests" ("target_account");
+
+-- One row per approver per request; obligation_ids is the JSON list it satisfied.
+CREATE TABLE "aws_request_approvals" (
+  "request_id"     character varying NOT NULL,
+  "approver"       character varying NOT NULL,
+  "approved_at"    character varying NOT NULL,
+  "obligation_ids" text NOT NULL,
+  PRIMARY KEY ("request_id", "approver")
+);

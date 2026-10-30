@@ -203,15 +203,16 @@ contribs.aws = {
     enabled = true;
     # The agent reads this to pick the right account, so always set it.
     description = "Sandbox account for read-only exploration (S3, CloudWatch logs).";
-    # Grant purely read-only requests without a human.
-    auto_approve_read_only = true;
+    # Grant read-only requests without a human (secret reads still need one).
+    ruleSets = [ "read-only" ];
   };
 };
 ```
 
 The [`accounts` option](../reference/options/index.md) documents every per-account
 field, including `allowed_policy` (the ceiling on what can ever be granted) and
-`auto_allowed_policy` (what's granted without approval).
+`ruleSets` (what's granted without approval; secret reads always need one by
+default).
 
 ## Jira and Airtable
 

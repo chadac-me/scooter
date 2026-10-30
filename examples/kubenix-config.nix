@@ -242,7 +242,7 @@
       broker_role_arn = "arn:aws:iam::123456789012:role/agent-token-broker-base";
       enabled = true;
       description = "Sandbox account for safe read-only exploration (S3, logs).";
-      auto_approve_read_only = true;
+      ruleSets = [ "read-only" ];
     };
 
     # Both search providers: not exclusive, one tool each.

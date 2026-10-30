@@ -39,7 +39,7 @@ in
 
         # The registry is a mounted file, so this hash is what makes an account edit roll the pod.
         podAnnotations."checksum/aws-accounts" =
-          builtins.hashString "sha256" (builtins.toJSON ccfg.accounts);
+          builtins.hashString "sha256" (builtins.toJSON ccfg.renderedAccounts);
 
         # IRSA: the broker pod assumes each account's base role via this role.
         serviceAccountAnnotations = lib.optionalAttrs (ccfg.serviceAccountRoleArn != "") {
@@ -76,7 +76,7 @@ in
       # The account registry, mounted in the broker and in every sandbox.
       kubernetes.resources.configMaps.agent-broker-aws-accounts = {
         metadata = { name = "agent-broker-aws-accounts"; namespace = cfg.namespace; };
-        data."accounts.json" = builtins.toJSON ccfg.accounts;
+        data."accounts.json" = builtins.toJSON ccfg.renderedAccounts;
       };
     })
   ];
