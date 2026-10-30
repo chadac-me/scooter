@@ -626,6 +626,35 @@ let
     ++ (if contribCtr != null && hasName (contribCtr.env or [ ]) "HTTPS_PROXY" && hasName (contribCtr.env or [ ]) "FORGE_PROXY_ADDR" then [ ]
         else [ "sandboxPod.extraEnv HTTPS_PROXY / FORGE_PROXY_ADDR missing — sandbox git/gh/glab bypass the forge proxy" ]);
 
+  # `<list>Attrs` in the manifest overlay renders as plain lists: definitions merge per key
+  # (mkForce included), the list form is kept, and no `*Attrs` key reaches the ConfigMap.
+  keyedOverlayPlatform = evalPlatform {
+    module = { lib, ... }: {
+      imports = [
+        ./kubenix-config.nix
+        { scooter.deployTools.sandboxManifestOverlay.spec = {
+            volumeClaimTemplatesAttrs.workspace.spec.storageClassName = "gp3";
+            podTemplate.spec.containersAttrs.sandbox.envAttrs = { A = "1"; B = "1"; };
+          }; }
+        { scooter.deployTools.sandboxManifestOverlay.spec.podTemplate.spec = {
+            containersAttrs.sandbox.envAttrs.B = lib.mkForce "2";
+            containers = [{ name = "sandbox"; env = [{ name = "C"; value = "list"; }]; }];
+          }; }
+      ];
+    };
+  };
+  keyedOverlay = builtins.fromJSON
+    keyedOverlayPlatform.config.kubernetes.resources.configMaps.sandbox-manifest-overlay.data."overlay.yaml";
+  keyedEnv = builtins.concatMap (c: c.env or [ ]) keyedOverlay.spec.podTemplate.spec.containers;
+  keyedValue = n: map (e: e.value) (builtins.filter (e: e.name == n) keyedEnv);
+  keyedOverlayProblems =
+    (if keyedOverlay.spec.volumeClaimTemplates or null == [{ metadata.name = "workspace"; spec.storageClassName = "gp3"; }]
+     then [ ] else [ "sandboxManifestOverlay volumeClaimTemplatesAttrs did not render as a claim named by metadata.name" ])
+    ++ (if keyedValue "A" == [ "1" ] && keyedValue "B" == [ "2" ] && keyedValue "C" == [ "list" ] then [ ]
+        else [ "sandboxManifestOverlay envAttrs did not merge per key (mkForce) alongside the list form" ])
+    ++ (if builtins.match ".*Attrs\".*" keyedOverlayPlatform.config.kubernetes.resources.configMaps.sandbox-manifest-overlay.data."overlay.yaml" == null
+        then [ ] else [ "sandboxManifestOverlay rendered an unexpanded *Attrs key" ]);
+
   # Sandbox self-access: the router serves the listener, a Service fronts it, and every sandbox
   # gets the token audience and the URL to reach it.
   routerPorts =
@@ -1231,7 +1260,7 @@ let
     ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
         else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
 
-  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ keyedOverlayProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named; a scooter.packages override reaches exactly the images that use it\n"

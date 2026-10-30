@@ -576,6 +576,7 @@ in
       sandboxManifestOverlay = mkOption {
         type = types.attrsOf types.anything;
         default = { };
+        apply = (import ./overlay-attrs.nix { inherit lib; }).expand;
         example = {
           spec.podTemplate.spec = {
             nodeSelector."scooter.io/pool" = "sandbox";
@@ -598,9 +599,11 @@ in
           with a matching `name` is patched, others appended) — so you patch one
           container's env by restating just `{ name = "sandbox"; env = [ … ]; }`.
 
-          Any list can instead be written as a `<list>Attrs` mapping keyed by item name,
-          which needs no list syntax and merges key-wise with other Nix definitions. A
-          scalar value is shorthand for `{ value = …; }`, so env reads naturally:
+          `containers`, `initContainers`, `volumes`, `volumeMounts`, `env`, `ports` and
+          `volumeClaimTemplates` can instead be written as a `<list>Attrs` attribute set
+          keyed by item name, which merges key-wise across definitions (so `mkForce`
+          works per item) and is expanded to the list before rendering. An `envAttrs`
+          value may be a bare string, shorthand for `{ value = …; }`:
 
               spec.volumeClaimTemplatesAttrs.workspace.spec.storageClassName = "gp3";
               spec.podTemplate.spec.containersAttrs.sandbox.envAttrs.MY_TOOL_URL = "http://…";
