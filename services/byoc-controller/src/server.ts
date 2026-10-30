@@ -137,7 +137,13 @@ export function createServer(config: ByocServerConfig): ByocServer {
   return {
     async handle(req) {
       const [pathname, query = ""] = req.path.split("?");
-      const parts = pathname.split("/").filter(Boolean); // ["byoc", ...]
+      let parts: string[];
+      try {
+        // Ids arrive URL-encoded; a permission id contains a colon.
+        parts = pathname.split("/").filter(Boolean).map(decodeURIComponent); // ["byoc", ...]
+      } catch {
+        return { status: 400, json: { error: "malformed path" } };
+      }
 
       if (parts[0] !== "byoc") return { status: 404, json: { error: "not found" } };
 
