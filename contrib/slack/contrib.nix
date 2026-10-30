@@ -16,8 +16,18 @@ in
       '';
     };
 
+    options.webhooksEnabled = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Enable the Slack events webhook handler (/webhooks/slack). Set SLACK_SIGNING_SECRET in the
+        webhooks provider Secret: unset, deliveries are accepted unsigned.
+      '';
+    };
+
     config = {
       src = ./.;
+      links.typeAliases = lib.importJSON ./scooter_contrib_slack/link_type_aliases.json;
       # The tool cards the UI renders for these calls, matched on the tool name.
       ui.tools = {
         slack_respond = { argKey = "text"; action = "replied in Slack"; };
@@ -28,7 +38,10 @@ in
         enable = true;
         env.SLACK_BOT_TOKEN = config.botTokenSecret;
       };
-      services.webhooks.enable = true;
+      services.webhooks = {
+        enable = true;
+        env.SLACK_ENABLED = lib.boolToString config.webhooksEnabled;
+      };
       # How to format for Slack (mrkdwn, not Markdown).
       skills."slack-formatting.md" = ./skills/slack-formatting.md;
     };

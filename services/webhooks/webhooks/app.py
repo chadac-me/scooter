@@ -14,9 +14,6 @@ from scooter_webhooks_lib.registry import discover_webhooks
 from scooter_webhooks_lib import agent_host_client, policy
 from scooter_webhooks_lib.agent_host_client import resolve_sandbox_to_conversation
 
-# Imported for its registration side effect, since nothing else imports it.
-from . import resource_shapes  # noqa: F401
-
 # Bound at import rather than in the lifespan, since handlers are discovered at import.
 agent_host_client.init(settings)
 policy.init(settings)

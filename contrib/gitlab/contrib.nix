@@ -27,6 +27,15 @@ in
       '';
     };
 
+    options.webhooksEnabled = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Enable the GitLab webhook handler (/webhooks/gitlab). Set GITLAB_WEBHOOK_SECRET in the
+        webhooks provider Secret: unset, deliveries are accepted unsigned.
+      '';
+    };
+
     options.tokenSecret = clib.mkSecretOption {
       key = "GITLAB_TOKEN";
       holds = "the GitLab token";
@@ -41,6 +50,7 @@ in
 
     config = {
       src = ./.;
+      links.typeAliases = lib.importJSON ./scooter_contrib_gitlab/link_type_aliases.json;
       sandbox.module = ./sandbox.nix;
 
       # The UI row: the GitLab chip, icon and card.
@@ -62,7 +72,10 @@ in
       };
       services.webhooks = {
         enable = true;
-        env.GITLAB_HOST = config.host;
+        env = {
+          GITLAB_HOST = config.host;
+          GITLAB_ENABLED = lib.boolToString config.webhooksEnabled;
+        };
         # Only this half reads Jira keys, and the grammar is jira's.
         pythonDeps = ps: [ ps.scooterContrib.jira ];
       };

@@ -8,6 +8,7 @@ from .config import settings
 from scooter_webhooks_lib.resources import (
     ResourceShapes,
     canonical_resource_type,
+    load_type_aliases,
     register_resource_shapes,
 )
 
@@ -34,7 +35,7 @@ def _id_variants(resource_type: str, resource_id: str) -> list[str]:
 register_resource_shapes(
     "github",
     ResourceShapes(
-        type_aliases={"pr": "pull_request", "pull_request": "pull_request", "issue": "issue"},
+        type_aliases=load_type_aliases(__package__),
         id_variants=_id_variants,
     ),
 )

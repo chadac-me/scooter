@@ -14,7 +14,7 @@ import { webhooks } from "@scooter/schema";
 
 import { formatError, logger } from "../log.js";
 import { createPgPool, DbUnavailableError, retryReadOnce } from "../db/pgPool.js";
-import { canonicalResourceType, withDerivedRef } from "../agent/resourceRef.js";
+import { canonicalResourceType, type LinkTypeAliases } from "./linkTypeAliases.js";
 
 import type { ConversationLink } from "./manager.js";
 import type { SessionId } from "../types.js";
@@ -48,6 +48,8 @@ export interface PgLinkStoreConfig {
    * File-backed links to read through to on a Postgres miss, backfilled and served.
    */
   legacy?: Pick<LinkStore, "listLinks">;
+  /** Contribs' resourceType spellings, canonicalised on write since they key the upsert. */
+  typeAliases?: LinkTypeAliases;
 }
 
 /**
@@ -71,29 +73,24 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
     ref: ConversationLink["ref"] | string | null;
   };
 
-  // withDerivedRef on read as well as write, so rows stored ref-less resolve without a data
-  // migration.
-  const rowToLink = (row: LinkRow): ConversationLink =>
-    withDerivedRef({
-      source: row.source,
-      resourceType: row.resourceType,
-      ...(row.url == null ? {} : { url: row.url }),
-      ...(row.title == null ? {} : { title: row.title }),
-      // jsonb arrives parsed, but a driver configured to return raw text must not
-      // produce a string where the tools expect an object.
-      ...(row.ref == null
-        ? {}
-        : { ref: typeof row.ref === "string" ? JSON.parse(row.ref) : row.ref }),
-    });
+  const rowToLink = (row: LinkRow): ConversationLink => ({
+    source: row.source,
+    resourceType: row.resourceType,
+    ...(row.url == null ? {} : { url: row.url }),
+    ...(row.title == null ? {} : { title: row.title }),
+    // jsonb arrives parsed, but a driver configured to return raw text must not
+    // produce a string where the tools expect an object.
+    ...(row.ref == null
+      ? {}
+      : { ref: typeof row.ref === "string" ? JSON.parse(row.ref) : row.ref }),
+  });
 
-  const insert = async (id: string, rawLink: ConversationLink, overwrite: boolean): Promise<number> => {
-    // Derive the structured `ref` from the URL when the writer supplied none.
-    const link = withDerivedRef(rawLink);
+  const insert = async (id: string, link: ConversationLink, overwrite: boolean): Promise<number> => {
     const values = {
       conversationId: id,
       source: link.source,
       // Canonical spelling, because it is part of the unique key this upsert conflicts on.
-      resourceType: canonicalResourceType(link.source, link.resourceType),
+      resourceType: canonicalResourceType(config.typeAliases ?? {}, link.source, link.resourceType),
       resourceId: resourceIdOf(link),
       url: link.url ?? null,
       title: link.title ?? null,

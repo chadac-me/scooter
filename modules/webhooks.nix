@@ -6,14 +6,31 @@
 # of it would reject deliveries before the signature check runs. See
 # docs/WEBHOOKS.md and services/webhooks/.
 
-{ config, lib, ... }:
+{ config, options, lib, ... }:
 
 let
   cfg = config.scooter;
   wcfg = cfg.webhooks;
+  # Each contrib owns its own webhook handler's settings now.
+  removed = {
+    githubEnabled = "Set `contribs.github.webhooksEnabled` instead.";
+    gitlabEnabled = "Set `contribs.gitlab.webhooksEnabled` instead.";
+    slackEnabled = "Set `contribs.slack.webhooksEnabled` instead.";
+    githubApp = "The handler uses `contribs.github.appId` and `contribs.github.privateKeySecret`.";
+  };
+  # A throw, since kubenix has no `assertions` option for mkRemovedOptionModule.
+  removedGuard = v:
+    let set = lib.filterAttrs (n: _: options.scooter.webhooks.${n}.isDefined) removed;
+    in if set == { } then v
+    else throw (lib.concatStrings (lib.mapAttrsToList
+      (n: msg: "`scooter.webhooks.${n}` was removed. ${msg}\n") set));
 in
 {
-  options.scooter.webhooks = with lib; {
+  options.scooter.webhooks = lib.mapAttrs (_: _: lib.mkOption {
+    type = lib.types.raw;
+    visible = false;
+    description = "Removed.";
+  }) removed // (with lib; {
     enable = mkOption {
       type = types.bool;
       default = false;
@@ -29,23 +46,6 @@ in
       type = types.bool;
       default = false;
       description = "Enable /webhooks/test for the spawn-from-webhook e2e.";
-    };
-
-    # --- Provider enablement ------------------------------------------------
-    githubEnabled = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Enable the GitHub webhook handler (/webhooks/github).";
-    };
-    gitlabEnabled = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Enable the GitLab webhook handler (/webhooks/gitlab).";
-    };
-    slackEnabled = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Enable the Slack events handler (/webhooks/slack).";
     };
 
     # A contrib's deployment.nix adds env to the Deployment declared here through
@@ -85,7 +85,7 @@ in
       description = ''
         Comment/review authors to drop outright (IGNORE_USERNAMES), matched
         case-insensitively — e.g. a noisy third-party bot. GitHub recognizes the
-        agent's own comments from the App identity (githubApp below), so this is
+        agent's own comments from the App identity (`contribs.github.appId`), so this is
         for OTHER authors; GitLab payloads carry no bot flag at all, so it is the
         only lever there.
       '';
@@ -94,38 +94,12 @@ in
       type = types.bool;
       default = true;
       description = ''
-        Fallback for deployments with no githubApp credentials: drop GitHub
+        Fallback for deployments with no `contribs.github.appId`: drop GitHub
         comments/reviews authored by any Bot account unless they mention the
-        agent. With githubApp set the agent's own comments are recognized by
+        agent. With the App set the agent's own comments are recognized by
         login and this only affects OTHER bots. Disable if you rely on a bot
         relaying human content without a mention.
       '';
-    };
-    # The broker's GitHub App also backs this service, so `GET /app` names the
-    # author to filter, and this points at the broker's key Secret
-    # (contribs.github.privateKeySecret) until the shared App credentials are
-    # hoisted into one place.
-    githubApp = {
-      appId = mkOption {
-        type = types.str;
-        default = "";
-        description = "GitHub App ID (GITHUB_APP_ID). Same App as the broker's.";
-      };
-      privateKeySecret = mkOption {
-        type = types.nullOr (types.submodule {
-          options = {
-            name = mkOption { type = types.str; description = "Secret name (same namespace)."; };
-            key = mkOption { type = types.str; default = "private-key"; description = "Secret key holding the PEM."; };
-          };
-        });
-        default = null;
-        example = { name = "github-app-key"; key = "private-key"; };
-        description = ''
-          Secret holding the GitHub App private key (PEM), mounted as
-          GITHUB_APP_PRIVATE_KEY. Null -> no App identity: webhooks falls back to
-          ignoreBotAuthors, and posts comments with the GITHUB_TOKEN PAT.
-        '';
-      };
     };
     logLevel = mkOption {
       type = types.str;
@@ -190,7 +164,7 @@ in
         description = "TLS Secret for `host` (empty + tls=true emits spec.tls without a secretName).";
       };
     };
-  };
+  });
 
   # The table declarations are unconditional (see modules/db-spec.nix); everything
   # else is gated on `enable`.
@@ -216,7 +190,7 @@ in
       };
     };
   }
-  (lib.mkIf wcfg.enable {
+  (lib.mkIf (removedGuard wcfg.enable) {
     # Deep-merged so the ingress block's additions coexist with the Deployment.
     kubernetes.resources = lib.mkMerge [
     {
@@ -251,22 +225,11 @@ in
                     value = "http://agent-host.${cfg.namespace}.svc.cluster.local:8080";
                   }
                   { name = "TEST_WEBHOOK_ENABLED"; value = lib.boolToString wcfg.testWebhook; }
-                  { name = "GITHUB_ENABLED"; value = lib.boolToString wcfg.githubEnabled; }
-                  { name = "GITLAB_ENABLED"; value = lib.boolToString wcfg.gitlabEnabled; }
-                  { name = "SLACK_ENABLED"; value = lib.boolToString wcfg.slackEnabled; }
                   { name = "MENTION_PATTERN"; value = wcfg.mentionPattern; }
                   { name = "LABEL_TRIGGER"; value = wcfg.labelTrigger; }
                   { name = "IGNORE_USERNAMES"; value = lib.concatStringsSep "," wcfg.ignoreUsernames; }
                   { name = "IGNORE_BOT_AUTHORS"; value = lib.boolToString wcfg.ignoreBotAuthors; }
-                ] ++ lib.optional (wcfg.githubApp.appId != "")
-                  { name = "GITHUB_APP_ID"; value = wcfg.githubApp.appId; }
-                ++ lib.optional (wcfg.githubApp.privateKeySecret != null) {
-                  name = "GITHUB_APP_PRIVATE_KEY";
-                  valueFrom.secretKeyRef = {
-                    name = wcfg.githubApp.privateKeySecret.name;
-                    key = wcfg.githubApp.privateKeySecret.key;
-                  };
-                } ++ [
+                ] ++ [
                   { name = "LOG_LEVEL"; value = wcfg.logLevel; }
                   { name = "AGENT_MANAGER_URL"; value = wcfg.managerUrl; }
                 ] ++ [

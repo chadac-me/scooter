@@ -6,7 +6,6 @@ import pytest
 
 from scooter_webhooks_lib import agent_host_client, policy
 
-import webhooks.resource_shapes  # noqa: F401
 from webhooks.config import settings
 
 

@@ -196,6 +196,10 @@ let
     ++ lib.concatLists (lib.mapAttrsToList (name: c: enabledRows "${name}." c.agent.hooks)
       (lib.filterAttrs (_: c: c.enable) config.contribs));
 
+  # Each enabled contrib's resourceType spellings -> the stored one.
+  linkTypeAliases = lib.mapAttrs (_: c: c.links.typeAliases)
+    (lib.filterAttrs (_: c: c.enable && c.links.typeAliases != { }) config.contribs);
+
   # The UI's contrib manifest from THIS deployment's enabled contribs, mounted over
   # the image's built-in one (services/ui/image/nginx.nix). The image is built with its
   # repo's contrib list, so without this a contrib the deployment left off would still
@@ -1673,6 +1677,9 @@ in
                 ++ lib.optional (blockingTools != { })
                   # Agent tools that block on the user's answer, tool -> { kind, title, dismissed }.
                   { name = "BLOCKING_TOOLS_JSON"; value = builtins.toJSON blockingTools; }
+                ++ lib.optional (linkTypeAliases != { })
+                  # Canonical resourceType per source, so links upsert onto one row.
+                  { name = "LINK_TYPE_ALIASES_JSON"; value = builtins.toJSON linkTypeAliases; }
                 ++ lib.optional (cfg.broker.enable && contribUserApi != { })
                   # Contribs whose settings tab reaches its broker half as the signed-in
                   # user through /contrib-api, name -> broker prefix.

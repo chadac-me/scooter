@@ -439,6 +439,20 @@ in
       };
     };
 
+    links.typeAliases = mkOption {
+      type = types.attrsOf types.str;
+      default = { };
+      example = { pr = "pull_request"; pull_request = "pull_request"; };
+      description = ''
+        Every `resourceType` spelling this contrib's links use, mapped to the one
+        stored in `resource_links`. The agent-host canonicalises links posted to it
+        (the broker's auto-links, `agent-broker link add`) with this table, so a link
+        and the same resource from the webhooks handler land on one row. Rendered
+        into the agent-host's `LINK_TYPE_ALIASES_JSON` by modules/platform.nix; a
+        source with no table is stored as written.
+      '';
+    };
+
     db = mkOption {
       default = { };
       description = ''

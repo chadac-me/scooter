@@ -100,21 +100,15 @@ reviews are forwarded to it, and so are CI results on its PRs (`workflow_run`: a
     A plain repository or org webhook works too (Settings → Webhooks, content type
     `application/json`, the same URL, secret and events).
 
-3. **Enable the handler**, giving it the same App credentials as the contrib:
+3. **Enable the handler:**
 
     ```nix
-    scooter.webhooks = {
-      githubEnabled = true;
-      githubApp = {
-        appId = "123456";
-        privateKeySecret = { name = "github-app-key"; key = "private-key"; };
-      };
-    };
+    contribs.github.webhooksEnabled = true;
     ```
 
-    With the App credentials, the handler recognizes the agent's own comments and
-    ignores them. Without them it falls back to ignoring every bot comment that doesn't
-    mention the agent (`ignoreBotAuthors`). To ignore other noisy bots, list them:
+    The handler uses the contrib's App credentials to recognize the agent's own
+    comments and ignore them. Without an `appId` it falls back to ignoring every bot
+    comment that doesn't mention the agent (`ignoreBotAuthors`). To ignore other noisy bots, list them:
 
     ```nix
     scooter.webhooks.ignoreUsernames = [ "dependabot[bot]" "renovate[bot]" ];
@@ -140,7 +134,7 @@ label to one. Later comments on a linked issue or MR are forwarded.
 3. **Enable the handler:**
 
     ```nix
-    scooter.webhooks.gitlabEnabled = true;
+    contribs.gitlab.webhooksEnabled = true;
     ```
 
     GitLab payloads don't mark bot accounts, so add the agent's own GitLab user (the
@@ -180,7 +174,7 @@ mention event is used, so `mentionPattern` doesn't apply.
 3. **Enable the handler:**
 
     ```nix
-    scooter.webhooks.slackEnabled = true;
+    contribs.slack.webhooksEnabled = true;
     ```
 
 4. **Test it:** invite the app to a channel and mention it.
@@ -226,9 +220,9 @@ kubectl -n scooter logs deploy/agent-webhooks -f
 |---|---|
 | Provider shows a 401 | The signing secret in the Secret doesn't match the provider's, or the pod hasn't restarted since you changed it |
 | Provider shows a 302 or a login page | An auth proxy is in front of the webhooks host |
-| `{"status": "disabled"}` | The handler's `…Enabled` option is off |
+| `{"status": "disabled"}` | The contrib's `webhooksEnabled` option is off |
 | Delivered, but nothing happens | The comment doesn't contain `mentionPattern`, or its author is in `ignoreUsernames` |
-| The agent replies to itself in a loop | GitLab: add its user to `ignoreUsernames`. GitHub: set `githubApp` |
+| The agent replies to itself in a loop | GitLab: add its user to `ignoreUsernames`. GitHub: set `contribs.github.appId` |
 
 For more detail, set `scooter.webhooks.logLevel = "DEBUG"`.
 

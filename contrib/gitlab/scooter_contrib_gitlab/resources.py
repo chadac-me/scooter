@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import re
 
-from scooter_webhooks_lib.resources import ResourceShapes, register_resource_shapes
+from scooter_webhooks_lib.resources import (
+    ResourceShapes,
+    load_type_aliases,
+    register_resource_shapes,
+)
 
 _GITLAB_URL_RE = re.compile(
     r"^https?://[^/]+/(.+?)/(?:-/)?(merge_requests|issues)/(\d+)(?:[/?#].*)?$"
@@ -27,7 +31,7 @@ def _id_variants(_resource_type: str, resource_id: str) -> list[str]:
 register_resource_shapes(
     "gitlab",
     ResourceShapes(
-        type_aliases={"mr": "merge_request", "merge_request": "merge_request", "issue": "issue"},
+        type_aliases=load_type_aliases(__package__),
         id_variants=_id_variants,
     ),
 )
