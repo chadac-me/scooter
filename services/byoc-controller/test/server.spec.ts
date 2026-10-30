@@ -328,6 +328,39 @@ describe("prompt route round-trips the caller's frame id", () => {
   });
 });
 
+describe("permission route", () => {
+  it("answers a permission whose id the agent-host URL-encoded", async () => {
+    const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });
+    const relay = createRunRelay({ registry });
+    const server = createServer({ registry, relay, secret: SECRET });
+    const { sessionId, token } = await registry.mint("alice");
+    const sent: Array<{ type?: string; id?: string }> = [];
+    registry.attach(sessionId, token, { send: (raw: string) => sent.push(JSON.parse(raw)), close: () => {} });
+
+    // The container's ids are `toolCallId:nonce`, and the colon is percent-encoded on the wire.
+    const id = "toolu_01ABC:k3j2h1";
+    relay.onContainerFrame(sessionId, JSON.stringify({ ch: "acp", type: "permission_request", id, payload: { request: { sessionId: "acp-1" } } }));
+    const res = await server.handle({
+      method: "POST",
+      path: `/byoc/${sessionId}/permission/${encodeURIComponent(id)}`,
+      body: { ch: "acp", type: "ack", id, payload: { result: { optionId: "answer" } } },
+      user: { id: "alice" },
+    } as never);
+
+    expect(res.status).toBe(204);
+    expect(sent.at(-1)).toMatchObject({ type: "ack", id });
+    server.close();
+  });
+
+  it("rejects a malformed percent-encoding instead of throwing", async () => {
+    const registry = createSessionRegistry({ store: fakeStore(), secret: SECRET });
+    const server = createServer({ registry, relay: createRunRelay({ registry }), secret: SECRET });
+    const res = await server.handle({ method: "POST", path: "/byoc/x/permission/%E0%A4%A", body: {}, user: { id: "alice" } } as never);
+    expect(res.status).toBe(400);
+    server.close();
+  });
+});
+
 // --- the inbound tunnel stream (GET /byoc/:id/tunnel) ----------------------------------------
 //
 // The agent-host's channel for frames a container initiates, which are kept out of run streams.

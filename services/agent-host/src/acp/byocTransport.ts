@@ -8,7 +8,7 @@
  * in-flight requests and lets the bridge emit RUN_ERROR rather than hang.
  */
 
-import { logger } from "../log.js";
+import { formatError, logger } from "../log.js";
 import type { RemoteTransport, WireFrame } from "./remoteProtocol.js";
 
 const log = logger("byoc-transport");
@@ -112,13 +112,25 @@ export function createByocTransport(config: ByocTransportConfig): RemoteTranspor
             signal: ac.signal,
           });
           if (!res.ok) {
+            log.warn("controller rejected a frame; closing the transport", {
+              session_id: sessionId,
+              frame_type: frame.type,
+              status: res.status,
+              reason: await res.text().catch(() => ""),
+            });
             // Close rather than retry silently, so the bridge tells the user their Claude is offline.
             shutdown();
             return;
           }
           await pump(res, arm);
-        } catch {
-          if (!ac.signal.aborted) shutdown(); // an abort is our own close(), not a failure
+        } catch (err) {
+          if (ac.signal.aborted) return; // an abort is our own close(), not a failure
+          log.warn("controller request failed; closing the transport", {
+            session_id: sessionId,
+            frame_type: frame.type,
+            error: formatError(err),
+          });
+          shutdown();
         } finally {
           clearTimeout(idle);
           inflight.delete(ac);
