@@ -1,7 +1,8 @@
 # What a PR must satisfy to merge, read by the one required check
-# (`ci-summary`), which collects what every reporting job wrote into the shared
-# PR comment and passes only if each gate below is satisfied; an opt-in suite is
-# enforced by declaring it here, not by editing branch protection.
+# (`ci-summary`), which collects the section every reporting job wrote (its
+# artifact, else the shared PR comment) and passes only if each gate below is
+# satisfied; an opt-in suite is enforced by declaring it here, not by editing
+# branch protection.
 #
 # `require`:
 #   always              — must report, and must pass

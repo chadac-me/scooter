@@ -86,6 +86,15 @@ jobs:
           node scripts/ci-report.mjs post --section fast --status "$status" \
             --summary "$summary" --body fast.md --labels "$LABELS"
 
+      - name: upload the fast section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-fast
+          path: ${{ runner.temp }}/ci-sections/fast.json
+          overwrite: true
+          if-no-files-found: ignore
+
   # Builds every image publish-images.yml ships (without pushing), so an image that
   # stops building fails its PR instead of the next publish on main. Assembling a
   # nix2container image over its whole closure is a failure surface neither the
@@ -163,6 +172,15 @@ jobs:
           node scripts/ci-report.mjs post --section images --status "$status" \
             --summary "$summary" --body images.md --labels "$LABELS"
 
+      - name: upload the images section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-images
+          path: ${{ runner.temp }}/ci-sections/images.json
+          overwrite: true
+          if-no-files-found: ignore
+
   # Runs the deploy's migrator against a scratch Postgres for both renders (see
   # nix/check-db-migrations.nix), so a migration that cannot apply fails its PR
   # instead of the deploy's migrate Job.
@@ -215,6 +233,15 @@ jobs:
           fi
           node scripts/ci-report.mjs post --section migrations --status "$status" \
             --summary "$summary" --body migrations.md --labels "$LABELS"
+
+      - name: upload the migrations section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-migrations
+          path: ${{ runner.temp }}/ci-sections/migrations.json
+          overwrite: true
+          if-no-files-found: ignore
 
   # Measures every shipped image on the PR, rebuilds the baseline from origin/main in
   # the same job (Cachix substitutes the unchanged images) and posts the diff as a
@@ -292,6 +319,15 @@ jobs:
           node scripts/ci-report.mjs post --section size --status fail \
             --summary 'image size — measurement FAILED' --body report.md --labels "$LABELS"
 
+      - name: upload the size section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-size
+          path: ${{ runner.temp }}/ci-sections/size.json
+          overwrite: true
+          if-no-files-found: ignore
+
   # Enumerates the dev-env-* nixosTests into a matrix so each VM test runs in its
   # own job; HEAVY_TESTS are excluded per-PR and included nightly or with the
   # `full-nixos-tests` label.
@@ -351,6 +387,15 @@ jobs:
           printf 'The benchmark run failed before it could compare; see the job log.\n' > bench.md
           node scripts/ci-report.mjs post --section bench --status fail \
             --summary 'benchmarks — run FAILED' --body bench.md --labels "$LABELS"
+
+      - name: upload the bench section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-bench
+          path: ${{ runner.temp }}/ci-sections/bench.json
+          overwrite: true
+          if-no-files-found: ignore
 
   nixos-tests-matrix:
     name: enumerate dev-env nixosTests
@@ -1181,6 +1226,15 @@ jobs:
           node scripts/ci-report.mjs post --section e2e-full --status "$status" \
             --body comment.md --labels "$LABELS"
 
+      - name: upload the e2e-full section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-e2e-full
+          path: ${{ runner.temp }}/ci-sections/e2e-full.json
+          overwrite: true
+          if-no-files-found: ignore
+
   # e2e fast: Playwright through the UI against the fake-agent stack, sharded as
   # distribute → e2e-shard → e2e-collect. Each shard has its own runner, webServer
   # and /tmp state, so playwright.config's workers:1 holds within a shard while
@@ -1403,6 +1457,15 @@ jobs:
           node scripts/ci-report.mjs post --section e2e-fast --status "$status" \
             --summary "$summary" --body comment.md --labels "$LABELS"
 
+      - name: upload the e2e-fast section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-e2e-fast
+          path: ${{ runner.temp }}/ci-sections/e2e-fast.json
+          overwrite: true
+          if-no-files-found: ignore
+
       # The gate: fail iff any shard failed.
       - name: gate on shard results
         if: always()
@@ -1592,6 +1655,15 @@ jobs:
           node scripts/ci-report.mjs post --section flake-fast --status "$status" \
             --summary "$(sed -n 's/^### [^ ]* //p' flake-comment.md | head -1 | grep . || echo 'flake focus (fast)')" \
             --body flake-comment.md --labels "$LABELS"
+
+      - name: upload the flake-fast section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-flake-fast
+          path: ${{ runner.temp }}/ci-sections/flake-fast.json
+          overwrite: true
+          if-no-files-found: ignore
 
       # A run that executed the targeted test zero times exits 0 and is the false
       # green this job exists to prevent.
@@ -1824,6 +1896,15 @@ jobs:
             --summary "$(sed -n 's/^### [^ ]* //p' flake-comment.md | head -1 | grep . || echo 'flake focus (full)')" \
             --body flake-comment.md --labels "$LABELS"
 
+      - name: upload the flake-full section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-flake-full
+          path: ${{ runner.temp }}/ci-sections/flake-full.json
+          overwrite: true
+          if-no-files-found: ignore
+
       # Zero repetitions of the targeted test is a false green.
       - name: gate — the targeted test must have run
         if: always() && steps.summary.outputs.verdict == 'not-run'
@@ -1891,10 +1972,19 @@ jobs:
           node scripts/ci-report.mjs post --section nixos --status "$status" \
             --summary "$summary" --body nixos.md --labels "$LABELS"
 
-  # The required check: reads the shared comment every reporting job wrote into and
-  # fails when a gate in .github/ci-gates.yml is failing or has not reported, since
-  # an unreported gate is not a passing gate. needs every producer so it runs last;
-  # always() so a red producer still yields a verdict.
+      - name: upload the nixos section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-nixos
+          path: ${{ runner.temp }}/ci-sections/nixos.json
+          overwrite: true
+          if-no-files-found: ignore
+
+  # The required check: reads the section every reporting job wrote (its artifact, else
+  # the shared comment) and fails when a gate in .github/ci-gates.yml is failing or
+  # has not reported, since an unreported gate is not a passing gate. needs every
+  # producer so it runs last; always() so a red producer still yields a verdict.
   ci-summary:
     name: ci summary (gates)
     needs: [ci, image-build-report, db-migrations-report, image-sizes, bench, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
@@ -1906,6 +1996,13 @@ jobs:
       issues: read           # a PR's comments live on the issues endpoint
     steps:
       - uses: actions/checkout@v5
+      # Saved sections, since fork PRs cannot write the comment.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: ci-section-*
+          path: ${{ runner.temp }}/ci-sections
+          merge-multiple: true
       - name: evaluate the gates
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
