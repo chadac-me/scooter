@@ -59,7 +59,7 @@ _VALID_VISIBILITY = {"public", "private"}
 # The Scooter UI's favicon (services/ui/index.html), for pages that declare none.
 _DEFAULT_FAVICON_LINK = (
     b"<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
-    b"viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B5%3C/text%3E%3C/svg%3E\">"
+    b"viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B4%3C/text%3E%3C/svg%3E\">"
 )
 _ICON_LINK_RE = re.compile(rb"<link\b[^>]*\brel\s*=\s*[\"']?[^\"'>]*\bicon\b", re.IGNORECASE)
 # Insert after the first match; never before a doctype.

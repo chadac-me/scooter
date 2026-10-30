@@ -18,6 +18,7 @@ import { InterruptList } from "./InterruptPanel.js";
 import { ThemePicker } from "./ThemePicker.js";
 import { useSessions } from "./sessions.js";
 import { appPathFor } from "./chatRoute.js";
+import { SCOOTER_MARK } from "./brandMark.js";
 
 // Whether the conversation stream has delivered its first full list, which is what lets
 // "not listed yet" become "not found". Set from main.tsx's onSnapshot.
@@ -70,7 +71,7 @@ export function ChatPage({ conversationId }: { conversationId: string }) {
       <div className="flex h-dvh flex-col" data-testid="chat-page" data-conversation-id={conversationId}>
         <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b bg-header px-3 text-sm">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="text-[15px] leading-none" aria-hidden>🛴</span>
+            <span className="text-[15px] leading-none" aria-hidden>{SCOOTER_MARK}</span>
             {ready && <HeaderConversationTitle />}
           </div>
           <div className="flex shrink-0 items-center gap-2">
