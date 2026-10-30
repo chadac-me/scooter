@@ -75,8 +75,9 @@ def _record_message_dispatched(channel: str, ts: str) -> None:
 
 
 def _verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
+    # Fail closed: an unset secret must not admit forged events.
     if not settings.slack_signing_secret:
-        return True
+        return False
     if abs(time.time() - int(timestamp)) > 60 * 5:
         return False
     sig_basestring = f"v0:{timestamp}:{body.decode('utf-8')}"

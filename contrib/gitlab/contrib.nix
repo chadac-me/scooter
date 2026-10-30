@@ -29,10 +29,11 @@ in
 
     options.webhooksEnabled = lib.mkOption {
       type = lib.types.bool;
-      default = false;
+      default = config.enable;
+      defaultText = lib.literalExpression "config.contribs.gitlab.enable";
       description = ''
         Enable the GitLab webhook handler (/webhooks/gitlab). Set GITLAB_WEBHOOK_SECRET in the
-        webhooks provider Secret: unset, deliveries are accepted unsigned.
+        webhooks provider Secret: without it every delivery gets a 401.
       '';
     };
 

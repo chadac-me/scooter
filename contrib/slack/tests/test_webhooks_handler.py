@@ -27,6 +27,18 @@ def test_slack_webhook_disabled(client):
         assert resp.json()["status"] == "disabled"
 
 
+def test_slack_webhook_rejects_all_without_a_secret(client):
+    with patch.object(slack_h, "settings") as mock_settings:
+        mock_settings.slack_enabled = True
+        mock_settings.slack_signing_secret = ""
+        resp = client.post(
+            "/webhooks/slack",
+            headers={"X-Slack-Request-Timestamp": "0", "X-Slack-Signature": ""},
+            json={"type": "event_callback"},
+        )
+        assert resp.status_code == 401
+
+
 def test_slack_event_deduped_by_event_id(client):
     """A redelivered event_id is processed exactly once."""
     slack_h._SEEN_EVENT_IDS.clear()

@@ -18,10 +18,11 @@ in
 
     options.webhooksEnabled = lib.mkOption {
       type = lib.types.bool;
-      default = false;
+      default = config.enable;
+      defaultText = lib.literalExpression "config.contribs.slack.enable";
       description = ''
         Enable the Slack events webhook handler (/webhooks/slack). Set SLACK_SIGNING_SECRET in the
-        webhooks provider Secret: unset, deliveries are accepted unsigned.
+        webhooks provider Secret: without it every delivery gets a 401.
       '';
     };
 

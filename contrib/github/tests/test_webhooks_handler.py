@@ -43,6 +43,18 @@ def test_github_webhook_invalid_signature(client):
         assert resp.status_code == 401
 
 
+def test_github_webhook_rejects_all_without_a_secret(client):
+    with patch.object(gh, "settings") as mock_settings:
+        mock_settings.github_enabled = True
+        mock_settings.github_webhook_secret = ""
+        resp = client.post(
+            "/webhooks/github",
+            headers={"X-Github-Event": "issue_comment", "X-Hub-Signature-256": ""},
+            json={},
+        )
+        assert resp.status_code == 401
+
+
 def test_importing_the_handler_arms_the_owner_lookup_and_shapes():
     """identity/resources register by import side effect and nothing else imports them."""
     from scooter_webhooks_lib import identity, resources

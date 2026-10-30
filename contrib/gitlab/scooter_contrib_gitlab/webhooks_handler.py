@@ -29,8 +29,9 @@ _C = {"component": "handlers.gitlab"}
 router = APIRouter()
 
 def _verify_signature(body: bytes, token: str) -> bool:
+    # Fail closed: an unset secret must not admit forged events.
     if not settings.gitlab_webhook_secret:
-        return True
+        return False
     return hmac.compare_digest(token, settings.gitlab_webhook_secret)
 
 
