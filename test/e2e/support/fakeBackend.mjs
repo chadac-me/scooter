@@ -16,16 +16,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, chownSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-// Postgres refuses to run as root, so when running as root the PG processes run as a
-// non-root uid (default `nobody`, override via PGUID/PGGID) and the datadir is chowned to it.
-const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
-const PG_AS = runningAsRoot
-  ? { uid: Number(process.env.PGUID ?? 65534), gid: Number(process.env.PGGID ?? 65534) }
-  : {};
 
 // E2E_-prefixed so they cannot collide with the k8s service env a dev container inside k8s
 // gets injected (AGENT_HOST_PORT=tcp://…).
@@ -33,6 +24,7 @@ const ROUTER_PORT = process.env.E2E_ROUTER_PORT ?? "8080";
 const AGENT_HOST_PORT = process.env.E2E_AGENT_HOST_PORT ?? "8079";
 const PG_PORT = process.env.E2E_PG_PORT ?? "55432";
 const REPO_ROOT = new URL("../../..", import.meta.url).pathname;
+const PG_EPHEMERAL = join(REPO_ROOT, "scripts/pg-ephemeral.sh");
 const DSN = `postgres://postgres@127.0.0.1:${PG_PORT}/agent_host?sslmode=disable`;
 // The webhooks DB owns the resource_links table, which agent-host writes and the router
 // reads, so both must point at the same DB.
@@ -45,8 +37,7 @@ const fail = (msg) => {
   process.exit(1);
 };
 
-let tmp;
-let pgStarted = false;
+let pgDir;
 /** @type {import('node:child_process').ChildProcess[]} */
 const children = [];
 
@@ -81,47 +72,22 @@ function cleanup() {
       /* already gone */
     }
   }
-  if (pgStarted && tmp) {
+  if (pgDir) {
     // pg_ctl daemonizes postgres detached from this process, so it must be stopped explicitly.
-    spawnSync("pg_ctl", ["-D", join(tmp, "data"), "-m", "immediate", "stop"], { stdio: "ignore", ...PG_AS });
-    pgStarted = false;
-  }
-  if (tmp) {
-    try {
-      rmSync(tmp, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
+    spawnSync(PG_EPHEMERAL, ["stop", pgDir], { stdio: "ignore" });
+    pgDir = undefined;
   }
 }
 
 // ---- boot sequence -----------------------------------------------------------------------------
 
-// nix develop's TMPDIR is root-only 0700, so PG_AS can't traverse it.
-tmp = mkdtempSync(join(runningAsRoot ? "/tmp" : tmpdir(), "scooter-e2e-pg-"));
-const pgData = join(tmp, "data");
-const pgSock = join(tmp, "sock");
-mkdirSync(pgSock, { recursive: true });
-if (runningAsRoot) {
-  // The PG processes run as PG_AS; give them ownership of the dir tree they must write.
-  chownSync(tmp, PG_AS.uid, PG_AS.gid);
-  chownSync(pgSock, PG_AS.uid, PG_AS.gid);
-}
-
-log(`initdb → ${pgData}${runningAsRoot ? ` (as uid ${PG_AS.uid})` : ""}`);
-must("initdb", ["-D", pgData, "-U", "postgres", "--auth=trust"], PG_AS);
-
 log(`starting Postgres on 127.0.0.1:${PG_PORT}`);
-must("pg_ctl", [
-  "-D", pgData,
-  "-o", `-k ${pgSock} -c listen_addresses=127.0.0.1 -c port=${PG_PORT}`,
-  "-l", join(tmp, "pg.log"),
-  "-w", "start",
-], PG_AS);
-pgStarted = true;
+const pg = spawnSync(PG_EPHEMERAL, ["start", PG_PORT], { stdio: ["ignore", "pipe", "inherit"], encoding: "utf8" });
+if (pg.status !== 0) fail(`pg-ephemeral.sh start exited ${pg.status ?? pg.signal}`);
+pgDir = pg.stdout.trim();
 
 log("createdb agent_host");
-must("createdb", ["-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", "agent_host"], PG_AS);
+must("createdb", ["-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", "agent_host"]);
 
 log("atlas migrate apply (agent_host)");
 must("atlas", ["migrate", "apply", "--dir", "file://agent_host/migrations", "--url", DSN], {
@@ -129,7 +95,7 @@ must("atlas", ["migrate", "apply", "--dir", "file://agent_host/migrations", "--u
 });
 
 log("createdb webhooks");
-must("createdb", ["-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", "webhooks"], PG_AS);
+must("createdb", ["-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", "webhooks"]);
 
 log("atlas migrate apply (webhooks)");
 must("atlas", ["migrate", "apply", "--dir", "file://webhooks/migrations", "--url", WEBHOOKS_DSN], {
@@ -139,7 +105,7 @@ must("atlas", ["migrate", "apply", "--dir", "file://webhooks/migrations", "--url
 // ask-user's database backs the sidebar's "!" (awaiting-input); both services find it by name.
 const AWAITING_DB = "contrib_ask_user";
 log(`createdb ${AWAITING_DB}`);
-must("createdb", ["-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", AWAITING_DB], PG_AS);
+must("createdb", ["-h", "127.0.0.1", "-p", PG_PORT, "-U", "postgres", AWAITING_DB]);
 
 log(`atlas migrate apply (${AWAITING_DB})`);
 must("atlas", ["migrate", "apply", "--dir", "file://migrations", "--url",
