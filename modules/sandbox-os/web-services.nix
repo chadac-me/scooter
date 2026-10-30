@@ -335,6 +335,7 @@ in
 {
   imports = [
     ./web-services/terminal.nix
+    ./web-services/ssh.nix
   ];
 
   options.webServices = lib.mkOption {
