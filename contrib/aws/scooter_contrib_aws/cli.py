@@ -207,7 +207,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         if status == 201:
             rid = body["request_id"]
             if body.get("status") == "active":
-                print(f"requested: {rid} — AUTO-APPROVED (read-only). Credentials are ready; use `aws --profile {args.profile} …`.")
+                print(f"requested: {rid} — AUTO-APPROVED by the account's approval rules. Credentials are ready; use `aws --profile {args.profile} …`.")
             else:
                 # Requesting neither pauses the agent nor notifies it on grant, so it is told to wait and poll.
                 msg = (

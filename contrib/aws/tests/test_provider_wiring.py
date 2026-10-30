@@ -29,6 +29,11 @@ def _aws_env(monkeypatch, tmp_path):
             "broker_role_arn": "arn:aws:iam::123456789012:role/base",
             "enabled": True,
             "approvers": ["alice@example.com"],
+            "approval_rules": [
+                {"name": "grants", "anchor": True},
+                {"name": "sg/secrets", "effect": "require_always", "actions": ["secretsmanager:GetSecretValue"],
+                 "resources": ["*"], "managed_policy_arns": [], "approvers": ["sec@example.com"]},
+            ],
         }
     }))
     monkeypatch.setenv("AWS_ENABLED", "true")
@@ -75,3 +80,23 @@ def test_the_transport_is_mounted_on_the_provider(_aws_env):
 
     provider = aws_provider.aws(_context(_aws_env, _Sentinel()))
     assert [t.name for t in provider.transports] == ["aws-permissions"]
+
+
+async def test_startup_seeds_account_and_rule_approvers(_aws_env):
+    import scooter_contrib_aws.broker_provider as aws_provider
+
+    class _Recording(_Sentinel):
+        def __init__(self):
+            self.granted = []
+
+        async def grant(self, *, user: str, relation: str, obj: str) -> None:
+            self.granted.append((user, obj))
+
+    authz = _Recording()
+    provider = aws_provider.aws(_context(_aws_env, authz))
+    await provider.on_startup()
+    await provider.on_shutdown()
+    assert authz.granted == [
+        ("user:alice@example.com", "aws_account:dev"),
+        ("user:sec@example.com", "aws_account:dev/sg/secrets"),
+    ]

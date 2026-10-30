@@ -17,6 +17,8 @@ from scooter_broker_lib.store import StoreConfig
 from scooter_broker_lib.testing import create_schema
 from scooter_contrib_aws import store as aws_store
 
+from rule_sets import compiled, rule
+
 
 # --- fakes ----------------------------------------------------------------
 class FakeIam(IamProvisioner):
@@ -55,20 +57,25 @@ class FakeIam(IamProvisioner):
 
 REGISTRY = {
     "dev": {"account_id": "123", "broker_role_arn": "arn:...:base", "enabled": True,
-            "allowed_policy": {"Statement": [{"Action": ["s3:*"], "Resource": ["*"]}]}},
+            "allowed_policy": {"Statement": [{"Action": ["s3:*"], "Resource": ["*"]}]},
+            "approval_rules": compiled()},
     "prod": {"account_id": "456", "broker_role_arn": "arn:...:base", "enabled": True,
-             "allowed_policy": {"Statement": [{"Action": ["s3:Get*"], "Resource": ["*"]}]}},
+             "allowed_policy": {"Statement": [{"Action": ["s3:Get*"], "Resource": ["*"]}]},
+             "approval_rules": compiled()},
     "off": {"account_id": "789", "broker_role_arn": "arn:...:base", "enabled": False},
-    # Opts in to read-only auto-approval.
+    # Uses the read-only rule set.
     "ro": {"account_id": "999", "broker_role_arn": "arn:...:base", "enabled": True,
            "auto_approve_read_only": True, "description": "read-only sandbox",
-           "allowed_policy": {"Statement": [{"Action": ["*"], "Resource": ["*"]}]}},
-    # Auto-approve tier narrower than the allowed_policy ceiling, so an in-ceiling request outside the tier still needs a human.
+           "allowed_policy": {"Statement": [{"Action": ["*"], "Resource": ["*"]}]},
+           "approval_rules": compiled(read_only=True)},
+    # Allow rule narrower than the ceiling.
     "auto": {"account_id": "111", "broker_role_arn": "arn:...:base", "enabled": True,
              "description": "auto-assume deploy roles",
              "allowed_policy": {"Statement": [{"Action": ["sts:*", "s3:*"], "Resource": ["*"]}]},
-             "auto_allowed_policy": {"Statement": [{"Action": ["sts:AssumeRole"],
-                 "Resource": ["arn:aws:iam::111:role/deploy-*"]}]}},
+             "approval_rules": compiled(after=[rule("account/deploy-roles", "allow", ["sts:AssumeRole"],
+                                                    ["arn:aws:iam::111:role/deploy-*"])])},
+    # No approval_rules: a registry not rendered by the Nix module.
+    "raw": {"account_id": "222", "broker_role_arn": "arn:...:base", "enabled": True},
 }
 
 ASSUME_OK = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
@@ -136,7 +143,7 @@ async def test_request_creates_pending(tmp_path):
     assert req.iam_policy_arn is None
 
 
-async def test_readonly_request_auto_approves_when_account_opts_in(tmp_path):
+async def test_readonly_request_auto_approves_with_the_read_only_set(tmp_path):
     from scooter_contrib_aws.service import AUTO_APPROVE_PRINCIPAL
 
     notified = []
@@ -152,7 +159,7 @@ async def test_readonly_request_auto_approves_when_account_opts_in(tmp_path):
     assert notified == []
 
 
-async def test_auto_allowed_policy_auto_approves_covered_request(tmp_path):
+async def test_allow_rule_auto_approves_covered_request(tmp_path):
     from scooter_contrib_aws.service import AUTO_APPROVE_PRINCIPAL
 
     notified = []

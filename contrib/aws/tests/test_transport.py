@@ -30,9 +30,12 @@ from scooter_contrib_aws.permissions_transport import AwsPermissions  # noqa: E4
 from scooter_broker_lib.testing import create_schema
 from scooter_contrib_aws import store as aws_store
 
+from rule_sets import compiled
+
 REGISTRY = {
     "dev": {"account_id": "123", "broker_role_arn": "arn:...:base", "enabled": True,
-            "allowed_policy": {"Statement": [{"Action": ["s3:*"], "Resource": ["*"]}]}},
+            "allowed_policy": {"Statement": [{"Action": ["s3:*"], "Resource": ["*"]}]},
+            "approval_rules": compiled()},
 }
 POLICY = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/*"}]}
 

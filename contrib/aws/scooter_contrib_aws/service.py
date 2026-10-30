@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
-from . import policy
+from . import policy, rules
 from scooter_broker_lib.authz import Authorizer, NoopAuthorizer, user_object
 
 from .objects import aws_account_object
@@ -22,8 +22,8 @@ from .models import PermissionRequest, RequestStatus, RiskLevel, StsCredentials
 from .store import PermissionStore
 
 
-# Recorded as `approved_by` when a request is auto-approved without a human.
-AUTO_APPROVE_PRINCIPAL = "system:auto-approve-read-only"
+# `approved_by` when the approval rules grant without a human.
+AUTO_APPROVE_PRINCIPAL = "system:auto-approve"
 
 # Re-vend an STS token this many seconds before its expiry so status() never hands out one that expires mid-call.
 _CREDS_REFRESH_SKEW = 300
@@ -147,6 +147,7 @@ class PermissionService:
             raise RequestError([f"Account '{target_account}' is not available"])
         if policy_document is None and not managed_policy_arns:
             raise RequestError(["Must supply policy_document and/or managed_policy_arns"])
+        account_rules = self._rules_for(target_account)
 
         # Managed-policy ARNs must be allowlisted for the account.
         allowed_managed = set(acct.get("allowed_managed_policies", []))
@@ -154,16 +155,23 @@ class PermissionService:
             if arn not in allowed_managed:
                 raise RequestError([f"Managed policy '{arn}' is not allowed for this account"])
 
+        errors: list[str] = []
+        if policy_document is not None:
+            errors += policy.validate_policy(policy_document, target_account)
+            allowed_policy = acct.get("allowed_policy") or {"Statement": [{"Action": ["*"], "Resource": ["*"]}]}
+            errors += policy.validate_policy_within_bounds(policy_document, allowed_policy)
+        parts = rules.request_parts(policy_document, managed_policy_arns)
+        errors += rules.denials(account_rules, parts)
+        if errors:
+            raise RequestError(errors)
+
         risk = RiskLevel.LOW
         summary = ""
         if policy_document is not None:
-            errors = policy.validate_policy(policy_document, target_account)
-            allowed_policy = acct.get("allowed_policy") or {"Statement": [{"Action": ["*"], "Resource": ["*"]}]}
-            errors += policy.validate_policy_within_bounds(policy_document, allowed_policy)
-            if errors:
-                raise RequestError(errors)
             risk = policy.classify_risk(policy_document, target_account)
             summary = policy.summarize_policy(policy_document)
+
+        needed = rules.obligations(target_account, account_rules, parts)
 
         request_id = uuid.uuid4().hex[:12]
         # IAM provisioning is deferred to _provision so a request always appears as pending even when the account's broker IAM is not set up yet.
@@ -181,48 +189,42 @@ class PermissionService:
             parent_request_id=parent_request_id,
             requested_at=_now(),
             iam_policy_arn=None,
+            approval_obligations=[o.to_json() for o in needed] or None,
         )
         await self._store.insert(req)
 
         # Cancel older pending siblings now; active ones keep working until this request is approved.
         await self._supersede_pending_siblings(req)
 
-        # Per-account opt-in: a pure read-only inline policy (no managed ARNs, which can grant writes) is granted without a human.
-        if (
-            acct.get("auto_approve_read_only", False)
-            and not managed_policy_arns
-            and policy_document is not None
-            and policy.is_read_only_policy(policy_document)
-        ):
-            logger.info(
-                "auto-approving read-only request",
-                extra={
-                    "conversation_id": req.conversation_id,
-                    "request_id": request_id,
-                    "target_account": target_account,
-                    "auto_approve_reason": "read_only",
-                },
-            )
-            return await self._provision(req, approver=AUTO_APPROVE_PRINCIPAL)
-
-        # Per-account auto-approve tier, checked after validation so it can only grant requests already within allowed_policy.
-        if policy.covered_by_auto_policy(
-            policy_document,
-            managed_policy_arns,
-            acct.get("auto_allowed_policy"),
-            acct.get("auto_allowed_managed_policies", []),
-        ):
+        if not needed:
             logger.info(
                 "auto-approving request",
                 extra={
                     "conversation_id": req.conversation_id,
                     "request_id": request_id,
                     "target_account": target_account,
-                    "auto_approve_reason": "auto_allowed_policy",
+                    "auto_approve_reason": "approval_rules",
                 },
             )
             return await self._provision(req, approver=AUTO_APPROVE_PRINCIPAL)
 
+        await self._notify(req)
+        return req
+
+    def _rules_for(self, target_account: str) -> list[rules.Rule]:
+        """The account's approval rules; refuses a registry rendered without them."""
+        raw = self._registry[target_account].get("approval_rules")
+        if raw is None:
+            raise RequestError([
+                f"Account '{target_account}' has no approval_rules; the account registry must be "
+                "rendered by the contribs.aws Nix module"
+            ])
+        try:
+            return rules.parse_rules(raw)
+        except ValueError as e:
+            raise RequestError([str(e)]) from e
+
+    async def _notify(self, req: PermissionRequest) -> None:
         # Best-effort notify so the agent-host raises the approval interrupt; a failure must not fail the request.
         if self._on_request is not None:
             try:
@@ -232,11 +234,10 @@ class PermissionService:
                     "on_request notify failed",
                     extra={
                         "conversation_id": req.conversation_id,
-                        "request_id": request_id,
-                        "target_account": target_account,
+                        "request_id": req.request_id,
+                        "target_account": req.target_account,
                     },
                 )
-        return req
 
     # --- approver identity -------------------------------------------------
     def resolve_approver(self, approver, *, fallback: str) -> str:
@@ -249,14 +250,31 @@ class PermissionService:
         return fallback
 
     # --- approve / deny (approver) ----------------------------------------
-    async def _authorize_approver(self, approver: str, target_account: str) -> None:
-        """Enforce that `approver` may approve this account, failing closed if FGA is unreachable."""
-        # user_object() wraps the bare principal as `user:<id>`, matching how seed_approver_tuples() writes the tuple.
-        allowed = await self._authz.check(
-            user=user_object(approver), relation="approver", obj=aws_account_object(target_account)
-        )
-        if not allowed:
-            raise RequestError([f"'{approver}' is not authorized to approve account '{target_account}'"])
+    def _obligations(self, req: PermissionRequest) -> list[rules.Obligation]:
+        """Stored obligations; older requests need one account approval."""
+        if req.approval_obligations is None:
+            return [rules.Obligation(id="0", rules=[rules.ACCOUNT_DEFAULT],
+                                     objects=[aws_account_object(req.target_account)])]
+        return [rules.Obligation.from_json(o) for o in req.approval_obligations]
+
+    async def _eligible(self, approver: str, obligations: list[rules.Obligation]) -> list[str]:
+        """Obligation ids `approver` may satisfy; FGA errors propagate."""
+        user = user_object(approver)
+        allowed: dict[str, bool] = {}
+        out: list[str] = []
+        for o in obligations:
+            for obj in o.objects:
+                if obj not in allowed:
+                    allowed[obj] = await self._authz.check(user=user, relation="approver", obj=obj)
+                if allowed[obj]:
+                    out.append(o.id)
+                    break
+        return out
+
+    @staticmethod
+    def _unmet(req: PermissionRequest, obligations: list[rules.Obligation]) -> list[rules.Obligation]:
+        done = {i for a in req.approvals for i in a.get("obligations", [])}
+        return [o for o in obligations if o.id not in done]
 
     async def _provision(self, req: PermissionRequest, approver: str) -> PermissionRequest:
         """Provision the inline policy, dynamic role and creds for an approved request and mark it active, recording `approver` as approved_by."""
@@ -360,19 +378,33 @@ class PermissionService:
             await self._store.update(sib.request_id, status=RequestStatus.SUPERSEDED)
 
     async def approve(self, *, request_id: str, approver: str) -> PermissionRequest:
+        """Record an approval; provision once no obligation is unmet."""
         req = await self._store.get(request_id)
         if req is None:
             raise RequestError([f"Unknown request '{request_id}'"])
         if req.status != RequestStatus.PENDING:
             raise RequestError([f"Request is {req.status.value}, not pending"])
-        await self._authorize_approver(approver, req.target_account)
-        return await self._provision(req, approver)
+        unmet = self._unmet(req, self._obligations(req))
+        satisfied = await self._eligible(approver, unmet)
+        if not satisfied:
+            raise RequestError([f"'{approver}' is not authorized to approve what request '{request_id}' still needs"])
+        if not await self._store.add_approval(request_id, approver, _now(), satisfied):
+            raise RequestError([f"'{approver}' has already approved request '{request_id}'"])
+        req = await self._store.get(request_id)  # type: ignore[assignment]
+        if self._unmet(req, unmet):
+            # The answered interrupt is gone; re-raise for the rest.
+            await self._notify(req)
+            return req
+        approvers = ", ".join(dict.fromkeys(a["approver"] for a in req.approvals))
+        return await self._provision(req, approvers)
 
     async def deny(self, *, request_id: str, approver: str, reason: str | None = None) -> PermissionRequest:
         req = await self._store.get(request_id)
         if req is None:
             raise RequestError([f"Unknown request '{request_id}'"])
-        await self._authorize_approver(approver, req.target_account)
+        # Anyone eligible for any obligation may deny it all.
+        if not await self._eligible(approver, self._obligations(req)):
+            raise RequestError([f"'{approver}' is not authorized to deny request '{request_id}'"])
         # A provisioned policy must be torn down before the request goes terminal, or the DB claims it is gone while IAM still has it.
         if req.iam_policy_arn and not self._iam.delete_dynamic_policy(
             target_account=req.target_account, policy_arn=req.iam_policy_arn
@@ -387,14 +419,14 @@ class PermissionService:
         return await self._store.get(request_id)  # type: ignore[return-value]
 
     async def can_approve(self, *, request_id: str, approver: str) -> bool:
-        """Read-only form of the approve() authorization check for the UI's Approve button, failing closed when the request is unknown or FGA is unreachable."""
+        """Would approve() accept `approver` now? Fails closed."""
         req = await self._store.get(request_id)
         if req is None:
             return False
+        if any(a["approver"] == approver for a in req.approvals):
+            return False
         try:
-            return await self._authz.check(
-                user=user_object(approver), relation="approver", obj=aws_account_object(req.target_account)
-            )
+            return bool(await self._eligible(approver, self._unmet(req, self._obligations(req))))
         except Exception:
             return False
 

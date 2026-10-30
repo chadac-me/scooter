@@ -2,7 +2,7 @@
  * PermissionsCard: the approval card for an `aws.permissions` request, whose data is the
  * broker's approval_data (models.py). The brief view shows the account, risk, reason and
  * how many actions write; the detail view lists every statement with write actions marked,
- * the managed policies, and the raw policy JSON.
+ * the managed policies, the raw policy JSON, and the approvals still needed.
  */
 
 import { useState } from "react";
@@ -16,6 +16,13 @@ export interface Statement {
   condition?: unknown;
 }
 
+/** One approval the request needs, from the broker's approval rules. */
+export interface Obligation {
+  rules: string[];
+  parts: string[];
+  approvedBy: string | null;
+}
+
 export interface Grant {
   account: string;
   risk: string;
@@ -25,6 +32,7 @@ export interface Grant {
   managedPolicyArns: string[];
   writeActions: string[];
   parentRequestId: string | null;
+  obligations: Obligation[];
 }
 
 const asList = (v: unknown): string[] =>
@@ -47,7 +55,16 @@ export function grantOf(data: unknown): Grant | null {
     managedPolicyArns: asList(d.managed_policy_arns),
     writeActions: asList(d.write_actions),
     parentRequestId: str(d.parent_request_id) || null,
+    obligations: obligationsOf(d.obligations),
   };
+}
+
+/** The broker's obligation list, dropping malformed entries. */
+export function obligationsOf(v: unknown): Obligation[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
+    .map((o) => ({ rules: asList(o.rules), parts: asList(o.parts), approvedBy: str(o.approved_by) || null }));
 }
 
 /** A policy document's statements, with IAM's string-or-list fields as lists. */
@@ -84,6 +101,24 @@ function RiskBadge({ risk }: { risk: string }) {
     >
       {risk} risk
     </span>
+  );
+}
+
+function Approvals({ obligations }: { obligations: Obligation[] }) {
+  return (
+    <ul className="space-y-1 text-xs" data-testid="aws-obligations">
+      {obligations.map((o, i) => (
+        <li key={i} className="flex items-start justify-between gap-2" data-approved={o.approvedBy ? "true" : "false"}>
+          <span className="min-w-0">
+            <span className="font-mono">{o.rules.join(", ")}</span>
+            {o.parts.length > 0 && <span className="block truncate text-muted-foreground">{o.parts.join("; ")}</span>}
+          </span>
+          <span className={cn("shrink-0", o.approvedBy ? "text-emerald-700 dark:text-emerald-300" : "text-muted-foreground")}>
+            {o.approvedBy ? `approved by ${o.approvedBy}` : "waiting"}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -200,6 +235,7 @@ export default function PermissionsCard({ message, data, view, ...answers }: Int
           {grant.writeActions.length > 0 ? `, ${grant.writeActions.length} write` : ", read-only"}
           {grant.managedPolicyArns.length > 0 && ` + ${grant.managedPolicyArns.length} managed`}
         </p>
+        {grant.obligations.length > 1 && <Approvals obligations={grant.obligations} />}
         <Answers {...answers} detail={false} />
       </div>
     );
@@ -256,6 +292,13 @@ export default function PermissionsCard({ message, data, view, ...answers }: Int
               </li>
             ))}
           </ul>
+        </section>
+      )}
+
+      {grant.obligations.length > 0 && (
+        <section className="space-y-1">
+          <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Approvals needed</h3>
+          <Approvals obligations={grant.obligations} />
         </section>
       )}
 
