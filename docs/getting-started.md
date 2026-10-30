@@ -181,8 +181,7 @@ scooter.agent = {
 };
 ```
 
-`claude setup-token` is interactive: capturing it with `$(…)` stores its screen text,
-not the token. Run it in a terminal, copy the `sk-ant-oat01-…` line it prints, then:
+Run `claude setup-token`, copy the `sk-ant-oat01-…` token it prints, then:
 
 ```bash
 kubectl -n scooter create secret generic agent-claude-code-token \
