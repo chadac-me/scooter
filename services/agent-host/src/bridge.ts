@@ -1464,7 +1464,7 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
         deps.modelCatalog
           ? deps.model && modelAllowedFor(deps.modelCatalog, deps.model, provider.modelTag)
             ? deps.model
-            : defaultFor(deps.modelCatalog, provider.modelTag)
+            : defaultFor(deps.modelCatalog, provider.modelTag, conversationId)
           : deps.model;
       // A provider with its own MCP set (the BYO tunnel names) wins; otherwise the per-run
       // resolver, falling back to the static `config.mcpServers`.

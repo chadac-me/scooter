@@ -124,10 +124,10 @@ describe("model catalog: provider dimension", () => {
     expect(modelAllowedFor(catalog, "claude-sonnet-4-5", undefined)).toBe(true);
   });
 
-  it("defaultFor: the global default when the provider offers it, else the provider's first", () => {
+  it("defaultFor: the global default when the provider offers it, else a model it offers", () => {
     expect(defaultFor(catalog, "goose")).toBe("us.anthropic.claude-sonnet-4-6");
-    // byoc does not offer the global default, so it gets its first offered model.
-    expect(defaultFor(catalog, "byoc")).toBe("claude-sonnet-4-5");
+    // byoc does not offer the global default, so it samples its equal-priority models.
+    expect(["claude-sonnet-4-5", "everywhere-model"]).toContain(defaultFor(catalog, "byoc"));
     expect(defaultFor(catalog, undefined)).toBe("us.anthropic.claude-sonnet-4-6");
   });
 
@@ -148,5 +148,55 @@ describe("model catalog: provider dimension", () => {
       AGENT_MODELS_JSON: JSON.stringify([{ id: "m1", default: true }]),
     } as never);
     expect(defaultFor(c, "byoc")).toBe("m1");
+  });
+});
+
+describe("model catalog: priority", () => {
+  const catalog = catalogFromEnv({
+    AGENT_MODELS_JSON: JSON.stringify([
+      { id: "opus", providers: ["byoc", "goose"], priorities: { byoc: 100, goose: 10 } },
+      { id: "sonnet", providers: ["goose"], priorities: { goose: 50 } },
+      { id: "fable", providers: ["goose"], priorities: { goose: 50 } },
+      { id: "haiku", providers: ["goose", "byoc"], priorities: { goose: 0, byoc: 0 } },
+    ]),
+  } as never);
+
+  it("picks the highest-priority model the provider offers", () => {
+    expect(defaultFor(catalog, "byoc", "conv-1")).toBe("opus");
+  });
+
+  it("samples equal priorities, stably per seed", () => {
+    const seen = new Set<string | undefined>();
+    for (let i = 0; i < 200; i++) {
+      const pick = defaultFor(catalog, "goose", `conv-${i}`);
+      expect(pick).toBe(defaultFor(catalog, "goose", `conv-${i}`));
+      seen.add(pick);
+    }
+    expect([...seen].sort()).toEqual(["fable", "sonnet"]);
+  });
+
+  it("an unseeded tie is sampled at random among the tied models", () => {
+    for (let i = 0; i < 20; i++) expect(["fable", "sonnet"]).toContain(defaultFor(catalog, "goose"));
+  });
+
+  it("legacy default/defaultFor flags read as priority 100", () => {
+    const c = catalogFromEnv({
+      AGENT_MODELS_JSON: JSON.stringify([
+        { id: "a", providers: ["byoc"] },
+        { id: "b", providers: ["byoc"], defaultFor: ["byoc"] },
+        { id: "c", default: true },
+      ]),
+    } as never);
+    expect(c.models.find((m) => m.id === "b")!.priorities).toEqual({ byoc: 100 });
+    expect(c.models.find((m) => m.id === "c")!.priority).toBe(100);
+    // "c" is untagged, so byoc sees it at its global 100 too.
+    expect(["b", "c"]).toContain(defaultFor(c, "byoc", "x"));
+  });
+
+  it("without a default flag the catalog default is the highest-priority model", () => {
+    const c = catalogFromEnv({
+      AGENT_MODELS_JSON: JSON.stringify([{ id: "a" }, { id: "b", priority: 5 }]),
+    } as never);
+    expect(c.defaultId).toBe("b");
   });
 });

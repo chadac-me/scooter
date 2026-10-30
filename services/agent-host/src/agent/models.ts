@@ -17,6 +17,10 @@ export interface ModelInfo {
   providers: string[];
   /** The providers this model is the default for. */
   defaultFor: string[];
+  /** Selection rank when nothing is picked: the highest offered wins, ties sampled. */
+  priority: number;
+  /** Per-provider ranks overriding `priority` for runs on that provider. */
+  priorities: Record<string, number>;
   /** The deployer-declared context window in tokens, overriding goose's own model table. */
   contextLimit?: number;
 }
@@ -34,17 +38,21 @@ export function catalogFromEnv(env: NodeJS.ProcessEnv = process.env): ModelCatal
     try {
       const parsed = JSON.parse(json) as Array<{
         id?: unknown; hint?: unknown; default?: unknown; providers?: unknown; defaultFor?: unknown;
-        contextLimit?: unknown;
+        contextLimit?: unknown; priority?: unknown; priorities?: unknown;
       }>;
       const models: ModelInfo[] = [];
       for (const m of Array.isArray(parsed) ? parsed : []) {
         if (typeof m?.id !== "string" || !m.id) continue;
+        const isDefault = m.default === true;
+        const defaultFor = Array.isArray(m.defaultFor) ? m.defaultFor.filter((x): x is string => typeof x === "string") : [];
         models.push({
           id: m.id,
           hint: typeof m.hint === "string" ? m.hint : "",
-          default: m.default === true,
+          default: isDefault,
           providers: Array.isArray(m.providers) ? m.providers.filter((x): x is string => typeof x === "string") : [],
-          defaultFor: Array.isArray(m.defaultFor) ? m.defaultFor.filter((x): x is string => typeof x === "string") : [],
+          defaultFor,
+          priority: isInt(m.priority) ? m.priority : isDefault ? DEFAULT_PRIORITY : 0,
+          priorities: parsePriorities(m.priorities, defaultFor),
           ...(isPositiveInt(m.contextLimit) ? { contextLimit: m.contextLimit } : {}),
         });
       }
@@ -60,8 +68,31 @@ export function catalogFromEnv(env: NodeJS.ProcessEnv = process.env): ModelCatal
     .map((s) => s.trim())
     .filter(Boolean);
   if (legacyDefault && !ids.includes(legacyDefault)) ids.unshift(legacyDefault);
-  const models: ModelInfo[] = ids.map((id) => ({ id, hint: "", default: id === legacyDefault, providers: [], defaultFor: [] }));
+  const models: ModelInfo[] = ids.map((id) => ({
+    id,
+    hint: "",
+    default: id === legacyDefault,
+    providers: [],
+    defaultFor: [],
+    priority: id === legacyDefault ? DEFAULT_PRIORITY : 0,
+    priorities: {},
+  }));
   return withDefault(models, legacyDefault);
+}
+
+/** The rank `default: true` stands for. */
+const DEFAULT_PRIORITY = 100;
+
+function isInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v);
+}
+
+/** `priorities` as given, else a `defaultFor` provider ranked as DEFAULT_PRIORITY. */
+function parsePriorities(raw: unknown, defaultFor: string[]): Record<string, number> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return Object.fromEntries(Object.entries(raw).filter((e): e is [string, number] => isInt(e[1])));
+  }
+  return Object.fromEntries(defaultFor.map((p) => [p, DEFAULT_PRIORITY]));
 }
 
 function isPositiveInt(v: unknown): v is number {
@@ -73,12 +104,12 @@ export function contextLimitOf(cat: ModelCatalog, id: string | undefined): numbe
   return id === undefined ? undefined : cat.models.find((m) => m.id === id)?.contextLimit;
 }
 
-/** Ensure exactly one default is marked: an explicit default:true, else `fallback`, else the first model. */
+/** Ensure exactly one default is marked: an explicit default:true, else `fallback`, else the first highest-priority model. */
 function withDefault(models: ModelInfo[], fallback?: string): ModelCatalog {
   if (models.length === 0) return { models: [], defaultId: fallback };
   let def = models.find((m) => m.default);
   if (!def && fallback) def = models.find((m) => m.id === fallback);
-  if (!def) def = models[0];
+  if (!def) def = models.reduce((a, b) => (b.priority > a.priority ? b : a));
   // Normalize the flags so exactly `def` is the default.
   for (const m of models) m.default = m.id === def.id;
   return { models, defaultId: def.id };
@@ -108,12 +139,36 @@ export function modelAllowedFor(catalog: ModelCatalog, id: string, tag: string |
   return m.providers.includes(tag);
 }
 
-/** The model a run on provider `tag` should use absent a valid choice: the provider's own default, else the global default if offered, else the first model the provider offers. */
-export function defaultFor(catalog: ModelCatalog, tag: string | undefined): string | undefined {
-  if (tag) {
-    const flagged = catalog.models.find((m) => m.defaultFor.includes(tag));
-    if (flagged) return flagged.id;
+/** Model `m`'s rank on provider `tag`, its global rank when that provider sets none. */
+function priorityOf(m: ModelInfo, tag: string | undefined): number {
+  return tag !== undefined && tag in m.priorities ? m.priorities[tag] : m.priority;
+}
+
+/**
+ * The model a run on provider `tag` should use absent a valid choice: the highest-priority
+ * model the provider offers, ties sampled by `seed` (the conversation id), else at random.
+ */
+export function defaultFor(catalog: ModelCatalog, tag: string | undefined, seed?: string): string | undefined {
+  let best = -Infinity;
+  let tied: string[] = [];
+  for (const m of catalog.models) {
+    if (!modelAllowedFor(catalog, m.id, tag)) continue;
+    const p = priorityOf(m, tag);
+    if (p > best) [best, tied] = [p, [m.id]];
+    else if (p === best) tied.push(m.id);
   }
-  if (catalog.defaultId && modelAllowedFor(catalog, catalog.defaultId, tag)) return catalog.defaultId;
-  return catalog.models.find((m) => modelAllowedFor(catalog, m.id, tag))?.id;
+  if (tied.length <= 1) return tied[0];
+  // Seeded so a conversation keeps one model across runs and both launch paths agree.
+  const roll = seed === undefined ? Math.random() : hash32(seed) / 2 ** 32;
+  return tied[Math.floor(roll * tied.length)];
+}
+
+/** FNV-1a: a stable, uniform-enough 32-bit hash of `s`. */
+function hash32(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
 }

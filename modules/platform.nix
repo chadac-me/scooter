@@ -100,23 +100,27 @@ let
   providerNames = lib.attrNames cfg.agent.availableModels;
   # id -> the providers offering it.
   providersOf = id: lib.filter (p: cfg.agent.availableModels.${p} ? ${id}) providerNames;
-  # provider -> its default model id (the entry flagged default, else the group's first).
-  providerDefault = p:
-    let ids = lib.attrNames cfg.agent.availableModels.${p};
-        flagged = lib.findFirst (id: cfg.agent.availableModels.${p}.${id}.default) null ids;
-    in if flagged != null then flagged else if ids != [ ] then lib.head ids else null;
-  providerDefaults = lib.filterAttrs (_: v: v != null)
-    (lib.genAttrs providerNames providerDefault);
+  maxOf = xs: lib.foldl' lib.max (lib.head xs) xs;
+  # provider -> its highest-priority model ids; the agent-host samples among ties.
+  providerTop = p:
+    let group = cfg.agent.availableModels.${p};
+        best = if group == { } then 0 else maxOf (lib.mapAttrsToList (_: m: m.priority) group);
+    in lib.attrNames (lib.filterAttrs (_: m: m.priority == best) group);
+  # provider -> one representative default, for provider-less contexts.
+  providerDefaults = lib.mapAttrs (_: lib.head)
+    (lib.filterAttrs (_: v: v != [ ]) (lib.genAttrs providerNames providerTop));
+  # A model's rank under each provider offering it.
+  prioritiesOf = id: lib.genAttrs (providersOf id) (p: cfg.agent.availableModels.${p}.${id}.priority);
   providerModelIds = lib.unique
     (lib.concatMap (p: lib.attrNames cfg.agent.availableModels.${p}) providerNames);
-  # The global default for provider-less contexts: the goose group's, else the deprecated
-  # agent.model, else any provider's explicit default, else the first model anywhere.
+  # The global default for provider-less contexts: the goose group's top model, else the
+  # deprecated agent.model, else the highest-priority model anywhere.
   defaultModelId =
     if providerDefaults ? goose then providerDefaults.goose
     else if cfg.agent.model != null then cfg.agent.model
-    # attrValues is alphabetical by provider, but only ever picks a model someone marked `default`.
-    else if providerDefaults != { } then lib.head (lib.attrValues providerDefaults)
-    else if providerModelIds != [ ] then lib.head providerModelIds
+    else if providerModelIds != [ ] then
+      let rank = id: maxOf (lib.attrValues (prioritiesOf id));
+      in lib.head (lib.sort (a: b: rank a > rank b) providerModelIds)
     else null;
   modelIds = lib.unique (
     providerModelIds
@@ -145,8 +149,11 @@ let
     default = id == defaultModelId;
     # A model from the deprecated flat `agent.model` is offered by every provider.
     providers = providersOf id;
-    # The providers this model is the default for.
-    defaultFor = lib.filter (p: providerDefaults.${p} == id) (lib.attrNames providerDefaults);
+    # The providers ranking this model highest (tied models share a provider).
+    defaultFor = lib.filter (p: lib.elem id (providerTop p)) (providersOf id);
+    # The rank on providers that list none; the global default leads.
+    priority = lib.foldl' lib.max (if id == defaultModelId then 100 else 0) (lib.attrValues (prioritiesOf id));
+    priorities = prioritiesOf id;
   } // lib.optionalAttrs (contextLimitOf id != null) { contextLimit = contextLimitOf id; }) modelIds);
   hasModels = modelIds != [ ];
 
@@ -711,7 +718,7 @@ in
         type = types.nullOr types.str;
         default = null;
         description = ''
-          DEPRECATED — use `availableModels.<id>.default = true` instead. When set,
+          DEPRECATED — use `availableModels.<provider>.<id>.priority` instead. When set,
           it's added to the offered set (back-compat for existing deploys) and, unless
           the `goose` provider marks its own default, becomes the global default —
           taking precedence over any OTHER provider's `default` marking. For Bedrock,
@@ -720,12 +727,22 @@ in
       };
 
       availableModels = mkOption {
-        type = types.attrsOf (types.attrsOf (types.submodule {
+        type = types.attrsOf (types.attrsOf (types.submodule ({ config, ... }: {
           options = {
             default = mkOption {
               type = types.bool;
               default = false;
-              description = "This provider's default model (at most one per provider; else the group's first entry).";
+              description = "Shorthand for `priority = 100`.";
+            };
+            priority = mkOption {
+              type = types.int;
+              default = if config.default then 100 else 0;
+              defaultText = literalExpression "if default then 100 else 0";
+              description = ''
+                Rank among this provider's models for a conversation that has not picked
+                one: the highest-priority model the serving provider offers is used, and
+                tied models are sampled per conversation.
+              '';
             };
             fast = mkOption {
               type = types.bool;
@@ -760,7 +777,7 @@ in
               '';
             };
           };
-        }));
+        })));
         default = { };
         example = literalExpression ''
           {
@@ -778,9 +795,10 @@ in
           (us.anthropic.…) while "claude-code" (the in-cluster subscription SDK)
           and "byoc" (the user's own container) run API ids (claude-sonnet-4-5) —
           so the provider is the outer key: a model two providers offer is simply
-          listed under both, and each provider group marks its own `default`. A
-          run only ever receives a model its provider serves — the conversation's
-          choice when that provider offers it, else that provider's default. The
+          listed under both, and each provider group ranks its own models by
+          `priority`. A run only ever receives a model its provider serves — the
+          conversation's choice when that provider offers it, else that provider's
+          highest-priority model, sampled per conversation among ties. The
           global default (provider-less contexts, e.g. the deprecated GOOSE_MODEL)
           comes from the "goose" group, falling back to the deprecated
           `agent.model`. The agent switches its own model via switch_model; the
