@@ -770,14 +770,17 @@ let
         else [ "sandbox-isolation internet egress must except the pod/tailnet/metadata ranges" ])
     ++ (if ((evalPlatform { module = { lib, ... }: { imports = [ ./kubenix-config.nix ]; scooter.networkPolicy.enable = lib.mkForce false; }; }).config.kubernetes.resources.networkPolicies or { }) ? sandbox-isolation
         then [ "networkPolicy.enable = false still renders sandbox-isolation" ] else [ ])
-    # The DNS rule is the one with no `to`; it must carry every configured port over both
-    # protocols, or a cluster whose resolver is not on 53 has sandboxes with no DNS at all.
+    # The any-destination rule (no `to`) carries exactly udpPorts and tcpPorts.
     ++ (let
-          dnsRules = builtins.filter (r: !(r ? to)) npEgress;
-          want = builtins.concatMap (p: [ { protocol = "UDP"; port = p; } { protocol = "TCP"; port = p; } ])
-            platform.config.scooter.networkPolicy.dnsPorts;
-        in if builtins.length dnsRules == 1 && (builtins.head dnsRules).ports == want then [ ]
-           else [ "sandbox-isolation DNS rule must allow UDP+TCP on networkPolicy.dnsPorts ${builtins.toJSON platform.config.scooter.networkPolicy.dnsPorts}, got ${builtins.toJSON (map (r: r.ports or [ ]) dnsRules)}" ]);
+          np = platform.config.scooter.networkPolicy;
+          anyRules = builtins.filter (r: !(r ? to)) npEgress;
+          want = map (port: { protocol = "UDP"; inherit port; }) np.udpPorts
+            ++ map (port: { protocol = "TCP"; inherit port; }) np.tcpPorts;
+        in if builtins.length anyRules == 1 && (builtins.head anyRules).ports == want then [ ]
+           else [ "sandbox-isolation any-destination rule must allow networkPolicy.udpPorts/tcpPorts ${builtins.toJSON want}, got ${builtins.toJSON (map (r: r.ports or [ ]) anyRules)}" ])
+    # With no ports, the rule must vanish: an empty `ports` allows all egress.
+    ++ (if builtins.any (r: !(r ? to)) (((evalPlatform { module = { lib, ... }: { imports = [ ./kubenix-config.nix ]; scooter.networkPolicy = { udpPorts = lib.mkForce [ ]; tcpPorts = lib.mkForce [ ]; }; }; }).config.kubernetes.resources.networkPolicies.sandbox-isolation.spec.egress))
+        then [ "sandbox-isolation renders a port-less any-destination rule when udpPorts and tcpPorts are empty" ] else [ ]);
 
   # A contrib's approval declaration reaches the agent-host, and with aws off it does not.
   approvalsJson =
