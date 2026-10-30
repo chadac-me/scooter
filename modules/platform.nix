@@ -598,8 +598,16 @@ in
           with a matching `name` is patched, others appended) — so you patch one
           container's env by restating just `{ name = "sandbox"; env = [ … ]; }`.
 
+          Any list can instead be written as a `<list>Attrs` mapping keyed by item name,
+          which needs no list syntax and merges key-wise with other Nix definitions. A
+          scalar value is shorthand for `{ value = …; }`, so env reads naturally:
+
+              spec.volumeClaimTemplatesAttrs.workspace.spec.storageClassName = "gp3";
+              spec.podTemplate.spec.containersAttrs.sandbox.envAttrs.MY_TOOL_URL = "http://…";
+
           The overlay may touch ANY path, but Scooter RE-ASSERTS a protected set after
-          merge (serviceAccountName, the broker-token volume/mount, volumeClaimTemplates,
+          merge (serviceAccountName, the broker-token volume/mount, the claims' specs
+          except the workspace claim's storageClassName and volumeAttributesClassName,
           and the CONVERSATION_ID / BROKER_* identity env), so a bad overlay can't detach
           a conversation from its identity, auth, or storage.
         '';

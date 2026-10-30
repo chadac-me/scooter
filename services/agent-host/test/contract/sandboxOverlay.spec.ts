@@ -219,3 +219,95 @@ describe("sandboxManifest(overlay)", () => {
     expect(ps.volumes.find((v: Obj) => v.name === "broker-token").projected).toBeTruthy();
   });
 });
+
+describe("<list>Attrs — name-keyed lists", () => {
+  const claim = (m: Obj, name: string): Obj =>
+    m.spec.volumeClaimTemplates.find((v: Obj) => v.metadata.name === name);
+
+  it("sets the workspace claim's class without touching its size", () => {
+    const m = manifest({ spec: { volumeClaimTemplatesAttrs: { workspace: { spec: { storageClassName: "gp3" } } } } });
+    expect(claim(m, "workspace").spec).toEqual({
+      accessModes: ["ReadWriteOnce"],
+      resources: { requests: { storage: "10Gi" } },
+      storageClassName: "gp3",
+    });
+    expect(claim(m, "workspace").name).toBeUndefined();
+    expect(m.spec.volumeClaimTemplatesAttrs).toBeUndefined();
+  });
+
+  it("overrides the workspaceStorageClass option", () => {
+    const m = sandboxManifest("c1", "conv-c1", "sa", "img", "ns", "aud", "10Gi", false, {
+      workspaceStorageClass: "from-option",
+      overlay: { spec: { volumeClaimTemplatesAttrs: { workspace: { spec: { storageClassName: "from-overlay" } } } } },
+    }) as Obj;
+    expect(claim(m, "workspace").spec.storageClassName).toBe("from-overlay");
+  });
+
+  it("keeps the workspace claim's size and access modes", () => {
+    const m = manifest({
+      spec: {
+        volumeClaimTemplatesAttrs: {
+          workspace: { spec: { accessModes: ["ReadWriteMany"], resources: { requests: { storage: "1Ti" } } } },
+        },
+      },
+    });
+    expect(claim(m, "workspace").spec.accessModes).toEqual(["ReadWriteOnce"]);
+    expect(claim(m, "workspace").spec.resources).toEqual({ requests: { storage: "10Gi" } });
+  });
+
+  it("can't rebind the workspace claim to another volume", () => {
+    const m = manifest({
+      spec: { volumeClaimTemplatesAttrs: { workspace: { spec: { volumeName: "pv-other", dataSource: { name: "snap" } } } } },
+    });
+    expect(claim(m, "workspace").spec.volumeName).toBeUndefined();
+    expect(claim(m, "workspace").spec.dataSource).toBeUndefined();
+  });
+
+  it("keeps the whole overlay-store claim spec", () => {
+    const m = sandboxManifest("c1", "conv-c1", "sa", "img", "ns", "aud", "10Gi", true, {
+      overlayStore: true,
+      overlayStorageClass: "warm-store-retain",
+      overlay: { spec: { volumeClaimTemplatesAttrs: { "scooter-rw": { spec: { storageClassName: "other" } } } } },
+    }) as Obj;
+    expect(claim(m, "scooter-rw").spec.storageClassName).toBe("warm-store-retain");
+  });
+
+  it("patches nested lists through a keyed container, scalars as env values", () => {
+    const m = manifest({
+      spec: { podTemplate: { spec: { containersAttrs: { sandbox: { envAttrs: { MY_TOOL: "on", CONVERSATION_ID: "evil" } } } } } },
+    });
+    const env = container(m).env as Obj[];
+    expect(env.find((e) => e.name === "MY_TOOL")?.value).toBe("on");
+    expect(env.find((e) => e.name === "CONVERSATION_ID")?.value).toBe("c1");
+    expect(env.filter((e) => e.name === "MY_TOOL")).toHaveLength(1);
+  });
+
+  it("merges two overlays' attrs key-wise, the later one winning", () => {
+    const contrib = { spec: { podTemplate: { spec: { containersAttrs: { sandbox: { envAttrs: { A: "1", B: "1" } } } } } } };
+    const consumer = { spec: { podTemplate: { spec: { containersAttrs: { sandbox: { envAttrs: { B: "2" } } } } } } };
+    const env = container(manifest(deepMerge(contrib, consumer) as Obj)).env as Obj[];
+    expect(env.find((e) => e.name === "A")?.value).toBe("1");
+    expect(env.find((e) => e.name === "B")?.value).toBe("2");
+  });
+
+  it("combines with the list form of the same list", () => {
+    const m = manifest({
+      spec: {
+        podTemplate: {
+          spec: {
+            containers: [{ name: "sandbox", env: [{ name: "A", value: "list" }] }],
+            containersAttrs: { sandbox: { envAttrs: { B: "attrs" } } },
+          },
+        },
+      },
+    });
+    const env = container(m).env as Obj[];
+    expect(env.find((e) => e.name === "A")?.value).toBe("list");
+    expect(env.find((e) => e.name === "B")?.value).toBe("attrs");
+  });
+
+  it("rejects an attrs value that isn't a mapping", () => {
+    expect(() => manifest({ spec: { volumeClaimTemplatesAttrs: ["workspace"] } })).toThrow(OverlayError);
+    expect(() => manifest({ spec: { volumeClaimTemplatesAttrs: { workspace: "gp3" } } })).toThrow(OverlayError);
+  });
+});

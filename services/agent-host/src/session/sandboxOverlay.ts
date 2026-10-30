@@ -5,7 +5,9 @@
  * ConfigMap is read on every create, parsed, and applied to the dict `sandboxManifest()`
  * returns. Objects deep-merge, scalars replace, arrays strategic-merge by `name`, and the
  * overlay wins everywhere except the PROTECTED_PATHS, which are re-asserted from the base
- * after the merge.
+ * after the merge. A `<list>Attrs` mapping beside any list is that list keyed by item name
+ * (`envAttrs.FOO = "x"`, `volumeClaimTemplatesAttrs.workspace.spec...`), so a patch needs
+ * no list syntax and two overlays merge it key-wise.
  */
 
 import { loadYaml } from "@kubernetes/client-node";
@@ -15,6 +17,16 @@ type JsonObject = Record<string, unknown>;
 
 /** The merge key for strategic array merges, as k8s uses for containers/env/volumes/volumeMounts. */
 const LIST_MERGE_KEY = "name";
+
+/** Suffix marking a name-keyed mapping that stands in for the sibling list. */
+const ATTRS_SUFFIX = "Attrs";
+
+/** An item's identity: `name`, or `metadata.name` for volumeClaimTemplates. */
+function itemKey(item: unknown): unknown {
+  if (!isObject(item)) return undefined;
+  if (LIST_MERGE_KEY in item) return item[LIST_MERGE_KEY];
+  return isObject(item.metadata) ? item.metadata.name : undefined;
+}
 
 /**
  * Dotted paths that Scooter owns, forced back to the generated value after the merge; a
@@ -30,11 +42,20 @@ export const PROTECTED_PATHS: readonly string[] = [
   "spec.podTemplate.spec.volumes[name=broker-token]",
   "spec.podTemplate.spec.containers[name=sandbox].volumeMounts[name=broker-token]",
   "spec.podTemplate.spec.containers[name=sandbox].volumeMounts[name=workspace]",
-  "spec.volumeClaimTemplates",
+  // A claim's spec could rebind it (volumeName, dataSource); PATCHABLE_PATHS reopens the class.
+  "spec.volumeClaimTemplates[name=workspace].spec",
+  "spec.volumeClaimTemplates[name=scooter-rw].spec",
   // Identity / broker env, protected per-variable.
   "spec.podTemplate.spec.containers[name=sandbox].env[name=CONVERSATION_ID]",
   "spec.podTemplate.spec.containers[name=sandbox].env[name=BROKER_URL]",
   "spec.podTemplate.spec.containers[name=sandbox].env[name=BROKER_TOKEN_PATH]",
+];
+
+/** Paths inside a protected subtree that the overlay may still set; the overlay-store claim
+ *  is absent because its class must match the warm pool's PVs. */
+export const PATCHABLE_PATHS: readonly string[] = [
+  "spec.volumeClaimTemplates[name=workspace].spec.storageClassName",
+  "spec.volumeClaimTemplates[name=workspace].spec.volumeAttributesClassName",
 ];
 
 /** The overlay payload is malformed, thrown so the caller fails loudly rather than silently
@@ -90,7 +111,7 @@ export function deepMerge(base: Json, overlay: Json): Json {
   if (isObject(base) && isObject(overlay)) {
     const out: JsonObject = { ...base };
     for (const [k, ov] of Object.entries(overlay)) {
-      out[k] = k in base ? deepMerge(base[k], ov) : copy(ov);
+      out[k] = k in out ? deepMerge(out[k], ov) : copy(ov);
     }
     return out;
   }
@@ -118,14 +139,70 @@ function mergeLists(base: unknown[], overlay: unknown[]): unknown[] {
   const out = base.map(copy);
   const index = new Map<unknown, number>();
   out.forEach((item, i) => {
-    if (isObject(item) && LIST_MERGE_KEY in item) index.set(item[LIST_MERGE_KEY], i);
+    const key = itemKey(item);
+    if (key !== undefined) index.set(key, i);
   });
   for (const ov of overlay) {
-    const key = isObject(ov) ? ov[LIST_MERGE_KEY] : undefined;
+    const key = itemKey(ov);
     const at = key !== undefined ? index.get(key) : undefined;
     if (at !== undefined) out[at] = deepMerge(out[at], ov);
+    else if (key !== undefined) index.set(key, out.push(copy(ov)) - 1);
     else out.push(copy(ov));
   }
+  return out;
+}
+
+// --- name-keyed list sugar ---------------------------------------------------
+
+/** Turn one `<list>Attrs` mapping into list items, naming each the way `baseList` names its
+ *  items; a scalar value is shorthand for `{ name, value }`, as env uses. */
+function attrsToItems(attrs: JsonObject, baseList: Json, path: string): JsonObject[] {
+  const byMetadata =
+    Array.isArray(baseList) &&
+    baseList.some((it) => isObject(it) && !(LIST_MERGE_KEY in it) && isObject(it.metadata));
+  return Object.entries(attrs).map(([name, v]) => {
+    if (!isObject(v)) {
+      if (byMetadata) throw new OverlayError(`${path}.${name} must be a mapping`);
+      return { [LIST_MERGE_KEY]: name, value: v };
+    }
+    if (!byMetadata) return { ...copy(v), [LIST_MERGE_KEY]: name };
+    const metadata = isObject(v.metadata) ? copy(v.metadata) : {};
+    return { ...copy(v), metadata: { ...metadata, name } };
+  });
+}
+
+/**
+ * Rewrite every `<list>Attrs` mapping in `overlay` into items appended to its `<list>`,
+ * walking `base` alongside so items inside a matched list item (a container's env) expand
+ * against the right base list.
+ */
+export function expandAttrs(base: Json, overlay: Json, path = ""): Json {
+  if (Array.isArray(overlay)) {
+    const baseItems = Array.isArray(base) ? base : [];
+    return overlay.map((ov) => {
+      const key = itemKey(ov);
+      const match = key === undefined ? undefined : baseItems.find((b) => itemKey(b) === key);
+      return expandAttrs(match, ov, `${path}[name=${String(key)}]`);
+    });
+  }
+  if (!isObject(overlay)) return overlay;
+  const b = isObject(base) ? base : {};
+  const out: JsonObject = {};
+  for (const [k, v] of Object.entries(overlay)) {
+    if (!k.endsWith(ATTRS_SUFFIX) || k === ATTRS_SUFFIX) continue;
+    if (!isObject(v)) throw new OverlayError(`${path}.${k} must be a mapping keyed by item name`);
+    const listKey = k.slice(0, -ATTRS_SUFFIX.length);
+    const listed = overlay[listKey];
+    if (listed !== undefined && !Array.isArray(listed)) {
+      throw new OverlayError(`${path}.${k} needs ${path}.${listKey} to be a list`);
+    }
+    out[listKey] = [...(listed ?? []), ...attrsToItems(v, b[listKey], `${path}.${k}`)];
+  }
+  for (const [k, v] of Object.entries(overlay)) {
+    if (k.endsWith(ATTRS_SUFFIX) && k !== ATTRS_SUFFIX) continue;
+    if (!(k in out)) out[k] = v;
+  }
+  for (const [k, v] of Object.entries(out)) out[k] = expandAttrs(b[k], v, path ? `${path}.${k}` : k);
   return out;
 }
 
@@ -156,7 +233,7 @@ function getPath(root: Json, segs: Seg[]): { value: Json; found: boolean } {
     cur = cur[seg.key];
     if (seg.sel !== undefined) {
       if (!Array.isArray(cur)) return { value: undefined, found: false };
-      const match = cur.find((it) => isObject(it) && it[LIST_MERGE_KEY] === seg.sel);
+      const match = cur.find((it) => itemKey(it) === seg.sel);
       if (match === undefined) return { value: undefined, found: false };
       cur = match;
     }
@@ -168,7 +245,7 @@ function getPath(root: Json, segs: Seg[]): { value: Json; found: boolean } {
  *  can be traversed for setting. */
 function resolveSelector(list: Json, seg: Seg): JsonObject {
   if (Array.isArray(list)) {
-    const found = list.find((it) => isObject(it) && it[LIST_MERGE_KEY] === seg.sel);
+    const found = list.find((it) => itemKey(it) === seg.sel);
     if (isObject(found)) return found;
   }
   const item: JsonObject = { [LIST_MERGE_KEY]: seg.sel };
@@ -199,12 +276,13 @@ function setPath(root: JsonObject, segs: Seg[], value: Json): void {
     cur[leaf.key] = [copy(value)];
     return;
   }
-  const at = list.findIndex((it) => isObject(it) && it[LIST_MERGE_KEY] === leaf.sel);
+  const at = list.findIndex((it) => itemKey(it) === leaf.sel);
   if (at >= 0) list[at] = copy(value);
   else list.push(copy(value));
 }
 
-/** Force every PROTECTED_PATHS value back to what `base` had, skipping paths absent from `base`. */
+/** Force every PROTECTED_PATHS value back to what `base` had, skipping paths absent from `base`,
+ *  then restore the overlay's PATCHABLE_PATHS values. */
 export function reassertProtected(base: JsonObject, merged: JsonObject): JsonObject {
   const out = copy(merged);
   for (const path of PROTECTED_PATHS) {
@@ -213,6 +291,11 @@ export function reassertProtected(base: JsonObject, merged: JsonObject): JsonObj
     if (!found) continue;
     setPath(out, segs, value);
   }
+  for (const path of PATCHABLE_PATHS) {
+    const segs = parsePath(path);
+    const { value, found } = getPath(merged, segs);
+    if (found) setPath(out, segs, value);
+  }
   return out;
 }
 
@@ -220,5 +303,5 @@ export function reassertProtected(base: JsonObject, merged: JsonObject): JsonObj
  *  returns `base` unchanged. */
 export function applyOverlay(base: JsonObject, overlay: JsonObject): JsonObject {
   if (!overlay || Object.keys(overlay).length === 0) return base;
-  return reassertProtected(base, deepMerge(base, overlay) as JsonObject);
+  return reassertProtected(base, deepMerge(base, expandAttrs(base, overlay)) as JsonObject);
 }
