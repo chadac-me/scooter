@@ -60,6 +60,21 @@ class PermissionRequest:
     credentials_issued_at: str | None = None
     expires_at: str | None = None
 
+    # rules.Obligation JSON, fixed at request time; None on older requests.
+    approval_obligations: list[dict[str, Any]] | None = None
+    # {approver, approved_at, obligations} rows from aws_request_approvals.
+    approvals: list[dict[str, Any]] = field(default_factory=list)
+
+
+def obligation_status(req: PermissionRequest) -> list[dict[str, Any]]:
+    """Each obligation with its approver, or None while waiting."""
+    approvals = getattr(req, "approvals", None) or []
+    out = []
+    for o in getattr(req, "approval_obligations", None) or []:
+        by = next((a["approver"] for a in approvals if o["id"] in a.get("obligations", [])), None)
+        out.append({"id": o["id"], "rules": o["rules"], "parts": o.get("parts", []), "approved_by": by})
+    return out
+
 
 @dataclass
 class StsCredentials:
@@ -81,6 +96,9 @@ def approval_message(req: PermissionRequest) -> str:
     if req.policy_summary:
         lines.append(req.policy_summary)
     lines.append(f"Reason: {req.justification or '(none)'}")
+    waiting = [", ".join(o["rules"]) for o in obligation_status(req) if o["approved_by"] is None]
+    if getattr(req, "approvals", None) and waiting:
+        lines.append(f"Still needs approval for: {'; '.join(waiting)}")
     return "\n".join(lines)
 
 
@@ -104,4 +122,5 @@ def approval_data(req: PermissionRequest) -> dict[str, Any]:
         "write_actions": write_actions(policy) if policy else [],
         "requested_at": getattr(req, "requested_at", "") or None,
         "parent_request_id": getattr(req, "parent_request_id", None),
+        "obligations": obligation_status(req),
     }

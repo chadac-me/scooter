@@ -17,6 +17,7 @@ from .service import PermissionService, ServiceConfig
 from .store import PermissionStore
 from .config import settings
 from .objects import aws_account_object
+from . import rules
 from scooter_broker_lib.authz import NoopAuthorizer, user_object
 from scooter_broker_lib.autolink import router_headers
 from scooter_broker_lib.context import BrokerContext
@@ -201,19 +202,20 @@ def aws(ctx: BrokerContext) -> Provider:
     _sweep_task: list[asyncio.Task] = []
 
     async def seed_approver_tuples() -> None:
-        """Seed OpenFGA approver tuples from each account's `approvers` list, idempotently."""
+        """Idempotently seed FGA approver tuples for accounts and rules."""
         for alias, acct in registry.items():
-            for approver in acct.get("approvers", []) or []:
+            tuples = [(a, aws_account_object(alias)) for a in acct.get("approvers", []) or []]
+            try:
+                tuples += rules.rule_approver_tuples(alias, rules.parse_rules(acct.get("approval_rules") or []))
+            except ValueError:
+                logger.exception("malformed approval_rules; not seeding its rules", extra={"account_alias": alias})
+            for approver, obj in tuples:
                 try:
-                    await authorizer.grant(
-                        user=user_object(approver),
-                        relation="approver",
-                        obj=aws_account_object(alias),
-                    )
+                    await authorizer.grant(user=user_object(approver), relation="approver", obj=obj)
                 except Exception:
                     logger.exception(
                         "failed seeding approver tuple",
-                        extra={"approver": approver, "account_alias": alias},
+                        extra={"approver": approver, "account_alias": alias, "object": obj},
                     )
         # Under NoopAuthorizer grant() does nothing, so the log line would be a lie.
         if not isinstance(authorizer, NoopAuthorizer):

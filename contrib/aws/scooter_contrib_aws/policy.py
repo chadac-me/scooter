@@ -1,8 +1,9 @@
 """IAM policy guardrails: validate, bound-check, classify, summarize.
 
-Pure functions gating every request in three layers: structural and prod-account
-checks, the global deny list, and per-account allowlist coverage. The permission
-boundary on every dynamic role (see iam.py) is the AWS-enforced ceiling on top.
+Pure functions gating every request: structural and prod-account checks, then
+per-account allowlist coverage. The `deny` approval rules (rules.py) replace the
+old global deny list, and the permission boundary on every dynamic role (see
+iam.py) is the AWS-enforced ceiling on top.
 """
 
 from __future__ import annotations
@@ -12,53 +13,7 @@ import re
 
 from .models import RiskLevel
 
-# --- Layer 2: global deny list ---
-BLOCKED_ACTIONS: list[str] = [
-    # IAM privilege escalation
-    "iam:CreateUser",
-    "iam:CreateRole",
-    "iam:AttachRolePolicy",
-    "iam:DetachRolePolicy",
-    "iam:PutRolePolicy",
-    "iam:DeleteRolePolicy",
-    "iam:CreateAccessKey",
-    "iam:UpdateAssumeRolePolicy",
-    "iam:PutRolePermissionsBoundary",
-    "iam:DeleteRolePermissionsBoundary",
-    "iam:PassRole",
-    # Security/audit tampering
-    "cloudtrail:DeleteTrail",
-    "cloudtrail:StopLogging",
-    "cloudtrail:UpdateTrail",
-    "guardduty:DeleteDetector",
-    "guardduty:DeleteMembers",
-    "guardduty:DisassociateFromMasterAccount",
-    "securityhub:DeleteHub",
-    "securityhub:DisableSecurityHub",
-    "config:DeleteConfigRule",
-    "config:DeleteConfigurationRecorder",
-    "config:StopConfigurationRecorder",
-    # Organization
-    "organizations:LeaveOrganization",
-    # Encryption
-    "kms:ScheduleKeyDeletion",
-    "kms:DisableKey",
-    "kms:DeleteAlias",
-    # Account
-    "account:CloseAccount",
-]
-
-# fnmatch patterns of blocked actions.
-BLOCKED_PATTERNS: list[str] = [
-    "guardduty:Delete*",
-    "guardduty:Disable*",
-    "securityhub:Delete*",
-    "securityhub:Disable*",
-    "config:Delete*",
-    "config:Stop*",
-    "kms:Delete*",
-]
-
+# Read verbs: drive risk and prod checks, not approval.
 READ_ONLY_PREFIXES = (
     "Get", "List", "Describe", "Head", "BatchGet",
     "Lookup", "Search", "Query", "Scan", "Select",
@@ -77,18 +32,6 @@ def _is_read_only_action(action: str) -> bool:
     return any(verb.startswith(prefix) for prefix in READ_ONLY_PREFIXES)
 
 
-def _action_matches_blocked(action: str) -> str | None:
-    """The matching blocked pattern if `action` is blocked, else None."""
-    action_lower = action.lower()
-    for blocked in BLOCKED_ACTIONS:
-        if action_lower == blocked.lower():
-            return blocked
-    for pattern in BLOCKED_PATTERNS:
-        if fnmatch.fnmatch(action_lower, pattern.lower()):
-            return pattern
-    return None
-
-
 def _normalize_actions(actions: str | list[str]) -> list[str]:
     return [actions] if isinstance(actions, str) else actions
 
@@ -102,7 +45,7 @@ def _is_prod_account(target_account: str) -> bool:
 
 
 def validate_policy(policy_document: dict, target_account: str = "") -> list[str]:
-    """Layers 1 and 2 (structural, deny-list and prod-account checks), returning error strings."""
+    """Structural and prod-account checks, returning error strings."""
     errors: list[str] = []
     is_prod = _is_prod_account(target_account)
 
@@ -133,11 +76,6 @@ def validate_policy(policy_document: dict, target_account: str = "") -> list[str
         resources = _normalize_resources(stmt.get("Resource", []))
         if not resources:
             errors.append(f"{prefix}: Resource is required")
-
-        for action in actions:
-            match = _action_matches_blocked(action)
-            if match:
-                errors.append(f"{prefix}: Action '{action}' is blocked (matches '{match}')")
 
         has_write = any(not _is_read_only_action(a) for a in actions)
         if has_write and is_prod:
@@ -180,46 +118,6 @@ def classify_risk(policy_document: dict, target_account: str) -> RiskLevel:
     if has_write or is_prod:
         return RiskLevel.MEDIUM
     return RiskLevel.LOW
-
-
-def is_read_only_policy(policy_document: dict) -> bool:
-    """True iff every Allow action is read-only and at least one is present; a wildcard is not read-only."""
-    saw_action = False
-    for stmt in policy_document.get("Statement", []):
-        if stmt.get("Effect", "Allow") != "Allow":
-            continue
-        actions = _normalize_actions(stmt.get("Action", []))
-        for a in actions:
-            saw_action = True
-            if not _is_read_only_action(a):
-                return False
-    return saw_action
-
-
-def covered_by_auto_policy(
-    policy_document: dict | None,
-    managed_policy_arns: list[str],
-    auto_allowed_policy: dict | None,
-    auto_allowed_managed_policies: list[str],
-) -> bool:
-    """True iff every action, resource and managed ARN is covered by the account's auto-approve tier; an empty tier or an empty request is never covered."""
-    has_doc = bool(policy_document and policy_document.get("Statement"))
-    has_arns = bool(managed_policy_arns)
-    if not has_doc and not has_arns:
-        return False
-
-    if has_doc:
-        if not auto_allowed_policy or not auto_allowed_policy.get("Statement"):
-            return False
-        assert policy_document is not None
-        if validate_policy_within_bounds(policy_document, auto_allowed_policy):
-            return False
-
-    # ARNs are case-sensitive, unlike actions and resources.
-    for arn in managed_policy_arns:
-        if not any(fnmatch.fnmatchcase(arn, p) for p in auto_allowed_managed_policies):
-            return False
-    return True
 
 
 def validate_policy_within_bounds(policy_document: dict, allowed_policy: dict) -> list[str]:

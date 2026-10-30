@@ -8,4 +8,5 @@
 owner = "broker"
 
 [contrib_aws.tables]
-permission_requests = { writers = ["broker"], readers = [] }
+aws_request_approvals = { writers = ["broker"], readers = [] }
+permission_requests   = { writers = ["broker"], readers = [] }

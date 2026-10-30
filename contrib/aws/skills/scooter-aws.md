@@ -81,7 +81,11 @@ Deny. So:
 - **Read-only requests may be auto-approved.** If the account is configured for
   it, a purely read-only policy (all `Get*`/`List*`/`Describe*` actions, no
   managed-policy ARNs) is granted immediately with no human — you'll get creds
-  right away. Anything with a write action always needs a human.
+  right away. Anything with a write action always needs a human, and so do
+  secret reads (`secretsmanager:GetSecretValue`, `ssm:GetParameter*`,
+  `kms:Decrypt`), so keep those in a separate request when you can.
+- **Some requests need more than one approver.** The approval card shows which
+  approvals are still waiting; the request stays pending until all are given.
 - Once approved, use it: `aws --profile <account-alias> s3 ls …`. Credentials
   are short-lived; the profile refreshes them for you automatically.
 

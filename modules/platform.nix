@@ -24,17 +24,21 @@ let
     modules = [ ../contrib/submodule.nix ];
   }).options;
   # Baseline: the registry with no deployment config.
-  bareContribs = (lib.evalModules {
+  bare = lib.evalModules {
     specialArgs = { inherit lib; };
     modules = [ ../contrib/all-modules.nix ];
-  }).config.contribs;
+  };
+  bareContribs = bare.config.contribs;
+  # Read-only options aren't deployer-set; functions never compare equal.
+  readOnlyFields = n: lib.attrNames (lib.filterAttrs (_: o: o.readOnly or false)
+    bare.options.contribs.valueMeta.attrs.${n}.configuration.options);
   # tryEval both sides: a defaultless option throws when read.
   fieldVal = tree: n: f:
     let r = builtins.tryEval (builtins.deepSeq (tree.${n}.${f} or null) (tree.${n}.${f} or null));
     in if r.success then { ok = r.value; } else null;
   # name -> the deployment options a deployer actually set on it.
   deployerSet = n: lib.filter (f: fieldVal config.contribs n f != fieldVal bareContribs n f)
-    (lib.subtractLists specFields (lib.attrNames config.contribs.${n}));
+    (lib.subtractLists (specFields ++ readOnlyFields n) (lib.attrNames config.contribs.${n}));
   unshippedConfigured = lib.filter (n: deployerSet n != [ ])
     (lib.attrNames (lib.filterAttrs (_: c: !c.enable) config.contribs));
   # A `throw` forced from the same leaf as `legacyRoot`, for the same reasons.
