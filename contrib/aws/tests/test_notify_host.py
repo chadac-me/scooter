@@ -207,3 +207,13 @@ async def test_429_and_408_are_treated_as_transient(monkeypatch, status):
     )
     await aws_provider.notify_host(_Req())
     assert len(seen) == 2, f"{status} must be retried, not treated as permanent"
+
+
+@pytest.mark.asyncio
+async def test_sends_the_router_service_token(monkeypatch):
+    monkeypatch.setattr(aws_provider, "router_headers", lambda: {"authorization": "Bearer svc-token"})
+    seen = _mock_httpx(monkeypatch, lambda req, n: httpx.Response(202))
+
+    await aws_provider.notify_host(_Req())
+
+    assert seen[0].headers["authorization"] == "Bearer svc-token"
