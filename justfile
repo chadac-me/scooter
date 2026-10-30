@@ -560,7 +560,11 @@ db-migrate-check:
     #!/usr/bin/env bash
     set -euo pipefail
     for env in {{db_envs}}; do
-      out="$(scripts/atlas-dev.sh migrate diff ci_drift_probe --env "$env" 2>&1)"
+      out="$(scripts/atlas-dev.sh migrate diff ci_drift_probe --env "$env" 2>&1)" || {
+        printf '%s\n' "$out"
+        echo "❌ $env: atlas-dev.sh failed before it could diff."
+        exit 1
+      }
       if ! printf '%s' "$out" | grep -q "no changes to be made"; then
         printf '%s\n' "$out"
         echo "❌ $env: schema.sql has changes with no migration. Run 'nix develop -c just db-migrate <name>' and commit the result."

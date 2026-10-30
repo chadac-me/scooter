@@ -34,10 +34,11 @@ trap cleanup EXIT
 # A random high port avoids collisions with any local server / parallel runs.
 port=$(( (RANDOM % 20000) + 40000 ))
 
-initdb -D "$pgdata" -U postgres --auth=trust >/dev/null 2>&1
+# Keep stderr: initdb's root refusal is its only diagnostic.
+initdb -D "$pgdata" -U postgres --auth=trust >/dev/null
 pg_ctl -D "$pgdata" \
   -o "-k $sock -c listen_addresses=127.0.0.1 -c port=$port" \
-  -l "$tmp/pg.log" start >/dev/null
+  -l "$tmp/pg.log" start >/dev/null || { cat "$tmp/pg.log" >&2; exit 1; }
 
 # Wait until it accepts connections.
 for _ in $(seq 1 30); do
