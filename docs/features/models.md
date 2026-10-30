@@ -15,8 +15,10 @@ scooter.agent.availableModels = {
 ```
 
 - A run only ever receives a model **its provider can serve** — the conversation's choice when
-  that provider offers it, else that provider's default. A Bedrock id never reaches a
-  bring-your-own container.
+  that provider offers it, else that provider's highest-`priority` model. A Bedrock id never
+  reaches a bring-your-own container.
+- `priority` is an integer, 0 by default; `default = true` is shorthand for `priority = 100`.
+  Models tied for the top priority are sampled per conversation, and a conversation stays on its pick.
 - The **agent picks its own model** via the `list_models` / `switch_model` tools, steered by
   your `hint`s; the UI and management API can override per conversation.
 - Providers: `goose` (Bedrock), `claude-code` (in-cluster subscription SDK), `byoc` (the

@@ -206,7 +206,30 @@ let
     (if ngGooseModel == "claude-opus-5" then [ ]
      else [ "no-goose: GOOSE_MODEL should fall through to the per-provider default (claude-opus-5), got '${ngGooseModel}'" ])
     ++ (if ngOpus != [ ] && (builtins.head ngOpus).default then [ ]
-        else [ "no-goose: AGENT_MODELS_JSON claude-opus-5 should be default:true" ]);
+        else [ "no-goose: AGENT_MODELS_JSON claude-opus-5 should be default:true" ])
+    ++ (if ngOpus != [ ] && (builtins.head ngOpus).priorities == { byoc = 100; claude-code = 100; } then [ ]
+        else [ "no-goose: `default = true` should render as priority 100 per provider" ]);
+
+  # Equal top priorities both render as defaults, so the agent-host samples between them.
+  tiePlatform = evalPlatform {
+    module = { lib, ... }: {
+      imports = [ ./kubenix-config.nix ];
+      scooter.fakeAgent = lib.mkForce false;
+      scooter.agent.availableModels = lib.mkForce {
+        "claude-code"."claude-opus-5" = { priority = 50; };
+        "claude-code"."claude-fable-5" = { priority = 50; };
+        "claude-code"."claude-haiku-5" = { };
+      };
+    };
+  };
+  tieModels =
+    let ctrs = builtins.attrValues (tiePlatform.config.kubernetes.resources.deployments.agent-host.spec.template.spec.containers or { });
+        env = builtins.filter (e: e.name == "AGENT_MODELS_JSON") (builtins.concatMap (c: c.env or [ ]) ctrs);
+    in if env == [ ] then [ ] else builtins.fromJSON (builtins.head env).value;
+  tieDefaults = map (m: m.id) (builtins.filter (m: m.defaultFor == [ "claude-code" ]) tieModels);
+  ngProblems' = ngProblems
+    ++ (if tieDefaults == [ "claude-fable-5" "claude-opus-5" ] then [ ]
+        else [ "priority tie: both priority-50 models should be claude-code defaults, got ${builtins.toJSON tieDefaults}" ]);
 
   # contribs.aws must stamp a checksum/aws-accounts annotation on the broker pod
   # template, so editing an account rolls the pod.
@@ -1335,7 +1358,7 @@ let
     ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
         else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
 
-  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ volumeProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems ++ enforceProblems;
+  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems' ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ volumeProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems ++ enforceProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named; a scooter.packages override reaches exactly the images that use it\n"

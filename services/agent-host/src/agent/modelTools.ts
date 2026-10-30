@@ -6,7 +6,7 @@
  */
 
 import type { ModelCatalog } from "./models.js";
-import { isOffered } from "./models.js";
+import { defaultFor, isOffered } from "./models.js";
 import type { ToolResult } from "./mcpServer.js";
 
 /** What the model tools need from the agent-host. */
@@ -35,7 +35,7 @@ export function handleListModels(deps: ModelToolsWiring, conversationId: string)
   if (catalog.models.length === 0) {
     return { content: [{ type: "text", text: "No models are configured for selection." }] };
   }
-  const current = deps.currentModel(conversationId) ?? catalog.defaultId;
+  const current = deps.currentModel(conversationId) ?? defaultFor(catalog, undefined, conversationId);
   const setBy = deps.modelSetBy?.(conversationId);
   const lines = catalog.models.map((m) =>
     modelLine(m.id, m.hint, m.id === current, m.default, setBy),

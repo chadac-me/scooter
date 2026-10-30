@@ -297,6 +297,7 @@ export function resolveFloorModel(
   requested: string | undefined,
   config: Pick<AgentHostConfig, "model" | "availableModels" | "modelCatalog">,
   tag: string,
+  conversationId?: string,
 ): string | undefined {
   const cat = config.modelCatalog;
   // A catalog with no group for this provider says nothing about what it serves, so keep the
@@ -304,7 +305,7 @@ export function resolveFloorModel(
   const listsTag = cat?.models.some((m) => m.providers.includes(tag) || m.defaultFor.includes(tag));
   if (!cat || !listsTag) return resolveModel(requested, config);
   if (requested && modelAllowedFor(cat, requested, tag)) return requested;
-  return defaultFor(cat, tag) ?? resolveModel(undefined, config);
+  return defaultFor(cat, tag, conversationId) ?? resolveModel(undefined, config);
 }
 
 /** No-op provisioner for local UI testing (no cluster). */
@@ -1749,7 +1750,7 @@ export async function main(
     // Per-conversation model override: GOOSE_MODEL (and its GOOSE_CONTEXT_LIMIT) in the
     // agent's launch env, limited to models the floor provider serves.
     const floorTag = usingClaude ? "claude-code" : "goose";
-    const resolved = resolveFloorModel(model, cfg, floorTag);
+    const resolved = resolveFloorModel(model, cfg, floorTag, conversationId);
     if (model && resolved !== model) {
       hostLog.info("substituted the floor provider's model", {
         conversation_id: conversationId,
