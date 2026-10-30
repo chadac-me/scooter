@@ -6,7 +6,7 @@ let
 in
 {
   contribs.aws = {
-    imports = [ ./rules.nix ];
+    imports = [ ./lib/rules.nix ];
 
     options = {
       region = mkOption { type = types.str; default = "us-east-1"; description = "AWS region."; };

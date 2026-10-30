@@ -5,7 +5,7 @@ let
   inherit (lib) mkOption types literalExpression;
   cfg = config;
 
-  dag = import ./lib/dag { inherit lib; };
+  dag = import ./dag { inherit lib; };
 
   # Guards sort before this anchor, grants after it.
   anchor = "grants";
