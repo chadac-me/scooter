@@ -1054,7 +1054,9 @@ in
           Make the router refuse every request it cannot attribute to a signed-in
           browser session or an allowed service token (401, or 403 for a token
           from a service not on the allowlist), and replace `userHeader` and
-          `emailHeader` with the proven caller's before forwarding. Requires
+          `emailHeader` with the proven caller's before forwarding. Agent-host then
+          stops treating a caller with no identity as the single user, so it cannot
+          change another user's conversation. Requires
           `sessionCheckUrl` in header mode, or `albRegion` in alb-oidc mode. Off,
           the router only logs what it would refuse; check those logs
           ("auth would reject", "auth identity mismatch") are quiet before turning
@@ -1583,6 +1585,8 @@ in
                   # Per-conversation service origins: the provisioner hands each sandbox its
                   # origin and the proxy serves services only there.
                   { name = "SANDBOX_DOMAIN"; value = cfg.ingress.sandboxDomain; }
+                ++ lib.optional cfg.auth.enforce
+                  { name = "AUTH_ENFORCE"; value = "true"; }
                 ++ lib.optional (cfg.auth.mode != "header")
                   # Identity provider: header (default) or alb-oidc.
                   { name = "AUTH_MODE"; value = cfg.auth.mode; }

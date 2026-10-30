@@ -1419,6 +1419,7 @@ export async function main(
     createManagementApi({
     uploadLimits,
     accessCheck,
+    authEnforced: process.env.AUTH_ENFORCE === "true",
     // Live appends only reach the owner's local store, so the integrity stream reports
     // whether this pod owns the conversation.
     streamOwnership: conversationRegistry && podName

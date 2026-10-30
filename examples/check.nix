@@ -580,12 +580,19 @@ let
   enforceRouterEnv =
     let ctrs = builtins.attrValues (enforcePlatform.config.kubernetes.resources.deployments.conversation-router.spec.template.spec.containers or { });
     in builtins.concatMap (c: c.env or [ ]) ctrs;
+  enforceHostEnv =
+    let ctrs = builtins.attrValues (enforcePlatform.config.kubernetes.resources.deployments.agent-host.spec.template.spec.containers or { });
+    in builtins.concatMap (c: c.env or [ ]) ctrs;
   enforceProblems =
     (if renders { scooter.auth.enforce = true; }
      then [ "auth.enforce rendered without sessionCheckUrl: the router would refuse every browser request" ]
      else [ ])
     ++ (if builtins.elem { name = "AUTH_ENFORCE"; value = "true"; } enforceRouterEnv then [ ]
         else [ "auth.enforce did not reach router.env.AUTH_ENFORCE" ])
+    ++ (if builtins.elem { name = "AUTH_ENFORCE"; value = "true"; } enforceHostEnv then [ ]
+        else [ "auth.enforce did not reach agent-host.env.AUTH_ENFORCE: anonymous callers could change any conversation" ])
+    ++ (if builtins.any (e: e.name == "AUTH_ENFORCE") hostEnv
+        then [ "the example tells agent-host to enforce auth without opting in" ] else [ ])
     ++ (if builtins.elem { name = "AUTH_EMAIL_HEADER"; value = "x-forwarded-email"; } enforceRouterEnv then [ ]
         else [ "router.env.AUTH_EMAIL_HEADER missing: an enforcing router would leave a client-sent email header in place" ])
     ++ (if builtins.any (e: e.name == "AUTH_ENFORCE") routerEnv

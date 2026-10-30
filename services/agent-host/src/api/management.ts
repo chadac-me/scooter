@@ -124,6 +124,8 @@ export interface ManagementDeps {
   ownerVerifier?: (req: IncomingMessage) => Promise<boolean>;
   /** The visibility check guarding every /conversations/:id route; absent means no guard (tests). */
   accessCheck?: AccessCheck;
+  /** AUTH_ENFORCE: the router proves every user, so anonymous is never the single user. */
+  authEnforced?: boolean;
   /** In-pod web-service registry powering the UI Services panel; absent in fake/local mode. */
   webServices?: WebServiceRegistry;
   /** Per-conversation service origins (SANDBOX_DOMAIN); absent keeps services under /c/<id>/. */
@@ -453,8 +455,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
   const mutableFor = (id: string, user: { anonymous: boolean; id: string }) => {
     const conv = sessions.get(id);
     if (!conv) return { conv: undefined as Conversation | undefined, error: 404 as const };
-    // Anonymous (no ingress identity) is single-user mode and may mutate any conversation.
-    if (!user.anonymous && conv.owner && conv.owner !== user.id) {
+    // Without AUTH_ENFORCE, anonymous is single-user mode and may mutate any conversation.
+    const singleUser = user.anonymous && !deps.authEnforced;
+    if (!singleUser && conv.owner && conv.owner !== user.id) {
       return { conv: undefined, error: 403 as const };
     }
     return { conv, error: undefined };
