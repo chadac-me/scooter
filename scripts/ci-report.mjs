@@ -6,16 +6,28 @@
 // PATCHes, so a gate nobody has reported yet renders as pending. Zero runtime
 // dependencies, so a nix-only job can run it with the runner's node.
 //
+// `post` also saves its section to <sections-dir>/<id>.json, which the job uploads
+// as artifact `ci-section-<id>`; `evaluate` reads those over the comment, so a fork
+// PR, whose token cannot write the comment, still gets a verdict.
+//
 // Usage:
 //   ci-report.mjs post --section <id> --status <pass|fail|warn|skip> \
-//     [--summary <text>] [--body <file>] [--gates <f>] [--labels a,b]
-//   ci-report.mjs evaluate [--gates <f>] [--labels a,b]   # exit 1 if blocked
-//     env: GH_TOKEN, GITHUB_REPOSITORY, PR
+//     [--summary <text>] [--body <file>] [--gates <f>] [--labels a,b] [--sections-dir <d>]
+//   ci-report.mjs evaluate [--gates <f>] [--labels a,b] [--sections-dir <d>]   # exit 1 if blocked
+//     env: GH_TOKEN, GITHUB_REPOSITORY, PR; <sections-dir> defaults to $RUNNER_TEMP/ci-sections
 //
 // `--summary` wraps the body in a <details>; omit it when the job renders its own
 // and the body is placed verbatim.
 
-import { readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
 
 export const MARKER = "<!-- ci-report -->";
 export const HEADING = "## CI";
@@ -150,18 +162,39 @@ export function renderComment(sections, gates) {
 /** Replace or add one section, leaving every other untouched; pure, so `post()` can retry by re-reading and re-applying. */
 export function mergeSection(body, section, gates) {
   const sections = parseSections(body);
+  sections.set(section.id, renderSection(section));
+  return renderComment(sections, gates);
+}
+
+/** A posted section as stored: id, status and its rendered markdown. */
+export function renderSection(section) {
   const content =
     section.summary != null
       ? // The blank line after </summary> is required or GitHub renders the
         // markdown inside as literal text.
         `<details><summary>${ICON[section.status] ?? ""} <b>${section.summary}</b></summary>\n\n${section.body ?? ""}\n</details>`
       : (section.body ?? "");
-  sections.set(section.id, {
-    id: section.id,
-    status: section.status,
-    content: content.trim(),
-  });
-  return renderComment(sections, gates);
+  return { id: section.id, status: section.status, content: content.trim() };
+}
+
+/** Save a section as `<dir>/<id>.json`, which the job uploads as artifact `ci-section-<id>`. */
+export function saveSection(dir, section) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${section.id}.json`),
+    JSON.stringify(renderSection(section)),
+  );
+}
+
+/** Read the sections saved by `saveSection`; a missing dir means none. */
+export function readSavedSections(dir) {
+  const sections = new Map();
+  if (!existsSync(dir)) return sections;
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+    const s = JSON.parse(readFileSync(join(dir, f), "utf8"));
+    if (s.id && STATUSES.includes(s.status)) sections.set(s.id, s);
+  }
+  return sections;
 }
 
 /** Did our section survive someone else's concurrent write? */
@@ -204,6 +237,16 @@ async function findComment(repo, pr, token) {
 
 /** Upsert one section on the PR, retrying if a concurrent writer clobbered it; re-applying ours cannot drop theirs. */
 export async function post({ repo, pr, token, section, gates }) {
+  try {
+    return await upsert({ repo, pr, token, section, gates });
+  } catch (e) {
+    // Fork PR tokens are read-only; evaluate reads saved sections.
+    console.warn(`::warning::could not write the CI comment: ${e.message}`);
+    return { url: null, attempt: 0 };
+  }
+}
+
+async function upsert({ repo, pr, token, section, gates }) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     const existing = await findComment(repo, pr, token);
     const merged = mergeSection(existing?.body ?? "", section, gates);
@@ -243,16 +286,34 @@ function main(argv) {
   const repo = process.env.GITHUB_REPOSITORY;
   const pr = process.env.PR;
   const token = process.env.GH_TOKEN;
+  const dir = opt(
+    "sections-dir",
+    join(process.env.RUNNER_TEMP ?? ".", "ci-sections"),
+  );
+
+  function evaluate(fromComment) {
+    // This run's saved sections override the comment's.
+    const sections = new Map([...fromComment, ...readSavedSections(dir)]);
+    if (process.env.GITHUB_STEP_SUMMARY)
+      appendFileSync(
+        process.env.GITHUB_STEP_SUMMARY,
+        renderComment(sections, active),
+      );
+    const { blocking, pending, mergeable } = evaluateGates(sections, active);
+    for (const id of blocking) console.log(`FAILING  ${id}`);
+    for (const id of pending) console.log(`PENDING  ${id}`);
+    console.log(mergeable ? "all gates satisfied" : "gates not satisfied");
+    if (!mergeable) process.exitCode = 1;
+  }
 
   if (cmd === "evaluate") {
-    return findComment(repo, pr, token).then((c) => {
-      const sections = parseSections(c?.body ?? "");
-      const { blocking, pending, mergeable } = evaluateGates(sections, active);
-      for (const id of blocking) console.log(`FAILING  ${id}`);
-      for (const id of pending) console.log(`PENDING  ${id}`);
-      console.log(mergeable ? "all gates satisfied" : "gates not satisfied");
-      if (!mergeable) process.exitCode = 1;
-    });
+    return findComment(repo, pr, token).then(
+      (c) => evaluate(parseSections(c?.body ?? "")),
+      (e) => {
+        console.warn(`::warning::could not read the CI comment: ${e.message}`);
+        return evaluate(new Map());
+      },
+    );
   }
 
   if (cmd !== "post") {
@@ -270,19 +331,15 @@ function main(argv) {
     return;
   }
   const bodyFile = opt("body");
-  return post({
-    repo,
-    pr,
-    token,
-    gates: active,
-    section: {
-      id,
-      status,
-      summary: opt("summary"),
-      body: bodyFile ? readFileSync(bodyFile, "utf8").trim() : "",
-    },
-  }).then((r) =>
-    console.log(r.url ? `posted ${id} → ${r.url}` : `posted ${id}`),
+  const section = {
+    id,
+    status,
+    summary: opt("summary"),
+    body: bodyFile ? readFileSync(bodyFile, "utf8").trim() : "",
+  };
+  saveSection(dir, section);
+  return post({ repo, pr, token, gates: active, section }).then((r) =>
+    console.log(r.url ? `posted ${id} → ${r.url}` : `saved ${id} to ${dir}`),
   );
 }
 

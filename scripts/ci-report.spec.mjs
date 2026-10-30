@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   MARKER,
@@ -9,7 +13,10 @@ import {
   mergeSection,
   parseGates,
   parseSections,
+  post,
+  readSavedSections,
   renderComment,
+  saveSection,
 } from "./ci-report.mjs";
 
 const GATES_YML = `
@@ -210,5 +217,55 @@ describe("renderComment", () => {
     let body = mergeSection("", section("e2e-fast", "pass", "A"), all);
     body = mergeSection(body, section("size", "warn", "B"), all);
     expect(renderComment(parseSections(body), all)).toBe(body);
+  });
+});
+
+describe("saved sections", () => {
+  const dir = () => mkdtempSync(join(tmpdir(), "ci-sections-"));
+
+  it("round-trip into what the comment would hold", () => {
+    const d = dir();
+    saveSection(d, section("size", "warn", "B"));
+    saveSection(d, section("e2e-fast", "fail", "A"));
+    const body = mergeSection(
+      mergeSection("", section("size", "warn", "B"), all),
+      section("e2e-fast", "fail", "A"),
+      all,
+    );
+    expect(readSavedSections(d)).toEqual(parseSections(body));
+  });
+
+  it("a missing dir means no sections", () => {
+    expect(readSavedSections(join(dir(), "absent")).size).toBe(0);
+  });
+
+  it("ignore a file with an unknown status", () => {
+    const d = dir();
+    writeFileSync(join(d, "x.json"), JSON.stringify({ id: "x", status: "ok" }));
+    expect(readSavedSections(d).size).toBe(0);
+  });
+});
+
+describe("post", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("does not fail the job when the token cannot write the comment", async () => {
+    // A fork PR's token: reads succeed, writes are refused.
+    vi.stubGlobal("fetch", async (_url, init) =>
+      init?.method
+        ? new Response('{"message":"Resource not accessible by integration"}', {
+            status: 403,
+          })
+        : Response.json([]),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const r = await post({
+      repo: "o/r",
+      pr: "1",
+      token: "t",
+      section: section("size", "pass"),
+      gates: all,
+    });
+    expect(r.url).toBeNull();
   });
 });
