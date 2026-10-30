@@ -59,7 +59,9 @@ let
           echo "[$db.$table] no $from.$table — nothing to copy"
           return 0
         fi
-        cols="$(psql -d "$db" -tAc "SELECT string_agg(quote_ident(attname), ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 'public.\"$table\"'::regclass AND attnum > 0 AND NOT attisdropped")"
+        # Only columns both sides have; columns added since take their default.
+        cols="$(psql -d "$db" -tAc "SELECT string_agg(quote_literal(attname), ',') FROM pg_attribute WHERE attrelid = 'public.\"$table\"'::regclass AND attnum > 0 AND NOT attisdropped")"
+        cols="$(psql -d "$from" -v ON_ERROR_STOP=1 -tAc "SELECT string_agg(quote_ident(attname), ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 'public.\"$table\"'::regclass AND attnum > 0 AND NOT attisdropped AND attname IN ($cols)")" || return 1
         pk="$(psql -d "$db" -tAc "SELECT string_agg(quote_ident(a.attname), ',') FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = 'public.\"$table\"'::regclass AND i.indisprimary")"
         if [ -z "$pk" ]; then
           echo "[$db.$table] has no primary key — refusing to copy (a re-run could not tell copied rows apart)" >&2
