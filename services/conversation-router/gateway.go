@@ -1,6 +1,6 @@
 package main
 
-// Shadow-mode identity gateway: logs would-be rejections, refuses nothing.
+// Identity gateway: proves each caller; shadow mode only logs refusals.
 
 import (
 	"context"
@@ -38,6 +38,8 @@ type gatewayPrincipal struct {
 
 type gateway struct {
 	listener string // "main" or "sandbox", for logs
+	// enforce refuses unproven callers and restamps identity headers.
+	enforce  bool
 	identity identityConfig
 	prefixes []string
 	session  *sessionChecker // nil: no session proof
@@ -126,14 +128,41 @@ func gatewayStatus(err error) int {
 	}
 }
 
-// wrap checks non-public requests in the background, always serving.
+// wrap checks non-public requests: inline when enforcing, else in the background.
 func (g *gateway) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !g.public(r) {
+		switch {
+		case g.public(r):
+		case g.enforce:
+			p, err := g.authenticate(r.Context(), r)
+			g.observe(r, p, err)
+			if err != nil {
+				status := gatewayStatus(err)
+				writeJSONError(w, status, strings.ToLower(http.StatusText(status)))
+				return
+			}
+			g.stamp(r, p)
+		default:
 			g.shadow(r)
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// stamp replaces client-sent identity headers with the proven caller's.
+func (g *gateway) stamp(r *http.Request, p gatewayPrincipal) {
+	header := g.identity.identityHeader()
+	r.Header.Del(header)
+	if g.identity.mode != "alb-oidc" {
+		r.Header.Del(g.identity.emailHeader)
+	}
+	if p.user == "" {
+		return
+	}
+	r.Header.Set(header, p.user)
+	if p.email != "" && g.identity.mode != "alb-oidc" {
+		r.Header.Set(g.identity.emailHeader, p.email)
+	}
 }
 
 // shadow checks a snapshot, since handlers mutate r's headers.
@@ -168,11 +197,15 @@ func (g *gateway) observe(r *http.Request, p gatewayPrincipal, err error) {
 	if p.serviceAccount != "" {
 		fields = append(fields, slog.String("service_account", p.serviceAccount))
 	}
+	reject := "auth would reject"
+	if g.enforce {
+		reject = "auth rejected"
+	}
 	switch {
-	case errors.Is(err, errUnverifiable):
+	case errors.Is(err, errUnverifiable) && !g.enforce:
 		return
 	case err != nil:
-		g.log.Warn("auth would reject", append(append(fields, callerFields(r)...),
+		g.log.Warn(reject, append(append(fields, callerFields(r)...),
 			slog.Int("status", gatewayStatus(err)), slog.String("reason", err.Error()))...)
 		return
 	}

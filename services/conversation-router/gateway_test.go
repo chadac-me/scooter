@@ -386,3 +386,105 @@ func TestSandboxGatewayIgnoresAuthorization(t *testing.T) {
 		t.Fatalf("a sandbox host must need a session, got %v", err)
 	}
 }
+
+func TestGatewayEnforceRefusesAndRestamps(t *testing.T) {
+	status, calls := 0, int32(0)
+	g, l := testGateway(t, authProxy(t, &status, &calls).URL)
+	g.enforce, g.legacy = true, nil
+	g.identity.emailHeader = "x-auth-email"
+	var seenUser, seenEmail string
+	served := 0
+	h := g.wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served++
+		seenUser, seenEmail = r.Header.Get("x-auth-user"), r.Header.Get("x-auth-email")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	serve := func(r *http.Request) int {
+		seenUser, seenEmail = "unset", "unset"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	bearer := func(token string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/conversations", nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		return r
+	}
+
+	// A forged header is replaced by the session's user.
+	forged := browserReq("alice")
+	forged.Header.Set("x-auth-user", "mallory")
+	forged.Header.Set("x-auth-email", "mallory@example.com")
+	if code := serve(forged); code != http.StatusNoContent || seenUser != "alice" || seenEmail != "alice@example.com" {
+		t.Fatalf("forged header: %d %q %q", code, seenUser, seenEmail)
+	}
+
+	// An asserter's named user becomes the identity.
+	r := bearer("scooter-router:" + gwWebhooks)
+	r.Header.Set(svcauth.UserHeader, "carol")
+	if code := serve(r); code != http.StatusNoContent || seenUser != "carol" {
+		t.Fatalf("asserter: %d %q", code, seenUser)
+	}
+
+	// A plain service cannot claim a user through the identity header.
+	r = bearer("scooter-router:" + gwBroker)
+	r.Header.Set("x-auth-user", "mallory")
+	if code := serve(r); code != http.StatusNoContent || seenUser != "" || seenEmail != "" {
+		t.Fatalf("service: %d %q %q", code, seenUser, seenEmail)
+	}
+
+	refused := []struct {
+		name   string
+		req    *http.Request
+		status int
+	}{
+		{"header only", func() *http.Request {
+			r := httptest.NewRequest(http.MethodGet, "/whoami", nil)
+			r.Header.Set("x-auth-user", "mallory")
+			return r
+		}(), 401},
+		{"dead session", browserReq("expired"), 401},
+		{"legacy audience", bearer("agent-host:" + gwWebhooks), 401},
+		{"SA not allowed", bearer("scooter-router:system:serviceaccount:" + gwNS + ":sandbox-x"), 403},
+	}
+	for _, c := range refused {
+		before := served
+		if code := serve(c.req); code != c.status || served != before {
+			t.Fatalf("%s: got %d (served %v), want %d", c.name, code, served != before, c.status)
+		}
+	}
+	if code := serve(httptest.NewRequest(http.MethodGet, "/healthz", nil)); code != http.StatusNoContent {
+		t.Fatalf("health probe refused: %d", code)
+	}
+
+	rejected := 0
+	for _, m := range l.lines(t) {
+		if m["msg"] == "auth would reject" {
+			t.Fatalf("enforcing gateway logged shadow wording: %v", m)
+		}
+		if m["msg"] == "auth rejected" {
+			rejected++
+		}
+	}
+	if rejected != len(refused) {
+		t.Fatalf("logged %d rejections, want %d", rejected, len(refused))
+	}
+}
+
+func TestGatewayEnforceWithoutBrowserProofFailsClosed(t *testing.T) {
+	g, l := testGateway(t, "")
+	g.enforce = true
+	h := g.wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("served a browser request nothing could verify")
+	}))
+	r := browserReq("alice")
+	r.Header.Set("x-auth-user", "alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code < 400 {
+		t.Fatalf("got %d", rec.Code)
+	}
+	if len(l.lines(t)) != 1 {
+		t.Fatalf("refusal not logged: %s", l.buf.String())
+	}
+}

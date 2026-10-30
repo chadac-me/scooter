@@ -30,17 +30,21 @@ func buildGateways(kubeCfg *rest.Config, log *slog.Logger) (main, sandbox *gatew
 	}
 	identity := identityConfigFromEnv()
 	prefixes := sessionCookiePrefixes()
+	enforce := env("AUTH_ENFORCE", "") == "true"
 	var alb *albVerifier
 	if region := env("AUTH_ALB_REGION", ""); region != "" && identity.mode == "alb-oidc" {
 		alb = newAlbVerifier(region)
 	}
 	mk := func(listener, checkURL string) *gateway {
 		g := newGateway(listener, identity)
-		g.prefixes, g.alb = prefixes, alb
+		g.prefixes, g.alb, g.enforce = prefixes, alb, enforce
 		if checkURL != "" && identity.mode != "alb-oidc" {
 			g.session = newSessionChecker(checkURL, prefixes)
 		}
-		if !g.browserProof() {
+		if !g.browserProof() && enforce {
+			log.Error("browser identity cannot be verified on this listener, so every browser request is refused",
+				slog.String("listener", listener))
+		} else if !g.browserProof() {
 			log.Warn("browser identity is not verified on this listener: set scooter.auth.sessionCheckUrl (or albRegion in alb-oidc mode)",
 				slog.String("listener", listener))
 		}
@@ -59,14 +63,19 @@ func buildGateways(kubeCfg *rest.Config, log *slog.Logger) (main, sandbox *gatew
 	} else {
 		main.services = svcauth.NewVerifier(review)
 	}
-	if legacy := env("WEBHOOKS_TOKEN_AUDIENCE", "agent-host"); legacy != audience && main.services != nil {
+	if legacy := env("WEBHOOKS_TOKEN_AUDIENCE", "agent-host"); legacy != audience && main.services != nil && !enforce {
 		if review, err := svcauth.NewTokenReviewer(kubeCfg, legacy); err == nil {
 			main.legacy = svcauth.NewVerifier(review)
 		}
 	}
 
 	sandbox = mk("sandbox", env("AUTH_SANDBOX_SESSION_CHECK_URL", env("AUTH_SESSION_CHECK_URL", "")))
-	log.Info("auth gateway in shadow mode: would-be rejections are logged, not enforced",
+	mode := "shadow"
+	if enforce {
+		mode = "enforce"
+	}
+	log.Info("auth gateway started",
+		slog.String("mode", mode),
 		slog.String("audience", audience),
 		slog.Int("services", len(main.policy.Services)),
 		slog.Int("asserters", len(main.policy.Asserters)))

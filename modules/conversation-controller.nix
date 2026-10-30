@@ -18,6 +18,13 @@ let
       # A `throw`, since kubenix has no `assertions` option.
       throw "scooter.conversationController.selfAccess.port = ${toString ccfg.selfAccess.port} collides with another conversation-router listener (8080 = main, ${toString sandboxPort} = sandbox hosts); pick a different port."
     else null;
+  # Without a way to prove sessions, enforcing would refuse every browser.
+  enforceAuth =
+    if cfg.auth.mode == "alb-oidc" && cfg.auth.albRegion == null then
+      throw "scooter.auth.enforce needs scooter.auth.albRegion in alb-oidc mode, or the router refuses every browser request."
+    else if cfg.auth.mode == "header" && cfg.auth.sessionCheckUrl == null then
+      throw "scooter.auth.enforce needs scooter.auth.sessionCheckUrl in header mode, or the router refuses every browser request."
+    else "true";
 in
 {
   options.scooter.conversationController = with lib; {
@@ -442,6 +449,10 @@ in
                   { name = "AUTH_MODE"; value = cfg.auth.mode; }
                 ++ lib.optional (cfg.auth.userHeader != "x-auth-user")
                   { name = "AUTH_USER_HEADER"; value = cfg.auth.userHeader; }
+                ++ lib.optional (cfg.auth.emailHeader != "x-auth-email")
+                  { name = "AUTH_EMAIL_HEADER"; value = cfg.auth.emailHeader; }
+                ++ lib.optional cfg.auth.enforce
+                  { name = "AUTH_ENFORCE"; value = enforceAuth; }
                 ++ [
                   # The SA(s) the router trusts as in-cluster callers.
                   { name = "WEBHOOKS_SERVICE_ACCOUNT";
