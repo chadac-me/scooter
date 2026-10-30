@@ -172,6 +172,7 @@
     conversationController.selfAccess.enable = true;
     # Sandbox isolation is on by default; `enable = false` hands it to your own policies.
     networkPolicy.enable = true;
+    networkPolicy.dnsPorts = [ 53 10053 ];
 
     # OpenTelemetry metrics with per-model prices per million tokens.
     observability.otel = {

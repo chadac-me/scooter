@@ -56,6 +56,16 @@ in
         directly. Extend this if your cluster uses public address space internally.
       '';
     };
+    dnsPorts = mkOption {
+      type = types.listOf types.port;
+      default = [ 53 ];
+      example = [ 53 10053 ];
+      description = ''
+        Ports the sandbox may send DNS to, UDP and TCP, at any destination. The policy
+        is evaluated after kube-proxy's DNAT, so this is the resolver pods' *target*
+        port, not the Service port: NixOS's coredns addon listens on 10053.
+      '';
+    };
     extraEgress = mkOption {
       type = types.listOf types.attrs;
       default = [ ];
@@ -79,7 +89,7 @@ in
         egress = [
           # DNS to any destination: NodeLocal DNSCache answers on a host-network address
           # that no podSelector matches.
-          { ports = [ { protocol = "UDP"; port = 53; } (tcp 53) ]; }
+          { ports = lib.concatMap (p: [ { protocol = "UDP"; port = p; } (tcp p) ]) npcfg.dnsPorts; }
           {
             to = [{ ipBlock = { cidr = "0.0.0.0/0"; except = npcfg.internetExcept; }; }];
           }

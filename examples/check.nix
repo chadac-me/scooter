@@ -769,7 +769,15 @@ let
     ++ (if builtins.all (b: b.ipBlock.cidr == "0.0.0.0/0" && builtins.all (c: builtins.elem c b.ipBlock.except) [ "10.0.0.0/8" "100.64.0.0/10" "169.254.0.0/16" ]) npInternet && npInternet != [ ] then [ ]
         else [ "sandbox-isolation internet egress must except the pod/tailnet/metadata ranges" ])
     ++ (if ((evalPlatform { module = { lib, ... }: { imports = [ ./kubenix-config.nix ]; scooter.networkPolicy.enable = lib.mkForce false; }; }).config.kubernetes.resources.networkPolicies or { }) ? sandbox-isolation
-        then [ "networkPolicy.enable = false still renders sandbox-isolation" ] else [ ]);
+        then [ "networkPolicy.enable = false still renders sandbox-isolation" ] else [ ])
+    # The DNS rule is the one with no `to`; it must carry every configured port over both
+    # protocols, or a cluster whose resolver is not on 53 has sandboxes with no DNS at all.
+    ++ (let
+          dnsRules = builtins.filter (r: !(r ? to)) npEgress;
+          want = builtins.concatMap (p: [ { protocol = "UDP"; port = p; } { protocol = "TCP"; port = p; } ])
+            platform.config.scooter.networkPolicy.dnsPorts;
+        in if builtins.length dnsRules == 1 && (builtins.head dnsRules).ports == want then [ ]
+           else [ "sandbox-isolation DNS rule must allow UDP+TCP on networkPolicy.dnsPorts ${builtins.toJSON platform.config.scooter.networkPolicy.dnsPorts}, got ${builtins.toJSON (map (r: r.ports or [ ]) dnsRules)}" ]);
 
   # A contrib's approval declaration reaches the agent-host, and with aws off it does not.
   approvalsJson =
