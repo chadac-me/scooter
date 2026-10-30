@@ -14,6 +14,7 @@ import { danglingRunInfo, orphanRuns } from "./danglingRun.js";
 import { allowAllGuard, type OwnershipGuard } from "./ownershipGuard.js";
 import { noopRegistry, type ConversationRegistry } from "./conversationRegistry.js";
 import { formatError, logger } from "../log.js";
+import { DERIVED_SOURCES, humanTriggerFromLog } from "../acp/remoteAgentRegistry.js";
 import type { AccessFacts, Visibility } from "./visibility.js";
 
 const log = logger("manager");
@@ -127,7 +128,7 @@ export interface ConversationMeta {
   visibility?: Visibility;
   /** Messages still queued in the bridge when the conversation was suspended; revive() re-enqueues
    *  them and clears the field. */
-  pendingQueue?: Array<{ text: string; priority: number }>;
+  pendingQueue?: Array<{ text: string; priority: number; source?: string; humanInitiated?: boolean }>;
 }
 
 /** An external resource a conversation is linked to (GitHub PR/issue, GitLab MR, Slack thread, Jira
@@ -427,7 +428,7 @@ interface Entry {
   visibility?: Visibility;
   /** Messages still queued in the bridge when this conversation was suspended, for revive() to
    *  re-enqueue. */
-  pendingQueue?: Array<{ text: string; priority: number }>;
+  pendingQueue?: Array<{ text: string; priority: number; source?: string; humanInitiated?: boolean }>;
   /** Suspend the sandbox when this run ends (in memory). */
   stopAfterRun?: boolean;
 }
@@ -621,6 +622,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       if (!oldest.done) endedIds.delete(oldest.value);
     }
     endedIds.add(id);
+  };
+
+  // A subagent tree shares its root's trigger; a missing ancestor fails closed.
+  const inheritedHumanTrigger = async (e: Entry): Promise<boolean> => {
+    let root = e;
+    for (let d = 0; root.parentId && d < 32; d++) {
+      const up = entries.get(root.parentId);
+      if (!up) return false;
+      root = up;
+    }
+    if (root.parentId) return false;
+    return humanTriggerFromLog(await collectEvents(store.readEvents(root.id)));
   };
 
   // Returns the persist promise so callers that need durability can await it.
@@ -960,7 +973,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         `to the agent that spawned you.)`;
       // Fire-and-forget: prompt() resolves on run completion, and the parent is told via
       // onSubagentComplete.
-      void entry.bridge?.prompt({ threadId: childThreadId, text: framedPrompt }).catch((err: unknown) => {
+      const humanInitiated = await inheritedHumanTrigger(entry);
+      void entry.bridge?.prompt({ threadId: childThreadId, text: framedPrompt, humanInitiated }).catch((err: unknown) => {
         log.errorWith("subagent initial prompt failed", err, { conversation_id: id, parent_id: parentId });
       });
       return toConversation(entry);
@@ -1039,8 +1053,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             const userMsgIds = new Set<string>();
             const loggedUserTexts = new Set<string>();
             for (const e of tail) {
-              const ev = e as { type?: string; delta?: string; role?: string; messageId?: string };
-              if (ev.type === "TEXT_MESSAGE_START" && ev.role === "user" && ev.messageId) {
+              const ev = e as { type?: string; delta?: string; role?: string; messageId?: string; source?: string; text?: string };
+              // Sourced prompts log as SYSTEM_MESSAGE; hook notes are output.
+              if (ev.type === "SYSTEM_MESSAGE" && ev.source !== "hook" && typeof ev.text === "string") {
+                loggedUserTexts.add(ev.text);
+              } else if (ev.type === "TEXT_MESSAGE_START" && ev.role === "user" && ev.messageId) {
                 userMsgIds.add(ev.messageId);
               } else if (
                 ev.type === "TEXT_MESSAGE_CONTENT" &&
@@ -1072,7 +1089,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             // A queued message that fails to re-run must not fail the revive.
             void entry.bridge
               ?.prompt(
-                { threadId: entry.threadId, text: item.text },
+                { threadId: entry.threadId, text: item.text, source: item.source, humanInitiated: item.humanInitiated },
                 item.priority ? { priority: item.priority } : undefined,
               )
               .catch((err) => {
@@ -1266,7 +1283,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       // with no bridge in this process.
       if (!entry.bridge) await this.revive(id);
       const opts = priority || interrupt ? { priority, interrupt } : undefined;
-      await entry.bridge?.prompt({ threadId: entry.threadId, text, images, files, source }, opts);
+      const humanInitiated = source !== undefined && DERIVED_SOURCES.has(source) ? await inheritedHumanTrigger(entry) : undefined;
+      await entry.bridge?.prompt({ threadId: entry.threadId, text, images, files, source, humanInitiated }, opts);
     },
 
     async promptByThread(threadId, text, model, priority, owner, images, files, source, provider) {

@@ -38,15 +38,15 @@ import type { AccessCheck } from "../session/access.js";
 import { isVisibility } from "../session/visibility.js";
 import { serviceUrl, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
-import { HUMAN_TRIGGER_SOURCES } from "../acp/remoteAgentRegistry.js";
+import { DERIVED_SOURCES, HUMAN_TRIGGER_SOURCES } from "../acp/remoteAgentRegistry.js";
 import type { HookDef } from "../hooks/types.js";
 import type { UserHookSettingsStore } from "../hooks/userHookSettingsStore.js";
 
 const log = logger("agent-host");
 const remoteAgentLog = logger("remote-agent");
 
-/** Sources POST /messages refuses, since a sandbox can reach it: a human trigger would let it pass as a person, and `resume` hides the message from the UI. */
-const RESERVED_SOURCES: ReadonlySet<string> = new Set([...HUMAN_TRIGGER_SOURCES, "resume"]);
+/** Sources POST /messages refuses, so a sandbox cannot pose as human. */
+const RESERVED_SOURCES: ReadonlySet<string> = new Set([...HUMAN_TRIGGER_SOURCES, ...DERIVED_SOURCES]);
 
 /** Whether a POST /messages caller may tag its message with this system source. */
 export function isPostableSource(source: unknown): source is string {
