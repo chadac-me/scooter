@@ -130,8 +130,7 @@ def _format_forwarded_message(
     else:
         preamble = (
             f"A new comment was posted on GitLab {noteable_type.replace('_', ' ')} {iid_prefix}{noteable_iid}. "
-            f"If it is addressed to you or asks for something, respond as below; "
-            f"otherwise it is just for your awareness."
+            f"Respond only if it is addressed to you or asks for something."
         )
 
     return (

@@ -55,7 +55,7 @@ def test_a_forwarded_note_asks_to_react_and_plan_and_carries_its_id():
     msg = gitlab_h._format_forwarded_message(
         "@chadac commented:\n\nplease fix", 7, "merge_requests", 3, has_mention=True, note_id=1234,
     )
-    assert "React with an emoji first" in msg
+    assert "React 👀 first" in msg
     assert "comment your plan" in msg
     assert "note_id: 1234" in msg
 

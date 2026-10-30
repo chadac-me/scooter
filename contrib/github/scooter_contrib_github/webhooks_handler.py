@@ -119,8 +119,7 @@ def _format_forwarded_message(
     else:
         preamble = (
             f"A new comment was posted on GitHub {kind} #{number} in {owner}/{repo}. "
-            f"If it is addressed to you or asks for something, respond as below; "
-            f"otherwise it is just for your awareness."
+            f"Respond only if it is addressed to you or asks for something."
         )
 
     reply_instruction = (
@@ -346,10 +345,8 @@ async def _handle_review(payload: dict):
     elif state == "changes_requested":
         head = f"@{user} requested CHANGES on PR #{number} in {owner}/{repo}."
         tail = (
-            "Before changing code, post ONE `github_comment` with your plan for the requested "
-            "changes, then carry it out without waiting for approval. Address the individual "
-            "line comments (they arrive separately), then PUSH — a reply alone does not clear "
-            "a changes-requested review."
+            "Comment your plan once, then address the line comments (they arrive separately) "
+            "and PUSH — a reply alone does not clear a changes-requested review."
         )
     else:
         head = f"@{user} reviewed PR #{number} in {owner}/{repo}."

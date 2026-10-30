@@ -95,13 +95,8 @@ thread.
 **So when a comment arrives, react 👀 as the first action of the turn** — before
 reading the repo, before planning, before any of the work.
 
-Then, if the comment asks for real work (not a one-line answer), **post your plan
-as a comment before you start**: what you understood, the approach, any open
-questions. Carry on with that plan straight away rather than waiting for a
-go-ahead; if they disagree they'll reply and you adjust. Finish with a
-`github_comment` reporting what you did. Silent work is the failure this
-prevents: the human should never have to open the conversation to learn what
-you're doing.
+Then, for real work, **comment a short plan before starting** and go ahead
+without waiting for approval. Finish with a `github_comment` of the results.
 
 The forwarded message hands you the id, and nothing else — picking the endpoint
 is yours:
