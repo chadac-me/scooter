@@ -11,10 +11,9 @@ let
   cfg = config.scooter;
 
   # Shape of one conversation's resources, keyed by conversationId.
-  mkConversation = { id, sandboxImage ? cfg.sandboxImage, brokerAudience ? "agent-broker", overlayStore ? false, overlayStorage ? "20Gi"
-    # Pool class, so the overlay PVC can bind a reserved PV.
-  , overlayStorageClass ? (if cfg.warmStore.enable then cfg.warmStore.storageClass else null)
-  , workspaceStorageClass ? cfg.workspaceStorageClass
+  mkConversation = { id, sandboxImage ? cfg.sandboxImage, brokerAudience ? "agent-broker", overlayStore ? false
+    # From scooter.sandbox.volumes, keyed by claim name.
+  , volumeClaims ? cfg.sandbox.renderedVolumeClaims
     # The default size preset rendered with requests == limits (Guaranteed QoS), including a GPU under its extended-resource name on both sides.
   , sandboxResources ? let
       defaultPreset =
@@ -88,20 +87,9 @@ let
           ];
         };
         # The workspace PVC; the conversation-state PVC is mounted by the agent-host, not here.
-        volumeClaimTemplates = [{
-          metadata.name = "workspace";
-          spec = {
-            accessModes = [ "ReadWriteOnce" ];
-            resources.requests.storage = "10Gi";
-          } // lib.optionalAttrs (workspaceStorageClass != null) { storageClassName = workspaceStorageClass; };
-        }] ++ lib.optionals overlayStore [{
+        volumeClaimTemplates = [ volumeClaims.workspace ]
           # The overlay-store upper PVC, only when the overlay-store image is in use.
-          metadata.name = "scooter-rw";
-          spec = {
-            accessModes = [ "ReadWriteOnce" ];
-            resources.requests.storage = overlayStorage;
-          } // lib.optionalAttrs (overlayStorageClass != null) { storageClassName = overlayStorageClass; };
-        }];
+          ++ lib.optional overlayStore volumeClaims.scooter-rw;
       };
     };
   };

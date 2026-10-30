@@ -107,7 +107,7 @@ let
   # A sandbox can reach the broker but not the agent-host, so sandbox-shaping config
   # must stay off the broker.
   sandboxShapingEnv = [
-    "SANDBOX_IMAGE" "SANDBOX_PULL_POLICY" "SANDBOX_RUNTIME_CLASS" "SANDBOX_WORKSPACE_STORAGE_CLASS" "SANDBOX_RESOURCES"
+    "SANDBOX_IMAGE" "SANDBOX_PULL_POLICY" "SANDBOX_RUNTIME_CLASS" "SANDBOX_VOLUME_CLAIMS" "SANDBOX_RESOURCES"
     "SANDBOX_SIZES_JSON" "SANDBOX_MANIFEST_OVERLAY_CONFIGMAP"
     "SCOOTER_CONFIGMAP" "SCOOTER_CONFIG_FILES_CONFIGMAP" "SCOOTER_TOKEN_AUDIENCES" "SCOOTER_ENV"
   ];
@@ -650,6 +650,32 @@ let
         else [ "sandboxPod.extraVolumes forge-ca (optional ConfigMap scooter-forge-ca) missing — no sandbox trusts the forge CA" ])
     ++ (if contribCtr != null && hasName (contribCtr.env or [ ]) "HTTPS_PROXY" && hasName (contribCtr.env or [ ]) "FORGE_PROXY_ADDR" then [ ]
         else [ "sandboxPod.extraEnv HTTPS_PROXY / FORGE_PROXY_ADDR missing — sandbox git/gh/glab bypass the forge proxy" ]);
+
+  # scooter.sandbox.volumes reaches the provisioner as SANDBOX_VOLUME_CLAIMS: defaults keep the
+  # overlay claim on the warm pool, an override and the renamed workspaceStorageClass land on
+  # the workspace claim, and an overlay class off the pool fails the render.
+  claimsOf = e: builtins.fromJSON (builtins.head (builtins.filter (x: x.name == "SANDBOX_VOLUME_CLAIMS")
+    e.config.kubernetes.resources.deployments.agent-host.spec.template.spec.containers.agent-host.env)).value;
+  withVolumes = m: evalPlatform { module = { imports = [ ./kubenix-config.nix m ]; }; };
+  defaultClaims = claimsOf platform;
+  setClaims = claimsOf (withVolumes {
+    scooter.sandbox.volumes.workspace = { spec.storageClassName = "gp3"; metadata.labels.tier = "fast"; };
+  });
+  legacyClaims = claimsOf (withVolumes { scooter.workspaceStorageClass = "legacy"; });
+  offPool = builtins.tryEval (builtins.deepSeq
+    (claimsOf (withVolumes { scooter.sandbox.volumes.overlay.spec.storageClassName = "elsewhere"; })) true);
+  volumeProblems =
+    (if defaultClaims.workspace or null == { metadata.name = "workspace"; spec = { accessModes = [ "ReadWriteOnce" ]; resources.requests.storage = "10Gi"; }; }
+     then [ ] else [ "SANDBOX_VOLUME_CLAIMS.workspace is not the 10Gi RWO default" ])
+    ++ (if (defaultClaims.scooter-rw.spec.storageClassName or null) == platform.config.scooter.warmStore.storageClass
+        then [ ] else [ "SANDBOX_VOLUME_CLAIMS.scooter-rw is off the warm-store pool class" ])
+    ++ (if setClaims.workspace.spec.storageClassName or null == "gp3" && setClaims.workspace.metadata.labels.tier or null == "fast"
+          && setClaims.workspace.spec.resources.requests.storage or null == "10Gi"
+        then [ ] else [ "scooter.sandbox.volumes.workspace did not merge onto the default claim" ])
+    ++ (if legacyClaims.workspace.spec.storageClassName or null == "legacy" then [ ]
+        else [ "scooter.workspaceStorageClass no longer reaches the workspace claim" ])
+    ++ (if !offPool.success then [ ]
+        else [ "an overlay claim class off the warm-store pool rendered instead of failing" ]);
 
   # Sandbox self-access: the router serves the listener, a Service fronts it, and every sandbox
   # gets the token audience and the URL to reach it.
@@ -1277,7 +1303,7 @@ let
     ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
         else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
 
-  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
+  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ volumeProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named; a scooter.packages override reaches exactly the images that use it\n"
