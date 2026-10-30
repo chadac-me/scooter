@@ -1,7 +1,13 @@
 /** The provider grouping that drives the two-level model picker. */
 
 import { describe, it, expect } from "vitest";
-import { groupModelsByProvider, providerLabel, UNTAGGED_GROUP } from "./modelGroups.js";
+import {
+  defaultServingProvider,
+  groupModelsByProvider,
+  modelOptionLabel,
+  providerLabel,
+  UNTAGGED_GROUP,
+} from "./modelGroups.js";
 
 describe("groupModelsByProvider", () => {
   it("returns null when no model carries a provider tag (legacy flat catalog)", () => {
@@ -61,5 +67,35 @@ describe("providerLabel", () => {
     expect(providerLabel("byoc")).toBe("bring-your-own-claude");
     expect(providerLabel("goose")).toBe("goose");
     expect(providerLabel("claude-code")).toBe("claude-code");
+  });
+});
+
+describe("the server-resolved default provider (#1019)", () => {
+  const base = {
+    available: ["claude-opus-5-5", "us.xai.grok-4.7"],
+    providers: { "claude-opus-5-5": ["byoc"], "us.xai.grok-4.7": ["goose"] },
+    defaultFor: { "claude-opus-5-5": ["byoc"], "us.xai.grok-4.7": ["goose"] },
+  };
+  const labels = (catalog: typeof base & { default: string; defaultProvider: string | null }) =>
+    groupModelsByProvider(catalog.available, catalog.providers, catalog.default)!.flatMap((g) =>
+      g.models.map((m) =>
+        modelOptionLabel(m, g.provider, {
+          defaultFor: catalog.defaultFor,
+          globalDefault: catalog.default,
+          defaultProvider: defaultServingProvider(catalog),
+        }),
+      ),
+    );
+
+  it("BYOC connected: the byoc model is the labelled default", () => {
+    const catalog = { ...base, default: "claude-opus-5-5", defaultProvider: "byoc" };
+    expect(defaultServingProvider(catalog)).toBe("byoc");
+    expect(labels(catalog)).toEqual(["claude-opus-5-5 (default)", "us.xai.grok-4.7"]);
+  });
+
+  it("BYOC not connected: the floor model stays the labelled default", () => {
+    const catalog = { ...base, default: "us.xai.grok-4.7", defaultProvider: "goose" };
+    expect(defaultServingProvider(catalog)).toBe("goose");
+    expect(labels(catalog)).toEqual(["us.xai.grok-4.7 (default)", "claude-opus-5-5"]);
   });
 });

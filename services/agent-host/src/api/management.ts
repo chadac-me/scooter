@@ -109,6 +109,11 @@ export interface ManagementDeps {
     /** Model id to the provider tags this model is the default for, so the UI can label
      *  "(default)" per provider group. */
     defaultFor?: Record<string, string[]>;
+    /** Model and provider an unset conversation's run uses for `owner`. */
+    resolveDefault?: (
+      owner: string | undefined,
+      conversationId: string | undefined,
+    ) => Promise<{ model: string | undefined; provider: string | undefined }>;
   };
   /** Raw handler for the agent-self-modify MCP endpoint, which writes the response itself. */
   mcpHandler?: (req: IncomingMessage, res: ServerResponse, body: unknown) => Promise<void>;
@@ -382,17 +387,25 @@ export function createManagementApi(deps: ManagementDeps): Router {
   });
 
   // The model catalog a UI populates its selector from.
-  r.get("/models", () => ({
-    json: {
-      default: models.default ?? null,
-      available: models.available,
-      hints: models.hints ?? {},
-      // Lets the UI label which choices apply to the BYO container vs the cloud floor.
-      providers: models.providers ?? {},
-      // Model id to the providers it is the default for, so the UI can mark "(default)" per group.
-      defaultFor: models.defaultFor ?? {},
-    },
-  }));
+  r.get("/models", async (ctx) => {
+    // `?conversation=` breaks priority ties as that conversation's runs do.
+    const resolved = await models
+      .resolveDefault?.(ctx.user.anonymous ? undefined : ctx.user.id, ctx.query.get("conversation") ?? undefined)
+      .catch((err) => void log.errorWith("resolving the default model failed", err));
+    return {
+      json: {
+        default: resolved?.model ?? models.default ?? null,
+        // The provider serving that default, so the UI labels it under the right group.
+        defaultProvider: resolved?.provider ?? null,
+        available: models.available,
+        hints: models.hints ?? {},
+        // Lets the UI label which choices apply to the BYO container vs the cloud floor.
+        providers: models.providers ?? {},
+        // Model id to the providers it is the default for, so the UI can mark "(default)" per group.
+        defaultFor: models.defaultFor ?? {},
+      },
+    };
+  });
 
   // Create a conversation with a server-minted id (a client-chosen id would become an
   // event-log key and a k8s resource name); in multi-replica the conversation-router serves

@@ -46,12 +46,15 @@ export interface ModelCatalog {
   providers?: Record<string, string[]>;
   /** Model id -> the provider tags it is the default for, so the picker can mark "(default)" per group. */
   defaultFor?: Record<string, string[]>;
+  /** The provider serving `default` for this caller, e.g. "byoc" while connected. */
+  defaultProvider?: string | null;
 }
 
 /** Fetch the offered models, returning an empty catalog when unreachable or unconfigured. */
-export async function loadModels(config: AgentHostConfig): Promise<ModelCatalog> {
+export async function loadModels(config: AgentHostConfig, conversationId?: string): Promise<ModelCatalog> {
+  const query = conversationId ? `?conversation=${encodeURIComponent(conversationId)}` : "";
   try {
-    const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/models`, {
+    const res = await fetch(`${config.baseUrl.replace(/\/$/, "")}/models${query}`, {
       headers: config.token ? { Authorization: `Bearer ${config.token}` } : undefined,
     });
     if (!res.ok) return { default: null, available: [] };

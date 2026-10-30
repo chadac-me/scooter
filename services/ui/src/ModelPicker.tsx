@@ -1,6 +1,6 @@
 /**
  * Per-conversation model picker. Fetches the agent-host's model catalog (GET /models)
- * once and lets the user choose the model for the current conversation; the choice is
+ * per conversation and lets the user choose the model for the current conversation; the choice is
  * stored on the session (sessions.ts) and rides the next prompt via the X-Agent-Model
  * header (RuntimeProvider), so it works both at new-chat time and as a
  * mid-conversation switch. Hidden entirely when the server offers no models.
@@ -26,13 +26,14 @@ export function ModelPicker() {
 
   useEffect(() => {
     let alive = true;
-    void loadModels({ baseUrl: BASE_URL }).then((c) => {
+    // Refetched per conversation: BYOC status and ties shape the default.
+    void loadModels({ baseUrl: BASE_URL }, currentId ?? undefined).then((c) => {
       if (alive) setCatalog(c);
     });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [currentId]);
 
   // A run that began while switching has now finished -> the switch took effect.
   useEffect(() => {
@@ -57,7 +58,10 @@ export function ModelPicker() {
     if (current.includes(":")) return current; // already provider-scoped
     const g = groupModelsByProvider(catalog.available, catalog.providers, catalog.default);
     if (!g) return current;
-    const owner = g.find((x) => x.models.includes(current));
+    // An inherited default sits under the provider that serves it.
+    const serving = explicitModel === undefined ? defaultServingProvider(catalog) : undefined;
+    const owner =
+      g.find((x) => x.provider === serving && x.models.includes(current)) ?? g.find((x) => x.models.includes(current));
     return owner ? `${owner.provider}:${current}` : current;
   })();
   const inherited = explicitModel === undefined;
