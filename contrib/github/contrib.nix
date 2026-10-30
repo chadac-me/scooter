@@ -40,6 +40,15 @@ in
         '';
       };
 
+      webhooksEnabled = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Enable the GitHub webhook handler (/webhooks/github). Set GITHUB_WEBHOOK_SECRET in the
+          webhooks provider Secret: unset, deliveries are accepted unsigned.
+        '';
+      };
+
       privateKeySecret = clib.mkSecretOption {
         key = "private-key";
         holds = "the PEM";
@@ -55,6 +64,7 @@ in
 
     config = {
       src = ./.;
+      links.typeAliases = lib.importJSON ./scooter_contrib_github/link_type_aliases.json;
       sandbox.module = ./sandbox.nix;
       # The tool card the UI renders for github_comment.
       ui.tools.github_comment = { argKey = "body"; action = "commented on GitHub"; };
@@ -74,7 +84,13 @@ in
       services.webhooks = {
         enable = true;
         pythonDeps = ps: [ ps.pyjwt ps.cryptography ];
-        env.GITHUB_HOST = config.host;
+        # The same App identifies the agent's own comments.
+        env = {
+          GITHUB_HOST = config.host;
+          GITHUB_ENABLED = lib.boolToString config.webhooksEnabled;
+          GITHUB_APP_ID = config.appId;
+          GITHUB_APP_PRIVATE_KEY = config.privateKeySecret;
+        };
       };
     };
   };

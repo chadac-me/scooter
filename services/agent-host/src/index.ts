@@ -46,6 +46,7 @@ import { createPgPool } from "./db/pgPool.js";
 import { createPgConversationRegistry } from "./session/pgConversationRegistry.js";
 import type { ConversationStore, ConversationLink } from "./session/manager.js";
 import { createPgLinkStore } from "./session/linkStore.js";
+import { parseLinkTypeAliases } from "./session/linkTypeAliases.js";
 import { createPgMetaStore } from "./session/metaStore.js";
 import { createPgAwaitingInputStore } from "./session/awaitingInputStore.js";
 import { createPvcAssetStore } from "./session/assetStore.js";
@@ -592,6 +593,7 @@ export async function main(
         legacy: fileStore.listLinks
           ? { listLinks: (id) => fileStore.listLinks!(id) }
           : undefined,
+        typeAliases: parseLinkTypeAliases(process.env.LINK_TYPE_ALIASES_JSON, (m) => hostLog.warn(m)),
       })
     : undefined;
   hostLog.info("link store selected", { backend: linkStore ? "postgres" : "file" });

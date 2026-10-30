@@ -24,6 +24,7 @@
 
     config = {
       src = ./.;
+      links.typeAliases = lib.importJSON ./scooter_contrib_jira/link_type_aliases.json;
       services.broker = {
         enable = true;
         env.JIRA_SITE_URL = lib.mkIf (config.siteUrl != "") config.siteUrl;

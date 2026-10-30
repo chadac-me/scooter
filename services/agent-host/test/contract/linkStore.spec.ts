@@ -23,10 +23,6 @@ const pr = (over: Partial<ConversationLink> = {}): ConversationLink => ({
   ...over,
 });
 
-/** The same PR as the store returns it, with the `ref` derived from the url. */
-const storedPr = (over: Partial<ConversationLink> = {}): ConversationLink =>
-  pr({ ref: { owner: "example-org", repo: "example-app", number: 203 }, ...over });
-
 /**
  * A tiny in-memory Postgres under a real drizzle client, so the store's generated-model
  * queries are exercised. It honours the global UNIQUE (source, resource_type, resource_id)
@@ -130,7 +126,7 @@ describe("linked resources in Postgres", () => {
     const store = createPgLinkStore({ db, legacy });
 
     await store.addLink(CONV, pr());
-    expect(await store.listLinks(CONV)).toEqual([storedPr()]);
+    expect(await store.listLinks(CONV)).toEqual([pr()]);
   });
 
   it("round-trips the full ConversationLink shape, ref included", async () => {
@@ -191,49 +187,15 @@ describe("linked resources in Postgres", () => {
     expect(listed[0].ref).toEqual({ channel: "C123", threadTs: "1700.5" });
   });
 
-  it("DERIVES the ref from the url when the writer supplied none", async () => {
-    // The broker's auto-link injector posts url + title only.
-    const { db, rows } = fakeDb();
-    const store = createPgLinkStore({ db });
-    await store.addLink(CONV, pr({ ref: undefined }));
-
-    // Asserted on the row so a reader that does not derive sees it too; jsonb is bound as text, hence the parse.
-    expect(JSON.parse((rows[0] as { ref: string }).ref)).toEqual({
-      owner: "example-org",
-      repo: "example-app",
-      number: 203,
-    });
-    expect((await store.listLinks(CONV))[0].ref).toEqual({ owner: "example-org", repo: "example-app", number: 203 });
-  });
-
   it("CANONICALISES resource_type, so the two spellings are ONE row", async () => {
     // The broker's auto-link says "pr" and the webhooks handler says "pull_request"; the table holds the long form.
     const { db, rows } = fakeDb();
-    const store = createPgLinkStore({ db });
+    const store = createPgLinkStore({ db, typeAliases: { github: { pr: "pull_request" } } });
     await store.addLink(CONV, pr({ resourceType: "pull_request" }));
     await store.addLink(CONV, pr({ resourceType: "pr", title: "same PR, other writer" }));
 
     expect(rows).toHaveLength(1);
     expect(rows[0].resource_type).toBe("pull_request");
-  });
-
-  it("an EXPLICIT ref is never overwritten by the derived one", async () => {
-    // Derivation only ever fills a gap.
-    const { db, rows } = fakeDb();
-    const store = createPgLinkStore({ db });
-    await store.addLink(CONV, pr({ ref: { owner: "example-org", repo: "example-app", number: 7 } }));
-
-    expect((await store.listLinks(CONV))[0].ref).toMatchObject({ number: 7 });
-  });
-
-  it("surfaces a derived ref for a row STORED without one (no migration needed)", async () => {
-    // Rows written without a ref must resolve on read.
-    const { db, rows } = fakeDb();
-    const store = createPgLinkStore({ db });
-    await store.addLink(CONV, pr());
-    (rows[0] as { ref: unknown }).ref = null;
-
-    expect((await store.listLinks(CONV))[0].ref).toEqual({ owner: "example-org", repo: "example-app", number: 203 });
   });
 
   it("a sparser re-post never blanks a column we already have", async () => {
@@ -318,7 +280,7 @@ describe("read-through to file-backed links", () => {
     await store.listLinks(CONV);
     legacy.listLinks.mockClear();
 
-    expect(await store.listLinks(CONV)).toEqual([storedPr()]);
+    expect(await store.listLinks(CONV)).toEqual([pr()]);
     expect(legacy.listLinks).not.toHaveBeenCalled();
   });
 

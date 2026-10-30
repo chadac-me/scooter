@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import re
 
-from scooter_webhooks_lib.resources import ResourceShapes, register_resource_shapes
+from scooter_webhooks_lib.resources import (
+    ResourceShapes,
+    load_type_aliases,
+    register_resource_shapes,
+)
 
 _JIRA_URL_RE = re.compile(r"^https?://[^/]+/browse/([A-Za-z][A-Za-z0-9_]*-\d+)(?:[/?#].*)?$")
 
@@ -17,7 +21,7 @@ def _id_variants(_resource_type: str, resource_id: str) -> list[str]:
 register_resource_shapes(
     "jira",
     ResourceShapes(
-        type_aliases={"ticket": "issue", "issue": "issue"},
+        type_aliases=load_type_aliases(__package__),
         id_variants=_id_variants,
     ),
 )

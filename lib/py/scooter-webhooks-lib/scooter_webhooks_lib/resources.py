@@ -8,8 +8,10 @@ none degrades to exact match.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from importlib.resources import files
 
 # (resource_type, resource_id) -> every id form naming that resource, the caller's first.
 IdVariants = Callable[[str, str], list[str]]
@@ -24,6 +26,11 @@ class ResourceShapes:
 
 
 _shapes: dict[str, ResourceShapes] = {}
+
+
+def load_type_aliases(package: str) -> dict[str, str]:
+    """A contrib's ``link_type_aliases.json``, the table its contrib.nix also hands the agent-host."""
+    return json.loads((files(package) / "link_type_aliases.json").read_text())
 
 
 def register_resource_shapes(source: str, shapes: ResourceShapes) -> None:
