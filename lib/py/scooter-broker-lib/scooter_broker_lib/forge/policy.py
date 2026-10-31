@@ -68,6 +68,8 @@ class ForgeRequest:
     # The operations of a GraphQL request body; None when not GraphQL or unparseable.
     graphql: tuple[GraphQLOperation, ...] | None = None
     query: str = ""
+    # The raw GraphQL body, for the provider to read; None when not GraphQL.
+    graphql_body: bytes | None = None
 
     @property
     def is_push(self) -> bool:

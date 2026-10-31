@@ -32,7 +32,7 @@ class _ForbiddenAsHttp:
 
     inner: GoogleServiceAccountSource
 
-    async def get(self, identity: Identity) -> Credential:
+    async def get(self, identity: Identity, request=None) -> Credential:
         try:
             return await self.inner.get(identity)
         except SubjectNotAllowed as e:

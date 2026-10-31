@@ -57,7 +57,7 @@ class GoogleServiceAccountSource(CredentialSource):
         headers = {"kid": self.info["private_key_id"]} if self.info.get("private_key_id") else None
         return jwt.encode(claims, self.info["private_key"], algorithm="RS256", headers=headers)
 
-    async def get(self, identity: Identity) -> Credential:
+    async def get(self, identity: Identity, request=None) -> Credential:
         subject = self.subject_for(identity)
         async with self._lock:
             cached = self._cache.get(subject)

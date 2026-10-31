@@ -229,7 +229,7 @@ class ForgeProxy:
         # Bytes read ahead of the policy check, re-sent before the rest of the body.
         prefix: list[bytes] = []
         ref_updates = None
-        graphql = None
+        graphql = graphql_body = None
         if has_body and c.kind == "git" and method == "POST" and c.git_service == "git-receive-pack":
             head = PushHeadReader(gzipped=hmap.get("content-encoding", "").lower() == "gzip")
             size = 0
@@ -247,12 +247,14 @@ class ForgeProxy:
                 if size > _GRAPHQL_LIMIT:
                     await io.send_simple(413, "GraphQL request too large for the forge proxy")
                     return False
-            graphql = parse_graphql_body(b"".join(prefix))
+            graphql_body = b"".join(prefix)
+            graphql = parse_graphql_body(graphql_body)
 
         forge_req = ForgeRequest(
             identity=identity, provider=route.provider.name, via="forge-proxy",
             method=method, host=host, path=path, query=query, kind=c.kind,
             repo=c.repo, git_service=c.git_service, ref_updates=ref_updates, graphql=graphql,
+            graphql_body=graphql_body,
         )
         decision = await enforce(route.provider.forge_policy, forge_req)
         if not decision.allowed:
@@ -279,7 +281,7 @@ class ForgeProxy:
             method, url, headers=out_headers, content=content() if has_body else None,
         )
         if c.kind != "web" and route.provider.credential is not None:
-            cred = await route.provider.credential.get(identity)
+            cred = await route.provider.credential.get(identity, forge_req)
             if c.kind == "git":
                 forge.inject_git(outbound, cred)
             else:

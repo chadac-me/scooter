@@ -90,9 +90,10 @@ def api_forge_request(
         path=path,
         query=query,
     )
-    graphql = None
+    graphql = graphql_body = None
     if method.upper() == "POST" and forge.dialect.is_graphql(path):
-        graphql = parse_graphql_body(body or b"")
+        graphql_body = body or b""
+        graphql = parse_graphql_body(graphql_body)
     return ForgeRequest(
         identity=identity,
         provider=provider.name,
@@ -105,4 +106,5 @@ def api_forge_request(
         repo=c.repo,
         git_service=c.git_service,
         graphql=graphql,
+        graphql_body=graphql_body,
     )

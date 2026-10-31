@@ -69,6 +69,16 @@ exactly which repos it can reach.
     };
     ```
 
+5. To serve more than one account (your user and an org, say), install the App on
+   each and list them. Each request then uses the installation on the account it
+   names. A private App can only be installed on the account that owns it, so this
+   needs a public App; `owners` makes sure installations on other accounts are
+   never used and their webhooks are dropped.
+
+    ```nix
+    contribs.github.owners = [ "my-user" "my-org" ];
+    ```
+
 ## GitLab
 
 GitLab uses a token: a personal, group or project access token with the `api` scope.

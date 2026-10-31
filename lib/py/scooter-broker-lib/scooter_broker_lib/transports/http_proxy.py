@@ -76,7 +76,7 @@ class HttpProxy(Transport):
                             headers={DENY_HEADER: decision.reason or "denied"},
                         )
                 if credential_source is not None:
-                    cred = await credential_source.get(identity)
+                    cred = await credential_source.get(identity, forge_req)
                     cred.inject(outbound)
                 upstream_resp = await client.send(outbound)
 

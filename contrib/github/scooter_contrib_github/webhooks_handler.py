@@ -134,6 +134,13 @@ def _format_forwarded_message(
     return f"{preamble}\n\n---\n\n{comment_body}\n\n---\n\n{reply_instruction}"
 
 
+def _event_owner(payload: dict) -> str:
+    """The lowercased account an event belongs to."""
+    repo_owner = ((payload.get("repository") or {}).get("owner") or {}).get("login")
+    account = ((payload.get("installation") or {}).get("account") or {}).get("login")
+    return (repo_owner or account or "").lower()
+
+
 @router.post("/webhooks/github")
 async def handle_github_webhook(
     request: Request,
@@ -150,6 +157,12 @@ async def handle_github_webhook(
 
     payload = await request.json()
     event_type = x_github_event
+
+    owner = _event_owner(payload)
+    if settings.app_owners and owner not in settings.app_owners:
+        # A public App's other installations share our webhook.
+        logger.info("ignoring event from another account", extra={**_C, "source": "github", "owner": owner})
+        return {"status": "ignored"}
 
     logger.info("received event", extra={**_C, "source": "github", "event_type": event_type})
 

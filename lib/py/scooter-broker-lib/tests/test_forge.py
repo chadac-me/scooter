@@ -231,6 +231,16 @@ def test_api_forge_request_reads_repo_and_graphql():
     assert api_forge_request(no_forge, IDENT, via="mcp", method="GET", url=httpx.URL("https://x/y")) is None
 
 
+def test_graphql_body_rides_along():
+    body = b'{"query": "query { viewer { login } }", "variables": {"owner": "o"}}'
+    p = _github_provider(None)
+    fr = api_forge_request(p, IDENT, via="mcp", method="POST",
+                           url=httpx.URL("https://api.github.com/graphql"), body=body)
+    assert fr.graphql_body == body
+    rest = api_forge_request(p, IDENT, via="mcp", method="GET", url=httpx.URL("https://api.github.com/repos/o/r"))
+    assert rest.graphql_body is None
+
+
 def test_http_proxy_denial_never_reaches_upstream(monkeypatch):
     class DenyDeletes:
         async def check(self, request):
