@@ -1,16 +1,19 @@
 name: CI
 
-# The check tier for PRs, main and the nightly: the fast checks, the nixosTest
-# matrix, the path-gated k3d jobs, the sharded e2e suites and the opt-in flake and
-# full-target jobs. Every reporting job writes one section of a shared PR comment,
-# and `ci-summary` is the single required check that evaluates those sections
-# against .github/ci-gates.yml. The Cachix cache `scooter` is pushed to when
-# CACHIX_AUTH_TOKEN is set and pulled read-only otherwise.
+# Two tiers, chosen by the `tier` job. A PR gets the `pr` tier: the fast checks and
+# the core nixosTests. The merge queue, main, the nightly and a PR labelled
+# `full-ci` get the `full` tier: everything, adding the image builds, db
+# migrations, sharded e2e, the whole nixosTest matrix and the path-gated k3d jobs.
+# The opt-in flake, bench and e2e-full jobs stay label-driven on either tier.
+# Every reporting job saves one gate section (and writes it into a shared PR
+# comment), and `ci-summary`, the single required check, evaluates this run's
+# sections against the base commit's .github/ci-gates.yml. The Cachix cache
+# `scooter` is pushed to when CACHIX_AUTH_TOKEN is set and pulled read-only otherwise.
 
 on:
   pull_request:
-    # `labeled` so adding an opt-in label (`flake-check`, `e2e-full-flake-check`,
-    # `e2e-full`, `full-nixos-tests`, `bench`) to an open PR re-runs CI.
+    # `labeled` so adding an opt-in label (`full-ci`, `flake-check`,
+    # `e2e-full-flake-check`, `e2e-full`, `full-nixos-tests`, `bench`) re-runs CI.
     types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
@@ -29,6 +32,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # `full` unless this is a PR without the `full-ci` label; see tierFor in ci-report.mjs.
+  tier:
+    name: choose the check tier
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.tier.outputs.full }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            scripts/ci-report.mjs
+            .github/ci-gates.yml
+          sparse-checkout-cone-mode: false
+      - id: tier
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: node scripts/ci-report.mjs tier --labels "$LABELS"
+
   ci:
     name: fast checks (flake + typecheck + unit + python)
     permissions:
@@ -67,7 +88,7 @@ jobs:
       # This job is the 'fast' gate and reports itself; always() so a red run still
       # resolves the gate for `ci-summary`.
       - name: post fast-checks section
-        if: always() && github.event_name == 'pull_request'
+        if: always()
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -104,6 +125,8 @@ jobs:
   # publish-images.yml; `just check-image-coverage` enforces it.
   image-build:
     name: build image ${{ matrix.image.attr }}
+    needs: tier
+    if: needs.tier.outputs.full == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false # report every broken image, not just the first
@@ -145,8 +168,8 @@ jobs:
   # still resolves the gate for `ci-summary`.
   image-build-report:
     name: report image builds
-    needs: image-build
-    if: always() && github.event_name == 'pull_request'
+    needs: [tier, image-build]
+    if: always() && needs.tier.outputs.full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -186,6 +209,8 @@ jobs:
   # instead of the deploy's migrate Job.
   db-migrations:
     name: db migrations (${{ matrix.variant }})
+    needs: tier
+    if: needs.tier.outputs.full == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -207,8 +232,8 @@ jobs:
   # resolves the gate for `ci-summary`.
   db-migrations-report:
     name: report db migrations
-    needs: db-migrations
-    if: always() && github.event_name == 'pull_request'
+    needs: [tier, db-migrations]
+    if: always() && needs.tier.outputs.full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -243,13 +268,14 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
-  # Measures every shipped image on the PR, rebuilds the baseline from origin/main in
-  # the same job (Cachix substitutes the unchanged images) and posts the diff as a
-  # report-only section. PR-only, since it needs a PR to compare against.
+  # Measures every shipped image, rebuilds the baseline from origin/main in the same
+  # job (Cachix substitutes the unchanged images) and posts the diff as a
+  # report-only section.
   image-sizes:
     name: image size benchmark
+    needs: tier
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: needs.tier.outputs.full == 'true'
     permissions:
       contents: read
       pull-requests: write   # to post/update the sticky size-report comment
@@ -328,9 +354,6 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
-  # Enumerates the dev-env-* nixosTests into a matrix so each VM test runs in its
-  # own job; HEAVY_TESTS are excluded per-PR and included nightly or with the
-  # `full-nixos-tests` label.
   # Touched suites in .github/benchmarks.yml, opt-in via `bench` label.
   bench:
     name: benchmarks (PR vs merge base)
@@ -397,12 +420,19 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
+  # Enumerates the dev-env-* nixosTests into a matrix so each VM test runs in its
+  # own job. HEAVY_TESTS run only nightly or with the `full-nixos-tests` label,
+  # which also lifts the `pr` tier's CORE_TESTS-only filter.
   nixos-tests-matrix:
     name: enumerate dev-env nixosTests
+    needs: tier
     runs-on: ubuntu-latest
     outputs:
       tests: ${{ steps.list.outputs.tests }}
     env:
+      # One VM test each for boot, rebuild, services and tooling.
+      CORE_TESTS: "dev-env-systemd-boot dev-env-scooter-rebuild dev-env-service dev-env-stub-tools"
+      FULL: ${{ needs.tier.outputs.full }}
       # Tests too expensive for per-PR runs (space-separated check names).
       HEAVY_TESTS: "dev-env-scooter-module"
       # Include heavy tests when: nightly schedule, OR the PR has the label.
@@ -428,6 +458,11 @@ jobs:
             tests=$(echo "$all" | jq -c --arg heavy "$HEAVY_TESTS" \
               '($heavy | split(" ")) as $h | [ .[] | select( . as $t | ($h | index($t)) | not ) ]')
             echo "excluding heavy tests ($HEAVY_TESTS) — run nightly or add the 'full-nixos-tests' label"
+          fi
+          if [ "$FULL" != "true" ] && [ "$INCLUDE_HEAVY" != "true" ]; then
+            tests=$(echo "$tests" | jq -c --arg core "$CORE_TESTS" \
+              '($core | split(" ")) as $c | [ .[] | select( . as $t | ($c | index($t)) ) ]')
+            echo "pr tier: core tests only — add the 'full-ci' label for the whole matrix"
           fi
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
           echo "matrix: $tests"
@@ -489,6 +524,8 @@ jobs:
   # Decides from the changed paths which cluster jobs need to run.
   cluster-changes:
     name: detect sandbox-image changes
+    needs: tier
+    if: needs.tier.outputs.full == 'true'
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.filter.outputs.image }}
@@ -496,9 +533,14 @@ jobs:
       example: ${{ steps.filter.outputs.example }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The merge group's base commit, which the filter diffs against.
+          fetch-depth: 0
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # v3 has no merge_group case; empty on a PR, where it uses the PR's base.
+          base: ${{ github.event.merge_group.base_sha }}
           filters: |
             image:
               - 'pkgs/sandbox-os/**'
@@ -787,11 +829,56 @@ jobs:
         if: always()
         run: nix shell nixpkgs#k3d -c k3d cluster delete scooter-example || true
 
+  # Reports the path-gated k3d jobs as the `cluster` gate; skipped jobs were not
+  # asked to run, so all-skipped reports skip.
+  cluster-report:
+    name: report cluster jobs
+    needs: [tier, cluster-changes, cluster-image-boot, cluster-userns, example-manifests]
+    if: always() && needs.tier.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: post cluster section
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          RESULTS: >-
+            changes=${{ needs.cluster-changes.result }}
+            image-boot=${{ needs.cluster-image-boot.result }}
+            userns=${{ needs.cluster-userns.result }}
+            example-manifests=${{ needs.example-manifests.result }}
+        run: |
+          set -euo pipefail
+          read -ra results <<< "$RESULTS"
+          printf -- '- %s\n' "${results[@]}" > cluster.md
+          if printf '%s\n' "${results[@]}" | grep -qvE '=(success|skipped)$'; then
+            status=fail; summary="cluster jobs — FAILED"
+          elif printf '%s\n' "${results[@]}" | grep -v '^changes=' | grep -q '=success$'; then
+            status=pass; summary="cluster jobs — pass"
+          else
+            status=skip; summary="cluster jobs — no cluster-relevant paths changed"
+          fi
+          node scripts/ci-report.mjs post --section cluster --status "$status" \
+            --summary "$summary" --body cluster.md --labels "$LABELS"
+
+      - name: upload the cluster section
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-section-cluster
+          path: ${{ runner.temp }}/ci-sections/cluster.json
+          overwrite: true
+          if-no-files-found: ignore
+
   # e2e full is sharded with the same distribute -> shard-matrix -> collect shape
   # as e2e fast; each shard boots its own cluster.
   e2e-full-distribute:
     name: e2e full distribute (shard)
-    needs: cluster-changes
     # Trigger-gated only (nightly, manual, or the `e2e-full` label); the platform
     # path filter would skip product-code changes the suite must cover.
     if: >-
@@ -908,7 +995,7 @@ jobs:
   # report.
   e2e-full-shard:
     name: e2e full shard ${{ matrix.shard }}
-    needs: [cluster-changes, e2e-full-distribute]
+    needs: e2e-full-distribute
     # Runs only when distribute did — that job carries the opt-in decision.
     if: needs.e2e-full-distribute.result == 'success'
     # The self-hosted fleet, for this job only: a shard is ~25 min of k3d and
@@ -1048,7 +1135,7 @@ jobs:
   # (not passes) when the suite was opted out.
   e2e-full-collect:
     name: e2e full (k3d)
-    needs: [cluster-changes, e2e-full-distribute, e2e-full-shard]
+    needs: [e2e-full-distribute, e2e-full-shard]
     # Skips rather than passes when the suite was opted out.
     if: always() && needs.e2e-full-distribute.result == 'success'
     runs-on: ubuntu-latest
@@ -1244,6 +1331,8 @@ jobs:
   # last successful run's report, with test/e2e/shard-weights.json as the fallback.
   e2e-distribute:
     name: e2e fast distribute (shard)
+    needs: tier
+    if: needs.tier.outputs.full == 'true'
     runs-on: ubuntu-latest
     env:
       E2E_SHARDS: "4"
@@ -1330,8 +1419,8 @@ jobs:
   # only, so weights stay clean).
   e2e-collect:
     name: e2e fast (Playwright, fake stack)
-    needs: [e2e-distribute, e2e-shard]
-    if: always()
+    needs: [tier, e2e-distribute, e2e-shard]
+    if: always() && needs.tier.outputs.full == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1378,7 +1467,7 @@ jobs:
       # One sticky section reflecting the current e2e result; it runs on green too
       # so a prior failure resolves.
       - name: post e2e shard section
-        if: always() && github.event_name == 'pull_request'
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.number }}
@@ -1941,7 +2030,7 @@ jobs:
   nixos-report:
     name: nixosTest report
     needs: [nixos-tests-matrix, nixos-test]
-    if: always() && github.event_name == 'pull_request'
+    if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1981,22 +2070,27 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
-  # The required check: reads the section every reporting job wrote (its artifact, else
-  # the shared comment) and fails when a gate in .github/ci-gates.yml is failing or
-  # has not reported, since an unreported gate is not a passing gate. needs every
-  # producer so it runs last; always() so a red producer still yields a verdict.
+  # The required check, in the merge queue as on a PR: fails unless every gate in
+  # play passed in this run, since an unreported gate is not a passing gate. The
+  # gates and their evaluator come from the base commit, so a PR cannot loosen the
+  # rules it is judged by. needs every producer so it runs last; always() so a red
+  # producer still yields a verdict.
   ci-summary:
     name: ci summary (gates)
-    needs: [ci, image-build-report, db-migrations-report, image-sizes, bench, nixos-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
-    if: always() && github.event_name == 'pull_request'
+    needs: [tier, ci, image-build-report, db-migrations-report, image-sizes, bench, nixos-report, cluster-report, e2e-collect, e2e-full-collect, flake-focus, flake-focus-full]
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-      issues: read           # a PR's comments live on the issues endpoint
     steps:
       - uses: actions/checkout@v5
-      # Saved sections, since fork PRs cannot write the comment.
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          sparse-checkout: |
+            scripts/ci-report.mjs
+            .github/ci-gates.yml
+          sparse-checkout-cone-mode: false
+      # This run's sections only; a missing one leaves its gate pending.
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -2005,7 +2099,5 @@ jobs:
           merge-multiple: true
       - name: evaluate the gates
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: node scripts/ci-report.mjs evaluate --labels "$LABELS"

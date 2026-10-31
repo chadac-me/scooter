@@ -117,6 +117,26 @@ Rules of thumb:
   server. NOT a superset of fast — fault-proxy specs run fast only. Gate specs with
   `fastOnly(reason)` / `fullOnly(reason)` from `test/e2e/target.ts`.
 
+### CI tiers: a PR runs the fast checks, the merge queue runs everything
+
+`main` merges through a merge queue, and `ci summary (gates)` is the only
+required check. A PR without labels gets the **`pr` tier**: the fast checks
+(`just ci`, the python and nix builds) plus four core nixosTests (`CORE_TESTS`
+in `.github/workflows/ci.yml`). The merge queue, `main` and the nightly get the
+**`full` tier**, which adds image builds, db migrations, e2e fast, the whole
+nixosTest matrix and the path-gated k3d jobs. A gate with `tier: full` in
+`.github/ci-gates.yml` is enforced only there.
+
+Add the **`full-ci`** label to run the full tier on the PR itself. Do it before
+queueing any change the fast tier cannot judge: UI or agent-host behaviour
+(e2e), images, migrations, the sandbox image, the cluster modules. A failure
+found in the queue costs a whole queue slot, and you have to re-queue. The
+opt-in labels below work on either tier.
+
+`ci-summary` evaluates the gates from the PR's **base** commit, so editing
+`ci-gates.yml` or `scripts/ci-report.mjs` in a PR has no effect on that PR's
+verdict. It takes effect only once the change is on `main`.
+
 ### Fixing a flake: label the PR so CI proves it
 
 A PR that fixes a flaky test declares the test in its **description** and opts in
@@ -215,6 +235,7 @@ with the PR skips the push — for a test-only fix, all of them.
 
 | Label | Job | Runs against |
 |---|---|---|
+| `full-ci` | the whole merge-queue suite | see "CI tiers" above |
 | `flake-check` | flake focus (targeted ×20) | **fast** — fake stack |
 | `e2e-full-flake-check` | flake focus full (k3d, targeted ×5) | **full** — a real k3d cluster |
 | `e2e-full` | e2e full (k3d) | the whole full suite, once (the nightly sweeps it ×5) |
