@@ -284,6 +284,12 @@
       installationId = "7890123";
       owners = [ "my-user" "my-org" ];
       privateKeySecret = { name = "github-app-key"; key = "private-key"; };
+      # Users link their own GitHub account on Settings → GitHub.
+      userAuth = {
+        enable = true;
+        clientId = "Iv23liExample";
+        clientSecretSecret = { name = "github-app-key"; key = "client-secret"; };
+      };
     };
 
     # Image generation: Bedrock is IRSA (no secret), picked by the default "priority"

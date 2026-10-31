@@ -14,6 +14,11 @@ let
     contribSqlDirs = lib.mapAttrs' (_: c: lib.nameValuePair c.db.name (c.src + "/sql")) dbContribs;
   }) runScript sqlPayload;
 
+  # Settings a contrib needs, beyond enable, before it owns a database.
+  dbSettings = {
+    github.userAuth.enable = true;
+  };
+
   # Every core service that owns a database.
   services = {
     broker.enable = true;
@@ -120,7 +125,7 @@ in
     expect = coreDbs;
   };
   db-migrate-all-contribs = mkCheck "db-migrate-all-contribs" {
-    contribs = lib.mapAttrs (_: _: { enable = true; }) dbContribs;
+    contribs = lib.mapAttrs (n: _: { enable = true; } // dbSettings.${n} or { }) dbContribs;
     expect = coreDbs ++ contribDbs;
   };
 }
