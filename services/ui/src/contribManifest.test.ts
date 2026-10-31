@@ -216,14 +216,14 @@ describe("the app no longer hardcodes a contrib's row", () => {
     serve404();
     await loadContribManifest();
     // An absent contrib falls back to a neutral glyph with the raw name as its label.
-    expect(render("gitlab")).not.toContain("<svg");
+    expect(render("gitlab")).toContain("lucide-link");
     expect(sourceLabel("gitlab")).toBe("gitlab");
   });
 
   it("still falls back for a source nobody declares", async () => {
     serve(DOC);
     await loadContribManifest();
-    expect(render("datadog")).not.toContain("<svg");
+    expect(render("datadog")).toContain("lucide-link");
     expect(sourceLabel("datadog")).toBe("datadog");
   });
 });

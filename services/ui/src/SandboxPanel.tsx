@@ -563,7 +563,7 @@ export function SandboxPanelView({
               >
                 Web services are declared inside the sandbox — ask Scooter
                 to add one (e.g. a terminal or VS Code) with <span className="font-mono">scooter-rebuild</span>.
-                {onRescanServices ? " Use the ↻ button above to re-scan once it's added." : ""}
+                {onRescanServices ? <> Use the <RotateCw className="inline size-3" role="img" aria-label="Re-scan" /> button above to re-scan once it&apos;s added.</> : ""}
               </p>
             ) : null}
           </section>

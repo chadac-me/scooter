@@ -10,6 +10,7 @@
  */
 
 import { useSyncExternalStore } from "react";
+import { ExternalLink } from "lucide-react";
 
 import { RuntimeProvider, useConversationInterrupts } from "./RuntimeProvider.js";
 import { ConversationArea, SandboxStatusPill } from "./App.js";
@@ -88,7 +89,7 @@ export function ChatPage({ conversationId }: { conversationId: string }) {
               target="_top"
               className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
             >
-              Open in Scooter ↗
+              Open in Scooter <ExternalLink className="ms-1 inline size-3.5" aria-hidden />
             </a>
           </div>
         </header>

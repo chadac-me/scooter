@@ -4,6 +4,8 @@
  * live as the agent works in the sandbox.
  */
 
+import { Menu, PanelRight, PictureInPicture2, Settings } from "lucide-react";
+
 import { RuntimeProvider, useConversationInterrupts } from "./RuntimeProvider.js";
 import { Sidebar } from "./Sidebar.js";
 import { RightPanel } from "./RightPanel.js";
@@ -79,7 +81,7 @@ function PopOutChatButton() {
       onClick={() => window.open(chatPath(id), `scooter-chat-${id}`, "popup,width=480,height=820")}
       className="text-muted-foreground"
     >
-      ⧉
+      <PictureInPicture2 />
     </Button>
   );
 }
@@ -119,7 +121,7 @@ export function App() {
                 onClick={() => mobileNav.toggle("sessions")}
                 className="-ml-1 text-muted-foreground desk:hidden"
               >
-                ☰
+                <Menu />
               </Button>
             )}
             <span className="text-[15px] leading-none" aria-hidden>{SCOOTER_MARK}</span>
@@ -144,7 +146,7 @@ export function App() {
                 onClick={() => mobileNav.toggle("panel")}
                 className="text-muted-foreground desk:hidden"
               >
-                ⚑
+                <PanelRight />
               </Button>
             )}
             {view !== "settings" && <PopOutChatButton />}
@@ -164,7 +166,7 @@ export function App() {
               }}
               className={cn("text-muted-foreground", view === "settings" && "bg-accent text-foreground")}
             >
-              ⚙
+              <Settings />
             </Button>
             {/* Signed-in user, hidden when anonymous and desktop-only. */}
             <span className="hidden desk:flex">

@@ -27,10 +27,10 @@ describe("sourceIcon", () => {
     }
   });
 
-  it("renders a fallback (no <svg>) for an unknown provider without throwing", () => {
+  it("renders the Lucide link icon for an unknown provider without throwing", () => {
     const html = renderToStaticMarkup(createElement(SourceBadge, { source: "bitbucket" }));
     expect(html).toContain("source-icon");
-    expect(html).not.toContain("<svg");
+    expect(html).toContain("lucide-link");
   });
 
   it("sourceLabel returns the brand label for known providers", () => {
