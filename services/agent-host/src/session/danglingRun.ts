@@ -112,3 +112,15 @@ export function orphanRuns(events: AguiEvent[], self?: RunOrigin): OrphanRun[] {
     .filter(([runId, v]) => !ended.has(runId) && !v.own)
     .map(([runId, v]) => ({ runId, threadId: v.threadId }));
 }
+
+/** True iff the log raised interrupt `id` and never settled it. */
+export function isUnansweredInterrupt(events: AguiEvent[], id: string): boolean {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type === "PERMISSION_RESOLVED" && e.toolCallId === id) return false;
+    if (e.type === "RUN_FINISHED" && e.outcome?.type === "interrupt" && e.outcome.interrupts.some((x) => x.id === id)) {
+      return true;
+    }
+  }
+  return false;
+}

@@ -121,6 +121,8 @@ export interface AguiConnection {
 export interface ResumeOutcome {
   ok: boolean;
   reason?: string;
+  /** Answered with nothing to resume; close the stream now. */
+  settled?: boolean;
 }
 
 /** The largest result one resume may carry, serialized. */
@@ -401,6 +403,11 @@ export function createAguiServer(): AguiServer {
           } catch {
             /* stream already torn down */
           }
+          set.delete(res);
+          res.end();
+          return;
+        }
+        if (outcomes.every((o) => o?.settled)) {
           set.delete(res);
           res.end();
           return;

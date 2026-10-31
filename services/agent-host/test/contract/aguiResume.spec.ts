@@ -13,7 +13,7 @@ async function postResume(
   onResume: (
     sessionId: string,
     entry: { interruptId: string; status: "resolved" | "cancelled"; payload?: unknown },
-  ) => Promise<{ ok: boolean; reason?: string }>,
+  ) => Promise<{ ok: boolean; reason?: string; settled?: boolean }>,
   opts: { deadlineMs?: number } = {},
 ): Promise<{ body: string; closed: boolean }> {
   const server = createAguiServer();
@@ -56,6 +56,12 @@ describe("/agui resume — never a silent open stream", () => {
   it("does NOT force-close a resume that WAS answered (a real run streams its events)", async () => {
     // With the guard at its 60s default and a 1.5s deadline, the stream stays open and silent.
     const { body } = await postResume(async () => ({ ok: true }), { deadlineMs: 1500 });
+    expect(body).not.toContain("RUN_ERROR");
+  });
+
+  it("closes a settled resume at once, without RUN_ERROR", async () => {
+    const { body, closed } = await postResume(async () => ({ ok: true, settled: true }), { deadlineMs: 1500 });
+    expect(closed, "a settled resume has no run to wait for").toBe(true);
     expect(body).not.toContain("RUN_ERROR");
   });
 
