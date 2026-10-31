@@ -64,8 +64,8 @@ export function sourceLabel(source: string): string {
   return sources()[source]?.label ?? source;
 }
 
-/** Draw a source's mark: a react-icons component for a built-in, an inline <svg> for
- *  a contrib. */
+/** Draw a source's mark: a component for a built-in, an inline <svg> for a contrib.
+ *  Lucide icons are forwardRef objects, so test for contrib data, not for a function. */
 function BrandMark({
   mark,
   size,
@@ -75,7 +75,7 @@ function BrandMark({
   size: number;
   color: string;
 }) {
-  if (typeof mark === "function") {
+  if (!("path" in mark)) {
     const Icon = mark;
     return <Icon size={size} color={color} />;
   }
