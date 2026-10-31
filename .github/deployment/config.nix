@@ -19,6 +19,7 @@
     # Builds the linked-account table and Settings tab; a deployment adds the OAuth client.
     github.userAuth.enable = true;
     gitlab.enable = true;
+    gitlab.userAuth.enable = true;
     google.enable = true;
     grafana.enable = true;
     imagegen = {
