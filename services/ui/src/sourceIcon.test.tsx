@@ -13,7 +13,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { sourceLabel, SourceBadge } from "./sourceIcon.js";
 
-const KNOWN = ["github", "slack", "shell", "scheduler", "background job", "broker", "subagent"];
+const KNOWN = ["github", "slack", "shell", "scheduler", "background job", "broker", "subagent", "hook"];
 
 describe("sourceIcon", () => {
   it("RENDERS a real icon for every known provider (catches a dropped icon import)", () => {
@@ -21,14 +21,16 @@ describe("sourceIcon", () => {
       // An undefined Icon throws here; the SVG assertion catches an empty render.
       const html = renderToStaticMarkup(createElement(SourceBadge, { source }));
       expect(html).toContain("source-icon");
-      expect(html).toContain("<svg"); // a real react-icons component renders an <svg>
+      expect(html, source).toContain("<svg");
+      // A component mistaken for contrib path data renders an <svg> with an empty <path/>.
+      expect(html, source).toMatch(/<(path|circle|rect|line|polyline)\b[^>]*\s(d|cx|x|x1|points)="/);
     }
   });
 
-  it("renders a fallback (no <svg>) for an unknown provider without throwing", () => {
+  it("renders the Lucide link icon for an unknown provider without throwing", () => {
     const html = renderToStaticMarkup(createElement(SourceBadge, { source: "bitbucket" }));
     expect(html).toContain("source-icon");
-    expect(html).not.toContain("<svg");
+    expect(html).toContain("lucide-link");
   });
 
   it("sourceLabel returns the brand label for known providers", () => {

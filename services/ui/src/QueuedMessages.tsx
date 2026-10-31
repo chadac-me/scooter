@@ -17,8 +17,7 @@
  */
 
 import { useLayoutEffect, useRef, useState } from "react";
-import { FiZap } from "react-icons/fi";
-import { Loader2Icon } from "lucide-react";
+import { Loader2Icon, Zap } from "lucide-react";
 
 import { useConversationInterrupts } from "./RuntimeProvider.js";
 import type { QueuedItem } from "./integrityAgent.js";
@@ -114,7 +113,7 @@ function QueuedMessageRow({ m }: { m: QueuedMessage }) {
           (priority ? "text-warning" : "text-muted-foreground")
         }
       >
-        {priority ? <FiZap size={11} aria-hidden /> : null}
+        {priority ? <Zap className="size-3" aria-hidden /> : null}
         <Loader2Icon aria-hidden className="size-3 animate-spin" />
         <span>{label}</span>
       </div>

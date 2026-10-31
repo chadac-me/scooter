@@ -1,9 +1,9 @@
 /**
  * Shared mapping from a source (a linked-resource provider, a tool card's provider, or
  * a system event's origin) to a brand icon and label, used by the LinkedResources panel,
- * the sidebar per-conversation icons and the thread's system-event lines. Built-in icons come from `react-icons` (and
- * `lucide-react` for the unbranded platform sources), imported per icon so only the ones
- * used are bundled, and render in the provider's brand color.
+ * the sidebar per-conversation icons and the thread's system-event lines. Brand logos come
+ * from `react-icons`, since Lucide ships none, and every other mark from `lucide-react`
+ * (iconSet.test.ts holds the UI to that); each renders in the provider's brand color.
  * A contrib adds its own row through the runtime manifest (contribManifest.ts) with
  * its mark as SVG data rather than a component, and BrandMark draws either form.
  */
@@ -11,15 +11,15 @@
 import type { ComponentType, ReactNode } from "react";
 import { SiGithub } from "react-icons/si";
 // Simple Icons dropped the Slack mark (trademark); FontAwesome still ships it.
-import { FaSlack, FaTerminal } from "react-icons/fa";
+import { FaSlack } from "react-icons/fa";
 // The Scooter mark for the "show the conversation title" option.
 import { SCOOTER_MARK } from "./brandMark.js";
-// Platform event sources have no brand, so they take a neutral glyph.
-import { AlarmClockIcon, BotIcon, CogIcon, KeyRoundIcon, ShieldCheckIcon } from "lucide-react";
+// Unbranded sources take a Lucide glyph.
+import { AlarmClockIcon, BotIcon, CogIcon, KeyRoundIcon, LinkIcon, ShieldCheckIcon, SquareTerminalIcon } from "lucide-react";
 import type { ContribIcon } from "./contribTypes.js";
 import { contribSources } from "./contribManifest.js";
 
-/** A react-icons brand mark, the form a built-in source's mark takes. */
+/** An icon component (react-icons or Lucide), the form a built-in source's mark takes. */
 export type IconComponent = ComponentType<{
   size?: number;
   color?: string;
@@ -41,7 +41,7 @@ const BUILTIN_SOURCES: Record<string, SourceRow> = {
   // Slack's deep aubergine disappears in dark mode -> use a brighter brand accent.
   slack: { label: "Slack", mark: FaSlack, color: "#E01E5A" },
   // Not a linked-resource provider — the shell/command tool card (ToolCallView).
-  shell: { label: "Shell", mark: FaTerminal, color: "currentColor" },
+  shell: { label: "Shell", mark: SquareTerminalIcon, color: "currentColor" },
   // Platform sources of system events (SystemEventMessage), not linked-resource providers.
   scheduler: { label: "Scheduler", mark: AlarmClockIcon, color: "currentColor" },
   "background job": { label: "Background job", mark: CogIcon, color: "currentColor" },
@@ -64,8 +64,8 @@ export function sourceLabel(source: string): string {
   return sources()[source]?.label ?? source;
 }
 
-/** Draw a source's mark: a react-icons component for a built-in, an inline <svg> for
- *  a contrib. */
+/** Draw a source's mark: a component for a built-in, an inline <svg> for a contrib.
+ *  Lucide icons are forwardRef objects, so test for contrib data, not for a function. */
 function BrandMark({
   mark,
   size,
@@ -75,7 +75,7 @@ function BrandMark({
   size: number;
   color: string;
 }) {
-  if (typeof mark === "function") {
+  if (!("path" in mark)) {
     const Icon = mark;
     return <Icon size={size} color={color} />;
   }
@@ -113,7 +113,7 @@ export function TitleBadge({ size = 15 }: { size?: number }) {
 export function SourceBadge({
   source,
   size = 14,
-  fallback = "🔗",
+  fallback = <LinkIcon className="size-3.5" aria-hidden />,
 }: {
   source: string;
   size?: number;
