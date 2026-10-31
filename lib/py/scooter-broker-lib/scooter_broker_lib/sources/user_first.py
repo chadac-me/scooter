@@ -10,6 +10,7 @@ from scooter_lib.logging_config import format_error
 
 from ..owner import OwnerResolver
 from ..types import Credential, CredentialSource, Identity
+from ..user_secrets import UserGrant
 
 if TYPE_CHECKING:
     from ..forge.policy import ForgeRequest
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # The user's own credential, None when they have linked none (or it can no longer be used).
-UserCredentialLookup = Callable[[str], Awaitable["Credential | None"]]
+UserCredentialLookup = Callable[[UserGrant], Awaitable["Credential | None"]]
 
 
 @dataclass
@@ -29,10 +30,10 @@ class UserFirstSource:
     fallback: CredentialSource
 
     async def get(self, identity: Identity, request: "ForgeRequest | None" = None) -> Credential:
-        user = await self.resolver.acting_user(identity)
-        if user is not None:
+        grant = await self.resolver.grant(identity)
+        if grant is not None:
             try:
-                cred = await self.user_credential(user)
+                cred = await self.user_credential(grant)
             except Exception as e:  # noqa: BLE001 - a broken user row must not take the forge down
                 logger.warning(
                     "user credential lookup failed; using the deployment credential",
@@ -40,7 +41,7 @@ class UserFirstSource:
                 )
                 cred = None
             if cred is not None:
-                return replace(cred, meta={**cred.meta, "acting_as": user})
+                return replace(cred, meta={**cred.meta, "acting_as": grant.user})
         # The request picks the fallback's installation when it serves several owners.
         return await self.fallback.get(identity, request)
 

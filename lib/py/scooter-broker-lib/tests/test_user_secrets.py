@@ -1,10 +1,13 @@
-"""Sealed user secrets open only with their own key and context."""
+"""Sealed user secrets open only with their own key, purpose and user's grant."""
 
 from __future__ import annotations
 
 import pytest
 
-from scooter_broker_lib.user_secrets import KeyRing, SecretBox, SecretError, open_sealed, seal
+from scooter_broker_lib.user_secrets import KeyRing, SecretBox, SecretError, UserGrant, _mint, open_sealed, seal
+
+ALICE = _mint("alice", "settings-session")
+BOB = _mint("bob", "private-conversation")
 
 
 def test_round_trip():
@@ -70,7 +73,7 @@ async def test_the_box_loads_its_keyring_once():
         return ring
 
     box = SecretBox(load)
-    assert await box.open(await box.seal("v", "c"), "c") == "v"
+    assert await box.open(ALICE, "p", await box.seal(ALICE, "p", "v")) == "v"
     assert loads == 1
 
 
@@ -86,5 +89,24 @@ async def test_a_failed_load_is_retried():
 
     box = SecretBox(load)
     with pytest.raises(RuntimeError):
-        await box.seal("v", "c")
-    assert (await box.seal("v", "c")).startswith("v1.")
+        await box.seal(ALICE, "p", "v")
+    assert (await box.seal(ALICE, "p", "v")).startswith("v1.")
+
+
+async def test_another_user_s_grant_fails_to_open():
+    box = SecretBox.of(KeyRing.generate())
+    sealed = await box.seal(ALICE, "github:access", "ghu_secret")
+    with pytest.raises(SecretError):
+        await box.open(BOB, "github:access", sealed)
+
+
+async def test_another_purpose_fails_to_open():
+    box = SecretBox.of(KeyRing.generate())
+    sealed = await box.seal(ALICE, "github:access", "ghu_secret")
+    with pytest.raises(SecretError):
+        await box.open(ALICE, "github:refresh", sealed)
+
+
+def test_a_grant_cannot_be_built_directly():
+    with pytest.raises(TypeError):
+        UserGrant("alice", "settings-session")

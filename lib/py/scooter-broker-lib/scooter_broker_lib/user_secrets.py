@@ -1,9 +1,14 @@
 """Encryption at rest for the per-user secrets a contrib stores: tokens, private keys.
 
 Each value is sealed with AES-256-GCM under the keyring's current key and bound to a
-caller-chosen context (for example ``"github:<user>"``), so a ciphertext copied into
-another user's row fails to open. A sealed value names its key, so old rows stay
-readable after a new key becomes current.
+purpose and a user, so a ciphertext copied into another user's row fails to open. A
+sealed value names its key, so old rows stay readable after a new key becomes current.
+
+`SecretBox` seals and opens only with a `UserGrant`, and the user it binds to is the
+grant's. Exactly two places mint one: `OwnerResolver.grant`, for the owner of a private
+conversation, and `user.user_grant`, for the user's own Settings session. So code
+holding the box still cannot open a secret outside those two situations, and
+`scripts/check-user-grants.sh` fails CI if any other module calls `_mint`.
 
 The broker supplies the keyring (from a Secret only it reads) through
 ``BrokerContext.user_secrets``; a contrib never builds one itself.
@@ -15,7 +20,7 @@ import asyncio
 import base64
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from cryptography.exceptions import InvalidTag
@@ -49,6 +54,36 @@ class KeyRing:
     @staticmethod
     def generate(kid: str = "k1") -> "KeyRing":
         return KeyRing(keys={kid: os.urandom(32)}, current=kid)
+
+
+_MINTED = object()
+
+
+@dataclass(frozen=True)
+class UserGrant:
+    """Proof that the caller may use `user`'s secrets; built only by `_mint`."""
+
+    user: str
+    # Why access was granted: "private-conversation" or "settings-session".
+    via: str
+    _token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _MINTED:
+            raise TypeError("a UserGrant comes only from OwnerResolver.grant or user.user_grant")
+        if not self.user:
+            raise ValueError("a UserGrant needs a user")
+
+
+def _mint(user: str, via: str) -> UserGrant:
+    """A grant for `user`; scripts/check-user-grants.sh limits who may call this."""
+    return UserGrant(user, via, _MINTED)
+
+
+def _aad(grant: UserGrant, purpose: str) -> str:
+    if not purpose or "\0" in purpose:
+        raise ValueError(f"invalid purpose {purpose!r}")
+    return f"{purpose}\0{grant.user}"
 
 
 def _b64e(data: bytes) -> str:
@@ -85,11 +120,11 @@ def open_sealed(ring: KeyRing, sealed: str, context: str) -> str:
 
 
 class SecretBox:
-    """Seals and opens per-user secrets, loading the keyring once on first use."""
+    """Seals and opens one user's secrets under a `UserGrant`, loading the keyring once on first use."""
 
     def __init__(self, load: Callable[[], Awaitable[KeyRing]]):
         self._load = load
-        self._ring: KeyRing | None = None
+        self._cached: KeyRing | None = None
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -101,15 +136,17 @@ class SecretBox:
 
         return SecretBox(load)
 
-    async def ring(self) -> KeyRing:
-        if self._ring is None:
+    async def _ring(self) -> KeyRing:
+        if self._cached is None:
             async with self._lock:
-                if self._ring is None:
-                    self._ring = await self._load()
-        return self._ring
+                if self._cached is None:
+                    self._cached = await self._load()
+        return self._cached
 
-    async def seal(self, plaintext: str, context: str) -> str:
-        return seal(await self.ring(), plaintext, context)
+    async def seal(self, grant: UserGrant, purpose: str, plaintext: str) -> str:
+        """`plaintext` sealed to `grant.user` for `purpose`, e.g. ``"github:access"``."""
+        return seal(await self._ring(), plaintext, _aad(grant, purpose))
 
-    async def open(self, sealed: str, context: str) -> str:
-        return open_sealed(await self.ring(), sealed, context)
+    async def open(self, grant: UserGrant, purpose: str, sealed: str) -> str:
+        """A value sealed to `grant.user` for `purpose`; SecretError for anyone else's."""
+        return open_sealed(await self._ring(), sealed, _aad(grant, purpose))

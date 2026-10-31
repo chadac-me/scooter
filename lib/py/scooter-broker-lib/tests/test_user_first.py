@@ -6,6 +6,7 @@ from scooter_broker_lib.owner import OwnerResolver
 from scooter_broker_lib.sources.static_token import StaticTokenSource
 from scooter_broker_lib.sources.user_first import UserFirstSource
 from scooter_broker_lib.types import Credential, Identity
+from scooter_broker_lib.user_secrets import UserGrant
 
 VIEWS = {
     "priv": {"owner": "alice", "visibility": "private"},
@@ -18,10 +19,10 @@ async def fetch(conv: str):
     return VIEWS.get(conv)
 
 
-async def user_cred(user: str) -> Credential | None:
-    if user == "alice":
+async def user_cred(grant: UserGrant) -> Credential | None:
+    if grant.user == "alice":
         return Credential(kind="bearer", value="alice-token")
-    if user == "carol":
+    if grant.user == "carol":
         raise RuntimeError("row unreadable")
     return None
 

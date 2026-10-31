@@ -98,3 +98,11 @@ async def test_the_agent_host_fetcher_reads_the_conversation_view():
 async def test_a_5xx_from_the_agent_host_acts_as_nobody():
     fetch = agent_host_fetcher("http://agent-host", transport=httpx.MockTransport(lambda _: httpx.Response(502)))
     assert await OwnerResolver(fetch).acting_user(ident("priv")) is None
+
+
+async def test_a_grant_only_for_the_owner_of_a_private_conversation(views):
+    r = OwnerResolver(views)
+    grant = await r.grant(ident("priv"))
+    assert grant is not None and grant.user == "alice" and grant.via == "private-conversation"
+    assert await r.grant(ident("shared", owner="alice")) is None
+    assert await r.grant(ident("nope")) is None

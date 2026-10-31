@@ -2,9 +2,9 @@
 
 A shared conversation can be prompted by anyone who can see it, so acting as its
 owner there would let any viewer act as that owner. A private one admits only its
-owner, so the agent in it acts for that one person. Every per-user credential goes
-through `OwnerResolver.acting_user`, which fails closed: an unknown conversation, a
-failed lookup or a shared conversation all resolve to None.
+owner, so the agent in it acts for that one person. Every per-user secret a sandbox
+reaches is opened under `OwnerResolver.grant`, which fails closed: an unknown
+conversation, a failed lookup or a shared conversation all resolve to None.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from scooter_lib.logging_config import format_error
 
 from .autolink import router_headers
 from .types import Identity
+from .user_secrets import UserGrant, _mint
 
 logger = logging.getLogger(__name__)
 
@@ -97,3 +98,8 @@ class OwnerResolver:
         # The visibility is not in any token, so even an owner-bearing identity is looked up.
         access = await self.access(identity.conversation_id)
         return access.acting_user if access else None
+
+    async def grant(self, identity: Identity) -> UserGrant | None:
+        """Access to the acting user's secrets, None wherever `acting_user` is None."""
+        user = await self.acting_user(identity)
+        return _mint(user, "private-conversation") if user else None

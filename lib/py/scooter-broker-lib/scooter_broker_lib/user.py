@@ -24,6 +24,7 @@ from typing import Awaitable, Callable
 from fastapi import Depends, HTTPException
 
 from .types import AuthDependency, Identity
+from .user_secrets import UserGrant, _mint
 
 
 def user_identity(authed: AuthDependency) -> Callable[..., Awaitable[str]]:
@@ -38,3 +39,13 @@ def user_identity(authed: AuthDependency) -> Callable[..., Awaitable[str]]:
         return identity.relayed_user
 
     return _user
+
+
+def user_grant(authed: AuthDependency) -> Callable[..., Awaitable[UserGrant]]:
+    """Like `user_identity`, but a grant to the signed-in user's own secrets."""
+    user = user_identity(authed)
+
+    async def _grant(user_id: str = Depends(user)) -> UserGrant:
+        return _mint(user_id, "settings-session")
+
+    return _grant
