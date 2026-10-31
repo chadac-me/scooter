@@ -13,6 +13,6 @@ class StaticTokenSource(CredentialSource):
     kind: str = "bearer"               # "bearer" | "header"
     header_name: str | None = None     # for kind="header" (e.g. PRIVATE-TOKEN)
 
-    async def get(self, identity: Identity) -> Credential:
+    async def get(self, identity: Identity, request=None) -> Credential:
         meta = {"header_name": self.header_name} if self.header_name else {}
         return Credential(kind=self.kind, value=self.token, meta=meta)

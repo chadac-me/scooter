@@ -68,6 +68,8 @@ class ForgeRequest:
     # The operations of a GraphQL request body; None when not GraphQL or unparseable.
     graphql: tuple[GraphQLOperation, ...] | None = None
     query: str = ""
+    # Each GraphQL operation's `variables` object; None when not GraphQL.
+    graphql_variables: tuple[dict, ...] | None = None
 
     @property
     def is_push(self) -> bool:

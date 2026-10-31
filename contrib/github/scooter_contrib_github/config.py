@@ -11,6 +11,8 @@ class GitHubSettings(ScooterBaseSettings):
     github_app_private_key: str = ""  # PEM content or a path to a .pem file
     # Broker only; webhooks looks the installation up per repo instead.
     github_app_installation_id: int = 0
+    # Comma-separated accounts the App serves; empty serves the one installation.
+    github_app_owners: str = ""
 
     # PAT fallback when github_app_* is unset, and the optional token on the public email lookup.
     github_token: str = ""
@@ -21,6 +23,10 @@ class GitHubSettings(ScooterBaseSettings):
 
     github_enabled: bool = False
     github_webhook_secret: str = ""
+
+    @property
+    def app_owners(self) -> tuple[str, ...]:
+        return tuple(o.strip().lower() for o in self.github_app_owners.split(",") if o.strip())
 
 
 settings = GitHubSettings()

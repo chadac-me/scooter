@@ -74,7 +74,7 @@ def api_forge_request(
     body: bytes | None = None,
 ) -> "ForgeRequest | None":
     """The ForgeRequest for an API call the broker makes for a provider, or None when the provider is not a forge."""
-    from .parse import classify, parse_graphql_body
+    from .parse import classify, parse_graphql_body, parse_graphql_variables
     from .policy import ForgeRequest
 
     forge = find_forge_hosts(provider)
@@ -90,9 +90,10 @@ def api_forge_request(
         path=path,
         query=query,
     )
-    graphql = None
+    graphql = variables = None
     if method.upper() == "POST" and forge.dialect.is_graphql(path):
         graphql = parse_graphql_body(body or b"")
+        variables = parse_graphql_variables(body or b"")
     return ForgeRequest(
         identity=identity,
         provider=provider.name,
@@ -105,4 +106,5 @@ def api_forge_request(
         repo=c.repo,
         git_service=c.git_service,
         graphql=graphql,
+        graphql_variables=variables,
     )

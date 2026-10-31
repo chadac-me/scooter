@@ -110,7 +110,7 @@ def world(ca, monkeypatch):
     gh_policy, gl_policy = Recorder(), Recorder()
     github = Provider(
         name="github",
-        credential=StaticTokenSource(token="ghs_real"),
+        credential=_RecordingSource(token="ghs_real"),
         transports=[ForgeHosts(
             hosts=[ForgeHost("github.com", git=True), ForgeHost("api.github.com", api_prefixes=("/",))],
             dialect=_GitHubish(),
@@ -141,6 +141,18 @@ def world(ca, monkeypatch):
         agent_host_url="http://agent-host",
     )
     return proxy, upstream_seen, links, gh_policy, gl_policy
+
+
+class _RecordingSource(StaticTokenSource):
+    """Records the forge request each credential is for."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.requests = []
+
+    async def get(self, identity, request=None):
+        self.requests.append(request)
+        return await super().get(identity, request)
 
 
 def _client(proxy: ForgeProxy, ca, token: str = "good-sa-token") -> httpx.AsyncClient:
@@ -223,6 +235,17 @@ async def test_graphql_mutation_is_parsed_and_autolinked(running, ca):
     assert r.json()["data"]["createPullRequest"]["pullRequest"]["url"].endswith("/pull/7")
     assert policy.seen[0].graphql[0].fields == ("createPullRequest",)
     assert links == [Link("github", "pr", "https://github.com/o/r/pull/7")]
+
+
+async def test_the_credential_source_sees_the_request(running, ca):
+    """A multi-installation source picks by owner, so it needs the request."""
+    proxy = running[0]
+    async with _client(proxy, ca) as c:
+        await c.get("https://api.github.com/repos/o/r", headers={"Authorization": "token scooter-forge-proxy"})
+        await c.post("https://api.github.com/graphql", json={"query": "query { viewer { login } }", "variables": {"owner": "o"}})
+    seen = proxy.routes["api.github.com"].provider.credential.requests
+    assert seen[0].repo == "o/r"
+    assert seen[1].graphql_variables == ({"owner": "o"},)
 
 
 async def test_gitlab_api_gets_private_token_and_keeps_encoded_path(running, ca):

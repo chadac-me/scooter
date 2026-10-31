@@ -269,6 +269,7 @@
     github = {
       appId = "123456";
       installationId = "7890123";
+      owners = [ "my-user" "my-org" ];
       privateKeySecret = { name = "github-app-key"; key = "private-key"; };
     };
   };

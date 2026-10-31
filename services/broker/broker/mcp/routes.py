@@ -74,7 +74,7 @@ class _Upstream:
                         request=outbound,
                     )
             if self._provider.credential is not None:
-                cred = await self._provider.credential.get(self._identity)
+                cred = await self._provider.credential.get(self._identity, forge_req)
                 cred.inject(outbound)
             return await client.send(outbound)
 

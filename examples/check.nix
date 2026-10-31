@@ -48,6 +48,18 @@ let
   googleProblems = if builtins.any (e: e.name == "GOOGLE_SERVICE_ACCOUNT_JSON") brokerEnv then [ ]
     else [ "broker.env.GOOGLE_SERVICE_ACCOUNT_JSON (google provider not wired)" ];
 
+  # GitHub owners reach both the broker and webhooks.
+  ghOwnersProblems =
+    let
+      webhooksEnv = builtins.concatMap (c: c.env or [ ])
+        (builtins.attrValues (res.deployments.agent-webhooks.spec.template.spec.containers or { }));
+      owners = env: map (e: e.value or "") (builtins.filter (e: e.name == "GITHUB_APP_OWNERS") env);
+    in
+    (if owners brokerEnv == [ "my-user,my-org" ] then [ ] else [ "broker.env.GITHUB_APP_OWNERS is not my-user,my-org" ])
+    ++ (if owners webhooksEnv == [ "my-user,my-org" ] then [ ] else [ "webhooks.env.GITHUB_APP_OWNERS is not my-user,my-org" ])
+    ++ (if builtins.any (e: e.name == "GITHUB_APP_INSTALLATION_ID" && (e.value or "") == "") brokerEnv
+        then [ "broker.env.GITHUB_APP_INSTALLATION_ID renders empty, which fails the int parse" ] else [ ]);
+
   # Web search: each enabled provider's key reaches the broker from its own secret,
   # several providers render together, and keyless duckduckgo renders its switch.
   searchKeyRef = env:
@@ -1369,7 +1381,7 @@ let
     ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
         else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
 
-  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems' ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ volumeProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems ++ enforceProblems;
+  allProblems = packageProblems ++ uploadsProblems ++ sysTaskProblems ++ askUserProblems ++ hookProblems ++ disabledContribProblems ++ settingsTabProblems ++ uiManifestProblems ++ conversationUiProblems ++ contribApiProblems ++ dirSkillProblems ++ legacyRootProblems ++ searchProblems ++ oneEntrypointProblems ++ ownerProblems ++ jobImmutabilityProblems ++ sizeGuardProblems ++ skillProblems ++ problems ++ ddProblems ++ atProblems ++ googleProblems ++ ghOwnersProblems ++ sharesProblems ++ cfProblems ++ csProblems ++ dbProblems ++ puProblems ++ mdProblems ++ ngProblems' ++ rolloutProblems ++ testProblems ++ schedProblems ++ otelProblems ++ coverageProblems ++ contribCoverageProblems ++ brokerDbProblems ++ dupEnvProblems ++ contribSeamProblems ++ sandboxSeamProblems ++ volumeProblems ++ approvalProblems ++ stage2Problems ++ contribDbProblems ++ contribGrantProblems ++ retireProblems ++ initGrantProblems ++ fgaProblems ++ sslProblems ++ vacuityProblems ++ approverProblems ++ selfAccessProblems ++ npProblems ++ sandboxOriginProblems ++ enforceProblems;
 in
 if allProblems == [ ]
 then "ok: deployments = ${haveDeps}; datadog + airtable + brave + kagi + duckduckgo (three search providers, each with its own tool) + configFiles + broker config-rollout + models + scheduler + otel wired; example covers every scooter.* namespace and every shipped contrib's own options; skills gated on the contrib being built; sandbox-shaping env is agent-host-only (one provisioning entrypoint); sandbox size default guard fires on 0 and 2 defaults; the renamed root (agentSandbox.*) fails the render; contribs reach the platform eval and configuring an unshipped one fails the render; deploy-time Jobs are spec-hash named; a scooter.packages override reaches exactly the images that use it\n"

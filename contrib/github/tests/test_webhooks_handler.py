@@ -62,3 +62,33 @@ def test_importing_the_handler_arms_the_owner_lookup_and_shapes():
 
     assert "github" in identity.registered_providers()
     assert "github" in resources.registered_sources()
+
+
+def _signed(secret: str, body: bytes) -> str:
+    import hashlib
+    import hmac
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("owners", "login", "status"),
+    [
+        (("chadac", "chadac-me"), "Chadac-Me", "ok"),
+        (("chadac", "chadac-me"), "stranger", "ignored"),
+        ((), "stranger", "ok"),
+    ],
+)
+def test_events_from_unlisted_owners_are_dropped(client, owners, login, status):
+    import json
+    body = json.dumps({"action": "noop", "repository": {"name": "r", "owner": {"login": login}}}).encode()
+    with patch.object(gh, "settings") as mock_settings:
+        mock_settings.github_enabled = True
+        mock_settings.github_webhook_secret = "s"
+        mock_settings.app_owners = owners
+        resp = client.post(
+            "/webhooks/github",
+            headers={"X-Github-Event": "ping", "X-Hub-Signature-256": _signed("s", body),
+                     "Content-Type": "application/json"},
+            content=body,
+        )
+    assert resp.json()["status"] == status

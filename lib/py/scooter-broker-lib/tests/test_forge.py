@@ -26,6 +26,7 @@ from scooter_broker_lib.forge import (
     load_policy,
     parse_graphql,
     parse_graphql_body,
+    parse_graphql_variables,
 )
 from scooter_broker_lib.sources.static_token import StaticTokenSource
 from scooter_broker_lib.transports.http_proxy import HttpProxy
@@ -229,6 +230,15 @@ def test_api_forge_request_reads_repo_and_graphql():
     assert (fr.repo, fr.query) == ("o/r", "state=open")
     no_forge = Provider(name="jira", transports=[])
     assert api_forge_request(no_forge, IDENT, via="mcp", method="GET", url=httpx.URL("https://x/y")) is None
+
+
+def test_graphql_variables_ride_along():
+    body = b'{"query": "query($owner: String!) { repository(owner: $owner) { id } }", "variables": {"owner": "o"}}'
+    fr = api_forge_request(_github_provider(None), IDENT, via="mcp", method="POST",
+                           url=httpx.URL("https://api.github.com/graphql"), body=body)
+    assert fr.graphql_variables == ({"owner": "o"},)
+    assert parse_graphql_variables(b'[{"query": "q"}, {"query": "q", "variables": {"a": 1}}]') == ({"a": 1},)
+    assert parse_graphql_variables(b"not json") is None
 
 
 def test_http_proxy_denial_never_reaches_upstream(monkeypatch):

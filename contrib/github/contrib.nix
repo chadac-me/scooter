@@ -14,7 +14,25 @@ in
       installationId = lib.mkOption {
         type = lib.types.str;
         default = "";
-        description = "GitHub App installation ID (GITHUB_APP_INSTALLATION_ID).";
+        description = ''
+          GitHub App installation ID (GITHUB_APP_INSTALLATION_ID). With `owners` empty,
+          every agent token comes from this installation. With `owners` set, it is the
+          fallback for requests that name no listed account, and may be left empty to
+          use the first owner's installation.
+        '';
+      };
+
+      owners = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "my-user" "my-org" ];
+        description = ''
+          The GitHub accounts (users or orgs) this App serves. When set, the broker
+          gives each request a token from the App's installation on the account the
+          request names (its repo path, or `gh`'s GraphQL `owner`), and webhooks drop
+          events from any other account. Installations on unlisted accounts are never
+          used, so this is required before making the App public.
+        '';
       };
 
       host = lib.mkOption {
@@ -74,7 +92,9 @@ in
         env = {
           GITHUB_HOST = config.host;
           GITHUB_APP_ID = config.appId;
-          GITHUB_APP_INSTALLATION_ID = config.installationId;
+          # Empty would fail the broker's int parse.
+          GITHUB_APP_INSTALLATION_ID = lib.mkIf (config.installationId != "") config.installationId;
+          GITHUB_APP_OWNERS = lib.concatStringsSep "," config.owners;
           GITHUB_APP_PRIVATE_KEY = config.privateKeySecret;
           GITHUB_FORGE_POLICY = lib.mkIf (config.forgePolicy != "") config.forgePolicy;
         };
@@ -87,6 +107,7 @@ in
           GITHUB_HOST = config.host;
           GITHUB_ENABLED = lib.boolToString config.webhooksEnabled;
           GITHUB_APP_ID = config.appId;
+          GITHUB_APP_OWNERS = lib.concatStringsSep "," config.owners;
           GITHUB_APP_PRIVATE_KEY = config.privateKeySecret;
         };
       };

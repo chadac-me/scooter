@@ -13,7 +13,7 @@ class DatadogKeysSource(CredentialSource):
     api_key: str
     app_key: str
 
-    async def get(self, identity: Identity) -> Credential:
+    async def get(self, identity: Identity, request=None) -> Credential:
         return Credential(
             kind="multi-header",
             value=json.dumps({

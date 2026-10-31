@@ -16,7 +16,7 @@ import httpx
 from fastapi import APIRouter
 
 if TYPE_CHECKING:
-    from .forge.policy import ForgePolicy
+    from .forge.policy import ForgePolicy, ForgeRequest
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +75,8 @@ class Credential:
 class CredentialSource(Protocol):
     """How a provider obtains its secret."""
 
-    async def get(self, identity: Identity) -> Credential:
-        """Resolve a credential for this caller."""
+    async def get(self, identity: Identity, request: "ForgeRequest | None" = None) -> Credential:
+        """Resolve a credential for this caller; `request` is the forge call it is for, when known."""
         ...
 
 

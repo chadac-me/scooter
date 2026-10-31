@@ -53,6 +53,7 @@ def github() -> Provider:
             app_id=settings.github_app_id,
             private_key=settings.github_app_private_key,
             installation_id=settings.github_app_installation_id,
+            owners=settings.app_owners,
             api_base=upstream,
         )
         enabled = True

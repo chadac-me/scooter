@@ -20,7 +20,7 @@ class AtlassianOAuthSource(CredentialSource):
 
     _cache: tuple[str, float] | None = field(default=None, repr=False)
 
-    async def get(self, identity: Identity) -> Credential:
+    async def get(self, identity: Identity, request=None) -> Credential:
         if self._cache and time.time() < self._cache[1] - 60:
             token, expires_at = self._cache
             return Credential(kind="bearer", value=token, expires_at=expires_at)
