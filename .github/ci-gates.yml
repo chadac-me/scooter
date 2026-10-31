@@ -9,6 +9,14 @@
 #   when_labelled: <l>  — only in play when the PR carries that label
 #   never               — reports, never gates (advisory)
 #
+# `tier`:
+#   pr    — gates every run, PRs included (default)
+#   full  — gates only the full tier: the merge queue, main, the nightly, and a
+#           PR labelled `full-ci`; an unlabelled PR neither runs nor waits for it
+#
+# `ci-summary` reads this file from the base commit, so a PR cannot loosen the
+# gates it is judged by.
+#
 # `advisory: true` keeps a gate visible in the table but never blocks, and
 # `block_while_pending: false` lets a PR merge before the gate has answered.
 # The order here is the render order of the comment's sections.
@@ -43,10 +51,12 @@ gates:
   - id: e2e-fast
     name: e2e fast (Playwright, fake stack)
     require: always
+    tier: full
 
   - id: nixos
     name: nixosTest dev-env-*
     require: always
+    # A PR runs the core subset (CORE_TESTS in ci.yml), the full tier every test.
 
   - id: fast
     name: fast checks (flake + typecheck + unit + python)
@@ -55,14 +65,22 @@ gates:
   - id: images
     name: image builds (every published image)
     require: always
+    tier: full
 
   - id: migrations
     name: db migrations (no contribs, all contribs)
     require: always
+    tier: full
+
+  - id: cluster
+    name: cluster jobs (k3d image boot, user namespaces, example manifests)
+    require: always
+    tier: full
 
   - id: size
     name: image size benchmark
     require: always
+    tier: full
     # Advisory: image-sizes-diff.sh never exits non-zero, and a closure that
     # balloons should be seen before merge without vetoing it.
     advisory: true

@@ -7,14 +7,20 @@
 // dependencies, so a nix-only job can run it with the runner's node.
 //
 // `post` also saves its section to <sections-dir>/<id>.json, which the job uploads
-// as artifact `ci-section-<id>`; `evaluate` reads those over the comment, so a fork
-// PR, whose token cannot write the comment, still gets a verdict.
+// as artifact `ci-section-<id>`. `evaluate` reads only those, never the comment: the
+// comment outlives a push, so its sections may describe another commit.
+//
+// A run's tier decides which gates are in play: `pr` (the default for a PR) runs the
+// fast checks, `full` (the merge queue, main, the nightly, or a PR labelled
+// `full-ci`) runs everything.
 //
 // Usage:
 //   ci-report.mjs post --section <id> --status <pass|fail|warn|skip> \
 //     [--summary <text>] [--body <file>] [--gates <f>] [--labels a,b] [--sections-dir <d>]
 //   ci-report.mjs evaluate [--gates <f>] [--labels a,b] [--sections-dir <d>]   # exit 1 if blocked
-//     env: GH_TOKEN, GITHUB_REPOSITORY, PR; <sections-dir> defaults to $RUNNER_TEMP/ci-sections
+//   ci-report.mjs tier [--labels a,b]          # writes full=<true|false> to $GITHUB_OUTPUT
+//     env: GH_TOKEN, GITHUB_REPOSITORY, GITHUB_EVENT_NAME, PR (unset outside a PR);
+//     <sections-dir> defaults to $RUNNER_TEMP/ci-sections
 //
 // `--summary` wraps the body in a <details>; omit it when the job renders its own
 // and the body is placed verbatim.
@@ -31,6 +37,16 @@ import { join } from "node:path";
 
 export const MARKER = "<!-- ci-report -->";
 export const HEADING = "## CI";
+
+/** The PR label that runs the merge-queue suite on the PR itself. */
+export const FULL_TIER_LABEL = "full-ci";
+
+/** `full` for every run but an unlabelled PR, which gets the fast `pr` tier. */
+export function tierFor(event, labels = []) {
+  return event !== "pull_request" || labels.includes(FULL_TIER_LABEL)
+    ? "full"
+    : "pr";
+}
 
 /** Terminal states a section can report, plus the implicit `pending`. */
 export const STATUSES = ["pass", "fail", "warn", "skip", "pending"];
@@ -72,6 +88,8 @@ export function parseGates(text) {
       throw new Error(`ci-gates.yml: ${g.id}: bad require: ${g.require}`);
     if (g.require === "when_labelled" && !g.label)
       throw new Error(`ci-gates.yml: ${g.id}: when_labelled needs a label`);
+    if (!["pr", "full"].includes(g.tier ?? "pr"))
+      throw new Error(`ci-gates.yml: ${g.id}: bad tier: ${g.tier}`);
   }
   return gates;
 }
@@ -79,11 +97,13 @@ export function parseGates(text) {
 const coerce = (v) =>
   v === "true" ? true : v === "false" ? false : v === "" ? undefined : v;
 
-/** The gates in play for this PR: a label-gated one only counts when labelled. */
-export function activeGates(gates, labels = []) {
+/** The gates in play: a label-gated one needs its label, a `full` one the full tier. */
+export function activeGates(gates, labels = [], tier = "full") {
   return gates.filter(
     (g) =>
-      (g.require ?? "always") !== "when_labelled" || labels.includes(g.label),
+      ((g.require ?? "always") !== "when_labelled" ||
+        labels.includes(g.label)) &&
+      (tier === "full" || (g.tier ?? "pr") === "pr"),
   );
 }
 
@@ -237,6 +257,8 @@ async function findComment(repo, pr, token) {
 
 /** Upsert one section on the PR, retrying if a concurrent writer clobbered it; re-applying ours cannot drop theirs. */
 export async function post({ repo, pr, token, section, gates }) {
+  // The merge queue, main and the nightly have no PR to comment on.
+  if (!pr) return { url: null, attempt: 0 };
   try {
     return await upsert({ repo, pr, token, section, gates });
   } catch (e) {
@@ -282,7 +304,8 @@ function main(argv) {
     readFileSync(opt("gates", ".github/ci-gates.yml"), "utf8"),
   );
   const labels = (opt("labels", "") || "").split(",").filter(Boolean);
-  const active = activeGates(gates, labels);
+  const tier = tierFor(process.env.GITHUB_EVENT_NAME, labels);
+  const active = activeGates(gates, labels, tier);
   const repo = process.env.GITHUB_REPOSITORY;
   const pr = process.env.PR;
   const token = process.env.GH_TOKEN;
@@ -291,9 +314,9 @@ function main(argv) {
     join(process.env.RUNNER_TEMP ?? ".", "ci-sections"),
   );
 
-  function evaluate(fromComment) {
-    // This run's saved sections override the comment's.
-    const sections = new Map([...fromComment, ...readSavedSections(dir)]);
+  if (cmd === "evaluate") {
+    const sections = readSavedSections(dir);
+    console.log(`tier: ${tier}`);
     if (process.env.GITHUB_STEP_SUMMARY)
       appendFileSync(
         process.env.GITHUB_STEP_SUMMARY,
@@ -304,20 +327,19 @@ function main(argv) {
     for (const id of pending) console.log(`PENDING  ${id}`);
     console.log(mergeable ? "all gates satisfied" : "gates not satisfied");
     if (!mergeable) process.exitCode = 1;
+    return;
   }
 
-  if (cmd === "evaluate") {
-    return findComment(repo, pr, token).then(
-      (c) => evaluate(parseSections(c?.body ?? "")),
-      (e) => {
-        console.warn(`::warning::could not read the CI comment: ${e.message}`);
-        return evaluate(new Map());
-      },
-    );
+  if (cmd === "tier") {
+    const line = `full=${tier === "full"}\n`;
+    if (process.env.GITHUB_OUTPUT)
+      appendFileSync(process.env.GITHUB_OUTPUT, line);
+    process.stdout.write(line);
+    return;
   }
 
   if (cmd !== "post") {
-    console.error("usage: ci-report.mjs <post|evaluate> [options]");
+    console.error("usage: ci-report.mjs <post|evaluate|tier> [options]");
     process.exitCode = 2;
     return;
   }

@@ -1,0 +1,3 @@
+# Changes to what CI runs or how it gates need an owner's review.
+/.github/                @chadac
+/scripts/ci-report.mjs   @chadac

@@ -17,6 +17,7 @@ import {
   readSavedSections,
   renderComment,
   saveSection,
+  tierFor,
 } from "./ci-report.mjs";
 
 const GATES_YML = `
@@ -38,6 +39,7 @@ gates:
   - id: size
     name: image size
     require: always
+    tier: full
 `;
 
 const gates = parseGates(GATES_YML);
@@ -67,6 +69,21 @@ describe("parseGates", () => {
       parseGates("gates:\n  - id: a\n    require: when_labelled\n"),
     ).toThrow(/needs a label/);
   });
+
+  it("rejects an unknown tier rather than gating no run at all", () => {
+    expect(() => parseGates("gates:\n  - id: a\n    tier: merge\n")).toThrow(
+      /bad tier/,
+    );
+  });
+});
+
+describe("tierFor", () => {
+  it("gives an unlabelled PR the fast tier and everything else the full one", () => {
+    expect(tierFor("pull_request", [])).toBe("pr");
+    expect(tierFor("pull_request", ["full-ci"])).toBe("full");
+    expect(tierFor("merge_group", [])).toBe("full");
+    expect(tierFor("push", [])).toBe("full");
+  });
 });
 
 describe("activeGates", () => {
@@ -77,6 +94,14 @@ describe("activeGates", () => {
     ]);
     expect(activeGates(gates, ["e2e-full"]).map((g) => g.id)).toEqual([
       "e2e-full",
+      "e2e-fast",
+      "size",
+    ]);
+  });
+
+  it("leaves a full-tier gate out of a PR-tier run, so the PR never waits on it", () => {
+    expect(activeGates(gates, [], "pr").map((g) => g.id)).toEqual(["e2e-fast"]);
+    expect(activeGates(gates, [], "full").map((g) => g.id)).toEqual([
       "e2e-fast",
       "size",
     ]);
@@ -267,5 +292,19 @@ describe("post", () => {
       gates: all,
     });
     expect(r.url).toBeNull();
+  });
+
+  it("only saves the section when there is no PR to comment on", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const r = await post({
+      repo: "o/r",
+      pr: "",
+      token: "t",
+      section: section("size", "pass"),
+      gates: all,
+    });
+    expect(r.url).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
