@@ -90,7 +90,7 @@ import {
 } from "./agent/subagentTools.js";
 import { createSubagentManager, DEFAULT_SUBAGENT_LIMITS } from "./session/subagentManager.js";
 import { createRouterSubagentCreator } from "./session/routerSubagents.js";
-import { lastRunCompleted } from "./session/danglingRun.js";
+import { isUnansweredInterrupt, lastRunCompleted } from "./session/danglingRun.js";
 import { randomUUID } from "node:crypto";
 import { createHttpSchedulerClient } from "./agent/schedulerClient.js";
 import type { ConversationOwnerLookup, SchedulerToolsWiring } from "./agent/schedulerTools.js";
@@ -1413,7 +1413,24 @@ export async function main(
     });
     if (answer()) return { ok: true };
 
-    // 3) Genuinely unanswerable; the caller turns this into a RUN_ERROR on the stream.
+    // 3) A dismissed interrupt with no live run: settle it.
+    if (entry.status === "cancelled") {
+      const events = await collectEventsSafe(store.readEvents(sessionId as SessionId));
+      if (isUnansweredInterrupt(events, entry.interruptId)) {
+        hostLog.info("resume: settling a dismissed interrupt with no live run", {
+          conversation_id: sessionId,
+          interrupt_id: entry.interruptId,
+        });
+        await store.appendEvent(sessionId as SessionId, {
+          type: "PERMISSION_RESOLVED",
+          toolCallId: entry.interruptId,
+          optionId: null,
+        });
+        return { ok: true, settled: true };
+      }
+    }
+
+    // 4) Genuinely unanswerable; the caller turns this into a RUN_ERROR on the stream.
     return { ok: false, reason: "this approval is no longer awaiting an answer (it may have expired or already been answered)" };
   });
 

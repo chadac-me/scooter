@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { hasDanglingRun, danglingRunInfo, lastRunCompleted } from "../../src/session/danglingRun.js";
+import { hasDanglingRun, danglingRunInfo, isUnansweredInterrupt, lastRunCompleted } from "../../src/session/danglingRun.js";
 import type { AguiEvent } from "../../src/bridge.js";
 
 const started = (r: string): AguiEvent => ({ type: "RUN_STARTED", threadId: "c", runId: r });
@@ -137,5 +137,27 @@ describe("danglingRunInfo host", () => {
     const e = { type: "RUN_STARTED", threadId: "c", runId: "r1", host: "host-a" } as AguiEvent;
     expect(danglingRunInfo([e])?.host).toBe("host-a");
     expect(danglingRunInfo([started("r2")])?.host).toBeUndefined();
+  });
+});
+
+describe("isUnansweredInterrupt", () => {
+  const asked = (id: string): AguiEvent => ({
+    type: "RUN_FINISHED",
+    threadId: "c",
+    runId: "r1",
+    outcome: { type: "interrupt", interrupts: [{ id, reason: "confirmation" }] },
+  } as AguiEvent);
+  const resolved = (id: string): AguiEvent => ({ type: "PERMISSION_RESOLVED", toolCallId: id, optionId: null });
+
+  it("true for a raised interrupt nothing settled, even after a pod restart", () => {
+    expect(isUnansweredInterrupt([started("r1"), asked("q1"), text()], "q1")).toBe(true);
+  });
+
+  it("false once a PERMISSION_RESOLVED settles it", () => {
+    expect(isUnansweredInterrupt([started("r1"), asked("q1"), resolved("q1")], "q1")).toBe(false);
+  });
+
+  it("false for an id the log never raised", () => {
+    expect(isUnansweredInterrupt([started("r1"), asked("q1")], "q2")).toBe(false);
   });
 });
