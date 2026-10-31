@@ -278,18 +278,6 @@ def parse_graphql(document: str) -> tuple[GraphQLOperation, ...]:
     )
 
 
-def parse_graphql_variables(body: bytes) -> tuple[dict, ...] | None:
-    """Each item's `variables` object of a JSON GraphQL request, or None when unreadable."""
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        return None
-    batch = payload if isinstance(payload, list) else [payload]
-    return tuple(
-        v for item in batch if isinstance(item, dict) and isinstance(v := item.get("variables"), dict)
-    )
-
-
 def parse_graphql_body(body: bytes) -> tuple[GraphQLOperation, ...] | None:
     """The operations of a JSON GraphQL request (single or batched), or None when unreadable."""
     try:

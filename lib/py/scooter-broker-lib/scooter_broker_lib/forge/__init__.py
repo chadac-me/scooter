@@ -9,7 +9,6 @@ from .parse import (
     classify,
     parse_graphql,
     parse_graphql_body,
-    parse_graphql_variables,
 )
 from .policy import (
     ALLOW_ALL,
@@ -51,5 +50,4 @@ __all__ = [
     "load_policy",
     "parse_graphql",
     "parse_graphql_body",
-    "parse_graphql_variables",
 ]

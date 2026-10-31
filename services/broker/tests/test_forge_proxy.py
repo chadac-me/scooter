@@ -245,7 +245,7 @@ async def test_the_credential_source_sees_the_request(running, ca):
         await c.post("https://api.github.com/graphql", json={"query": "query { viewer { login } }", "variables": {"owner": "o"}})
     seen = proxy.routes["api.github.com"].provider.credential.requests
     assert seen[0].repo == "o/r"
-    assert seen[1].graphql_variables == ({"owner": "o"},)
+    assert json.loads(seen[1].graphql_body)["variables"] == {"owner": "o"}
 
 
 async def test_gitlab_api_gets_private_token_and_keeps_encoded_path(running, ca):

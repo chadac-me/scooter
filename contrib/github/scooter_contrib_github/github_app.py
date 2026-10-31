@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import OrderedDict
@@ -34,11 +35,21 @@ def request_owner(request: "ForgeRequest | None") -> str | None:
     if request.repo and "/" in request.repo:
         return request.repo.split("/", 1)[0].lower()
     # gh's repo-scoped GraphQL queries pass `owner` as a variable.
-    for variables in request.graphql_variables or ():
+    for variables in _graphql_variables(request.graphql_body):
         owner = variables.get("owner")
         if isinstance(owner, str) and owner:
             return owner.lower()
     return None
+
+
+def _graphql_variables(body: bytes | None) -> list[dict]:
+    """Each operation's `variables` object in a GraphQL body."""
+    try:
+        payload = json.loads(body or b"null")
+    except ValueError:
+        return []
+    batch = payload if isinstance(payload, list) else [payload]
+    return [v for item in batch if isinstance(item, dict) and isinstance(v := item.get("variables"), dict)]
 
 
 @dataclass

@@ -62,6 +62,8 @@ def test_app_jwt_survives_a_fast_clock(monkeypatch):
 
 # --- several owners -----------------------------------------------------------
 
+import json  # noqa: E402
+
 from scooter_broker_lib.forge import ForgeRequest  # noqa: E402
 
 _INSTALLATIONS = [
@@ -75,7 +77,7 @@ def _req(repo: str | None = None, variables: dict | None = None) -> ForgeRequest
     return ForgeRequest(
         identity=_identity(), provider="github", via="forge-proxy", method="POST",
         host="api.github.com", path="/graphql", kind="api", repo=repo,
-        graphql_variables=(variables,) if variables is not None else None,
+        graphql_body=json.dumps({"query": "q", "variables": variables}).encode() if variables is not None else None,
     )
 
 
@@ -192,3 +194,15 @@ async def test_a_reinstall_is_picked_up(github, monkeypatch):
         assert (await src.get(_identity(), _req("chadac-me/scooter"))).value == "tok-505"
     finally:
         _INSTALLATIONS[1] = {"id": 202, "account": {"login": "Chadac-Me"}}
+
+
+def test_owner_from_batched_or_broken_graphql():
+    from scooter_contrib_github.github_app import request_owner
+
+    def req(body: bytes) -> ForgeRequest:
+        return ForgeRequest(identity=_identity(), provider="github", via="mcp", method="POST",
+                            host="api.github.com", path="/graphql", kind="api", graphql_body=body)
+
+    assert request_owner(req(b'[{"query": "q"}, {"query": "q", "variables": {"owner": "O"}}]')) == "o"
+    assert request_owner(req(b"not json")) is None
+    assert request_owner(req(b'{"query": "q", "variables": {"input": {}}}')) is None
