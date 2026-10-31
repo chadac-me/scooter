@@ -13,7 +13,7 @@ import { SiGithub } from "react-icons/si";
 // Simple Icons dropped the Slack mark (trademark); FontAwesome still ships it.
 import { FaSlack, FaTerminal } from "react-icons/fa";
 // The Scooter mark for the "show the conversation title" option.
-import { MdElectricScooter } from "react-icons/md";
+import { SCOOTER_MARK } from "./brandMark.js";
 // Platform event sources have no brand, so they take a neutral glyph.
 import { AlarmClockIcon, BotIcon, CogIcon, KeyRoundIcon, ShieldCheckIcon } from "lucide-react";
 import type { ContribIcon } from "./contribTypes.js";
@@ -100,9 +100,11 @@ export function TitleBadge({ size = 15 }: { size?: number }) {
       data-testid="title-icon"
       title="Conversation title"
       aria-label="Conversation title"
-      className="inline-flex items-center"
+      className="inline-flex items-center justify-center leading-none"
+      // The emoji sits in the same box as the brand icons beside it.
+      style={{ width: size, height: size, fontSize: size * 0.9 }}
     >
-      <MdElectricScooter size={size} color="currentColor" />
+      <span aria-hidden>{SCOOTER_MARK}</span>
     </span>
   );
 }

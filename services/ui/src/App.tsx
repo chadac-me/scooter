@@ -24,6 +24,7 @@ import { useSandboxStatus, LABEL as SANDBOX_LABEL, DOT as SANDBOX_DOT } from "./
 import { Thread } from "@/components/assistant-ui/thread";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { SCOOTER_MARK } from "./brandMark.js";
 
 /** The Thread in an error boundary keyed to the render tick, so a transient runtime crash recovers on the next frame. */
 export function GuardedThread() {
@@ -121,7 +122,7 @@ export function App() {
                 ☰
               </Button>
             )}
-            <span className="text-[15px] leading-none" aria-hidden>🛴</span>
+            <span className="text-[15px] leading-none" aria-hidden>{SCOOTER_MARK}</span>
             {/* The wordmark gives way below sm, so the title and its actions fit a phone header. */}
             <span className="hidden text-[13.5px] font-semibold tracking-tight sm:inline">scooter</span>
             {view !== "settings" && <HeaderConversationTitle actions />}
