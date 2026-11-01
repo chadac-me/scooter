@@ -513,13 +513,17 @@ describe("web-service proxy", () => {
     expect(j.logs).toContain("Running on http://0.0.0.0:2718");
   });
 
-  it("a NON-HTML request to a dead service still gets a 502 (no HTML for an XHR/asset)", async () => {
-    // An HTML loading page would corrupt an asset or XHR fetch.
-    const proxy = makeProxy(startingRegistry(await deadPort(), { runningAfter: 99 }));
-    const { status } = await proxyGet(proxy, "/c/conv-1/marimo/assets/app.js", {
-      accept: "*/*",
+  it("a NON-HTML request to a dead service auto-starts it and gets a retryable 503", async () => {
+    // An API client has no loading page, so it brings the unit up by retrying.
+    const registry = startingRegistry(await deadPort(), { runningAfter: 99 });
+    const proxy = makeProxy(registry);
+    const { status, body, retryAfter } = await proxyGet(proxy, "/c/conv-1/marimo/api/list", {
+      accept: "application/json",
     });
-    expect(status).toBe(502);
+    expect(status).toBe(503);
+    expect(retryAfter).toBe("2");
+    expect(registry.starts).toContain("marimo");
+    expect(body).not.toContain("<html");
   });
 
   it("once the service is up, the loading page's status endpoint reports running", async () => {
@@ -553,11 +557,11 @@ describe("web-service proxy", () => {
     expect(registry.invalidated).toContain("conv-1");
   });
 
-  it("a refused connection on an XHR still gets a 502, not a loading page", async () => {
+  it("a refused connection on an XHR gets a retryable 503, not a loading page", async () => {
     const registry = fakeRegistry(await deadPort(), { running: true });
     const proxy = makeProxy(registry);
     const { status, body } = await proxyGet(proxy, "/c/conv-1/marimo/api/x", { accept: "*/*" });
-    expect(status).toBe(502);
+    expect(status).toBe(503);
     expect(body).not.toContain("<html");
   });
 
@@ -879,7 +883,7 @@ describe("web-service proxy", () => {
   it("a stale cached address is dropped on the first failed connect, and the next request finds the pod", async () => {
     // 127.0.0.2 is loopback but nothing listens there for this port: the old pod IP.
     const { proxy, lookups } = countingProxy(fakeRegistry(svc.port), {}, ["127.0.0.2", "127.0.0.1"]);
-    expect((await proxyGet(proxy, "/c/conv-1/marimo/a", { accept: "*/*" })).status).toBe(502);
+    expect((await proxyGet(proxy, "/c/conv-1/marimo/a", { accept: "*/*" })).status).toBe(503);
     expect((await proxyGet(proxy, "/c/conv-1/marimo/a")).status).toBe(200);
     expect(lookups()).toBe(2);
   });
@@ -930,7 +934,7 @@ function proxyGet(
   proxy: WebServiceProxy,
   path: string,
   opts: { accept?: string; headers?: Record<string, string>; method?: string } = {},
-): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null; setCookie: string[]; location: string }> {
+): Promise<{ status: number; body: string; echoPath: string; ident: IdentEcho | null; setCookie: string[]; location: string; retryAfter: string }> {
   return new Promise((resolve, reject) => {
     void withFront(proxy, (port) =>
       new Promise<void>((done) => {
@@ -950,6 +954,7 @@ function proxyGet(
               ident: raw ? (JSON.parse(String(raw)) as IdentEcho) : null,
               setCookie: res.headers["set-cookie"] ?? [],
               location: String(res.headers.location ?? ""),
+              retryAfter: String(res.headers["retry-after"] ?? ""),
             });
             done();
           });

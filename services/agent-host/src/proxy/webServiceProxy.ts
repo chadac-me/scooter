@@ -506,8 +506,8 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
     return true;
   }
 
-  /** The unit is down: a navigation gets an auto-start plus the loading page, while
-      an XHR/asset fetch gets a plain 502 since an HTML page would corrupt it. */
+  /** The unit is down: start it, then a navigation gets the loading page while an
+      XHR/asset fetch gets a retryable 503, since an HTML page would corrupt it. */
   async function serveNotRunning(
     req: IncomingMessage,
     res: ServerResponse,
@@ -517,12 +517,13 @@ export function createWebServiceProxy(deps: WebServiceProxyDeps): WebServiceProx
       res.end();
       return;
     }
+    // Best-effort start; the loading page or the client's retry polls readiness.
+    await registry.start(r.conversationId, r.service).catch(() => {});
     if (!wantsHtml(req.headers.accept)) {
-      res.writeHead(502, { "content-type": "text/plain" }).end(`${r.service} is not running`);
+      res.writeHead(503, { "content-type": "text/plain", "retry-after": "2", "cache-control": "no-store" })
+        .end(`${r.service} is starting`);
       return;
     }
-    // Best-effort start; the loading page polls readiness regardless.
-    await registry.start(r.conversationId, r.service).catch(() => {});
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
       .end(renderLoadingPage(r.service, r.basePath));
   }
