@@ -352,6 +352,7 @@
             contrib-github = contribs.packages.github.broker;
             contrib-github-webhooks = contribs.packages.github.webhooks;
             contrib-gitlab = contribs.packages.gitlab.broker;
+            contrib-gcp = contribs.packages.gcp.broker;
             contrib-google = contribs.packages.google.broker;
             contrib-gitlab-webhooks = contribs.packages.gitlab.webhooks;
             contrib-grafana = contribs.packages.grafana.broker;
@@ -509,6 +510,7 @@
             contrib-github = contribs.packages.github.broker;
             contrib-github-webhooks = contribs.packages.github.webhooks;
             contrib-gitlab = contribs.packages.gitlab.broker;
+            contrib-gcp = contribs.packages.gcp.broker;
             contrib-google = contribs.packages.google.broker;
             contrib-gitlab-webhooks = contribs.packages.gitlab.webhooks;
             contrib-grafana = contribs.packages.grafana.broker;

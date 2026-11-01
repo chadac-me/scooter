@@ -642,6 +642,7 @@ let
       contribs.aws = lib.mkForce { enable = false; };
       contribs.shares = lib.mkForce { enable = false; };
       contribs.ssh = lib.mkForce { enable = false; };
+      contribs.gcp = lib.mkForce { enable = false; };
     };
   };
   awsOffBrokerEnv =
@@ -723,7 +724,13 @@ let
     ++ (let off = contribOverlayOf awsOffPlatform;
             ctrs = if off == null then [ ] else builtins.filter (c: c.name == "sandbox") off.containers;
         in if !(builtins.any (c: hasName (c.env or [ ]) "SSH_AUTH_SOCK") ctrs) then [ ]
-        else [ "ssh-off: sandboxPod.extraEnv still sets SSH_AUTH_SOCK — contrib/ssh/deployment.nix is not gated on the contrib" ]);
+        else [ "ssh-off: sandboxPod.extraEnv still sets SSH_AUTH_SOCK — contrib/ssh/deployment.nix is not gated on the contrib" ])
+    ++ (if contribCtr != null && hasName (contribCtr.env or [ ]) "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE" then [ ]
+        else [ "sandboxPod.extraEnv CLOUDSDK_AUTH_ACCESS_TOKEN_FILE missing with gcp on — sandbox gcloud has no token to send" ])
+    ++ (let off = contribOverlayOf awsOffPlatform;
+            ctrs = if off == null then [ ] else builtins.filter (c: c.name == "sandbox") off.containers;
+        in if !(builtins.any (c: hasName (c.env or [ ]) "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE") ctrs) then [ ]
+        else [ "gcp-off: sandboxPod.extraEnv still sets CLOUDSDK_AUTH_ACCESS_TOKEN_FILE — contrib/gcp/deployment.nix is not gated on the contrib" ]);
 
   # scooter.sandbox.volumes reaches the provisioner as SANDBOX_VOLUME_CLAIMS: defaults keep the
   # overlay claim on the warm pool, an override and the renamed workspaceStorageClass land on

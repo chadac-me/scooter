@@ -14,6 +14,7 @@
     datadog.enable = true;
     duckduckgo.enable = true;
     files.enable = true;
+    gcp.enable = true;
     github.enable = true;
     gitlab.enable = true;
     google.enable = true;

@@ -43,4 +43,7 @@
   # The forge CLIs (contrib/github, contrib/gitlab), authenticated by the broker's forge proxy.
   gh = pkgs.gh;
   glab = pkgs.glab;
+
+  # contrib/gcp's CLIs, authenticated the same way.
+  google-cloud-sdk = { package = pkgs.google-cloud-sdk; bins = [ "gcloud" "gsutil" "bq" ]; };
 }
