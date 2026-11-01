@@ -26,9 +26,9 @@ on:
   # Manual trigger for running the nightly-only jobs on demand.
   workflow_dispatch:
 
-# Cancel superseded runs on the same ref (e.g. a force-push to a PR branch).
+# Cancel superseded runs of the same event on a ref; a push never cancels the nightly.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
