@@ -17,6 +17,7 @@ let
   # Settings a contrib needs, beyond enable, before it owns a database.
   dbSettings = {
     github.userAuth.enable = true;
+    gitlab.userAuth.enable = true;
   };
 
   # Every core service that owns a database.
