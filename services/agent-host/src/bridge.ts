@@ -38,9 +38,6 @@ const log = logger("bridge");
  *  gets a note listing the saved paths. */
 export const UPLOADS_DIR = "/workspace/uploads";
 
-/** Where contrib-generated images (imagegen) are materialized inside the sandbox. */
-export const IMAGES_DIR = "/workspace/images";
-
 /** Sanitize an attachment filename to a safe basename so a hostile `name` cannot escape its directory. */
 export function safeUploadName(name: string): string {
   const base = name.split(/[\\/]/).pop() || "file";
@@ -49,9 +46,7 @@ export function safeUploadName(name: string): string {
   return cleaned || "file";
 }
 
-/** Write one base64 file into the sandbox at `dir`/<name> and return the path, throwing
- *  so the caller can log and skip a bad write. Shared by upload attachments and
- *  contrib-written files (imagegen's generated images) alike. */
+/** Write a base64 file to `dir`/<sanitized name> in the sandbox; returns the path. */
 export async function writeSandboxFile(exec: ExecBackend, dir: string, file: { name: string; data: string }): Promise<string> {
   const name = safeUploadName(file.name);
   const path = `${dir}/${name}`;

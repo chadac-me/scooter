@@ -41,9 +41,7 @@ export function imageMimeType(path: string): string | undefined {
 
 const err = (text: string): ImageToolResult => ({ content: [{ type: "text", text }], isError: true });
 
-/** Read `path` from the sandbox as base64, capped at `maxBytes` (checked in the pod so an
- *  oversized file is never shipped over the exec channel). Shared by view_image and
- *  anything else that needs a sandbox file's bytes (imagegen's `reference_image_path`). */
+/** Read a sandbox file as base64; size is checked in the pod. */
 export async function readSandboxFileBase64(
   client: SandboxApiClient,
   path: string,
