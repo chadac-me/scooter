@@ -24,13 +24,15 @@ in
       env_of() { tr '\0' '\n' < /proc/1/environ | sed -n "s/^$1=//p" | head -1; }
       broker=''${BROKER_URL:-$(env_of BROKER_URL)}
       token=''${BROKER_TOKEN_PATH:-$(env_of BROKER_TOKEN_PATH)}
+      # Without a broker there is no key to serve, so stay inert.
+      [ -n "$broker" ] || exit 0
       exec ${lib.getExe agent} -socket /run/scooter-ssh-agent/agent.sock \
         -broker "$broker" -token "''${token:-/var/run/secrets/broker/token}"
     '';
     serviceConfig = {
       RuntimeDirectory = "scooter-ssh-agent";
       RuntimeDirectoryMode = "0755";
-      Restart = "always";
+      Restart = "on-failure";
       RestartSec = 1;
     };
   };
