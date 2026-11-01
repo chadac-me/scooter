@@ -15,7 +15,7 @@ buildNpmPackage {
   version = "0.0.0";
   src = lib.cleanPackageSource ./.;
 
-  npmDepsHash = "sha256-yH3J82SWehFbJLmbDYtFBAnDrjK+3q5govyYUIn3h9g=";
+  npmDepsHash = "sha256-VUXE8+roIG3Yjjm7zDoI+Ix3MX/Mg7RGoeDYyHL0iec=";
 
   nativeBuildInputs = [ makeWrapper ];
 
