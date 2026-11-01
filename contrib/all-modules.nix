@@ -19,6 +19,7 @@
     ./google/contrib.nix
     ./gitlab/contrib.nix
     ./grafana/contrib.nix
+    ./imagegen/contrib.nix
     ./jira/contrib.nix
     ./kagi/contrib.nix
     ./marimo/contrib.nix
