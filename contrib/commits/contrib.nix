@@ -5,6 +5,7 @@
 {
   contribs.commits = {
     src = ./.;
+    sandbox.module = ./sandbox.nix;
 
     # Its own database, contrib_commits, with its own Atlas history.
     db = {

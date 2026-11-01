@@ -217,6 +217,9 @@
             assert notebookCfg.displayName == "Notebook" && notebookCfg.visibleInMenu && !marimoCfg.visibleInMenu;
             assert builtins.elem "webservice-marimo.service" shipped.nixos.config.systemd.services.webservice-notebook.wants;
             assert builtins.elem "webservice-notebook.service" shipped.nixos.config.systemd.services.webservice-marimo.partOf;
+            # commits switches on the git-identity poller in the sandbox.
+            assert builtins.elem "contrib/commits/sandbox.nix" (derive [ ]).treeRelative;
+            assert shipped.nixos.config.programs.scooterGitIdentity.enable;
             assert shipped.nixos.config.systemd.services ? "scooter-aws-config";
             assert skillCfg.environment.etc ? "scooter/skills/echo-skill";
             assert builtins.elem "skill-dirs/module.nix"
