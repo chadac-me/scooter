@@ -93,6 +93,8 @@ maybe("scooter-rebuild, run twice", () => {
     await cluster.waitFor<{ status: { phase: string } }>(
       "Pod", POD, (p) => p.status?.phase === "Running", 180_000, NS,
     );
+    // Boot units still settling would land in the switch's failed-unit diff.
+    await cluster.exec(SELECTOR, ["timeout", "120", "systemctl", "is-system-running", "--wait"], NS);
   }, 240_000);
 
   afterAll(async () => {
