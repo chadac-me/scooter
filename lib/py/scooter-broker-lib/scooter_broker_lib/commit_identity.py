@@ -1,4 +1,4 @@
-"""Who a sandbox's commits are by: the bot, or the user with the bot as co-author.
+"""Who a sandbox's commits are authored by: the bot, or the user with the bot as co-author.
 
 A forge contrib registers a `CommitIdentitySource`. Asked for `None` it names
 the deployment's own bot; asked for a user it names that user's account, or

@@ -142,7 +142,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail=f"agent-host list-links failed: {e}") from e
         return {"links": links}
 
-    # Who this sandbox's commits are by; the sandbox polls it into its git config.
+    # Who this sandbox's commits are authored by; the sandbox polls it into its git config.
     @app.get("/git/identity")
     async def git_identity(identity: Identity = Depends(authenticate)) -> dict:
         acting = await context.owners.acting_user(identity) if context.owners else None

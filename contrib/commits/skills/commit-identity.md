@@ -30,4 +30,4 @@ refuses if any identity exists. If it looks wrong, tell the user and point them
 to Settings. Don't work around it with `git config user.*`, `-c user.email=…` or
 `GIT_AUTHOR_*`.
 
-In shared conversations these tools aren't offered, and commits are by the bot.
+In shared conversations these tools aren't offered, and commits are authored by the bot.

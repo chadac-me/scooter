@@ -1,4 +1,4 @@
-# Who the sandbox's commits are by, as the broker says (GET /git/identity): the
+# Who the sandbox's commits are authored by, as the broker says (GET /git/identity): the
 # deployment's bot, or in the owner's private conversation the owner, with the bot
 # credited in a Co-authored-by trailer.
 #
@@ -95,7 +95,7 @@ in
     environment.etc = lib.listToAttrs (map (n: lib.nameValuePair "scooter/git-hooks/${n}" { source = hook n; }) hookNames);
 
     systemd.services.scooter-git-identity = {
-      description = "Poll the broker for who commits are by";
+      description = "Poll the broker for who commits are authored by";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
       serviceConfig = {
