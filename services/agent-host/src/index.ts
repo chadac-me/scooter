@@ -1889,6 +1889,7 @@ export async function main(
               // Without `skills` the SDK leaves the Skill tool out of the explicit allowedTools,
               // so the model cannot invoke any.
               skills: "all",
+              nativeWebSearch: process.env.SCOOTER_NATIVE_WEB_SEARCH === "1",
               // One line naming the skills the session discovered.
               onInit: (info) =>
                 hostLog.info("sdk session init", {

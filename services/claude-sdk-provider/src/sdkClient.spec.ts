@@ -211,6 +211,42 @@ describe("SDK client native subagents (the CLI's Task/Agent tools)", () => {
   });
 });
 
+describe("SDK client native WebSearch", () => {
+  const optionsOfOneTurn = async (nativeWebSearch?: boolean) => {
+    const fq = fakeQuery();
+    const client = await createSdkAcpClient({
+      oauthToken: "t", model: "claude-x", exec: fakeExec, systemPrompt: "hi",
+      queryImpl: fq.queryImpl, nativeWebSearch,
+    });
+    await client.newSession({ threadId: "c1" } as never);
+    await client.prompt({ prompt: [{ type: "text", text: "search" }] } as never);
+    return fq.calls[0].options;
+  };
+  const decide = async (opts: Record<string, unknown>) => {
+    const hooks = opts.hooks as { PreToolUse: Array<{ hooks: Array<(i: unknown) => Promise<unknown>> }> };
+    return (await hooks.PreToolUse[0].hooks[0]({ tool_name: "WebSearch" })) as {
+      continue?: boolean;
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+    };
+  };
+
+  it("with nativeWebSearch, pre-approves WebSearch and the hook lets it run", async () => {
+    const opts = await optionsOfOneTurn(true);
+    expect(opts.allowedTools as string[]).toContain("WebSearch");
+    const out = await decide(opts);
+    expect(out.hookSpecificOutput?.permissionDecision).not.toBe("deny");
+    expect(out.continue).toBe(true);
+  });
+
+  it("without it, WebSearch is redirected to a *_web_search tool", async () => {
+    const opts = await optionsOfOneTurn();
+    expect(opts.allowedTools as string[]).not.toContain("WebSearch");
+    const out = await decide(opts);
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toMatch(/_web_search/);
+  });
+});
+
 describe("SDK client back-pressure (canUseTool yields to a queued priority item)", () => {
   const clientWith = (shouldYield?: () => boolean) => {
     const fq = fakeQuery();

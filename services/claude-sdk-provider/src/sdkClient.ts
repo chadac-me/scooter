@@ -87,6 +87,8 @@ export interface SdkAcpClientDeps {
   recordRaw?: (msg: unknown) => void;
   /** Conversation tool hooks, run after the platform's tool policy. */
   toolHooks?: ToolHooks;
+  /** Allow the CLI's WebSearch, which Anthropic runs server-side on the subscription. */
+  nativeWebSearch?: boolean;
 }
 
 /** The minimal shape of the SDK's query() this module depends on, declared locally so it type-checks without the SDK installed. */
@@ -162,6 +164,7 @@ function emitContextUsage(msg: unknown, last: PromptUsage | null): SessionUpdate
 /** Spawn an SDK-backed AcpClient. */
 export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpClient> {
   const { server, toolAliases, disallowedTools } = await createSandboxMcpServer(deps.exec);
+  const allowedBuiltins = [...Object.values(toolAliases), ...(deps.nativeWebSearch ? ["WebSearch"] : [])];
 
   // Lazy import so the module graph (and unit tests) load without the SDK.
   const query =
@@ -227,7 +230,7 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
     permissionMode: "dontAsk",
     // Suppresses the permission prompt for the tools we own; their real gate is the PreToolUse hook and the bridge's permission flow.
     allowedTools: [
-      ...Object.values(toolAliases),
+      ...allowedBuiltins,
       ...(deps.mcpEndpointUrl ? ["mcp__scooter-env"] : []),
       ...(deps.mcpServers ?? []).map((m) => `mcp__${m.name}`),
       ...(deps.mcpServers ?? []).map((m) => `mcp__${m.name}`),
@@ -246,7 +249,7 @@ export async function createSdkAcpClient(deps: SdkAcpClientDeps): Promise<AcpCli
               // With no one to ask, the policy redirects the tool.
               const blocking = found && permissionHandler ? found : undefined;
               if (!blocking) {
-                const decision = decideTool(name, Object.values(toolAliases));
+                const decision = decideTool(name, allowedBuiltins);
                 if (!decision.allow) {
                   debugError("[sdk:tool-denied]", `${name}: ${decision.reason}`);
                   return denyTool(decision.reason);
