@@ -11,6 +11,7 @@
     ./aws/contrib.nix
     ./brave/contrib.nix
     ./code-server/contrib.nix
+    ./commits/contrib.nix
     ./datadog/contrib.nix
     ./duckduckgo/contrib.nix
     ./echo/contrib.nix

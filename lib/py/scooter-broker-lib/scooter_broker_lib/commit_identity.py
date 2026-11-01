@@ -4,6 +4,9 @@ A forge contrib registers a `CommitIdentitySource`. Asked for `None` it names
 the deployment's own bot; asked for a user it names that user's account, or
 None when they have not linked one. `resolve` asks the sources in registration
 order and takes the first answer.
+
+An identity the user chose (the commits contrib, via `provide_chosen`) wins over
+any forge's answer for that user.
 """
 
 from __future__ import annotations
@@ -53,6 +56,27 @@ def register_commit_identity(source: CommitIdentitySource) -> CommitIdentitySour
     return source
 
 
+ChosenLookup = Callable[[str], Awaitable["Person | None"]]
+
+_chosen: ChosenLookup | None = None
+
+
+def provide_chosen(lookup: ChosenLookup | None) -> None:
+    """Install the lookup for a user's own chosen identity; None removes it."""
+    global _chosen
+    _chosen = lookup
+
+
+async def _chosen_for(user: str) -> Person | None:
+    if _chosen is None:
+        return None
+    try:
+        return await _chosen(user)
+    except Exception as e:  # noqa: BLE001 - fall back to the forge account
+        logger.warning("chosen commit identity lookup failed", extra={"error": format_error(e)})
+        return None
+
+
 async def _first(user: str | None) -> Person | None:
     for source in list(_sources.values()):
         try:
@@ -69,10 +93,10 @@ async def _first(user: str | None) -> Person | None:
 
 
 async def resolve(acting_user: str | None) -> CommitIdentity:
-    """The user (bot as co-author) when acting for a linked user, else the bot alone."""
+    """The user (bot as co-author) when acting for a user with an identity, else the bot alone."""
     bot = await _first(None)
     if acting_user is not None:
-        user = await _first(acting_user)
+        user = await _chosen_for(acting_user) or await _first(acting_user)
         if user is not None:
             return CommitIdentity(author=user, co_author=bot)
     return CommitIdentity(author=bot)

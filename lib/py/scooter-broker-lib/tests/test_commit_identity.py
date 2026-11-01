@@ -18,6 +18,7 @@ def _clean():
     yield
     ci._sources.clear()
     ci._sources.update(saved)
+    ci.provide_chosen(None)
 
 
 def forge(people: dict):
@@ -54,4 +55,41 @@ async def test_a_failing_source_falls_through_to_the_next():
         raise RuntimeError("forge down")
 
     ci.register_commit_identity(forge({None: BOT, "alice": ALICE}))
+    assert await ci.resolve("alice") == ci.CommitIdentity(author=ALICE, co_author=BOT)
+
+
+def chosen(people: dict):
+    async def lookup(user):
+        return people.get(user)
+
+    return lookup
+
+
+async def test_a_chosen_identity_wins_over_the_forge_account():
+    ci.register_commit_identity(forge({None: BOT, "alice": ALICE}))
+    mine = Person("Alice Liddell", "alice@example.com")
+    ci.provide_chosen(chosen({"alice": mine}))
+    assert await ci.resolve("alice") == ci.CommitIdentity(author=mine, co_author=BOT)
+
+
+async def test_a_chosen_identity_needs_no_linked_forge_account():
+    ci.register_commit_identity(forge({None: BOT}))
+    mine = Person("Bob", "bob@example.com")
+    ci.provide_chosen(chosen({"bob": mine}))
+    assert await ci.resolve("bob") == ci.CommitIdentity(author=mine, co_author=BOT)
+
+
+async def test_a_chosen_identity_never_applies_when_not_acting():
+    ci.register_commit_identity(forge({None: BOT}))
+    ci.provide_chosen(chosen({None: ALICE}))
+    assert await ci.resolve(None) == ci.CommitIdentity(author=BOT)
+
+
+async def test_a_failing_lookup_falls_back_to_the_forge_account():
+    ci.register_commit_identity(forge({None: BOT, "alice": ALICE}))
+
+    async def broken(user):
+        raise RuntimeError("db down")
+
+    ci.provide_chosen(broken)
     assert await ci.resolve("alice") == ci.CommitIdentity(author=ALICE, co_author=BOT)

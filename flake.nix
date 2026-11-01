@@ -359,6 +359,7 @@
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
             # files' broker half is the annotation store; its build carries the whole
             # suite, the sandbox viewer's stdlib tests included, as check inputs.
+            contrib-commits = contribs.packages.commits.broker;
             contrib-files = contribs.packages.files.broker;
             contrib-personalization = contribs.packages.personalization.broker;
             contrib-shares = contribs.packages.shares.broker;
@@ -512,6 +513,7 @@
             contrib-kagi = contribs.packages.kagi.broker;
             contrib-slack = contribs.packages.slack.broker;
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
+            contrib-commits = contribs.packages.commits.broker;
             contrib-files = contribs.packages.files.broker;
             contrib-personalization = contribs.packages.personalization.broker;
             contrib-shares = contribs.packages.shares.broker;
