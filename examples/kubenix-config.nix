@@ -208,6 +208,7 @@
     brave.enable = true;
     datadog.enable = true;
     duckduckgo.enable = true;
+    gcp.enable = true;
     github.enable = true;
     gitlab.enable = true;
     google.enable = true;
@@ -238,6 +239,13 @@
     google = {
       serviceAccountSecret.name = "google-service-account";
       subject = "agent@example.com";
+    };
+
+    # Google Cloud: the forge proxy injects a service-account token into calls to
+    # *.googleapis.com, so gcloud and terraform in the sandbox need no credential.
+    gcp = {
+      serviceAccountSecret.name = "gcp-service-account";
+      project = "my-project";
     };
 
     # AWS permissions broker: approval-gated STS access per account, with the

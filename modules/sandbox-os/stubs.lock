@@ -57,6 +57,17 @@
         ],
         "name": "glab-1.126.0"
       },
+      "google-cloud-sdk": {
+        "attr": "google-cloud-sdk",
+        "drv": "/nix/store/qw5fsz0046nj2xs9qa72a4pbfx9sa5hp-google-cloud-sdk-583.0.0.drv",
+        "output": "out",
+        "bins": [
+          "gcloud",
+          "gsutil",
+          "bq"
+        ],
+        "name": "google-cloud-sdk-583.0.0"
+      },
       "marimo": {
         "attr": "marimo",
         "drv": "/nix/store/5gqr5q7wnqs22j9sf0pj37y461d5aw57-python3.14-marimo-0.25.1.drv",
@@ -140,6 +151,17 @@
           "glab"
         ],
         "name": "glab-1.126.0"
+      },
+      "google-cloud-sdk": {
+        "attr": "google-cloud-sdk",
+        "drv": "/nix/store/dh9q672psrgch6dmm0z57shqqpipbm1r-google-cloud-sdk-583.0.0.drv",
+        "output": "out",
+        "bins": [
+          "gcloud",
+          "gsutil",
+          "bq"
+        ],
+        "name": "google-cloud-sdk-583.0.0"
       },
       "marimo": {
         "attr": "marimo",

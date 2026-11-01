@@ -15,6 +15,7 @@
     ./duckduckgo/contrib.nix
     ./echo/contrib.nix
     ./files/contrib.nix
+    ./gcp/contrib.nix
     ./github/contrib.nix
     ./google/contrib.nix
     ./gitlab/contrib.nix
