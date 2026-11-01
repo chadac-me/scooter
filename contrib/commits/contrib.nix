@@ -1,5 +1,5 @@
 # commits' declaration: the name and email a user's commits carry. The user sets it
-# on a settings tab; an agent may fill it in once, in their private conversation.
+# on a settings tab; an agent may propose one, which the user approves in Approvals.
 { ... }:
 
 {
@@ -10,6 +10,7 @@
     db = {
       enable = true;
       tables.commit_identities = { };
+      tables.commit_identity_proposals = { };
     };
 
     services.broker = {
@@ -17,6 +18,10 @@
       pythonDeps = ps: [ ps.aiosqlite ];
       env.COMMITS_ENABLED = "true";
     };
+
+    # Proposals are approved in-conversation; routing lives in ./deployment.nix.
+    approvals = { };
+    ui.interruptRenderers."commits.identity".entry = "ui/ProposalCard.tsx";
 
     skills."commit-identity.md" = ./skills/commit-identity.md;
 

@@ -8,4 +8,5 @@
 owner = "broker"
 
 [contrib_commits.tables]
-commit_identities = { writers = ["broker"], readers = [] }
+commit_identities         = { writers = ["broker"], readers = [] }
+commit_identity_proposals = { writers = ["broker"], readers = [] }

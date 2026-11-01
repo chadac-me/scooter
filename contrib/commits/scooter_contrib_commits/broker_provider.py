@@ -11,6 +11,7 @@ from scooter_broker_lib.types import Provider
 
 from . import mcp_tools
 from .config import CommitsSettings
+from .host import HostCards
 from .store import CommitIdentityStore
 from .transport import Commits
 
@@ -19,12 +20,14 @@ from .transport import Commits
 def commits(ctx: BrokerContext) -> Provider:
     transport = Commits()
     tools = McpTools(server=mcp_tools.commits_mcp_server())
-    if not CommitsSettings().commits_enabled or ctx.owners is None:
+    settings = CommitsSettings()
+    if not settings.commits_enabled or ctx.owners is None:
         return Provider(name="commits", transports=[transport, tools], enabled=False)
 
     store = CommitIdentityStore(ctx.contrib_store_config("commits"))
-    transport.store = store
-    mcp_tools.configure(store, ctx.owners)
+    cards = HostCards(settings.agent_host_url)
+    transport.store, transport.cards = store, cards
+    mcp_tools.configure(store, ctx.owners, cards)
 
     async def chosen(user: str) -> Person | None:
         found = await store.get(user)
