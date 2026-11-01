@@ -217,6 +217,9 @@
             assert notebookCfg.displayName == "Notebook" && notebookCfg.visibleInMenu && !marimoCfg.visibleInMenu;
             assert builtins.elem "webservice-marimo.service" shipped.nixos.config.systemd.services.webservice-notebook.wants;
             assert builtins.elem "webservice-notebook.service" shipped.nixos.config.systemd.services.webservice-marimo.partOf;
+            # commits switches on the git-identity poller in the sandbox.
+            assert builtins.elem "contrib/commits/sandbox.nix" (derive [ ]).treeRelative;
+            assert shipped.nixos.config.programs.scooterGitIdentity.enable;
             assert shipped.nixos.config.systemd.services ? "scooter-aws-config";
             assert skillCfg.environment.etc ? "scooter/skills/echo-skill";
             assert builtins.elem "skill-dirs/module.nix"
@@ -360,6 +363,7 @@
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
             # files' broker half is the annotation store; its build carries the whole
             # suite, the sandbox viewer's stdlib tests included, as check inputs.
+            contrib-commits = contribs.packages.commits.broker;
             contrib-files = contribs.packages.files.broker;
             contrib-personalization = contribs.packages.personalization.broker;
             contrib-shares = contribs.packages.shares.broker;
@@ -514,6 +518,7 @@
             contrib-kagi = contribs.packages.kagi.broker;
             contrib-slack = contribs.packages.slack.broker;
             contrib-slack-webhooks = contribs.packages.slack.webhooks;
+            contrib-commits = contribs.packages.commits.broker;
             contrib-files = contribs.packages.files.broker;
             contrib-personalization = contribs.packages.personalization.broker;
             contrib-shares = contribs.packages.shares.broker;

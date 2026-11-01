@@ -820,8 +820,11 @@ let
     ++ (if approvalsJson == null || (approvalsJson.aws.pendingPath or null) != null then [ ]
         else [ ("aws.pendingPath is null — an approval window lost to a pod rollout would"
                 + " never be re-raised, leaving a blocked agent and a user with nothing to click") ])
-    ++ (if builtins.all (e: e.name != "APPROVAL_CONTRIBS_JSON") awsOffApprovals then [ ]
-        else [ "aws-off: host.env.APPROVAL_CONTRIBS_JSON present — approvals are not gated on the contrib's own enable" ]);
+    ++ (if approvalsJson == null || (approvalsJson.commits.pendingPath or null) == "/commits/proposals/pending" then [ ]
+        else [ "APPROVAL_CONTRIBS_JSON has no commits row with its pendingPath (contrib/commits/deployment.nix)" ])
+    # Other contribs may still raise approvals; only aws's row must go.
+    ++ (if builtins.all (e: e.name != "APPROVAL_CONTRIBS_JSON" || !(builtins.fromJSON e.value ? aws)) awsOffApprovals then [ ]
+        else [ "aws-off: APPROVAL_CONTRIBS_JSON still has an aws row — approvals are not gated on the contrib's own enable" ]);
 
   # `permission_requests` is declared whenever aws is built, even with the broker off.
   brokerOffPlatform = evalPlatform {

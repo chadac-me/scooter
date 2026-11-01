@@ -16,6 +16,7 @@ import { shortId } from "../session/manager.js";
 import type { SessionId } from "../types.js";
 import { tailByRuns } from "../session/eventWindow.js";
 import { trimToBoundary } from "../session/eventStore.js";
+import { isUnansweredInterrupt } from "../session/danglingRun.js";
 import {
   alignPageToRun,
   foldToMessages,
@@ -1088,6 +1089,19 @@ export function createManagementApi(deps: ManagementDeps): Router {
 
     raiseApprovalInterrupt(bridge, conv.id, ctx.params.contrib, body as ApprovalRequest, deps.resolveApproval);
     return { status: 202, json: { ok: true } };
+  });
+
+  // Withdraws a card another approval superseded.
+  r.del("/conversations/:id/approvals/:contrib/:requestId", async (ctx) => {
+    const conv = sessions.get(ctx.params.id) ?? (await sessions.getByShortId(ctx.params.id));
+    if (!conv) return { status: 404, json: { error: "unknown conversation" } };
+    const requestId = ctx.params.requestId;
+    if (sessions.get(conv.id)?.bridge?.withdrawInterrupt(requestId)) return { json: { withdrawn: true } };
+    const events: AguiEvent[] = [];
+    for await (const e of store.readEvents(conv.id as SessionId)) events.push(e);
+    if (!isUnansweredInterrupt(events, requestId)) return { json: { withdrawn: false } };
+    await store.appendEvent(conv.id as SessionId, { type: "PERMISSION_RESOLVED", toolCallId: requestId, optionId: null });
+    return { json: { withdrawn: true } };
   });
 
   // --- Scheduled tasks (UI settings page) ----------------------------------------

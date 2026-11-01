@@ -1,0 +1,88 @@
+"""commits' agent tools, listed only in the owner's private conversation.
+
+The user is always the conversation's acting user, never an argument. An agent
+reads the identity and proposes one when none is set; only the user's approval,
+in the Approvals tab, writes it.
+"""
+
+from __future__ import annotations
+
+from fastmcp import FastMCP
+
+from scooter_broker_lib.mcp import ToolContext, ToolContextDep, ToolResult, gate
+from scooter_broker_lib.owner import OwnerResolver
+
+from .host import Cards
+from .store import CommitIdentityStore, InvalidIdentity, Refused, validated
+
+mcp = FastMCP(name="commits")
+
+# Set by the provider factory.
+_store: CommitIdentityStore | None = None
+_owners: OwnerResolver | None = None
+_cards: Cards | None = None
+
+_SETTINGS = "Settings → Commit identity"
+
+
+def configure(store: CommitIdentityStore | None, owners: OwnerResolver | None, cards: Cards | None = None) -> None:
+    global _store, _owners, _cards
+    _store, _owners, _cards = store, owners, cards
+
+
+async def _acting(ctx: ToolContext) -> str | None:
+    if _store is None or _owners is None:
+        return None
+    return await _owners.acting_user(ctx.identity)
+
+
+async def _is_private(ctx: ToolContext) -> bool:
+    return await _acting(ctx) is not None
+
+
+@gate(_is_private)
+@mcp.tool
+async def commit_identity_get(ctx: ToolContext = ToolContextDep) -> ToolResult:
+    """The name and email the user's commits carry, who set it, and any proposal awaiting approval.
+
+    If none is set and none is pending, work out the identity the user usually commits
+    under and pass it to commit_identity_propose (see the commit-identity skill).
+    """
+    user = await _acting(ctx)
+    if user is None or _store is None:
+        return ToolResult.error("no commit identity outside the owner's private conversation")
+    chosen = await _store.get(user)
+    if chosen is not None:
+        return ToolResult.ok(f"{chosen.person.ident()} (set by {chosen.set_by})")
+    pending = await _store.pending(user_id=user)
+    if pending:
+        idents = ", ".join(p.person.ident() for p in pending)
+        return ToolResult.ok(f"No commit identity is set. Awaiting the user's approval: {idents}.")
+    return ToolResult.ok("No commit identity is set.")
+
+
+@gate(_is_private)
+@mcp.tool
+async def commit_identity_propose(name: str, email: str, ctx: ToolContext = ToolContextDep) -> ToolResult:
+    """Ask the user to approve this as their commit identity; only possible while none is set.
+
+    It shows as a card in the user's Approvals tab and takes effect only when they
+    approve it. Do not wait on it: carry on, and tell the user it is waiting there.
+    """
+    user = await _acting(ctx)
+    if user is None or _store is None:
+        return ToolResult.error("no commit identity outside the owner's private conversation")
+    try:
+        person = validated(name, email)
+        proposal = await _store.propose(user, ctx.identity.conversation_id, person)
+    except (InvalidIdentity, Refused) as e:
+        return ToolResult.error(f"refused: {e}. The user sets it at {_SETTINGS}.")
+    if _cards is not None:
+        await _cards.raise_(proposal)
+    return ToolResult.ok(
+        f"Proposed {person.ident()}; it is waiting in the user's Approvals tab and applies once they approve."
+    )
+
+
+def commits_mcp_server() -> FastMCP:
+    return mcp

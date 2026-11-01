@@ -348,6 +348,9 @@ export interface SessionBridge {
     metadata?: Record<string, unknown>;
   }): void;
 
+  /** Settle an external interrupt unanswered; false if none is pending. */
+  withdrawInterrupt(id: string): boolean;
+
   /** Subscribe to the AG-UI event stream broadcast to the UI (live). */
   onEvent(cb: (event: AguiEvent) => void): () => void;
   /** Subscribe to events that are persisted but not broadcast live, such as the user's
@@ -1837,6 +1840,13 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
       } else {
         pending.resolve(chosen, chosen ? result : undefined); // unblocks the agent's permission request
       }
+      return true;
+    },
+    withdrawInterrupt(id) {
+      const pending = pendingPermissions.get(id);
+      if (!pending?.onExternal) return false;
+      pendingPermissions.delete(id);
+      persist({ type: "PERMISSION_RESOLVED", toolCallId: id, optionId: null });
       return true;
     },
     raiseInterrupt({ id, message, options, onAnswer, metadata }) {

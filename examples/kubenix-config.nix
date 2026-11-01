@@ -218,6 +218,8 @@
     # Static shares: agents publish bundles the broker serves at /s/<uuid>/.
     shares.enable = true;
     slack.enable = true;
+    # Per-user commit identity: a Settings tab, filled in once by an agent if empty.
+    commits.enable = true;
     # Per-user SSH key: a broker-backed ssh-agent in each sandbox, a Settings tab.
     ssh.enable = true;
 

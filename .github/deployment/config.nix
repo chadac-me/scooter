@@ -10,6 +10,7 @@
     aws.enable = true;
     brave.enable = true;
     code-server.enable = true;
+    commits.enable = true;
     datadog.enable = true;
     duckduckgo.enable = true;
     files.enable = true;

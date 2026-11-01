@@ -3,7 +3,7 @@
  * session/update notifications and the exact AG-UI event sequence is asserted.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import {
   createSessionBridge,
@@ -246,6 +246,34 @@ describe("ACP -> AG-UI bridge", () => {
     expect(bridge.answerPermission("aws-req-1", "approve")).toBe(true);
     expect(answered).toBe("approve");
     expect(bridge.answerPermission("aws-req-1", "approve")).toBe(false); // already settled
+  });
+
+  it("withdrawInterrupt settles an external interrupt without firing onAnswer", async () => {
+    const agent = createFakeAcpAgent();
+    agent.setScript([{ finish: { stopReason: "end_turn" } }]);
+    const exec = createSandboxExecBackend(createFakeSandboxApi());
+    const bridge = createSessionBridge({
+      config: { cwd: "/workspace", skillsDir: "/skills", agent: { command: "fake", args: [], env: {} }, sandbox: { name: "s", namespace: "ns" } },
+      exec,
+      acpClient: acpClientFromTransport(agent.transport, exec),
+    });
+    const persisted: Array<{ type: string; toolCallId?: string; optionId?: string | null }> = [];
+    bridge.onPersist((e) => persisted.push(e as never));
+    const onAnswer = vi.fn();
+    bridge.raiseInterrupt({
+      id: "commits-p1",
+      message: "Use Ada <ada@x.dev>?",
+      options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }],
+      onAnswer,
+    });
+
+    expect(bridge.withdrawInterrupt("commits-p1")).toBe(true);
+    // The log settles the card, so every open tab drops it.
+    expect(persisted).toContainEqual(expect.objectContaining({ type: "PERMISSION_RESOLVED", toolCallId: "commits-p1", optionId: null }));
+    expect(onAnswer).not.toHaveBeenCalled();
+    // Gone: a late click and a second withdraw both find nothing.
+    expect(bridge.answerPermission("commits-p1", "approve")).toBe(false);
+    expect(bridge.withdrawInterrupt("commits-p1")).toBe(false);
   });
 
   it("raiseInterrupt merges extra metadata (e.g. aws:true) alongside options", async () => {
