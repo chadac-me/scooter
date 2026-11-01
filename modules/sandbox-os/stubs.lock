@@ -2,19 +2,19 @@
   "version": 1,
   "inputs": {
     "nixpkgs": {
-      "lastModified": 1792773339,
-      "narHash": "sha256-rZLrzrC6i+jnTAlvPZHogKDulY7WWDEv9hJeHieO7Zw=",
+      "lastModified": 1793341285,
+      "narHash": "sha256-Y1CiZ4SoBUjLQyQM/pY+rS2dXD3CHLPstF0lmOc73D4=",
       "owner": "NixOS",
       "repo": "nixpkgs",
-      "rev": "3ec636362e1816bc2f0888fa0fa2c69f1bc9e504",
+      "rev": "1c89083e451e891152365b799595cf7790a43325",
       "type": "github"
     },
     "uv-nix": {
-      "lastModified": 1792678206,
-      "narHash": "sha256-HTDN09Bb/NGwfCnBFuIIuS7bsKb6YRgMwKnlLtiakps=",
+      "lastModified": 1793193441,
+      "narHash": "sha256-iTRkjt2MXZ1L2b/Bohe+WUxhEnaukn1DBvO/kOuhoRU=",
       "owner": "chadac",
       "repo": "uv-nix",
-      "rev": "d45e9a75eabadaf1fcb8107fcb2bcad40d4492cb",
+      "rev": "2c3a906558191f218df87aec45e2e6a9a79c11d7",
       "type": "github"
     }
   },
@@ -41,21 +41,21 @@
       },
       "gh": {
         "attr": "gh",
-        "drv": "/nix/store/2dyzvf15igds1a4qldhd2yp5zbvb8874-gh-2.103.0.drv",
+        "drv": "/nix/store/3w6hc10jizi1x77sd3z76s2mgxrpdghx-gh-2.103.3.drv",
         "output": "out",
         "bins": [
           "gh"
         ],
-        "name": "gh-2.103.0"
+        "name": "gh-2.103.3"
       },
       "glab": {
         "attr": "glab",
-        "drv": "/nix/store/dahaf0inpj52dw5z4pj2dl0l8hiqf95r-glab-1.114.0.drv",
+        "drv": "/nix/store/c3q5acvqdpnxvf08xmrz24cm7hphsa4g-glab-1.126.0.drv",
         "output": "out",
         "bins": [
           "glab"
         ],
-        "name": "glab-1.114.0"
+        "name": "glab-1.126.0"
       },
       "marimo": {
         "attr": "marimo",
@@ -95,12 +95,12 @@
       },
       "uv": {
         "attr": "uv",
-        "drv": "/nix/store/ry3r18nag7nzifsrylfwk3cpz4ykxwcd-uv-nix-bin-0.13.5-nix.1.drv",
+        "drv": "/nix/store/d61613q70sir8f7dxp08d3158i75gfy1-uv-nix-bin-0.13.6-nix.1.drv",
         "output": "out",
         "bins": [
           "uv"
         ],
-        "name": "uv-nix-bin-0.13.5-nix.1"
+        "name": "uv-nix-bin-0.13.6-nix.1"
       }
     },
     "x86_64-linux": {
@@ -125,21 +125,21 @@
       },
       "gh": {
         "attr": "gh",
-        "drv": "/nix/store/vjpz45dp51acbahazxd9gjn9ii3mdprr-gh-2.103.0.drv",
+        "drv": "/nix/store/l0j0vwm6mh1bbq6hbp608h5iy467z3ck-gh-2.103.3.drv",
         "output": "out",
         "bins": [
           "gh"
         ],
-        "name": "gh-2.103.0"
+        "name": "gh-2.103.3"
       },
       "glab": {
         "attr": "glab",
-        "drv": "/nix/store/qc76zm9j4g054xhmjhw3pv1fyhsb71jf-glab-1.114.0.drv",
+        "drv": "/nix/store/bd0gxpf2yw7shjm987hn1hxz8g44gfpn-glab-1.126.0.drv",
         "output": "out",
         "bins": [
           "glab"
         ],
-        "name": "glab-1.114.0"
+        "name": "glab-1.126.0"
       },
       "marimo": {
         "attr": "marimo",
@@ -179,12 +179,12 @@
       },
       "uv": {
         "attr": "uv",
-        "drv": "/nix/store/bqw00nbvsjf13a1szkkcjvylpv7skpyn-uv-nix-bin-0.13.5-nix.1.drv",
+        "drv": "/nix/store/6apwnz0y4yrjh2ypzv2jqjks4i89j406-uv-nix-bin-0.13.6-nix.1.drv",
         "output": "out",
         "bins": [
           "uv"
         ],
-        "name": "uv-nix-bin-0.13.5-nix.1"
+        "name": "uv-nix-bin-0.13.6-nix.1"
       }
     }
   }
