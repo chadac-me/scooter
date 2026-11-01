@@ -858,6 +858,18 @@ in
             kubectl create secret generic <name> --from-literal=token=sk-ant-oat01-...
           '';
         };
+        nativeWebSearch = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Let the agent use Claude's built-in WebSearch tool. Anthropic runs the
+            search server-side under the subscription token, so no request leaves
+            the agent-host. The search contribs (brave, kagi, duckduckgo) stay
+            available alongside it. Off, WebSearch is refused and the agent is
+            pointed at a `*_web_search` tool instead. Rendered as
+            SCOOTER_NATIVE_WEB_SEARCH.
+          '';
+        };
       };
       # Bring-your-own-Claude: users run a container with their own Claude subscription
       # that dials in over a WebSocket, and scooter routes their conversations to it.
@@ -1662,7 +1674,9 @@ in
                   # The SDK runs `claude --dangerously-skip-permissions`, which is refused
                   # under root unless IS_SANDBOX marks a sandboxed context.
                   { name = "IS_SANDBOX"; value = "1"; }
-                ] ++ lib.optional (defaultModelId != null)
+                ] ++ lib.optional (!cfg.fakeAgent && cfg.agent.provider == "claude-code" && cfg.agent.claudeCode.nativeWebSearch)
+                  { name = "SCOOTER_NATIVE_WEB_SEARCH"; value = "1"; }
+                ++ lib.optional (defaultModelId != null)
                   # The default model, derived from availableModels.<id>.default (or the
                   # deprecated agent.model).
                   { name = "GOOSE_MODEL"; value = defaultModelId; }

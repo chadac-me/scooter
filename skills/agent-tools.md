@@ -158,6 +158,9 @@ Call it instead of piecing the state together from `check-runs`, `reviews` and
   so is the one most likely to be present, but it reads a public HTML page and is
   rate-limited: when it fails, that is about the tool and not about the web, so prefer
   a keyed sibling if one is listed rather than retrying it.
+- **`WebSearch`, when your tool list has it**, is Claude's built-in search, run by
+  Anthropic on its own index with fresh results. Count it as one more index under the
+  same rule: pick it OR a `*_web_search` tool for a query, not both.
 - **Fetch a URL** — fetch a public web page and get its readable text. Use it on a
   URL from a search result, a PR/issue link, or docs. (It refuses
   internal/cluster/metadata addresses.)
