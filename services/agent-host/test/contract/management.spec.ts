@@ -919,6 +919,62 @@ describe("management API", () => {
     });
   });
 
+  describe("DELETE /conversations/:id/approvals/:contrib/:requestId (withdraw)", () => {
+    const UUID = "aee8b191-a4ca-4cb5-81f0-ffd058a89663";
+    const SHORT = shortIdOf(UUID);
+    const raised: AguiEvent = {
+      type: "RUN_FINISHED", threadId: UUID, runId: "ext-p1",
+      outcome: { type: "interrupt", interrupts: [{ id: "p1", reason: "confirmation", message: "m" }] },
+    } as AguiEvent;
+
+    const setup = (bridge?: { withdrawInterrupt: (id: string) => boolean }, events: AguiEvent[] = []) => {
+      const c = conv({ id: UUID, threadId: UUID, bridge: bridge as never });
+      const sessions = {
+        ...fakeSessions(),
+        get: (id: string) => (id === UUID ? c : undefined),
+        getByShortId: vi.fn(async (h: string) => (h === SHORT ? c : undefined)),
+      } as unknown as SessionManager;
+      const store = fakeStore(events);
+      const appended: AguiEvent[] = [];
+      store.appendEvent = async (_id, e) => {
+        appended.push(e);
+      };
+      const api = createManagementApi({ sessions, store, server: stubServer, answerPermission: async () => {} });
+      return { api, appended };
+    };
+
+    it("settles the card on a live bridge", async () => {
+      const withdrawInterrupt = vi.fn(() => true);
+      const { api, appended } = setup({ withdrawInterrupt });
+      const { status, json } = await call(api, "DELETE", `/conversations/${SHORT}/approvals/commits/p1`);
+      expect(status).toBe(200);
+      expect(json).toEqual({ withdrawn: true });
+      expect(withdrawInterrupt).toHaveBeenCalledWith("p1");
+      expect(appended).toEqual([]);
+    });
+
+    it("settles it in the log when no bridge holds it, so a revive does not show it", async () => {
+      const { api, appended } = setup(undefined, [raised]);
+      const { json } = await call(api, "DELETE", `/conversations/${SHORT}/approvals/commits/p1`);
+      expect(json).toEqual({ withdrawn: true });
+      expect(appended).toEqual([{ type: "PERMISSION_RESOLVED", toolCallId: "p1", optionId: null }]);
+    });
+
+    it("leaves an already settled card alone", async () => {
+      const settled = { type: "PERMISSION_RESOLVED", toolCallId: "p1", optionId: "approve" } as AguiEvent;
+      const { api, appended } = setup({ withdrawInterrupt: () => false }, [raised, settled]);
+      const { json } = await call(api, "DELETE", `/conversations/${SHORT}/approvals/commits/p1`);
+      expect(json).toEqual({ withdrawn: false });
+      expect(appended).toEqual([]);
+    });
+
+    it("404s an unknown conversation", async () => {
+      const { api } = setup();
+      const { status } = await call(api, "DELETE", "/conversations/nope/approvals/commits/p1");
+      expect(status).toBe(404);
+    });
+  });
+
   describe("raiseApprovalInterrupt (shared builder — route + revive re-raise)", () => {
     const build = () => {
       const raiseInterrupt = vi.fn();
