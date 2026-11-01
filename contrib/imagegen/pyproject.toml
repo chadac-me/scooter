@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scooter-contrib-imagegen"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+# The standard broker-provider entry point (contrib/build.nix's generated pyproject
+# would also render this one); explicit here because this file exists for the two
+# below it.
+[project.entry-points."agent_broker.providers"]
+imagegen = "scooter_contrib_imagegen.broker_provider:imagegen"
+
+# imagegen's OWN plugin surface, discovered the same way the broker's provider
+# registry discovers providers (lib/py/scooter-broker-lib/scooter_broker_lib/registry.py),
+# so an out-of-tree package can add a backend or a selector without touching this one.
+[project.entry-points."scooter_imagegen.backends"]
+bedrock = "scooter_contrib_imagegen.backends.bedrock:factory"
+
+[project.entry-points."scooter_imagegen.selectors"]
+priority = "scooter_contrib_imagegen.selectors:priority"

@@ -212,6 +212,7 @@
     gitlab.enable = true;
     google.enable = true;
     grafana.enable = true;
+    imagegen.enable = true;
     jira.enable = true;
     kagi.enable = true;
     # Static shares: agents publish bundles the broker serves at /s/<uuid>/.
@@ -273,6 +274,17 @@
       installationId = "7890123";
       owners = [ "my-user" "my-org" ];
       privateKeySecret = { name = "github-app-key"; key = "private-key"; };
+    };
+
+    # Image generation: Bedrock is IRSA (no secret), picked by the default "priority"
+    # selector whenever the agent does not name a backend.
+    imagegen = {
+      dailyLimit = 50;
+      backends.bedrock = {
+        enable = true;
+        priority = 100;
+        roleArn = "arn:aws:iam::123456789012:role/agent-broker-bedrock";
+      };
     };
   };
 }

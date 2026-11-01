@@ -38,7 +38,7 @@ const log = logger("bridge");
  *  gets a note listing the saved paths. */
 export const UPLOADS_DIR = "/workspace/uploads";
 
-/** Sanitize an attachment filename to a safe basename so a hostile `name` cannot escape UPLOADS_DIR. */
+/** Sanitize an attachment filename to a safe basename so a hostile `name` cannot escape its directory. */
 export function safeUploadName(name: string): string {
   const base = name.split(/[\\/]/).pop() || "file";
   // Drop leading dots and anything outside a conservative character set.
@@ -46,13 +46,17 @@ export function safeUploadName(name: string): string {
   return cleaned || "file";
 }
 
-/** Write one base64 file attachment into the sandbox at UPLOADS_DIR/<name> and return
- *  the path, throwing so the caller can log and skip a bad upload. */
-async function writeUploadedFile(exec: ExecBackend, file: { name: string; data: string }): Promise<string> {
+/** Write a base64 file to `dir`/<sanitized name> in the sandbox; returns the path. */
+export async function writeSandboxFile(exec: ExecBackend, dir: string, file: { name: string; data: string }): Promise<string> {
   const name = safeUploadName(file.name);
-  const path = `${UPLOADS_DIR}/${name}`;
+  const path = `${dir}/${name}`;
   await exec.writeBinaryFile(path, file.data);
   return path;
+}
+
+/** Write one base64 file attachment into the sandbox at UPLOADS_DIR/<name>. */
+async function writeUploadedFile(exec: ExecBackend, file: { name: string; data: string }): Promise<string> {
+  return writeSandboxFile(exec, UPLOADS_DIR, file);
 }
 
 /** The note appended to the prompt listing where uploaded files were saved. */

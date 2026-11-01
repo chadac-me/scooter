@@ -41,6 +41,29 @@ export function imageMimeType(path: string): string | undefined {
 
 const err = (text: string): ImageToolResult => ({ content: [{ type: "text", text }], isError: true });
 
+/** Read a sandbox file as base64; size is checked in the pod. */
+export async function readSandboxFileBase64(
+  client: SandboxApiClient,
+  path: string,
+  maxBytes: number,
+): Promise<{ data: string } | { error: string; tooBig?: boolean }> {
+  // Positional $1 keeps the path out of the script text, so no quoting is needed.
+  const script =
+    `sz=$(stat -c %s -- "$1") || exit 1; ` +
+    `if [ "$sz" -gt ${maxBytes} ]; then echo "$sz" >&2; exit ${TOO_BIG_EXIT}; fi; ` +
+    `base64 -w0 -- "$1"`;
+  const res = await client.execute({ command: "sh", args: ["-c", script, "read_file", path], cwd: "/workspace", env: {} });
+  if (res.exitCode === TOO_BIG_EXIT) {
+    return { error: `${path} is ${res.stderr.trim()} bytes; over the ${maxBytes} byte cap.`, tooBig: true };
+  }
+  if (res.exitCode !== 0) {
+    return { error: (res.stderr || res.stdout).trim() || `exit ${res.exitCode}` };
+  }
+  const data = res.stdout.replace(/\s+/g, "");
+  if (!data) return { error: `${path} is empty.` };
+  return { data };
+}
+
 /** Read `path` from the sandbox as base64, size-checked in the pod so an oversized file is never shipped. */
 export async function handleViewImage(
   wiring: ImageToolsWiring,
@@ -55,26 +78,17 @@ export async function handleViewImage(
   if (!mimeType) {
     return err(`view_image: ${path} is not a supported image (use .png, .jpg, .jpeg, .gif or .webp).`);
   }
-  // Positional $1 keeps the path out of the script text, so no quoting is needed.
-  const script =
-    `sz=$(stat -c %s -- "$1") || exit 1; ` +
-    `if [ "$sz" -gt ${IMAGE_MAX_BYTES} ]; then echo "$sz" >&2; exit ${TOO_BIG_EXIT}; fi; ` +
-    `base64 -w0 -- "$1"`;
   try {
     const client = await wiring.client(conversationId);
-    const res = await client.execute({ command: "sh", args: ["-c", script, "view_image", path], cwd: "/workspace", env: {} });
-    if (res.exitCode === TOO_BIG_EXIT) {
+    const result = await readSandboxFileBase64(client, path, IMAGE_MAX_BYTES);
+    if ("error" in result) {
       return err(
-        `view_image: ${path} is ${res.stderr.trim()} bytes; images over ${IMAGE_MAX_BYTES} bytes cannot be viewed. ` +
-          `Downscale or crop it first (e.g. with ImageMagick: magick in.png -resize 50% out.png).`,
+        result.tooBig
+          ? `view_image: ${result.error} Downscale or crop it first (e.g. with ImageMagick: magick in.png -resize 50% out.png).`
+          : `view_image failed for ${path}: ${result.error}`,
       );
     }
-    if (res.exitCode !== 0) {
-      return err(`view_image failed for ${path}: ${(res.stderr || res.stdout).trim() || `exit ${res.exitCode}`}`);
-    }
-    const data = res.stdout.replace(/\s+/g, "");
-    if (!data) return err(`view_image: ${path} is empty.`);
-    return { content: [{ type: "image", data, mimeType }] };
+    return { content: [{ type: "image", data: result.data, mimeType }] };
   } catch (e) {
     return err(`view_image failed for ${path}: ${(e as Error)?.message ?? e}`);
   }

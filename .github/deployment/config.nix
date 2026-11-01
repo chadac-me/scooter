@@ -17,6 +17,10 @@
     gitlab.enable = true;
     google.enable = true;
     grafana.enable = true;
+    imagegen = {
+      enable = true;
+      backends.bedrock.enable = true;
+    };
     jira.enable = true;
     kagi.enable = true;
     marimo.enable = true;

@@ -352,6 +352,7 @@
             contrib-google = contribs.packages.google.broker;
             contrib-gitlab-webhooks = contribs.packages.gitlab.webhooks;
             contrib-grafana = contribs.packages.grafana.broker;
+            contrib-imagegen = contribs.packages.imagegen.broker;
             contrib-jira = contribs.packages.jira.broker;
             contrib-jira-webhooks = contribs.packages.jira.webhooks;
             contrib-kagi = contribs.packages.kagi.broker;
@@ -507,6 +508,7 @@
             contrib-google = contribs.packages.google.broker;
             contrib-gitlab-webhooks = contribs.packages.gitlab.webhooks;
             contrib-grafana = contribs.packages.grafana.broker;
+            contrib-imagegen = contribs.packages.imagegen.broker;
             contrib-jira = contribs.packages.jira.broker;
             contrib-jira-webhooks = contribs.packages.jira.webhooks;
             contrib-kagi = contribs.packages.kagi.broker;

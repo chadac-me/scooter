@@ -50,7 +50,13 @@ import { createPgMetaStore } from "./session/metaStore.js";
 import { createPgAwaitingInputStore } from "./session/awaitingInputStore.js";
 import { createPvcAssetStore } from "./session/assetStore.js";
 import { createHybridAssetStore } from "./session/hybridAssetStore.js";
-import { createSessionBridge, PRIORITY_INTERRUPT, type AguiEvent, type ApproverIdentity } from "./bridge.js";
+import {
+  createSessionBridge,
+  PRIORITY_INTERRUPT,
+  writeSandboxFile,
+  type AguiEvent,
+  type ApproverIdentity,
+} from "./bridge.js";
 import { createAcpClient, type BlockingTool } from "./acp/client.js";
 import { createRecorder } from "./transcript/recorder.js";
 import { createSandboxExecBackend, connectSandbox } from "./exec/sandboxExec.js";
@@ -80,7 +86,7 @@ import type { HookDef, HookRunner } from "./hooks/types.js";
 import { createPgUserHookSettingsStore } from "./hooks/userHookSettingsStore.js";
 import { mintConvToken } from "./auth/convToken.js";
 import { createMcpEndpoint, resolveConversation } from "./agent/mcpServer.js";
-import type { ImageToolsWiring } from "./agent/imageTools.js";
+import { readSandboxFileBase64, IMAGE_MAX_BYTES, type ImageToolsWiring } from "./agent/imageTools.js";
 import { createBrokerMcpProxy } from "./agent/brokerMcpProxy.js";
 import {
   lastAssistantText,
@@ -1505,6 +1511,14 @@ export async function main(
       setSandboxSize: k8sProvisioner
         ? (id: string, size: string) => k8sProvisioner.setSize(shortId(id), { size }, id)
         : undefined,
+      // Sandbox file I/O for contribs; needs real pod exec, so off in fake mode.
+      writeSandboxFile: config.fakeSandbox
+        ? undefined
+        : (id: string, file: { dir: string; name: string; data: string }) =>
+            writeSandboxFile(createSandboxExecBackend(sandboxClientFor(id)), file.dir, file),
+      readSandboxFile: config.fakeSandbox
+        ? undefined
+        : async (id: string, path: string) => readSandboxFileBase64(sandboxClientFor(id), path, IMAGE_MAX_BYTES),
       // BYO-Claude Settings section (mint one-liner + connected badge), undefined when BYO is off.
       remoteAgent: remoteAgentUi,
       // Manual compaction via a one-off SDK query with the same token/model the conversation

@@ -700,6 +700,57 @@ describe("management API", () => {
     expect((json as any).links[0]).toMatchObject({ source: "slack", resourceType: "thread" });
   });
 
+  // --- sandbox file I/O for contribs ------------------------------------------
+
+  const baseDeps = () => ({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerPermission: async () => {} });
+
+  it("POST /conversations/:id/files writes to the caller's dir and returns the path", async () => {
+    const writeSandboxFile = vi.fn(async (_id: string, f: { dir: string; name: string }) => `${f.dir}/${f.name}`);
+    const api = createManagementApi({ ...baseDeps(), writeSandboxFile });
+    const { status, json } = await call(api, "POST", "/conversations/c1/files", { dir: "/workspace/out", name: "cat.png", data: "YWJj" });
+    expect(status).toBe(201);
+    expect((json as any).path).toBe("/workspace/out/cat.png");
+    expect(writeSandboxFile).toHaveBeenCalledWith("c1", { dir: "/workspace/out", name: "cat.png", data: "YWJj" });
+  });
+
+  it("POST /conversations/:id/files rejects a missing field or a dir outside /workspace", async () => {
+    const writeSandboxFile = vi.fn();
+    const api = createManagementApi({ ...baseDeps(), writeSandboxFile });
+    expect((await call(api, "POST", "/conversations/c1/files", { dir: "/workspace", name: "a" })).status).toBe(400);
+    expect((await call(api, "POST", "/conversations/c1/files", { dir: "/workspace/../etc", name: "a", data: "YQ==" })).status).toBe(400);
+    expect((await call(api, "POST", "/conversations/c1/files", { dir: "/tmp", name: "a", data: "YQ==" })).status).toBe(400);
+    expect(writeSandboxFile).not.toHaveBeenCalled();
+  });
+
+  it("POST /conversations/:id/files 501s when no writer is wired (fake sandbox)", async () => {
+    const api = createManagementApi(baseDeps());
+    const { status } = await call(api, "POST", "/conversations/c1/files", { dir: "/workspace/x", name: "a", data: "YQ==" });
+    expect(status).toBe(501);
+  });
+
+  it("GET /conversations/:id/files?path=... reads through readSandboxFile", async () => {
+    const readSandboxFile = vi.fn(async () => ({ data: "YWJj" }));
+    const api = createManagementApi({ ...baseDeps(), readSandboxFile });
+    const { status, json } = await call(api, "GET", "/conversations/c1/files?path=/workspace/uploads/cat.png");
+    expect(status).toBe(200);
+    expect((json as any).data).toBe("YWJj");
+    expect(readSandboxFile).toHaveBeenCalledWith("c1", "/workspace/uploads/cat.png");
+  });
+
+  it("GET /conversations/:id/files refuses a path outside /workspace and 404s a reader error", async () => {
+    const readSandboxFile = vi.fn(async () => ({ error: "no such file" }));
+    const api = createManagementApi({ ...baseDeps(), readSandboxFile });
+    expect((await call(api, "GET", "/conversations/c1/files?path=/etc/passwd")).status).toBe(400);
+    expect((await call(api, "GET", "/conversations/c1/files?path=/workspace/nope.png")).status).toBe(404);
+    expect(readSandboxFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("GET /conversations/:id/files 501s when no reader is wired (fake sandbox)", async () => {
+    const api = createManagementApi(baseDeps());
+    const { status } = await call(api, "GET", "/conversations/c1/files?path=/workspace/x.png");
+    expect(status).toBe(501);
+  });
+
   // --- web services (Services panel: list + start) ----------------------------
 
   function fakeWebServices(over: Partial<Record<string, unknown>> = {}) {

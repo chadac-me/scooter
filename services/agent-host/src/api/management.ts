@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { posix } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { createRouter, type JsonResult, type Router, type ResolveUser } from "../http/router.js";
@@ -43,6 +44,11 @@ import type { HookDef } from "../hooks/types.js";
 import type { UserHookSettingsStore } from "../hooks/userHookSettingsStore.js";
 
 const log = logger("agent-host");
+
+/** True when `p` is absolute and stays under /workspace after normalizing `..`. */
+export function isWorkspacePath(p: string): boolean {
+  return p.startsWith("/") && (posix.normalize(p) + "/").startsWith("/workspace/");
+}
 const remoteAgentLog = logger("remote-agent");
 
 /** Sources POST /messages refuses, so a sandbox cannot pose as human. */
@@ -161,6 +167,10 @@ export interface ManagementDeps {
   sandboxSizes?: () => Promise<{ sizes: Record<string, SandboxSizePreset>; default: string | null }>;
   /** Record a named size preset for a conversation, rejecting unknown names; absent means the route reports 501. */
   setSandboxSize?: (conversationId: string, size: string) => Promise<void>;
+  /** Write a base64 file into the sandbox at `dir`/<name>; absent in fake mode. */
+  writeSandboxFile?: (conversationId: string, file: { dir: string; name: string; data: string }) => Promise<string>;
+  /** Read a sandbox file as base64; absent in fake mode. */
+  readSandboxFile?: (conversationId: string, path: string) => Promise<{ data: string } | { error: string }>;
   /** Bring-your-own-Claude support for the Settings "Connect your Claude agent" section; absent when REMOTE_AGENT_JOIN_SECRET is unset, so the UI hides it. */
   remoteAgent?: {
     /** Mint a fresh owner-bound join token plus the docker one-liner; async because the session is minted on the controller. */
@@ -898,6 +908,32 @@ export function createManagementApi(deps: ManagementDeps): Router {
       ref: body.ref,
     });
     return { status: 201, json: { ok: true } };
+  });
+
+  // Contribs run outside the sandbox, so file I/O for them goes through here.
+  r.post("/conversations/:id/files", async (ctx) => {
+    if (!deps.writeSandboxFile) return { status: 501, json: { error: "sandbox file writes unavailable" } };
+    const id = await resolveLiveConvId(ctx.params.id);
+    if (!id) return { status: 404, json: { error: "not found" } };
+    const body = await ctx.body<{ dir?: string; name?: string; data?: string }>();
+    if (!body.dir || !body.name || !body.data) {
+      return { status: 400, json: { error: "dir, name and data required" } };
+    }
+    if (!isWorkspacePath(body.dir)) return { status: 400, json: { error: "dir must be under /workspace" } };
+    const path = await deps.writeSandboxFile(id, { dir: body.dir, name: body.name, data: body.data });
+    return { status: 201, json: { path } };
+  });
+
+  r.get("/conversations/:id/files", async (ctx) => {
+    if (!deps.readSandboxFile) return { status: 501, json: { error: "sandbox file reads unavailable" } };
+    const id = await resolveLiveConvId(ctx.params.id);
+    if (!id) return { status: 404, json: { error: "not found" } };
+    const path = ctx.query.get("path");
+    if (!path) return { status: 400, json: { error: "path required" } };
+    if (!isWorkspacePath(path)) return { status: 400, json: { error: "path must be under /workspace" } };
+    const result = await deps.readSandboxFile(id, path);
+    if ("error" in result) return { status: 404, json: { error: result.error } };
+    return { json: { data: result.data } };
   });
 
   // Web services (marimo/xterm/vscode) declared in the sandbox and reverse-proxied at
