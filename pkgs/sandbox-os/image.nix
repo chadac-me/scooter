@@ -83,6 +83,8 @@ let
     # The built-in web services are declared by default so they are startable on
     # demand, with mkDefault so a deployment can turn one off.
     webServices.terminal.enable = lib.mkDefault true;
+    # Tramp and ssh clients reach the sandbox through it.
+    webServices.ssh.enable = lib.mkDefault true;
   });
 
   toplevel = nixos.config.system.build.toplevel;
