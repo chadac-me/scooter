@@ -519,6 +519,10 @@ check-skill-lock:
 check-conv-token-vector:
     @scripts/check-conv-token-vector.sh
 
+# Only the audited paths may grant access to a user's personal secrets.
+check-user-grants:
+    @scripts/check-user-grants.sh
+
 # --- Database schema (Atlas) ------------------------------------------------
 # The shared Postgres schema is declared in lib/sql/<db>/schema.sql, with Atlas
 # owning the migrations under lib/sql/<db>/migrations and each recipe spinning its
@@ -586,7 +590,7 @@ db-validate:
     done
 
 # Everything CI runs.
-ci: check-flake check-manifests check-stubs check-image-coverage check-contrib-coverage check-skill-lock check-conv-token-vector check-lockfiles check-npm-hashes check-shell-syntax lint db-generate-check db-migrate-check test-unit
+ci: check-flake check-manifests check-stubs check-image-coverage check-contrib-coverage check-skill-lock check-conv-token-vector check-user-grants check-lockfiles check-npm-hashes check-shell-syntax lint db-generate-check db-migrate-check test-unit
     @echo "✅ ci (fast) passed — run 'just test' for cluster + e2e tiers"
 
 # Build + serve the docs site locally (mkdocs + the generated kubenix option pages).
