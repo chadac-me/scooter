@@ -35,10 +35,10 @@ flowchart LR
     ext --> webhooks --> router
     sched --> router
     router --> host1 & host2
-    host1 -->|Agent A| sb1
-    host1 -->|Agent B| sb2
-    host2 -->|Agent C| sb3
-    host2 -->|Agent D| sb4
+    host1 -->|agent A| sb1
+    host1 -->|agent B| sb2
+    host2 -->|agent C| sb3
+    host2 -->|agent D| sb4
     sandboxes --> broker
     hosts --> broker
     broker --> world
