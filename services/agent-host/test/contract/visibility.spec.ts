@@ -108,7 +108,7 @@ function setup(initial: Partial<Conversation> = {}, opts: { readAccessFails?: bo
   const sessions = {
     get: (id: string) => convs.get(id),
     ensureReadable: vi.fn(async (id: string) => convs.has(id)),
-    getByShortId: vi.fn(async (h: string) => [...convs.values()].find((c) => `short-${c.id}` === h)),
+    getBySandboxKey: vi.fn(async (h: string) => [...convs.values()].find((c) => `short-${c.id}` === h)),
     enqueueByThread: vi.fn(async () => {}),
     start: vi.fn(async (threadId: string, model?: string, owner?: string, o?: { visibility?: Visibility }) => {
       const c = conv({ id: threadId, threadId, model, owner, visibility: o?.visibility });
