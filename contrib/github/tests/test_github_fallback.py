@@ -50,7 +50,7 @@ async def test_a_missing_conversation_is_replaced(linked):
     deliver.return_value = gh.SendOutcome.NOT_FOUND
     await gh._handle_comment(_comment())
     store.assert_awaited_once_with(
-        "github", "pull_request", "chadac/scooter#799", gh.PENDING_CONVERSATION_ID,
+        "github", "pull_request", "chadac-me/scooter#799", gh.PENDING_CONVERSATION_ID,
     )
     # Let the create task scheduled by the handler run.
     await asyncio.sleep(0)
