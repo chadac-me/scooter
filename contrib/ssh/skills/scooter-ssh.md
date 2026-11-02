@@ -9,8 +9,9 @@ there is no key file to find and `ssh-add` cannot add one.
   key (`ssh-add -L` prints "The agent has no identities"). That is deliberate:
   anyone can prompt a shared conversation, so it never acts as one person.
   Don't hunt for another credential.
-- **Going private.** When the task needs the owner's key and the conversation is
-  shared, call `make_conversation_private`; the key appears within seconds.
+- **Going private.** `conversation_status` says whether this conversation is
+  shared or private. When the task needs the owner's key and it is shared, call
+  `make_conversation_private`; the key appears within seconds.
   Only the owner can make it shared again, from the UI. If anyone other than
   the owner has prompted this conversation (forwarded comments and messages
   from other people count), or you can't tell, first ask the owner to approve,

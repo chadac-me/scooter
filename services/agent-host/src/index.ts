@@ -89,6 +89,7 @@ import { createMemoryIdentityRegistry, createPgIdentityRegistry } from "./sessio
 import { mintConvToken } from "./auth/convToken.js";
 import { createMcpEndpoint, resolveConversation } from "./agent/mcpServer.js";
 import { readSandboxFileBase64, IMAGE_MAX_BYTES, type ImageToolsWiring } from "./agent/imageTools.js";
+import type { ConversationToolsWiring } from "./agent/conversationTools.js";
 import { createBrokerMcpProxy } from "./agent/brokerMcpProxy.js";
 import { createSandboxMcpProxy } from "./agent/sandboxMcpProxy.js";
 import { createMcpServerRegistry, offeredMcpServers, type OfferedMcpServer } from "./agent/mcpServerRegistry.js";
@@ -1180,19 +1181,6 @@ export async function main(
     setTitle: (id: string, title: string) => sessions.setTitle(id, title, { force: true }),
   };
 
-  // make_conversation_private: shared → private only; going shared stays the owner's PATCH.
-  const visibilityToolsWiring = {
-    rootOf: (id: string) => {
-      let c = sessions.get(id as SessionId);
-      while (c?.parentId) c = sessions.get(c.parentId);
-      return c?.id;
-    },
-    owner: (id: string) => sessions.get(id as SessionId)?.owner,
-    currentVisibility: async (id: string): Promise<Visibility> =>
-      (await store.readAccess?.(id as SessionId))?.visibility ?? sessions.get(id as SessionId)?.visibility ?? "shared",
-    makePrivate: (id: string) => sessions.setVisibility(id as SessionId, "private"),
-  };
-
   // Sandbox right-sizing tools; absent for a fake sandbox.
   const resourceToolsWiring = k8sProvisioner
     ? {
@@ -1207,6 +1195,16 @@ export async function main(
         stopSandbox: (id: string) => sessions.stopSandbox!(id as SessionId),
       }
     : undefined;
+
+  // conversation_status, and make_conversation_private: shared → private only; going shared
+  // stays the owner's PATCH.
+  const conversationToolsWiring: ConversationToolsWiring = {
+    get: (id) => sessions.get(id as SessionId),
+    currentVisibility: async (id) =>
+      (await store.readAccess?.(id as SessionId))?.visibility ?? sessions.get(id as SessionId)?.visibility ?? "shared",
+    makePrivate: (id) => sessions.setVisibility(id as SessionId, "private"),
+    resources: resourceToolsWiring?.currentResources,
+  };
 
   // One HTTP client to the scheduler service, shared by the agent MCP tools and the UI
   // settings proxy, with every call scoped to an owner.
@@ -1284,7 +1282,7 @@ export async function main(
           subagents: subagentManager,
           titles: titleToolsWiring,
           images: imageToolsWiring,
-          visibility: visibilityToolsWiring,
+          conversation: conversationToolsWiring,
         })
       : undefined;
 

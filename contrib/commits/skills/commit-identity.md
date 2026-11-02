@@ -32,5 +32,6 @@ to Settings. Don't work around it with `git config user.*`, `-c user.email=…` 
 
 In shared conversations these tools aren't offered. Commits are authored by the bot,
 and the conversation's owner is credited in a `Co-authored-by` trailer.
-A `GIT_AUTHOR_NAME` ending in `[bot]` is the sign you are in one. If the user wants
-commits under their own name, see `make_conversation_private` in the `scooter-ssh` skill.
+`conversation_status` shows which kind this is (so does a `GIT_AUTHOR_NAME` ending in
+`[bot]`). If the user wants commits under their own name, see
+`make_conversation_private` in the `scooter-ssh` skill.
