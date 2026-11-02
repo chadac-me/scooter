@@ -656,9 +656,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           pendingQueue: e.pendingQueue,
         }) ?? Promise.resolve();
 
-  // The router writes star and title without telling this replica.
+  // The router and other replicas write these without telling this one.
   const refreshRouterMeta = async (e: Entry): Promise<void> => {
-    const m = await store.readRouterMeta?.(e.id);
+    const [m, access] = await Promise.all([store.readRouterMeta?.(e.id), store.readAccess?.(e.id)]);
+    if (access) {
+      if (access.owner) e.owner = access.owner;
+      e.visibility = access.visibility;
+    }
     if (!m) return;
     e.starred = m.starred;
     e.userTitled = m.userTitled;

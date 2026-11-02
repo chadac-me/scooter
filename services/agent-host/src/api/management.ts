@@ -461,12 +461,9 @@ export function createManagementApi(deps: ManagementDeps): Router {
     let conv = sessions.get(ctx.params.id);
     if (!conv && (await sessions.ensureReadable(ctx.params.id))) conv = sessions.get(ctx.params.id);
     if (!conv) return { status: 404, json: { error: "not found" } };
-    // Star and title are router-written; serve the durable values.
+    // Star, title and visibility may be written elsewhere; serve the durable values.
     await sessions.refreshRouterMeta(conv.id).catch(() => {});
-    // Another replica may have changed the visibility; the store holds the truth.
-    const access = await store.readAccess?.(conv.id).catch(() => undefined);
-    const v = view(sessions.get(conv.id) ?? conv);
-    return { json: access ? { ...v, owner: access.owner, visibility: access.visibility } : v };
+    return { json: view(sessions.get(conv.id) ?? conv) };
   });
 
   r.del("/conversations/:id", async (ctx) => {
