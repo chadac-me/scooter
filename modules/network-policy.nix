@@ -4,7 +4,8 @@
 # listeners trust ingress identity headers, so a sandbox must reach only the
 # SA-token-authenticated surfaces (broker, forge proxy, router self-access), DNS,
 # and the public internet. Ingress to a sandbox is limited to the platform's own
-# pods, which also blocks sandbox-to-sandbox traffic.
+# pods, which also blocks sandbox-to-sandbox traffic. Agent-host pods accept
+# connections only from the router and conversation-controller.
 #
 # On by default; set `scooter.networkPolicy.enable = false` to manage your own.
 # Needs a CNI that enforces NetworkPolicy (k3s's built-in controller, Calico,
@@ -36,7 +37,8 @@ in
       type = types.bool;
       default = true;
       description = ''
-        Render the NetworkPolicies that isolate sandbox pods. Disable only if you
+        Render the NetworkPolicies that isolate sandbox pods and admit only the
+        router and conversation-controller to agent-host pods. Disable only if you
         supply equivalent policies yourself: without them a sandbox can reach the
         agent-host, router and Postgres directly and impersonate any user.
       '';
@@ -86,6 +88,18 @@ in
       '';
       description = "Extra NetworkPolicy egress rules for sandbox pods, e.g. an in-network Nix cache.";
     };
+    agentHostExtraIngress = mkOption {
+      type = types.listOf types.attrs;
+      default = [ ];
+      example = lib.literalExpression ''
+        [ { from = [ { podSelector.matchLabels.app = "metrics-scraper"; } ]; ports = [ { protocol = "TCP"; port = 8080; } ]; } ]
+      '';
+      description = ''
+        Extra NetworkPolicy ingress rules for agent-host pods. By default only the
+        conversation router and conversation-controller may connect; every other
+        caller goes through the router, which authenticates it.
+      '';
+    };
   };
 
   config = lib.mkIf npcfg.enable {
@@ -114,6 +128,22 @@ in
           ports = [ (tcp "self") ];
         }
         ++ npcfg.extraEgress;
+      };
+    };
+
+    # Agent-host trusts identity headers, so only the router that sets them connects.
+    kubernetes.resources.networkPolicies.agent-host-ingress = {
+      metadata = { name = "agent-host-ingress"; namespace = cfg.namespace; };
+      spec = {
+        podSelector.matchLabels.app = "agent-host";
+        policyTypes = [ "Ingress" ];
+        ingress = [{
+          from = [
+            { podSelector.matchLabels.app = "conversation-router"; }
+            # Revive pushes dial the newly assigned pod's IP directly.
+            { podSelector.matchLabels.app = "conversation-controller"; }
+          ];
+        }] ++ npcfg.agentHostExtraIngress;
       };
     };
   };
