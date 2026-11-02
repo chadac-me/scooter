@@ -193,7 +193,7 @@ export interface ConversationStore {
   /** Persist conversation metadata so the list survives a restart; optional. */
   saveMeta?(meta: ConversationMeta): Promise<void>;
   /** The router-owned star and title as persisted; optional. */
-  readRouterMeta?(id: SessionId): Promise<RouterMeta | undefined>;
+  readRouterMeta?(id: SessionId): Promise<Partial<RouterMeta> | undefined>;
   /** Set the visibility of `rootId` and every descendant in one write; optional. */
   setVisibility?(rootId: SessionId, visibility: Visibility): Promise<void>;
   /** Read a conversation's owner and visibility fresh from the shared store, since another
@@ -660,11 +660,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const refreshRouterMeta = async (e: Entry): Promise<void> => {
     const m = await store.readRouterMeta?.(e.id);
     if (!m) return;
-    if (m.owner) e.owner = m.owner;
-    e.visibility = m.visibility;
-    e.starred = m.starred;
-    e.userTitled = m.userTitled;
-    if (m.userTitled) e.title = m.title;
+    // An absent or undefined key leaves the entry's value unchanged.
+    if (m.owner !== undefined) e.owner = m.owner;
+    if (m.visibility !== undefined) e.visibility = m.visibility;
+    if (m.starred !== undefined) e.starred = m.starred;
+    if (m.userTitled !== undefined) e.userTitled = m.userTitled;
+    if (e.userTitled && m.title !== undefined) e.title = m.title;
   };
 
   /** Events dropped by the ownership fence, per conversation — for sampled logging only. */

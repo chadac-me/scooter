@@ -82,7 +82,7 @@ describe("SessionManager visibility", () => {
   it("refreshRouterMeta picks up a visibility another replica stored", async () => {
     let stored: "shared" | "private" = "shared";
     const s = store({
-      readRouterMeta: async () => ({ title: "t1", userTitled: false, starred: false, owner: "alice", visibility: stored }),
+      readRouterMeta: async () => ({ owner: "alice", visibility: stored }),
     });
     const sessions = createSessionManager({ provisioner: provisioner(), store: s });
     const c = await sessions.start("t1", undefined, "alice");
