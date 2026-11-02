@@ -1180,6 +1180,19 @@ export async function main(
     setTitle: (id: string, title: string) => sessions.setTitle(id, title, { force: true }),
   };
 
+  // make_conversation_private: shared → private only; going shared stays the owner's PATCH.
+  const visibilityToolsWiring = {
+    rootOf: (id: string) => {
+      let c = sessions.get(id as SessionId);
+      while (c?.parentId) c = sessions.get(c.parentId);
+      return c?.id;
+    },
+    owner: (id: string) => sessions.get(id as SessionId)?.owner,
+    currentVisibility: async (id: string): Promise<Visibility> =>
+      (await store.readAccess?.(id as SessionId))?.visibility ?? sessions.get(id as SessionId)?.visibility ?? "shared",
+    makePrivate: (id: string) => sessions.setVisibility(id as SessionId, "private"),
+  };
+
   // Sandbox right-sizing tools; absent for a fake sandbox.
   const resourceToolsWiring = k8sProvisioner
     ? {
@@ -1271,6 +1284,7 @@ export async function main(
           subagents: subagentManager,
           titles: titleToolsWiring,
           images: imageToolsWiring,
+          visibility: visibilityToolsWiring,
         })
       : undefined;
 
