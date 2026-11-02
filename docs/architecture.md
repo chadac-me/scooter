@@ -10,14 +10,11 @@ the broker, which holds the credentials.
 flowchart LR
     user(["User"])
     ext(["GitHub · GitLab<br/>Slack · Jira"])
-    byocbox(["BYOC container"])
 
     ui["UI"]
     webhooks["webhooks"]
     sched["scheduler"]
     router["conversation-<br/>router"]
-    ctrl["conversation-<br/>controller"]
-    byocctl["byoc-<br/>controller"]
 
     subgraph hosts["agent-host replicas"]
         host1["agent-host 1"]
@@ -37,11 +34,11 @@ flowchart LR
     user --> ui --> router
     ext --> webhooks --> router
     sched --> router
-    ctrl -.-> hosts
     router --> host1 & host2
-    host1 -->|exec| sb1 & sb2
-    host2 -->|exec| sb3 & sb4
-    byocbox <--> byocctl <--> hosts
+    host1 -->|conversation A| sb1
+    host1 -->|conversation B| sb2
+    host2 -->|conversation C| sb3
+    host2 -->|conversation D| sb4
     sandboxes --> broker
     hosts --> broker
     broker --> world
