@@ -13,7 +13,7 @@ def _comment(body="please also fix the docs"):
         "action": "created",
         "comment": {"id": 1, "body": body, "user": {"login": "chadac"}},
         "issue": {"number": 799, "title": "Some PR", "pull_request": {"url": "u"}},
-        "repository": {"owner": {"login": "chadac"}, "name": "scooter"},
+        "repository": {"owner": {"login": "chadac-me"}, "name": "scooter"},
     }
 
 
