@@ -256,6 +256,17 @@ describe("management API", () => {
   });
 
 
+  it("GET /conversations/:id serves the stored visibility, not another replica's stale copy", async () => {
+    const api = createManagementApi({
+      sessions: fakeSessions(),
+      store: { ...fakeStore([]), readAccess: async () => ({ owner: "chadac", visibility: "private" as const }) },
+      server: stubServer,
+      answerPermission: async () => {},
+    });
+    const { json } = await call(api, "GET", "/conversations/c1");
+    expect(json).toMatchObject({ owner: "chadac", visibility: "private" });
+  });
+
   it("GET /conversations/:id/resources returns the sandbox size when wired", async () => {
     const size = { requests: { cpu: "500m", memory: "1Gi" }, limits: { memory: "4Gi" } };
     const api = createManagementApi({
