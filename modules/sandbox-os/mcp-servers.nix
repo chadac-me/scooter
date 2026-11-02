@@ -1,9 +1,9 @@
 # mcpServers.<name>: declarative in-pod MCP servers registered with the agent.
 # One option renders both the systemd unit `mcp-<name>` and the discovery
 # manifest /run/scooter/mcp-servers.json the agent-host reads to learn each
-# server's port. The agent-host proxies to podIP:port, so like web services they
-# listen on the pod network behind the sandbox-isolation NetworkPolicy; unlike
-# them, units are restartIfChanged and ports are auto-assigned.
+# server's port. The agent-host proxies to podIP:port; the sandbox-isolation
+# NetworkPolicy admits only the agent-host to their reserved port range. Unlike
+# web services, units are restartIfChanged and ports are auto-assigned.
 
 { config, lib, pkgs, ... }:
 
@@ -14,8 +14,9 @@ let
   unitName = name: "mcp-${name}";
 
   # Auto-assigned ports start here; a rebuild can hand a port to a different server, so the agent-host rebuilds its session whenever the offered set changes.
-  basePort = 9700;
-  maxAutoPorts = 100;
+  range = import ./mcp-port-range.nix;
+  basePort = range.first;
+  maxAutoPorts = range.last - range.first + 1;
 
   # Names wanting an auto port, sorted so assignment is a pure function of the enabled set.
   autoNames = lib.sort (a: b: a < b)
@@ -28,8 +29,6 @@ let
        else basePort + (lib.lists.findFirstIndex (n: n == name) 0 autoNames);
 
   resolvedPorts = lib.mapAttrsToList (name: _: portOf name) enabled;
-  webServicePorts = lib.mapAttrsToList (_: s: s.port)
-    (lib.filterAttrs (_: s: s.enable) (config.webServices or { }));
 
   # Read by the agent-host McpServerRegistry; holds no credential.
   manifestJSON = builtins.toJSON {
@@ -200,10 +199,11 @@ let
       };
 
       port = lib.mkOption {
-        type = lib.types.nullOr lib.types.port;
+        type = lib.types.nullOr (lib.types.ints.between range.first range.last);
         default = null;
         description = ''
-          In-pod TCP port. Leave null (the default) to have one assigned from 9700;
+          In-pod TCP port, within 9700-9799: the NetworkPolicy lets only the agent-host
+          reach that range. Leave null (the default) to have one assigned from 9700;
           the manifest tells the agent-host which one it got.
 
           Assignment is by index in the sorted set of auto-port servers, so adding a
@@ -279,10 +279,18 @@ in
     description = "Declarative in-pod MCP servers, registered with the agent on its next message.";
   };
 
-  config = lib.mkIf (enabled != { }) {
+  config = lib.mkMerge [
+  {
+    # Always rendered, so a missing manifest means unreadable, never none declared.
+    systemd.tmpfiles.rules = [
+      "d /run/scooter 0755 root root -"
+      "L+ /run/scooter/mcp-servers.json - - - - ${manifestFile}"
+    ];
+  }
+  (lib.mkIf (enabled != { }) {
     environment.systemPackages = [ scooterMcp ];
 
-    # The agent-host dials podIP:port; the NetworkPolicy keeps other sandboxes out.
+    # The agent-host dials podIP:port; the NetworkPolicy admits only it to this range.
     networking.firewall.allowedTCPPorts = resolvedPorts;
 
     systemd.services = lib.mapAttrs' (name: s:
@@ -339,27 +347,15 @@ in
       };
     };
 
-    systemd.tmpfiles.rules = [
-      "d /run/scooter 0755 root root -"
-      "L+ /run/scooter/mcp-servers.json - - - - ${manifestFile}"
-    ];
-
     assertions = [
       {
-        # Two explicit ports can collide with each other, which the web-service check below would not see.
+        # Explicit ports can collide with each other or with auto-assigned ones.
         assertion = lib.length resolvedPorts == lib.length (lib.unique resolvedPorts);
         message =
           "mcpServers: enabled servers must have unique ports (resolved: "
           + lib.concatMapStringsSep ", " toString (lib.sort (a: b: a < b) resolvedPorts)
           + "). Two servers set the same explicit `port`, or an explicit port "
           + "collides with an auto-assigned one — leave `port` unset to get a free one.";
-      }
-      {
-        assertion = lib.intersectLists resolvedPorts webServicePorts == [ ];
-        message =
-          "mcpServers: port(s) "
-          + lib.concatMapStringsSep ", " toString (lib.intersectLists resolvedPorts webServicePorts)
-          + " collide with webServices. Both share the pod's port space.";
       }
       {
         assertion = lib.length autoNames <= maxAutoPorts;
@@ -374,5 +370,6 @@ in
       assertion = (s.command == null) != (s.stdioCommand == null);
       message = "mcpServers.${name}: set exactly one of `command` or `stdioCommand`.";
     }) enabled;
-  };
+  })
+  ];
 }

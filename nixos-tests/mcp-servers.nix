@@ -74,8 +74,8 @@ pkgs.testers.runNixOSTest {
     };
     mcpServers.gamma = {
       enable = true;
-      port = 9911;
-      command = "${fakeServer} 0.0.0.0 9911";
+      port = 9790;
+      command = "${fakeServer} 0.0.0.0 9790";
       autoStart = false;
     };
     # A stdio server through the default stdioWrapper.
@@ -95,7 +95,7 @@ pkgs.testers.runNixOSTest {
     # 1. Ports are auto-assigned by sorted index from the 9700 base, and an explicit port is left alone.
     assert srv["alpha"]["port"] == 9700, srv
     assert srv["beta"]["port"] == 9701, srv
-    assert srv["gamma"]["port"] == 9911, srv
+    assert srv["gamma"]["port"] == 9790, srv
     assert srv["time"]["port"] == 9702, srv
     assert srv["alpha"]["unit"] == "mcp-alpha", srv
     assert srv["alpha"]["description"] == "Alpha test server", srv
@@ -114,7 +114,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed("ss -ltn | grep -qE '0\\.0\\.0\\.0:9700'")
     machine.succeed("systemctl is-active --quiet firewall")
     machine.succeed("iptables -S nixos-fw | grep -E -- '--dport 9700 .*-j nixos-fw-accept'")
-    machine.succeed("iptables -S nixos-fw | grep -E -- '--dport 9911 .*-j nixos-fw-accept'")
+    machine.succeed("iptables -S nixos-fw | grep -E -- '--dport 9790 .*-j nixos-fw-accept'")
 
     # 4a. The default stdioWrapper serves a stdio server as stateless streamable HTTP.
     machine.wait_for_open_port(9702, timeout=180)

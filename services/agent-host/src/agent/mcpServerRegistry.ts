@@ -50,6 +50,7 @@ export interface OfferedMcpServer {
 /** The exec surface needed here, a subset of SandboxApiClient. */
 export interface ExecLike {
   execute(req: { command: string; args?: string[] }): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  download(path: string): Promise<string>;
 }
 
 export interface McpServerRegistryDeps {
@@ -118,8 +119,15 @@ export function fingerprintOffered(offered: OfferedMcpServer[]): string {
   return JSON.stringify(offered.map((o) => [o.name, o.url, o.headers.map((h) => h.name)]));
 }
 
-/** Prints the manifest, or nothing if absent; fails if unreadable. */
-const READ_MANIFEST = `cat ${MCP_MANIFEST_PATH} 2>/dev/null || ! test -e ${MCP_MANIFEST_PATH}`;
+/** How many entries the manifest lists, or -1 if it is not a manifest. */
+function listedCount(raw: string): number {
+  try {
+    const data = JSON.parse(raw) as { servers?: unknown };
+    return data && Array.isArray(data.servers) ? data.servers.length : -1;
+  } catch {
+    return -1;
+  }
+}
 
 export function createMcpServerRegistry(
   deps: McpServerRegistryDeps,
@@ -140,15 +148,15 @@ export function createMcpServerRegistry(
     const entry = cache.get(conversationId);
     if (!force && entry && now() - entry.at < ttlMs) return entry.descriptors;
     const exec = await execFor(conversationId);
-    const r = await exec.execute({ command: "sh", args: ["-c", READ_MANIFEST] });
-    if (r.exitCode !== 0) throw new Error(`reading ${MCP_MANIFEST_PATH}: ${r.stderr.trim() || `exit ${r.exitCode}`}`);
-    const descriptors = parseMcpManifest(r.stdout);
-    // Unparseable content is a broken render, not none declared.
-    if (r.stdout.trim() !== "" && descriptors.length === 0) {
-      log.warn("the MCP manifest parsed to no servers; check the rendered file", {
+    // The image always renders the manifest, so a failed read is a blip, not none declared.
+    const raw = await exec.download(MCP_MANIFEST_PATH);
+    const descriptors = parseMcpManifest(raw);
+    if (listedCount(raw) !== descriptors.length) {
+      log.warn("the MCP manifest has entries the agent-host cannot use; check the rendered file", {
         conversation_id: conversationId,
         path: MCP_MANIFEST_PATH,
-        bytes: r.stdout.length,
+        bytes: raw.length,
+        usable: descriptors.length,
       });
     }
     cache.set(conversationId, { descriptors, at: now() });

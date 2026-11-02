@@ -35,11 +35,13 @@ const manifestOf = (...servers: Partial<McpServerDescriptor>[]) =>
   JSON.stringify({ servers: servers.map((s) => entry(s)) });
 
 const MANIFEST = manifestOf({});
+/** What mcp-servers.nix renders when nothing is declared. */
+const EMPTY = JSON.stringify({ servers: [] });
 
 type Req = { command: string; args?: string[] };
 type Res = { stdout: string; stderr: string; exitCode: number };
 
-/** A pod: `sh` reads the manifest, `systemctl is-active` reports `states`, anything else succeeds. */
+/** A pod: `download` reads the manifest (null = missing), `systemctl is-active` reports `states`, anything else succeeds. */
 function fakePod(opts: { manifest?: string | null; states?: Record<string, string>; on?: (req: Req) => Res | undefined } = {}) {
   const calls: Req[] = [];
   const exec: ExecLike = {
@@ -47,11 +49,6 @@ function fakePod(opts: { manifest?: string | null; states?: Record<string, strin
       calls.push(req);
       const custom = opts.on?.(req);
       if (custom) return custom;
-      if (req.command === "sh") {
-        expect(req.args?.join(" ")).toContain(MCP_MANIFEST_PATH);
-        // null = absent: the read script prints nothing and exits 0.
-        return { stdout: opts.manifest === undefined ? MANIFEST : (opts.manifest ?? ""), stderr: "", exitCode: 0 };
-      }
       if (req.command === "systemctl") {
         const units = (req.args ?? []).slice(1);
         const lines = units.map((u) => opts.states?.[u] ?? "active");
@@ -59,8 +56,18 @@ function fakePod(opts: { manifest?: string | null; states?: Record<string, strin
       }
       return { stdout: "", stderr: "", exitCode: 0 };
     }),
+    download: vi.fn(async (path: string): Promise<string> => {
+      const req = { command: "download", args: [path] };
+      calls.push(req);
+      expect(path).toBe(MCP_MANIFEST_PATH);
+      const custom = opts.on?.(req);
+      if (custom && custom.exitCode !== 0) throw new Error(`download ${path}: ${custom.stderr}`);
+      if (custom) return custom.stdout;
+      if (opts.manifest === null) throw new Error(`download ${path}: No such file or directory`);
+      return opts.manifest ?? MANIFEST;
+    }),
   };
-  return { exec, calls, reads: () => calls.filter((c) => c.command === "sh").length };
+  return { exec, calls, reads: () => calls.filter((c) => c.command === "download").length };
 }
 
 function make(exec: ExecLike, opts?: { ttlMs?: number; now?: () => number }) {
@@ -104,15 +111,21 @@ describe("McpServerRegistry", () => {
     expect((await reg.list("conv-1")).map((s) => s.name)).toEqual(["alpha"]);
   });
 
-  it("treats an absent manifest as none declared, without failing", async () => {
-    const reg = make(fakePod({ manifest: null }).exec);
+  it("treats an empty manifest as none declared", async () => {
+    const reg = make(fakePod({ manifest: EMPTY }).exec);
     expect(await reg.list("conv-1")).toEqual([]);
     await expect(reg.running("conv-1")).resolves.toEqual([]);
   });
 
-  it("caches an absent manifest too, so a sandbox without servers costs one read per TTL", async () => {
+  it("treats a missing manifest as unreadable, since the image always renders one", async () => {
+    const reg = make(fakePod({ manifest: null }).exec);
+    expect(await reg.list("conv-1")).toEqual([]);
+    await expect(reg.running("conv-1")).rejects.toThrow(/No such file/);
+  });
+
+  it("caches an empty manifest too, so a sandbox without servers costs one read per TTL", async () => {
     // Most sandboxes declare none; the resolver runs every message.
-    const pod = fakePod({ manifest: null });
+    const pod = fakePod({ manifest: EMPTY });
     const reg = make(pod.exec);
     await reg.running("conv-1");
     await reg.running("conv-1");
@@ -143,7 +156,7 @@ describe("McpServerRegistry", () => {
 
   it("does not cache a FAILED read", async () => {
     let broken = true;
-    const pod = fakePod({ on: (req) => (req.command === "sh" && broken ? { stdout: "", stderr: "Permission denied", exitCode: 1 } : undefined) });
+    const pod = fakePod({ on: (req) => (req.command === "download" && broken ? { stdout: "", stderr: "Permission denied", exitCode: 1 } : undefined) });
     const reg = make(pod.exec);
     expect(await reg.list("conv-1")).toEqual([]);
     broken = false;
@@ -151,7 +164,7 @@ describe("McpServerRegistry", () => {
   });
 
   it("running() THROWS when the pod cannot be read, so a blip is not 'servers removed'", async () => {
-    const pod = fakePod({ on: (req) => (req.command === "sh" ? { stdout: "", stderr: "Permission denied", exitCode: 1 } : undefined) });
+    const pod = fakePod({ on: (req) => (req.command === "download" ? { stdout: "", stderr: "Permission denied", exitCode: 1 } : undefined) });
     await expect(make(pod.exec).running("conv-1")).rejects.toThrow(/Permission denied/);
   });
 
