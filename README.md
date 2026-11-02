@@ -7,7 +7,7 @@
 
 Scooter is a self-hosted, open source, Kubernetes-based, agent chat platform. Scooter agents are superpowered developers with full power over their dev environment while being fully locked down and under your control. Agents can install tools, spawn web services, collaborate via [VS Code in the browser](https://github.com/coder/code-server), check out, build and contribute back to your software projects.
 
-![A Scooter conversation: the agent reports on a pull request it opened, with the sandbox's web services in the side panel](https://raw.githubusercontent.com/chadac/scooter/assets/readme/scooter-browser-sample.png)
+![A Scooter conversation: the agent reports on a pull request it opened, with the sandbox's web services in the side panel](https://raw.githubusercontent.com/chadac-me/scooter/assets/readme/scooter-browser-sample.png)
 
 The key distinguishing feature of Scooter is that it is designed to be **extensible from the ground up**: You can customize everything Scooter can do, from the skills available to it, the services and tools that each agent has access to, its integrations with other services and permission-controlled access, and any custom Scooter chat UI components that you would ever need.
 
