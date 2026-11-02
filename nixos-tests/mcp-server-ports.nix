@@ -80,9 +80,14 @@ pkgs.runCommand "dev-env-mcp-server-ports"
       mcpServers.c = { enable = true; port = 9911; command = "${fakeCmd}"; }; }
   ''})
   echo "ok: $ok"
-  if echo "$ok" | grep -qE "unique ports|collide with webServices|exactly one"; then
+  if echo "$ok" | grep -qE "unique ports|collide with webServices|exactly one|names may use"; then
     echo "FAIL: the happy path tripped an mcpServers assertion: $ok"; exit 1
   fi
+
+  # (6) A name that cannot appear in a tool name.
+  badname=$(${failedFor ''{ mcpServers."my.server" = { enable = true; command = "${fakeCmd}"; }; }''})
+  echo "badname: $badname"
+  echo "$badname" | grep -q "names may use" || { echo "FAIL: a name with '.' was accepted"; exit 1; }
 
   touch $out
 ''
