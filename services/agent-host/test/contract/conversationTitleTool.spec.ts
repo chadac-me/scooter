@@ -50,7 +50,7 @@ const inMemoryStore = (): ConversationStore => {
 
 /** A user rename, which the conversation-router writes straight to the row. */
 const renameAsUser = (id: SessionId, title: string) =>
-  routerRows.set(id, { title, userTitled: true, starred: false });
+  routerRows.set(id, { title, userTitled: true, starred: false, visibility: "shared" });
 
 /** A conversation already named by its opening marker, plus the wiring index.ts builds. */
 async function titledConversation(): Promise<{

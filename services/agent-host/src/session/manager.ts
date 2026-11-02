@@ -37,8 +37,8 @@ const MODEL_SWITCH_NUDGE =
 /** The title a conversation is created with, before the agent's <title> marker names it. */
 export const PLACEHOLDER_TITLE = "New chat";
 
-/** The conversation fields only the conversation-router writes. */
-export interface RouterMeta {
+/** The stored fields the router or another replica may change behind this one. */
+export interface RouterMeta extends AccessFacts {
   title: string;
   userTitled: boolean;
   starred: boolean;
@@ -658,12 +658,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
   // The router and other replicas write these without telling this one.
   const refreshRouterMeta = async (e: Entry): Promise<void> => {
-    const [m, access] = await Promise.all([store.readRouterMeta?.(e.id), store.readAccess?.(e.id)]);
-    if (access) {
-      if (access.owner) e.owner = access.owner;
-      e.visibility = access.visibility;
-    }
+    const m = await store.readRouterMeta?.(e.id);
     if (!m) return;
+    if (m.owner) e.owner = m.owner;
+    e.visibility = m.visibility;
     e.starred = m.starred;
     e.userTitled = m.userTitled;
     if (m.userTitled) e.title = m.title;

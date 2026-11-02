@@ -38,7 +38,7 @@ const fakeProvisioner = (): SandboxProvisioner => {
 /** Star and title as the conversation-router writes them to the row. */
 const routerRows = new Map<SessionId, RouterMeta>();
 const routerWrite = (id: SessionId, patch: Partial<RouterMeta>) =>
-  routerRows.set(id, { title: "", userTitled: false, starred: false, ...routerRows.get(id), ...patch });
+  routerRows.set(id, { title: "", userTitled: false, starred: false, visibility: "shared", ...routerRows.get(id), ...patch });
 
 const inMemoryStore = (): ConversationStore => {
   const logs = new Map<SessionId, AguiEvent[]>();
