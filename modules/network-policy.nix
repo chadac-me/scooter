@@ -1,15 +1,10 @@
-# Sandbox NetworkPolicy: the network wall the in-namespace trust model assumes.
+# Platform NetworkPolicies: the in-namespace network wall.
 #
-# Sandbox pods share the platform namespace, and the agent-host / router main
-# listeners trust ingress identity headers, so a sandbox must reach only the
-# SA-token-authenticated surfaces (broker, forge proxy, router self-access), DNS,
-# and the public internet. Ingress to a sandbox is limited to the platform's own
-# pods, which also blocks sandbox-to-sandbox traffic. Agent-host pods accept
-# connections only from the router and conversation-controller.
+# - Sandboxes reach only the broker, forge proxy, router self-access, DNS and the internet.
+# - Only platform pods reach a sandbox, so sandboxes can't reach each other.
+# - Only the router and conversation-controller reach agent-host pods.
 #
-# On by default; set `scooter.networkPolicy.enable = false` to manage your own.
-# Needs a CNI that enforces NetworkPolicy (k3s's built-in controller, Calico,
-# Cilium, ...); on one that does not, these objects are inert.
+# Needs a CNI that enforces NetworkPolicy; elsewhere these are inert.
 
 { config, lib, ... }:
 
