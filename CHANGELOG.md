@@ -16,8 +16,10 @@ content tags and also gain `vX.Y.Z`; the flake is published to
   linked by URL were dropped when they had no @mention.
 - **Tool-result images show on collapsed tool cards**, such as a screenshot
   from `view_image`.
-- **Release PRs skip CI.** A PR that changes only `VERSION` and `CHANGELOG.md`
-  merges as soon as it is approved.
+- **Release PRs are tested in the merge queue.** A PR that changes only
+  `VERSION` and `CHANGELOG.md` runs no checks of its own, so it can be queued
+  once approved. In the queue it runs everything, including e2e-full and the
+  heavy nixosTests, and must pass all of it.
 
 ## v1.0.1
 
