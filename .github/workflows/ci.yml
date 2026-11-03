@@ -5,6 +5,8 @@ name: CI
 # `full-ci` get the `full` tier: everything, adding the image builds, db
 # migrations, sharded e2e, the whole nixosTest matrix and the path-gated k3d jobs.
 # The opt-in flake, bench and e2e-full jobs stay label-driven on either tier.
+# A PR or queue entry that changes only VERSION and CHANGELOG.md gets the
+# `release` tier: no gates, so it skips the checks and merges at once.
 # Every reporting job saves one gate section (and writes it into a shared PR
 # comment), and `ci-summary`, the single required check, evaluates this run's
 # sections against the base commit's .github/ci-gates.yml. The Cachix cache
@@ -38,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       full: ${{ steps.tier.outputs.full }}
+      release: ${{ steps.tier.outputs.release }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -47,11 +50,16 @@ jobs:
           sparse-checkout-cone-mode: false
       - id: tier
         env:
+          GH_TOKEN: ${{ github.token }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: node scripts/ci-report.mjs tier --labels "$LABELS"
 
   ci:
     name: fast checks (flake + typecheck + unit + python)
+    needs: tier
+    if: needs.tier.outputs.release != 'true'
     permissions:
       contents: read
       pull-requests: write   # posts its own gate section (scripts/ci-report.mjs)
@@ -430,6 +438,7 @@ jobs:
   nixos-tests-matrix:
     name: enumerate dev-env nixosTests
     needs: tier
+    if: needs.tier.outputs.release != 'true'
     runs-on: ubuntu-latest
     outputs:
       tests: ${{ steps.list.outputs.tests }}
@@ -2034,7 +2043,8 @@ jobs:
   nixos-report:
     name: nixosTest report
     needs: [nixos-tests-matrix, nixos-test]
-    if: always()
+    # Skipped matrix: a release-tier run, which reports nothing.
+    if: always() && needs.nixos-tests-matrix.result != 'skipped'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -2103,5 +2113,8 @@ jobs:
           merge-multiple: true
       - name: evaluate the gates
         env:
+          GH_TOKEN: ${{ github.token }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: node scripts/ci-report.mjs evaluate --labels "$LABELS"

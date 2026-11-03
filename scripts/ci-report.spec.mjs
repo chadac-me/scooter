@@ -84,6 +84,16 @@ describe("tierFor", () => {
     expect(tierFor("merge_group", [])).toBe("full");
     expect(tierFor("push", [])).toBe("full");
   });
+
+  it("skips everything for a PR or queue entry that only bumps the release", () => {
+    const bump = ["VERSION", "CHANGELOG.md"];
+    expect(tierFor("pull_request", [], bump)).toBe("release");
+    expect(tierFor("merge_group", [], ["VERSION"])).toBe("release");
+    expect(tierFor("pull_request", [], [...bump, "flake.nix"])).toBe("pr");
+    expect(tierFor("merge_group", [], [...bump, "flake.nix"])).toBe("full");
+    expect(tierFor("push", [], bump)).toBe("full");
+    expect(tierFor("schedule", [], bump)).toBe("full");
+  });
 });
 
 describe("activeGates", () => {
@@ -97,6 +107,10 @@ describe("activeGates", () => {
       "e2e-fast",
       "size",
     ]);
+  });
+
+  it("gates a release-tier run on nothing", () => {
+    expect(activeGates(gates, ["e2e-full"], "release")).toEqual([]);
   });
 
   it("leaves a full-tier gate out of a PR-tier run, so the PR never waits on it", () => {

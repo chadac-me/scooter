@@ -34,7 +34,8 @@ A release is a PR that bumps `VERSION` and adds a `## vX.Y.Z` section to the
 top of `CHANGELOG.md`, summarising the changes merged since the last tag
 (`git log vX.Y.Z..origin/main`). Bump the minor version for new features and
 the patch version for fixes only; the major version moves only when a
-maintainer says so. Merging the PR runs `.github/workflows/release.yml`, which
+maintainer says so. Change nothing else in the PR: CI then skips every check,
+so it merges as soon as it is approved. Merging the PR runs `.github/workflows/release.yml`, which
 tags the merge commit, creates the GitHub Release from that section, tags each
 image with the version and publishes the flake to FlakeHub. If a step fails,
 re-run the workflow; it skips what already exists.
