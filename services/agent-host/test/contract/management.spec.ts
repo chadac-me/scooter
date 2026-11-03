@@ -193,6 +193,61 @@ describe("management API", () => {
     expect((res.json as { id?: string }).id).not.toBe("attacker-chosen-id");
   });
 
+  // A Slack button answers as the clicker's Scooter user: only the verified webhooks caller
+  // may name the answerer, and only the conversation's owner may answer.
+  describe("POST /conversations/:id/interrupts/:interruptId/answer", () => {
+    const mk = (verified: boolean, outcome = { ok: true }) => {
+      const answerInterrupt = vi.fn(async () => outcome);
+      const api = createManagementApi({
+        sessions: fakeSessions(),
+        store: fakeStore([]),
+        server: stubServer,
+        answerPermission: async () => {},
+        answerInterrupt,
+        ownerVerifier: async () => verified,
+        conversationOwner: async (id) => (id === "c1" ? { owner: "chadac" } : undefined),
+      });
+      return { api, answerInterrupt };
+    };
+    const answer = (api: ReturnType<typeof createManagementApi>, by: string, path = "/conversations/c1/interrupts/i1/answer") =>
+      call(api, "POST", path, { answeredBy: { id: by }, optionId: "answer", result: { answers: { Q: "A" } } });
+
+    it("answers as the owner", async () => {
+      const { api, answerInterrupt } = mk(true);
+      const res = await answer(api, "chadac");
+      expect(res.status).toBe(200);
+      expect(answerInterrupt).toHaveBeenCalledWith(
+        "c1",
+        { interruptId: "i1", status: "resolved", payload: { optionId: "answer", result: { answers: { Q: "A" } } } },
+        { id: "chadac" },
+      );
+    });
+
+    it("refuses anyone but the owner", async () => {
+      const { api, answerInterrupt } = mk(true);
+      expect((await answer(api, "mallory")).status).toBe(403);
+      expect(answerInterrupt).not.toHaveBeenCalled();
+    });
+
+    it("refuses an unverified caller naming the owner", async () => {
+      const { api, answerInterrupt } = mk(false);
+      expect((await answer(api, "chadac")).status).toBe(403);
+      expect(answerInterrupt).not.toHaveBeenCalled();
+    });
+
+    it("refuses an unowned or unknown conversation", async () => {
+      const { api } = mk(true);
+      expect((await answer(api, "chadac", "/conversations/nope/interrupts/i1/answer")).status).toBe(403);
+    });
+
+    it("reports an interrupt no longer waiting", async () => {
+      const { api } = mk(true, { ok: false, reason: "already answered" } as never);
+      const res = await answer(api, "chadac");
+      expect(res.status).toBe(409);
+      expect(res.json).toEqual({ error: "already answered" });
+    });
+  });
+
   // A body `owner` (webhooks' resolved user) is honored only for a caller the ownerVerifier accepts. Why: issue #897.
   describe("POST /conversations body owner", () => {
     const mk = (ownerVerifier?: (req: IncomingMessage) => Promise<boolean>) => {
