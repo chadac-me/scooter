@@ -12,14 +12,15 @@
 //
 // A run's tier decides which gates are in play: `pr` (the default for a PR) runs the
 // fast checks, `full` (the merge queue, main, the nightly, or a PR labelled
-// `full-ci`) runs everything, and `release` (a PR or queue entry that changes only
-// RELEASE_FILES) runs nothing: it ships code main has already tested.
+// `full-ci`) runs everything. A change to only RELEASE_FILES gets `skip` on the PR,
+// which runs nothing, and `release` in the merge queue, which runs the full tier
+// plus every gate marked `release: true`, each made required.
 //
 // Usage:
 //   ci-report.mjs post --section <id> --status <pass|fail|warn|skip> \
 //     [--summary <text>] [--body <file>] [--gates <f>] [--labels a,b] [--sections-dir <d>]
 //   ci-report.mjs evaluate [--gates <f>] [--labels a,b] [--sections-dir <d>]   # exit 1 if blocked
-//   ci-report.mjs tier [--labels a,b]   # writes full= and release=<true|false> to $GITHUB_OUTPUT
+//   ci-report.mjs tier [--labels a,b]   # writes full=, release=, skip=<true|false> to $GITHUB_OUTPUT
 //     env: GH_TOKEN, GITHUB_REPOSITORY, GITHUB_EVENT_NAME, PR (unset outside a PR),
 //     BASE_SHA + HEAD_SHA (the compared range; unset, no run is a release);
 //     <sections-dir> defaults to $RUNNER_TEMP/ci-sections
@@ -50,13 +51,12 @@ export const RELEASE_FILES = ["VERSION", "CHANGELOG.md"];
 export const isReleaseOnly = (files) =>
   files.length > 0 && files.every((f) => RELEASE_FILES.includes(f));
 
-/** `release` for a release-only PR or queue entry, `pr` for an unlabelled PR, else `full`. */
+/** For a release-only change, `skip` on the PR and `release` in the queue; else `pr` for an unlabelled PR, else `full`. */
 export function tierFor(event, labels = [], files = []) {
-  if (
-    (event === "pull_request" || event === "merge_group") &&
-    isReleaseOnly(files)
-  )
-    return "release";
+  if (isReleaseOnly(files)) {
+    if (event === "pull_request") return "skip";
+    if (event === "merge_group") return "release";
+  }
   return event !== "pull_request" || labels.includes(FULL_TIER_LABEL)
     ? "full"
     : "pr";
@@ -113,7 +113,22 @@ const coerce = (v) =>
 
 /** The gates in play: a label-gated one needs its label, a `full` one the full tier. */
 export function activeGates(gates, labels = [], tier = "full") {
-  if (tier === "release") return [];
+  if (tier === "skip") return [];
+  if (tier === "release") {
+    const full = activeGates(gates, labels, "full");
+    return gates
+      .filter((g) => g.release || full.includes(g))
+      .map((g) =>
+        g.release
+          ? {
+              ...g,
+              require: "always",
+              advisory: false,
+              block_while_pending: true,
+            }
+          : g,
+      );
+  }
   return gates.filter(
     (g) =>
       ((g.require ?? "always") !== "when_labelled" ||
@@ -356,7 +371,8 @@ async function main(argv) {
   }
 
   if (cmd === "tier") {
-    const line = `full=${tier === "full"}\nrelease=${tier === "release"}\n`;
+    const full = tier === "full" || tier === "release";
+    const line = `full=${full}\nrelease=${tier === "release"}\nskip=${tier === "skip"}\n`;
     if (process.env.GITHUB_OUTPUT)
       appendFileSync(process.env.GITHUB_OUTPUT, line);
     process.stdout.write(line);
