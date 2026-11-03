@@ -94,10 +94,8 @@ export interface ManagementDeps {
   /** Which pod serves this conversation's live stream; absent means single-replica, where everything is "mine". */
   streamOwnership?: (id: string) => Promise<"mine" | "elsewhere" | "unknown">;
   server: AguiServer;
-  /** Answer a pending tool permission as `approver`, the identity of the human answering. */
-  answerPermission: (sessionId: string, toolCallId: string, optionId: string, approver?: ApproverIdentity) => Promise<void>;
   /** Answer a pending interrupt as `approver`, the same path as an /agui resume. */
-  answerInterrupt?: Parameters<AguiServer["onResume"]>[0];
+  answerInterrupt: Parameters<AguiServer["onResume"]>[0];
   /** Relay the user's answer (the optionId is the verb) to the contrib's broker half as `approver`; throws on a dropped answer. */
   resolveApproval?: (
     sessionId: string,
@@ -859,14 +857,19 @@ export function createManagementApi(deps: ManagementDeps): Router {
     const approver = ctx.user.anonymous
       ? undefined
       : { id: ctx.user.id, email: ctx.user.email, name: ctx.user.name };
-    await deps.answerPermission(ctx.params.id, ctx.params.toolCallId, body.optionId, approver);
+    const outcome = await deps.answerInterrupt(
+      ctx.params.id as SessionId,
+      { interruptId: ctx.params.toolCallId, status: "resolved", payload: { optionId: body.optionId } },
+      approver,
+    );
+    if (!outcome.ok) return { status: 409, json: { error: outcome.reason ?? "no longer awaiting an answer" } };
     return { status: 204, json: null };
   });
 
   // The webhooks service answers for a chat user it mapped to a Scooter user (a Slack button),
   // so only that verified caller may name the answerer, and only the owner may answer.
   r.post("/conversations/:id/interrupts/:interruptId/answer", async (ctx) => {
-    if (!deps.answerInterrupt || !deps.conversationOwner) return { status: 501, json: { error: "answering is not wired" } };
+    if (!deps.conversationOwner) return { status: 501, json: { error: "answering is not wired" } };
     if (!deps.ownerVerifier || !(await deps.ownerVerifier(ctx.req).catch(() => false))) {
       return { status: 403, json: { error: "only the webhooks service answers for another user" } };
     }
