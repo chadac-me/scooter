@@ -180,6 +180,21 @@
               # The baked re-converge list, as the image renders it
               listFile = sandboxWithEcho.nixos.config.environment.etc."scooter/reconverge-modules.json".source;
               shippedListFile = shipped.nixos.config.environment.etc."scooter/reconverge-modules.json".source;
+              shippedTree = lib.head (lib.filter
+                (d: lib.hasSuffix "-sandbox-os-src" (toString d))
+                shipped.nixos.config.system.extraDependencies);
+              # The shipped image re-converged with no local modules, as scooter-rebuild does.
+              reconvergedShipped =
+                let layers = map (f: "${shippedTree}/${f}")
+                  shipped.nixos.config.programs.scooterModule.extraReconvergeModuleFiles;
+                in (import "${shippedTree}/modules/sandbox-os/runtime-converge/base-config.nix" {
+                  nixpkgs = builtins.path { path = build.config.sandboxPkgs.path; name = "source"; };
+                  modulesPath = "${shippedTree}/modules/sandbox-os";
+                  inherit system;
+                  extraModules = layers
+                    ++ [{ programs.scooterModule.extraReconvergeModules = layers; }];
+                }).config;
+              unitNames = cfg: builtins.attrNames cfg.systemd.units;
 
               # echo enabled as a contrib (not just its module file), so its skill
               # DIRECTORY goes through modules/skills like a shipped one would.
@@ -200,7 +215,9 @@
             assert sandboxWithEcho.nixos.config.environment.etc ? "scooter/contrib-echo";
             assert echoOnly == [ "contrib/echo/sandbox.nix" ];
             assert shipped.nixos.config.programs.scooterModule.extraReconvergeModuleFiles
-              == (derive [ ]).treeRelative ++ [ "skill-dirs/module.nix" ];
+              == [ "pkgs/sandbox-os/container.nix" ] ++ (derive [ ]).treeRelative ++ [ "skill-dirs/module.nix" ];
+            # A rebuild must not drop a unit the image boots with.
+            assert lib.subtractLists (unitNames reconvergedShipped) (unitNames shipped.nixos.config) == [ ];
             # marimo ships as a contrib: its service, and marimo-pair's directory for the agent's shell.
             assert builtins.elem "contrib/marimo/sandbox.nix" (derive [ ]).treeRelative;
             assert shipped.nixos.config.webServices.marimo.enable;
