@@ -7,7 +7,7 @@ name: ci-comment
 # Safe with a secret because `workflow_run` always runs this file as it is on
 # main, and nothing here checks out or runs PR code: the script comes from main,
 # the artifacts are parsed as data, and the PR is looked up from the API rather
-# than taken from them. CHADAC_BOT_PAT lives in the `chadac-bot` environment,
+# than taken from them. CHADAC_BOT_TOKEN lives in the `chadac-bot` environment,
 # which only main may deploy to, so a same-repo branch editing ci.yml can't read it.
 
 on:
@@ -48,7 +48,7 @@ jobs:
           merge-multiple: true
       - name: post the CI comment
         env:
-          GH_TOKEN: ${{ secrets.CHADAC_BOT_PAT }}
+          GH_TOKEN: ${{ secrets.CHADAC_BOT_TOKEN }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}

@@ -1,7 +1,7 @@
 name: update-flake-lock
 
 # Weekly `nix flake update` that opens a PR bumping flake.lock, as chadac-bot.
-# The job uses its PAT (CHADAC_BOT_PAT, in the main-only `chadac-bot`
+# The job uses its PAT (CHADAC_BOT_TOKEN, in the main-only `chadac-bot`
 # environment) because a PR opened by GITHUB_TOKEN triggers no other
 # workflows, so ci.yml would never run on the bump.
 # `nix flake update` runs here directly so stubs.lock can be regenerated in the
@@ -64,7 +64,7 @@ jobs:
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           # PAT so the opened PR triggers ci.yml.
-          token: ${{ secrets.CHADAC_BOT_PAT }}
+          token: ${{ secrets.CHADAC_BOT_TOKEN }}
           branch: update_flake_lock_action
           delete-branch: true
           title: "chore: update flake.lock"
