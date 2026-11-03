@@ -4,6 +4,21 @@ Each release's section becomes its GitHub Release notes. Images keep their
 content tags and also gain `vX.Y.Z`; the flake is published to
 [FlakeHub](https://flakehub.com/flake/chadac-me/scooter).
 
+## v1.0.2
+
+- **The agent can check and narrow its own conversation.** New
+  `conversation_status` and `make_conversation_private` tools. Going private
+  is one-way; only the owner can share a conversation again.
+- **Bedrock image models are configurable in Nix.** The model list and region
+  are options on `contribs.imagegen.backends.bedrock`. The default moves from
+  the deprecated Titan v2 to Stable Image Core in us-west-2.
+- **GitLab notes reach their conversation.** Notes on an MR or issue that was
+  linked by URL were dropped when they had no @mention.
+- **Tool-result images show on collapsed tool cards**, such as a screenshot
+  from `view_image`.
+- **Release PRs skip CI.** A PR that changes only `VERSION` and `CHANGELOG.md`
+  merges as soon as it is approved.
+
 ## v1.0.1
 
 - **The flake now publishes to FlakeHub.** v1.0.0 never got there: FlakeHub
