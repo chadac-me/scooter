@@ -195,6 +195,7 @@
                     ++ [{ programs.scooterModule.extraReconvergeModules = layers; }];
                 }).config;
               unitNames = cfg: builtins.attrNames cfg.systemd.units;
+              droppedUnits = lib.subtractLists (unitNames reconvergedShipped) (unitNames shipped.nixos.config);
 
               # echo enabled as a contrib (not just its module file), so its skill
               # DIRECTORY goes through modules/skills like a shipped one would.
@@ -216,8 +217,6 @@
             assert echoOnly == [ "contrib/echo/sandbox.nix" ];
             assert shipped.nixos.config.programs.scooterModule.extraReconvergeModuleFiles
               == [ "pkgs/sandbox-os/container.nix" ] ++ (derive [ ]).treeRelative ++ [ "skill-dirs/module.nix" ];
-            # A rebuild must not drop a unit the image boots with.
-            assert lib.subtractLists (unitNames reconvergedShipped) (unitNames shipped.nixos.config) == [ ];
             # marimo ships as a contrib: its service, and marimo-pair's directory for the agent's shell.
             assert builtins.elem "contrib/marimo/sandbox.nix" (derive [ ]).treeRelative;
             assert shipped.nixos.config.webServices.marimo.enable;
@@ -244,6 +243,10 @@
             assert lib.any (p: (p.pname or p.name or "") == "scooter-aws")
               shipped.nixos.config.environment.systemPackages;
             pkgs.runCommand "contrib-sandbox-check" { } ''
+              # In the script, not an assert: it reads the built tree.
+              dropped=${lib.escapeShellArg (toString droppedUnits)}
+              if [ -n "$dropped" ]; then echo "FAIL: a rebuild drops $dropped" >&2; exit 1; fi
+
               echo "baked re-converge list:"
               ${pkgs.jq}/bin/jq -r '.[]' ${listFile}
               for p in $(${pkgs.jq}/bin/jq -r '.[]' ${listFile}); do
