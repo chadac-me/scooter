@@ -530,6 +530,8 @@ jobs:
       # /dev/kvm ships with restrictive group perms on GitHub runners, and without
       # them qemu silently falls back to much slower TCG emulation.
       - name: enable KVM access (else qemu falls back to slow TCG)
+        # onprem: done in its NixOS config (kvm 0666, LimitNOFILE).
+        if: ${{ !startsWith(runner.name, 'onprem') }}
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -549,6 +551,8 @@ jobs:
       # virtiofsd holds one host fd per guest-visible inode, so a test that reads a
       # big tree off the shared store exhausts the default 65536.
       - name: raise the fd limit virtiofsd inherits
+        # onprem: done in its NixOS config (kvm 0666, LimitNOFILE).
+        if: ${{ !startsWith(runner.name, 'onprem') }}
         run: |
           # Only matters when nix uses a daemon; the build step raises its own shell's
           # limit for the single-user case.
@@ -562,7 +566,8 @@ jobs:
 
       - name: build ${{ matrix.test }}
         run: |
-          sudo prlimit --pid $$ --nofile=1048576:1048576
+          # onprem has no sudo; its runner's hard limit is already 1048576.
+          [[ "$RUNNER_NAME" == onprem-* ]] || sudo prlimit --pid $$ --nofile=1048576:1048576
           ulimit -n 1048576
           ulimit -n
           nix build ".#checks.x86_64-linux.${{ matrix.test }}" --print-build-logs
