@@ -42,7 +42,7 @@ jobs:
       full: ${{ steps.tier.outputs.full }}
       release: ${{ steps.tier.outputs.release }}
       skip: ${{ steps.tier.outputs.skip }}
-      # Runner per matrix entry: onprem and ubuntu-latest alternate.
+      # Runner per matrix entry, weighted by each fleet's capacity.
       runners: ${{ steps.runners.outputs.runners }}
     steps:
       - uses: actions/checkout@v5
@@ -59,13 +59,18 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: node scripts/ci-report.mjs tier --labels "$LABELS"
       # Fork PRs never reach the home runners; ONPREM_RUNNERS=off disables them.
+      # Each entry goes onprem with ONPREM_SHARE% odds: 4 slots vs 20 hosted.
       - id: runners
         env:
           FORK: ${{ github.event.pull_request.head.repo.fork || false }}
           ONPREM: ${{ vars.ONPREM_RUNNERS || 'on' }}
+          SHARE: ${{ vars.ONPREM_SHARE || '17' }}
         run: |
-          if [ "$FORK" = true ] || [ "$ONPREM" = off ]; then pair='"ubuntu-latest","ubuntu-latest"'; else pair='"onprem","ubuntu-latest"'; fi
-          printf 'runners=[%s]\n' "$(yes "$pair" | head -n 32 | paste -sd, -)" >> "$GITHUB_OUTPUT"
+          if [ "$FORK" = true ] || [ "$ONPREM" = off ]; then SHARE=0; fi
+          list=$(for _ in $(seq 64); do
+            if [ $((RANDOM % 100)) -lt "$SHARE" ]; then echo '"onprem"'; else echo '"ubuntu-latest"'; fi
+          done | paste -sd, -)
+          echo "runners=[$list]" >> "$GITHUB_OUTPUT"
 
   # One job per `just ci-<shard>`, so the fast checks run in parallel.
   fast:
