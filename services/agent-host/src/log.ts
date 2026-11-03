@@ -67,7 +67,7 @@ export function reconfigureLogging(): void {
 }
 
 /** Serialize a caught value into something with actual content, since a WebSocket or k8s client error's useful fields are non-enumerable. */
-/** A thrown value as one line of text; JSON-RPC errors are plain objects, not Errors. */
+// A thrown value as text; JSON-RPC errors aren't Errors.
 export function errorText(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (err && typeof err === "object") {

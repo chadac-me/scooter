@@ -1,9 +1,4 @@
-/**
- * A run whose pre-prompt setup (sandbox cold start, MCP resolution, session creation) outlasts
- * its budget must end without ever reaching the agent, and the dead-on-arrival clock must not
- * count that setup. Otherwise the prompt is sent for a run nothing reads, and the agent works
- * on it unseen while every retry hits the busy session.
- */
+// A setup that times out must never reach the agent.
 
 import { describe, it, expect } from "vitest";
 
@@ -61,7 +56,7 @@ describe("bridge setup watchdog (setupTimeoutMs)", () => {
       exec,
       acpClient: client,
       firstActivityTimeoutMs: 30,
-      // Setup outlasting the DOA window, as a sandbox cold start does.
+      // Setup outlasting the DOA window, like a sandbox cold start.
       loadHistory: async () => (await sleep(80), []),
     });
     const events = collect(bridge);
@@ -107,8 +102,7 @@ describe("bridge setup watchdog (setupTimeoutMs)", () => {
       setupTimeoutMs: 40,
       deathRetryMax: 1,
       deathRetryBaseMs: 10,
-      // Call 1 builds the session; call 2 (the first run) hangs, then reports a changed set
-      // that would rebuild the session under the retry; later calls are unchanged.
+      // Call 2 hangs, then answers a set that would rebuild.
       resolveMcpServers: async () => {
         calls++;
         if (calls === 2) {
