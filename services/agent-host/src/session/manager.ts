@@ -701,10 +701,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     if (e.userTitled && m.title !== undefined) e.title = m.title;
   };
 
-  /** Every bridge wired to a conversation's log: one detached by a suspend or model switch can
-   *  still be running, and must die with the rest when this pod cannot write. */
+  // Wired bridges per conversation; detached ones may still be running.
   const wired = new Map<SessionId, Set<SessionBridge>>();
-  /** Bridges whose write failed: the rest of their events are not this pod's to log. */
+  // Bridges being killed; their remaining events are dropped.
   const doomed = new WeakSet<SessionBridge>();
   /** Dangling-run reconciliations in flight, so racing callers settle each conversation once. */
   const danglingReconciles = new Set<SessionId>();
@@ -733,7 +732,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   // refreshSandbox throttle: conversation -> last cluster read.
   const REFRESH_SANDBOX_MS = 5_000;
   const lastSandboxRefresh = new Map<SessionId, number>();
-  /** Cancel every run this pod has for `id` (and their sandbox execs) and drop the bridges. */
+  // Cancel and drop every bridge this pod has for `id`.
   const stopLocalRun = async (id: SessionId, why: string): Promise<void> => {
     // An in-flight revive would rebuild the bridge after teardown.
     await reviving.get(id)?.catch(() => {});
@@ -765,7 +764,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       );
     }
   };
-  /** A write from `bridge` failed, so this pod is not the conversation's writer: stop it all. */
+  // A failed write means this pod is not the writer.
   const killUnwritable = (id: SessionId, bridge: SessionBridge, why: string) => {
     if (doomed.has(bridge)) return;
     doomed.add(bridge);
@@ -780,7 +779,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // Rewired (revived) means live again.
     doomed.delete(bridge);
     const set = wired.get(e.id) ?? new Set<SessionBridge>();
-    // Idle bridges no longer attached cannot run again; keep only ones that might.
+    // Drop detached bridges that are idle; they cannot run again.
     for (const b of set) if (b !== bridge && !b.queueState?.().running) set.delete(b);
     wired.set(e.id, set.add(bridge));
     // Persist via onPersist only: it sees every event that should be logged exactly once, while
@@ -797,7 +796,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
       // Cheap synchronous pre-filter; the store's AppendFence is the authority.
       if (!ownershipGuard.canWrite(e.id)) {
-        // This drop is how a mid-run reassignment truncates the run's log.
+        // Loud: this drop truncates the run's log.
         log.warn("ownership fence dropped an event (reassigned mid-run?)", {
           conversation_id: e.id,
           event_type: event.type,
@@ -805,7 +804,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         killUnwritable(e.id, bridge, "write fenced by the ownership cache");
         return;
       }
-      // A run whose turns cannot be persisted must not keep acting unseen.
+      // An unpersisted run must not keep acting unseen.
       store.appendEvent(e.id, event).catch(() => killUnwritable(e.id, bridge, "durable append failed"));
     });
   };
