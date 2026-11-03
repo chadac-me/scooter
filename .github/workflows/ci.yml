@@ -94,6 +94,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # CI=1 selects vitest's default reporter.
@@ -191,6 +193,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # Building to completion forces every layer derivation. The claude-baked
       # images contain the unfree claude CLI, hence allowUnfree + --impure.
@@ -263,6 +267,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: nix build .#checks.x86_64-linux.db-migrate-${{ matrix.variant }}
         env:
@@ -330,6 +336,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # 1. Measure the PR's images (JSON to pr-sizes.json; build logs to stderr).
@@ -420,6 +428,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: run the touched suites, PR and merge base interleaved
         run: scripts/bench-ab.sh "origin/${{ github.base_ref }}" bench-out
@@ -546,6 +556,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # virtiofsd holds one host fd per guest-visible inode, so a test that reads a
@@ -716,6 +728,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # k3d needs Docker (present on ubuntu-latest); k3d and kubectl come from nixpkgs.
@@ -767,6 +781,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # The rancher/k3s image ships only runc, which gives non-privileged systemd no writable cgroup,
@@ -836,6 +852,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: render the example
@@ -979,6 +997,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # A window of recent runs regardless of conclusion, not the last GREEN one: the full
@@ -1073,6 +1093,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
 
       # One script so the `flake focus full` job stands up an identical cluster.
       - name: bring up k3d + the platform
@@ -1441,6 +1463,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # PLAYWRIGHT_JSON_OUTPUT_NAME makes the json reporter write to a file;
@@ -1643,6 +1667,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: e2e ×5 (report flaky)
         env:
@@ -1683,6 +1709,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # Fails loudly when the label is set but no pattern is given.
@@ -1866,6 +1894,8 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: scooter
+          # onprem: the cache is already set system-wide (untrusted users can't add it).
+          skipAddingSubstituter: ${{ startsWith(runner.name, 'onprem') }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # FULL_TARGET=1 intersects `flake-specs:` with the full-target allowlist and
