@@ -87,7 +87,7 @@ import { createHookRunner, parseHooks } from "./hooks/runner.js";
 import type { HookDef, HookRunner } from "./hooks/types.js";
 import { createPgUserHookSettingsStore } from "./hooks/userHookSettingsStore.js";
 import { createMemoryIdentityRegistry, createPgIdentityRegistry } from "./session/identityRegistry.js";
-import { conversationTree, createMemoryAuthorStore, createPgAuthorStore, type Author } from "./session/authorStore.js";
+import { conversationTree, createMemoryAuthorStore, createPgAuthorStore, isOwnText, type Author } from "./session/authorStore.js";
 import { mintConvToken } from "./auth/convToken.js";
 import { createMcpEndpoint, resolveConversation } from "./agent/mcpServer.js";
 import { readSandboxFileBase64, IMAGE_MAX_BYTES, type ImageToolsWiring } from "./agent/imageTools.js";
@@ -1441,7 +1441,7 @@ export async function main(
       // Refuse the whole message rather than silently dropping files past the count.
       assertFileCount(input.files, uploadLimits);
       // Recorded before delivery: unrecorded text would leave the conversation untainted.
-      await authorStore.record(sessionId, author);
+      if (!isOwnText(author, sessions.get(sessionId)?.owner)) await authorStore.record(sessionId, author);
       await sessions.promptByThread(sessionId, input.text, model, input.priority, input.owner, promptImages, promptFiles, input.source, input.provider, sender);
     } catch (err) {
       // The run could not start, so persist a RUN_ERROR to the durable log so a reattaching

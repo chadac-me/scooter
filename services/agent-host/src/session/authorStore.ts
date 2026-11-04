@@ -1,5 +1,5 @@
 /**
- * Who wrote the text in each conversation; see lib/sql/agent_host/schema.sql.
+ * Who other than the owner wrote text in each conversation; see lib/sql/agent_host/schema.sql.
  *
  * The broker vends personal credentials only while every author is the owner, so a
  * prompt whose author can't be recorded must not reach the agent.
@@ -31,6 +31,10 @@ export interface AuthorStore {
   listTree(conversationId: string): Promise<ResolvedAuthor[]>;
   close(): Promise<void>;
 }
+
+/** The owner's own text taints nothing, so it gets no row. */
+export const isOwnText = (author: Author, owner: string | undefined): boolean =>
+  author.kind === "user" && owner !== undefined && author.id === owner;
 
 const authorKey = (a: Author): string => (a.kind === "unknown" ? "" : a.id);
 

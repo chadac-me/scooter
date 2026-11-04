@@ -7,7 +7,7 @@ import { describe, it, expect } from "vitest";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 
-import { conversationTree, createMemoryAuthorStore, createPgAuthorStore } from "../../src/session/authorStore.js";
+import { conversationTree, createMemoryAuthorStore, createPgAuthorStore, isOwnText } from "../../src/session/authorStore.js";
 import type { SessionId } from "../../src/types.js";
 
 type Call = { sql: string; params: unknown[] };
@@ -82,5 +82,15 @@ describe("conversationTree", () => {
   it("reaches the root's every descendant from any node", () => {
     expect(conversationTree(sessions, "b").sort()).toEqual(["a", "b", "c", "root"]);
     expect(conversationTree(sessions, "other")).toEqual(["other"]);
+  });
+});
+
+describe("isOwnText", () => {
+  it("is the owner's own prompt only", () => {
+    expect(isOwnText({ kind: "user", id: "alice" }, "alice")).toBe(true);
+    expect(isOwnText({ kind: "user", id: "bob" }, "alice")).toBe(false);
+    expect(isOwnText({ kind: "user", id: "alice" }, undefined)).toBe(false);
+    expect(isOwnText({ kind: "identity", id: "i-1" }, "alice")).toBe(false);
+    expect(isOwnText({ kind: "unknown" }, "alice")).toBe(false);
   });
 });

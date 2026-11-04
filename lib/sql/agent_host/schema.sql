@@ -224,7 +224,7 @@ CREATE UNIQUE INDEX "identities_provider_external_id" ON "identities" ("provider
 -- The rule finds an owner's own accounts through this.
 CREATE INDEX "identities_by_scooter_user" ON "identities" ("scooter_user");
 
--- Who wrote the text a conversation's agent acts on, one row per distinct author.
+-- Who other than the owner wrote text a conversation's agent acts on, one row per author.
 -- kind is identity (an identities.id), user (a users.id) or unknown (author ''): text
 -- whose writer can't be named. The broker vends personal credentials only while every
 -- author in the conversation's tree is its owner.
