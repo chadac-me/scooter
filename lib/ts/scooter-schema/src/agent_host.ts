@@ -81,6 +81,17 @@ export const userHookSettings = pgTable("user_hook_settings", {
 	primaryKey({ columns: [table.owner, table.hookId], name: "user_hook_settings_pkey"}),
 ]);
 
+export const conversationAuthors = pgTable("conversation_authors", {
+	conversationId: text("conversation_id").notNull(),
+	kind: text().notNull(),
+	author: text().notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	firstAt: bigint("first_at", { mode: "number" }).notNull(),
+}, (table) => [
+	primaryKey({ columns: [table.kind, table.conversationId, table.author], name: "conversation_authors_pkey"}),
+	check("conversation_authors_kind_check", sql`kind = ANY (ARRAY['identity'::text, 'user'::text, 'unknown'::text])`),
+]);
+
 export const conversationJobs = pgTable("conversation_jobs", {
 	conversationId: text("conversation_id").notNull(),
 	jobId: text("job_id").notNull(),

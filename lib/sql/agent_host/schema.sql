@@ -221,3 +221,15 @@ CREATE UNIQUE INDEX "identities_provider_external_id" ON "identities" ("provider
 
 -- The rule finds an owner's own accounts through this.
 CREATE INDEX "identities_by_scooter_user" ON "identities" ("scooter_user");
+
+-- Who wrote the text a conversation's agent acts on, one row per distinct author.
+-- kind is identity (an identities.id), user (a users.id) or unknown (author ''): text
+-- whose writer can't be named. The broker vends personal credentials only while every
+-- author in the conversation's tree is its owner.
+CREATE TABLE "conversation_authors" (
+  "conversation_id" text   NOT NULL,
+  "kind"            text   NOT NULL CHECK ("kind" IN ('identity', 'user', 'unknown')),
+  "author"          text   NOT NULL,
+  "first_at"        bigint NOT NULL,
+  PRIMARY KEY ("conversation_id", "kind", "author")
+);
