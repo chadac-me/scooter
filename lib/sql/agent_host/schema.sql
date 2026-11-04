@@ -86,6 +86,8 @@ CREATE INDEX "conversations_by_sandbox_ref" ON "conversations" ("sandbox_ref");
 
 -- Per-owner filtering for the conversation list.
 CREATE INDEX "conversations_by_owner" ON "conversations" ("owner");
+-- The author check walks a conversation's subagents.
+CREATE INDEX "conversations_by_parent" ON "conversations" ("parent_id");
 
 -- LIVE CONVERSATION-LIST PUSH — a NOTIFY trigger on this table (channel
 -- 'conversations_changed') lets the conversation-router serve GET /conversations/events by

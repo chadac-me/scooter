@@ -78,6 +78,7 @@ class Conversations(Base):
         PrimaryKeyConstraint('id', name='conversations_pkey'),
         Index('conversations_by_activity', 'last_activity_at'),
         Index('conversations_by_owner', 'owner'),
+        Index('conversations_by_parent', 'parent_id'),
         Index('conversations_by_sandbox_ref', 'sandbox_ref')
     )
 

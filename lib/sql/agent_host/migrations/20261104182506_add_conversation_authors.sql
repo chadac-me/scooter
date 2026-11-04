@@ -1,3 +1,5 @@
+-- Create index "conversations_by_parent" to table: "conversations"
+CREATE INDEX "conversations_by_parent" ON "conversations" ("parent_id");
 -- Create "conversation_authors" table
 CREATE TABLE "conversation_authors" (
   "conversation_id" text NOT NULL,
