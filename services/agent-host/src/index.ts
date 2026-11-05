@@ -1222,7 +1222,11 @@ export async function main(
     get: (id) => sessions.get(id as SessionId),
     currentVisibility: async (id) =>
       (await store.readAccess?.(id as SessionId))?.visibility ?? sessions.get(id as SessionId)?.visibility ?? "shared",
-    makePrivate: (id) => sessions.setVisibility(id as SessionId, "private"),
+    makePrivate: async (id) => {
+      // Others may have reached the sandbox while it was shared.
+      await authorStore.record(id, { kind: "unknown" });
+      await sessions.setVisibility(id as SessionId, "private");
+    },
     resources: resourceToolsWiring?.currentResources,
   };
 

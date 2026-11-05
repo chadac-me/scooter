@@ -9,3 +9,13 @@ CREATE TABLE "conversation_authors" (
   PRIMARY KEY ("conversation_id", "kind", "author"),
   CONSTRAINT "conversation_authors_kind_check" CHECK (kind = ANY (ARRAY['identity'::text, 'user'::text, 'unknown'::text]))
 );
+-- Taint existing conversations holding text relayed from outside the owner.
+INSERT INTO "conversation_authors" ("conversation_id", "kind", "author", "first_at")
+SELECT DISTINCT "conversation_id", 'unknown', '', (extract(epoch FROM now()) * 1000)::bigint
+FROM "conversation_events"
+WHERE "event"->>'type' = 'SYSTEM_MESSAGE'
+  AND COALESCE("event"->>'source', '') NOT IN (
+    'hook', 'resume', 'startup', 'system', 'scheduler', 'files', 'ui',
+    'subagent', 'background job', 'parent-clarification'
+  )
+ON CONFLICT DO NOTHING;

@@ -543,6 +543,10 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (body.visibility === "shared" && current === "private" && body.confirm !== true) {
       return { status: 409, json: { error: "making a private conversation shared needs confirm: true" } };
     }
+    // Others may have reached the sandbox while it was shared.
+    if (body.visibility === "private" && current === "shared") {
+      await deps.authorStore?.record(conv.id, { kind: "unknown" });
+    }
     await sessions.setVisibility(conv.id, body.visibility);
     return { json: view(sessions.get(conv.id)!) };
   });

@@ -303,4 +303,18 @@ describe("conversation authors", () => {
     await call(setup({ visibility: "private" }, { authorStore: priv }).api, "POST", "/conversations/c1/messages", { text: "hi" }, "alice");
     expect(await priv.listTree("c1")).toEqual([]);
   });
+
+  it("records a shared conversation going private as unknown", async () => {
+    const authorStore = createMemoryAuthorStore();
+    const { api } = setup({}, { authorStore });
+    expect((await call(api, "PATCH", "/conversations/c1/visibility", { visibility: "private" }, "alice")).status).toBe(200);
+    expect(await authorStore.listTree("c1")).toEqual([{ kind: "unknown", author: "", user: null }]);
+  });
+
+  it("refuses the flip when the author write fails", async () => {
+    const failing = { ...createMemoryAuthorStore(), record: async () => { throw new Error("db down"); } };
+    const { api, sessions } = setup({}, { authorStore: failing });
+    await expect(call(api, "PATCH", "/conversations/c1/visibility", { visibility: "private" }, "alice")).rejects.toThrow("db down");
+    expect(sessions.setVisibility).not.toHaveBeenCalled();
+  });
 });
