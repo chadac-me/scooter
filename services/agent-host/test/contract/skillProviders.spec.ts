@@ -1,5 +1,8 @@
 /** Skill providers: sandbox commands whose skills fill gaps. */
 
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+
 import { describe, it, expect } from "vitest";
 
 import {
@@ -197,5 +200,29 @@ describe("skill provider registry", () => {
   it("parseProvidedSkills drops malformed entries and rejects other shapes", () => {
     expect(parseProvidedSkills(JSON.stringify({ skills: [file("a"), { name: 1 }] })).map((f) => f.name)).toEqual(["a"]);
     expect(() => parseProvidedSkills("{}")).toThrow();
+  });
+});
+
+describe("echo's sample provider", () => {
+  // The same script contrib/echo declares and the k3d e2e render runs.
+  const script = readFileSync(new URL("../../../../contrib/echo/skill-provider.sh", import.meta.url), "utf8");
+  const localExec: ProviderExec = {
+    async execute(req) {
+      const r = spawnSync(req.command, req.args, { input: req.stdin, encoding: "utf8" });
+      return { stdout: r.stdout, stderr: r.stderr, exitCode: r.status ?? 1 };
+    },
+  };
+
+  it("runs under bash and is offered next to the deployment's skills", async () => {
+    const registry = createSkillProviderRegistry({
+      providers: [provider("echo.hello", { command: script })],
+      sandboxFor: () => ({ name: "sb", namespace: "ns" }),
+      connect: async () => localExec,
+    });
+    const files = await registry.skills("c1", "alice");
+    const { skills, dropped } = pickProvidedSkills(files, new Set(["agent-tools"]));
+    expect(dropped).toEqual([]);
+    expect(skills.map((s) => [s.name, s.description])).toEqual([["echo-provided", "Use when testing skill providers."]]);
+    expect(renderSkillFile(skills[0])).toContain("echo-provided-skill-marker");
   });
 });

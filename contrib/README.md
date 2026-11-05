@@ -417,6 +417,11 @@ against. A deployment declares its own under `scooter.agent.skillProviders`.
 - **Changes.** The agent-host re-runs a provider at most every 10 seconds. A changed
   answer rebuilds the session like any other skills change.
 
+`contrib/echo/skill-provider.sh` is the fixture. `examples/check.nix` asserts the
+rendering, `skillProviders.spec.ts` runs the script through the agent-host's merge, and
+`test/e2e/skill-providers.spec.ts` checks on the k3d stack that its skill reaches the
+agent.
+
 ### Contributing agent tools (`mcp_tools.py`)
 
 A contrib owns the agent's typed tools for its integration. Declare them on your

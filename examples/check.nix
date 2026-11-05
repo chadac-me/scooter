@@ -1362,10 +1362,7 @@ let
   providersOf = extra:
     let m = builtins.filter (e: e.name == "SKILL_PROVIDERS_JSON") (hostEnvOf extra);
     in if m == [ ] then [ ] else builtins.fromJSON (builtins.head m).value;
-  echoProvider = enable: {
-    contribs.echo.enable = nixpkgsLib.mkForce enable;
-    contribs.echo.agent.skillProviders.dump.command = "echo '{\"skills\":[]}'";
-  };
+  echoProvider = enable: { contribs.echo.enable = nixpkgsLib.mkForce enable; };
   providerProblems =
     (if providersOf { } == [ ] then [ ] else [ "SKILL_PROVIDERS_JSON has undeclared providers" ])
     ++ (let r = providersOf { scooter.agent.skillProviders.team = { command = "x"; timeout = 90; }; }; in
@@ -1373,7 +1370,9 @@ let
         else [ "a provider with no `wait` does not wait its whole timeout" ])
     ++ (if providersOf { scooter.agent.skillProviders.team = { command = "x"; enable = false; }; } == [ ] then [ ]
         else [ "a provider still renders with enable = false" ])
-    ++ (if map (p: p.id) (providersOf (echoProvider true)) == [ "echo.dump" ] then [ ]
+    ++ (let r = providersOf (echoProvider true); in
+        if map (p: p.id) r == [ "echo.hello" ] && nixpkgsLib.hasInfix "echo-provided-skill-marker" (builtins.head r).command
+        then [ ]
         else [ "an enabled contrib's provider is not in SKILL_PROVIDERS_JSON as <contrib>.<id>" ])
     ++ (if providersOf (echoProvider false) == [ ] then [ ]
         else [ "a disabled contrib's provider is in SKILL_PROVIDERS_JSON" ]);
