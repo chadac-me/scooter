@@ -232,6 +232,6 @@ CREATE TABLE "conversation_authors" (
   "conversation_id" text   NOT NULL,
   "kind"            text   NOT NULL CHECK ("kind" IN ('identity', 'user', 'unknown')),
   "author"          text   NOT NULL,
-  "first_at"        bigint NOT NULL,
+  "first_at"        bigint NOT NULL, -- epoch ms this author first wrote here
   PRIMARY KEY ("conversation_id", "kind", "author")
 );
