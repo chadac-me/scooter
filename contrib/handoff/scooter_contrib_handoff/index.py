@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-
 import httpx
 
 from .agent_host import AgentHost
@@ -19,7 +17,7 @@ MAX_MESSAGE_CHARS = 4000
 MAX_CONVERSATIONS = 50
 
 
-async def reindex(store: HandoffStore, agent_host: AgentHost, now: datetime) -> dict[str, int]:
+async def reindex(store: HandoffStore, agent_host: AgentHost) -> dict[str, int]:
     rows = {
         row["id"]: row for row in await agent_host.shared()
         if row.get("id") and not row.get("parentId") and isinstance(row.get("lastActivityAt"), (int, float))
@@ -47,8 +45,7 @@ async def reindex(store: HandoffStore, agent_host: AgentHost, now: datetime) -> 
         )
         done += 1
     await store.remove_conversations(gone)
-    purged = await store.purge_bundles(now)
-    return {"indexed": done, "removed": len(gone), "pending": max(0, len(changed) - done), "purged_bundles": purged}
+    return {"indexed": done, "removed": len(gone), "pending": max(0, len(changed) - done)}
 
 
 def _messages(page: dict) -> list[tuple[str, str]]:

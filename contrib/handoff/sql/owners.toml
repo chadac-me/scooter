@@ -8,7 +8,5 @@
 owner = "broker"
 
 [contrib_handoff.tables]
-handoff_bundle_chunks = { writers = ["broker"], readers = [] }
-handoff_bundles       = { writers = ["broker"], readers = [] }
 handoff_conversations = { writers = ["broker"], readers = [] }
 handoff_messages      = { writers = ["broker"], readers = [] }

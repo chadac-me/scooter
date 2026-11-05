@@ -17,7 +17,7 @@ from scooter_broker_lib.mcp import ToolContext, ToolContextDep, ToolResult
 
 from . import HANDOFF_SOURCE
 from .agent_host import AgentHost, SpawnError
-from .store import HandoffStore, now_utc
+from .store import HandoffStore
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,6 @@ mcp = FastMCP(name="handoff")
 
 _MAX_BRIEF = 48 * 1024
 _MAX_READ_CHARS = 2000
-_MAX_BUNDLES = 20
 
 # Set by the provider factory.
 _store: HandoffStore | None = None
@@ -44,7 +43,7 @@ def conversation_url(conversation_id: str) -> str:
 
 @mcp.tool
 async def handoff_spawn(
-    brief: str, title: str = "", bundles: list[str] | None = None, model: str = "",
+    brief: str, title: str = "", model: str = "",
     ctx: ToolContext = ToolContextDep,
 ) -> ToolResult:
     """Hand a task to a NEW top-level conversation, with its own sandbox and its own
@@ -55,32 +54,25 @@ async def handoff_spawn(
     reports back here. The new conversation has the same owner and visibility as this
     one, and none of this conversation's history or files, so `brief` must stand
     alone: the goal, what is done, what is left, repos, branches and decisions.
-    `bundles` are bundle ids from POST handoff/bundles; the broker appends the
-    commands that unpack them. The router caps spawns per conversation per hour.
+    Push work in progress to a branch first and name it. The router caps spawns
+    per conversation per hour.
     """
     if _store is None or _agent_host is None:
         return ToolResult.error("handoff is not configured here")
     source_id = ctx.identity.conversation_id
     if not source_id:
         return ToolResult.error("no conversation for this caller")
-    bundles = bundles or []
     brief = brief.strip()
     if not brief:
         return ToolResult.error("brief is required")
     if len(brief) > _MAX_BRIEF:
-        return ToolResult.error(f"brief exceeds {_MAX_BRIEF} bytes; move detail into a bundle")
-    if len(bundles) > _MAX_BUNDLES:
-        return ToolResult.error(f"at most {_MAX_BUNDLES} bundles per handoff")
-    now = now_utc()
-    for bundle_id in bundles:
-        if await _store.bundle(bundle_id, now) is None:
-            return ToolResult.error(f"no such bundle, or it expired: {bundle_id}")
+        return ToolResult.error(f"brief exceeds {_MAX_BRIEF} bytes; push detail to a branch and name it")
 
     try:
         # Only a shared source is readable through handoff_read.
         shared = await _agent_host.conversation(source_id) is not None
         made = await _agent_host.spawn(
-            source_id, prompt=_prompt(brief, source_id, bundles, shared=shared),
+            source_id, prompt=_prompt(brief, source_id, shared=shared),
             title=title.strip(), model=model.strip(), source=HANDOFF_SOURCE,
         )
     except SpawnError as e:
@@ -93,20 +85,15 @@ async def handoff_spawn(
     label = title.strip() or "Handoff"
     await post_link(_agent_host.url, source_id, Link("handoff", "conversation", conversation_url(new_id), f"Handed off: {label}"))
     await post_link(_agent_host.url, new_id, Link("handoff", "conversation", conversation_url(source_id), "Handed off from"))
-    for bundle_id in bundles:
-        await _store.touch_bundle(bundle_id, now)
     return ToolResult.ok(json.dumps({
         "conversation_id": new_id, "url": conversation_url(new_id), "visibility": made.get("visibility"),
     }))
 
 
-def _prompt(brief: str, source_id: str, bundles: list[str], *, shared: bool) -> str:
+def _prompt(brief: str, source_id: str, *, shared: bool) -> str:
     lines = [brief, "", "---", f"Handed off from conversation {source_id} ({conversation_url(source_id)})."]
     if shared:
         lines.append(f'Read its history with handoff_read(conversation_id="{source_id}") if the brief leaves a gap.')
-    if bundles:
-        lines.append("Files were handed over as bundles. Unpack each before you start:")
-        lines += [f"    agent-broker handoff/bundles/{b} -o - | tar --zstd -xf - -C /workspace" for b in bundles]
     return "\n".join(lines)
 
 

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 
 import pytest
 from scooter_broker_lib.mcp import ToolContext
 from scooter_broker_lib.types import Identity, Provider
 
-from conftest import NOW
 from scooter_contrib_handoff import mcp_tools
 from scooter_contrib_handoff.index import reindex
 from scooter_contrib_handoff.mcp_tools import handoff_read, handoff_search, handoff_spawn
@@ -24,7 +22,6 @@ def links(store, agent_host, monkeypatch):
         posted.append((conversation_id, link))
 
     monkeypatch.setattr(mcp_tools, "post_link", post_link)
-    monkeypatch.setattr(mcp_tools, "now_utc", lambda: NOW)
     return posted
 
 
@@ -59,19 +56,6 @@ async def test_a_private_source_gets_no_read_hint(router, links):
     assert "handoff_read" not in router.spawns[0][1]["prompt"]
 
 
-async def test_bundles_are_checked_and_unpacked_in_the_prompt(router, links, store):
-    router.add("src")
-    bid = await store.begin_bundle("sbx", None, NOW)
-    await store.add_chunk(bid, 0, b"x")
-    await store.finish_bundle(bid, size=1, sha256="s")
-    r = await handoff_spawn(brief="go", bundles=["b_missing"], ctx=ctx("src"))
-    assert r.is_error and "b_missing" in r.text and router.spawns == []
-    r = await handoff_spawn(brief="go", bundles=[bid], ctx=ctx("src"))
-    assert not r.is_error
-    assert f"agent-broker handoff/bundles/{bid} -o - | tar --zstd -xf - -C /workspace" in router.spawns[0][1]["prompt"]
-    assert await store.bundle(bid, NOW + timedelta(days=13)) is not None
-
-
 async def test_router_refusal_is_reported_with_any_created_id(router, links):
     router.add("src")
     router.spawn_status = 429
@@ -87,7 +71,7 @@ async def test_spawn_needs_a_brief(router, links):
 async def test_search_hides_this_conversation_and_newly_private_ones(router, links, store, agent_host):
     for cid in ("here", "other", "gone"):
         router.add(cid, title=cid, messages=[("user", "the router 503 bug")])
-    await reindex(store, agent_host, NOW)
+    await reindex(store, agent_host)
     router.rows["gone"]["visibility"] = "private"
     r = await handoff_search(query="router 503", ctx=ctx("here"))
     hits = json.loads(r.text)

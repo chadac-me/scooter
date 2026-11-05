@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -10,12 +9,9 @@ from scooter_broker_lib.testing import create_schema, sqlite_config
 from scooter_contrib_handoff.agent_host import AgentHost
 from scooter_contrib_handoff.store import HandoffStore, _Base
 
-NOW = datetime(2026, 11, 5, tzinfo=timezone.utc)
-
-
 @pytest.fixture
 async def store():
-    s = HandoffStore(sqlite_config(), ttl=timedelta(days=14))
+    s = HandoffStore(sqlite_config())
     await create_schema(s, _Base)
     return s
 

@@ -5,29 +5,6 @@
 -- (`just db-migrate handoff`). The row models in scooter_contrib_handoff/store.py
 -- mirror it, and tests/test_db.py holds them together.
 
--- An uploaded archive; its bytes live in handoff_bundle_chunks.
-CREATE TABLE "handoff_bundles" (
-  "id"          character varying NOT NULL,
-  "uploader"    character varying NOT NULL,
-  "state"       character varying NOT NULL,
-  "size_bytes"  bigint NOT NULL,
-  "sha256"      character varying NULL,
-  "description" text NULL,
-  "created_at"  character varying NOT NULL,
-  "expires_at"  character varying NOT NULL,
-  PRIMARY KEY ("id")
-);
-CREATE INDEX "ix_handoff_bundles_uploader" ON "handoff_bundles" ("uploader");
-CREATE INDEX "ix_handoff_bundles_expires_at" ON "handoff_bundles" ("expires_at");
-
--- A bundle's bytes, in upload order.
-CREATE TABLE "handoff_bundle_chunks" (
-  "bundle_id" character varying NOT NULL,
-  "seq"       integer NOT NULL,
-  "data"      bytea NOT NULL,
-  PRIMARY KEY ("bundle_id", "seq")
-);
-
 -- A shared conversation the search index has folded in.
 CREATE TABLE "handoff_conversations" (
   "conversation_id"  character varying NOT NULL,
