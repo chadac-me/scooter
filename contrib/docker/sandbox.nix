@@ -1,6 +1,6 @@
 # docker's sandbox half: dockerd in nested namespaces, socket-activated on /run/docker.sock.
 
-{ lib, pkgs, ... }:
+{ config, lib, pkgs, ... }:
 
 let
   run = "/run/scooter-docker";
@@ -119,7 +119,8 @@ in
     description = "Docker in nested user, network and mount namespaces";
     requires = [ "scooter-docker.socket" "scooter-docker-proxy.service" ];
     after = [ "scooter-docker.socket" "scooter-docker-proxy.service" ];
-    path = with pkgs; [ util-linux iproute2 socat gawk gnugrep coreutils ];
+    # The stubs materialize through nix-store.
+    path = with pkgs; [ config.nix.package util-linux iproute2 socat gawk gnugrep coreutils ];
     environment = {
       HTTPS_PROXY = "http://127.0.0.1:${shimPort}";
       HTTP_PROXY = "http://127.0.0.1:${shimPort}";
