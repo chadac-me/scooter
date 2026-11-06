@@ -228,10 +228,10 @@ const apiFor = (over: Partial<Parameters<typeof createManagementApi>[0]> = {}) =
 const sandboxFrames = (frames: StateFrame[]) =>
   frames.filter((f): f is Extract<StateFrame, { kind: "topic" }> => f.kind === "topic" && f.topic === "sandbox");
 
-describe("GET /conversations/:id/state/events", () => {
+describe("state topics on GET /conversations/:id/events.integrity", () => {
   it("streams the sandbox topic, and a service start shows without waiting for a tick", async () => {
     const { api } = apiFor();
-    const s = call(api, "GET", "/conversations/c1/state/events");
+    const s = call(api, "GET", "/conversations/c1/events.integrity");
     type Sandbox = { ready: boolean; services: { running: boolean }[] };
     const latest = () => sandboxFrames(s.frames()).at(-1)?.data as Sandbox | undefined;
     await vi.waitFor(() => expect(latest()).toBeDefined());
@@ -245,25 +245,20 @@ describe("GET /conversations/:id/state/events", () => {
     s.close();
   });
 
-  it("answers 404 for an unknown conversation so the client stops reconnecting", async () => {
-    const { api } = apiFor();
-    const s = call(api, "GET", "/conversations/nope/state/events");
-    await s.done;
-    expect(s.status()).toBe(404);
-  });
-
-  it("ends the stream when another pod owns the conversation", async () => {
-    const { api } = apiFor({ streamOwnership: async () => "elsewhere" });
-    const s = call(api, "GET", "/conversations/c1/state/events");
-    await vi.waitFor(() => expect(s.text()).toContain("owner-elsewhere"));
+  it("stops the conversation's watcher when its last stream closes", async () => {
+    const stateHub = createStateHub();
+    const { api } = apiFor({ stateHub });
+    const s = call(api, "GET", "/conversations/c1/events.integrity");
+    await vi.waitFor(() => expect(stateHub.subscribers("c1")).toBe(1));
     s.close();
+    expect(stateHub.subscribers("c1")).toBe(0);
   });
 });
 
 describe("POST /conversations/:id/state/contrib/:contrib", () => {
   it("fans a contrib's data, or a bare invalidation, out to the conversation's stream", async () => {
     const { api } = apiFor();
-    const s = call(api, "GET", "/conversations/c1/state/events");
+    const s = call(api, "GET", "/conversations/c1/events.integrity");
     await flush();
     const withData = call(api, "POST", "/conversations/c1/state/contrib/shares", { data: { count: 2 } });
     await withData.done;

@@ -867,6 +867,10 @@ export function createManagementApi(deps: ManagementDeps): Router {
     live = true;
     // Mark the end of the initial replay so the client knows it is caught up.
     send({ kind: "synced" });
+    // State topics share this connection; browsers cap HTTP/1.1 connections per host.
+    const unsubState = stateHub.subscribe(id, (f) => {
+      if (f.kind === "topic") send(f);
+    });
 
       // This stream only carries live events for a conversation this pod runs, so when
       // another pod owns it end the stream after replay (and re-check periodically) so the
@@ -895,6 +899,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
       clearInterval(heartbeat);
       clearInterval(ownershipTimer);
       unsub?.();
+      unsubState();
     });
   });
 
@@ -1080,7 +1085,6 @@ export function createManagementApi(deps: ManagementDeps): Router {
       return resolveConvId(id);
     },
     fromService,
-    streamOwnership: deps.streamOwnership,
   });
 
   // Shared by GET /web-services and the `sandbox` topic.

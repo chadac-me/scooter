@@ -1,4 +1,4 @@
-// Per-conversation topics behind GET /conversations/:id/state/events.
+// Per-conversation topics, carried on GET /conversations/:id/events.integrity.
 
 /** One frame on the state stream; a topic without `data` means "refetch". */
 export type StateFrame =

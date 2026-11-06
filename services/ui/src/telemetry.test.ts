@@ -123,7 +123,6 @@ describe("classifyRoute", () => {
   it("separates the high-volume polled routes from each other", () => {
     // These were a single "other" bucket, which is why their cost was invisible.
     expect(classifyRoute("https://host/conversations/abc/ready")).toBe("ready");
-    expect(classifyRoute("https://host/conversations/abc/state/events")).toBe("state-stream");
     expect(classifyRoute("https://host/conversations/abc/web-services")).toBe("web-services");
     expect(classifyRoute("https://host/conversations/abc/links")).toBe("links");
   });
