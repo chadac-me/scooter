@@ -8,20 +8,20 @@ import pytest
 from scooter_broker_lib.mcp import ToolContext
 from scooter_broker_lib.types import Identity, Provider
 
-from scooter_contrib_handoff import mcp_tools
+from scooter_contrib_handoff import mcp_tools, spawn
 from scooter_contrib_handoff.index import reindex
 from scooter_contrib_handoff.mcp_tools import handoff_read, handoff_search, handoff_spawn
 
 
 @pytest.fixture
 def links(store, agent_host, monkeypatch):
-    mcp_tools.configure(store, agent_host, "https://scooter.test")
+    mcp_tools.configure(store, agent_host, "https://scooter.test", require_approval=False)
     posted: list[tuple[str, object]] = []
 
     async def post_link(url, conversation_id, link):
         posted.append((conversation_id, link))
 
-    monkeypatch.setattr(mcp_tools, "post_link", post_link)
+    monkeypatch.setattr(spawn, "post_link", post_link)
     return posted
 
 

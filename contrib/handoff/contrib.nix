@@ -1,4 +1,5 @@
-# handoff's declaration: agents spawn new conversations and recall shared ones.
+# handoff's declaration: agents spawn new conversations, with the owner's approval,
+# and recall shared ones.
 # Its deployment half (./deployment.nix) lets the broker
 # spawn through the router.
 { lib, ... }:
@@ -16,6 +17,16 @@
           set, else links carry the bare conversation id.
         '';
       };
+      requireApproval = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether the conversation's owner approves each handoff_spawn in the
+          conversation before the new conversation is created
+          (HANDOFF_REQUIRE_APPROVAL). The agent is told the outcome either way.
+          false spawns at once, within the router's per-hour cap.
+        '';
+      };
       indexEvery = lib.mkOption {
         type = lib.types.str;
         default = "5m";
@@ -31,13 +42,18 @@
         enable = true;
         tables.handoff_conversations = { };
         tables.handoff_messages = { };
+        tables.handoff_spawn_requests = { };
       };
 
       services.broker = {
         enable = true;
         pythonDeps = ps: [ ps.aiosqlite ];
         env.HANDOFF_ENABLED = "true";
+        env.HANDOFF_REQUIRE_APPROVAL = lib.boolToString config.requireApproval;
       };
+
+      # Spawns are approved in-conversation; routing lives in ./deployment.nix.
+      approvals = { };
 
       skills."scooter-handoff.md" = ./skills/scooter-handoff.md;
 

@@ -1,4 +1,4 @@
-"""The handoff provider: the search index, its route and the agent tools.
+"""The handoff provider: the search index, spawn approvals, their routes and the agent tools.
 
 Off unless `handoff_enabled`; the registry then drops the routes and tools, so no agent
 is offered a handoff that is not there.
@@ -14,6 +14,8 @@ from scooter_broker_lib.types import Provider
 from . import mcp_tools
 from .agent_host import AgentHost
 from .config import settings
+from .host import HostCards
+from .spawn import Spawner
 from .store import HandoffStore
 from .transport import Handoff
 
@@ -29,5 +31,11 @@ def handoff(ctx: BrokerContext) -> Provider:
     store = HandoffStore(ctx.contrib_store_config("handoff"))
     agent_host = AgentHost(settings.agent_host_url) if settings.agent_host_url else None
     transport.store, transport.agent_host = store, agent_host
-    mcp_tools.configure(store, agent_host, settings.handoff_public_base_url)
+    transport.spawner = Spawner(agent_host, settings.handoff_public_base_url) if agent_host else None
+    mcp_tools.configure(
+        store, agent_host, settings.handoff_public_base_url,
+        owners=ctx.owners,
+        cards=HostCards(settings.agent_host_url) if agent_host else None,
+        require_approval=settings.handoff_require_approval,
+    )
     return Provider(name="handoff", transports=[transport, tools], enabled=True)

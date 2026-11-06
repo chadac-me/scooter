@@ -1240,6 +1240,9 @@ let
   handoffRouterEnv =
     let ctrs = builtins.attrValues (handoffEval.config.kubernetes.resources.deployments.conversation-router.spec.template.spec.containers or { });
     in builtins.concatMap (c: c.env or [ ]) ctrs;
+  handoffBrokerEnv =
+    let ctrs = builtins.attrValues (handoffEval.config.kubernetes.resources.deployments.agent-broker.spec.template.spec.containers or { });
+    in builtins.concatMap (c: c.env or [ ]) ctrs;
   sysEchoTuned = sysById (sysEval {
     contribs.echo.enable = nixpkgsLib.mkForce true;
     scooter.systemTasks.echo-greet.every = "4h";
@@ -1279,6 +1282,10 @@ let
     # handoff spawns through the router, so enabling it must make the broker a spawner.
     ++ (if builtins.any (e: e.name == "CONVERSATION_SPAWNER_SERVICE_ACCOUNTS" && nixpkgsLib.hasSuffix ":agent-broker" e.value) handoffRouterEnv then [ ]
         else [ "enabling handoff did not add the broker to conversationController.spawners" ])
+    ++ (if (handoffEval.config.scooter.approvals.handoff.brokerPrefix or null) == "/handoff/spawns" then [ ]
+        else [ "enabling handoff did not route its approval cards to /handoff/spawns" ])
+    ++ (if builtins.any (e: e.name == "HANDOFF_REQUIRE_APPROVAL" && e.value == "true") handoffBrokerEnv then [ ]
+        else [ "handoff spawns did not default to needing approval (HANDOFF_REQUIRE_APPROVAL)" ])
     ++ (if schedImageOf (sysEval { contribs.handoff.enable = nixpkgsLib.mkForce true; scooter.systemTasks.broker-health.enable = false; }) == publishedSchedImage then [ ]
         else [ "with handoff enabled the scheduler image differs from the published one" ])
     ++ (if (sysEchoTuned.echo-greet.interval_seconds or null) == 14400 then [ ]
