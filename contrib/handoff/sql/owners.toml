@@ -8,5 +8,6 @@
 owner = "broker"
 
 [contrib_handoff.tables]
-handoff_conversations = { writers = ["broker"], readers = [] }
-handoff_messages      = { writers = ["broker"], readers = [] }
+handoff_conversations  = { writers = ["broker"], readers = [] }
+handoff_messages       = { writers = ["broker"], readers = [] }
+handoff_spawn_requests = { writers = ["broker"], readers = [] }
