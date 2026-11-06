@@ -13,6 +13,11 @@ let
 
   outer = pkgs.writeShellScript "scooter-dockerd" ''
     set -eu
+    # A masked /proc (host-user pods) breaks container sysctls and networking.
+    case "$(findmnt -rno OPTIONS /proc/sys || true)" in ro*)
+      echo "scooter-docker: /proc/sys is read-only; docker needs sandboxUserNamespace (procMount: Unmasked)" >&2
+      exit 1 ;;
+    esac
     # Materialize the stubs here, where the nix cache is reachable.
     ${pkgs.docker}/bin/dockerd --version >/dev/null
     ${pkgs.crun}/bin/crun --version >/dev/null

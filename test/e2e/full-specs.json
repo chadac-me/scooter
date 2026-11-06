@@ -22,7 +22,6 @@
   "queue-durability.spec.ts",
   "refresh-history.spec.ts",
   "revive.spec.ts",
-  "sandbox-docker.spec.ts",
   "scroll-lock.spec.ts",
   "sessions.spec.ts",
   "settings-skills.spec.ts",

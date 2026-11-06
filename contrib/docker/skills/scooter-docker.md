@@ -15,6 +15,11 @@ namespace. It starts the first time something connects to `/run/docker.sock`
 (`DOCKER_HOST` points there), so it costs nothing until you use it. Privileged
 containers work, which is what k3d's nodes need.
 
+If `docker` reports that it cannot connect and `journalctl -u scooter-docker`
+says `/proc/sys is read-only`, this deployment does not run sandboxes in a user
+namespace. Docker cannot work in that sandbox. Tell the user rather than
+working around it.
+
 ## Before a cluster: scale up
 
 A 3-node k3d cluster idles at about 1 GiB of process memory plus page cache, and
