@@ -67,6 +67,7 @@ export function classifyRoute(url: string): string {
   if (path.endsWith("/messages")) return "send-message";
   if (path.includes("events.integrity")) return "stream";
   if (path.endsWith("/conversations/events")) return "list-stream";
+  if (path.endsWith("/state/events")) return "state-stream";
   if (path.endsWith("/cancel")) return "cancel";
   if (path.endsWith("/ready")) return "ready";
   if (path.endsWith("/links")) return "links";
