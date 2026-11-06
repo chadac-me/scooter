@@ -5,7 +5,8 @@ The browser cannot run kubectl, so specs POST here to disturb the cluster mid-co
 POST /restart rollout-restarts the agent-host Deployment and waits, and POST /move/<thread>
 deletes the pod hosting <thread>'s conversation so the controller reassigns it. The warm-store
 stories read and disturb the overlay pool: GET /overlay/<thread>, GET /pool, POST and GET
-/canary/<thread>, POST /warm-store/scale/<n>. Stdlib only, shells out to kubectl on PATH.
+/canary/<thread>, POST /warm-store/scale/<n>. POST /docker/<thread> runs a container in
+the conversation's sandbox. Stdlib only, shells out to kubectl on PATH.
 """
 
 from __future__ import annotations
@@ -98,6 +99,14 @@ class Hook(BaseHTTPRequestHandler):
                 return self._reply(400, "bad conversation id or canary")
             r = sh("kubectl", "-n", NS, "exec", sandbox_of(thread), "-c", "sandbox", "--",
                    "sh", "-c", f"echo {body} > {CANARY} && sync")
+            return self._reply(200 if r.returncode == 0 else 500, r.stdout + r.stderr)
+
+        if self.path.startswith("/docker/"):
+            thread = self.path.removeprefix("/docker/")
+            if not thread_ok(thread):
+                return self._reply(400, "bad conversation id")
+            r = sh("kubectl", "-n", NS, "exec", sandbox_of(thread), "-c", "sandbox", "--",
+                   "bash", "-lc", "docker run --rm alpine:3.20 echo docker-ok")
             return self._reply(200 if r.returncode == 0 else 500, r.stdout + r.stderr)
 
         m = re.fullmatch(r"/warm-store/scale/([01])", self.path)
