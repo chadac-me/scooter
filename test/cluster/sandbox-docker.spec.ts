@@ -75,9 +75,13 @@ maybe("docker in a user-namespaced sandbox", () => {
       if (Date.now() > deadline) throw new Error("scooter-docker.socket never became active");
       await new Promise((res) => setTimeout(res, 2000));
     }
+    // Query the closure before docker runs: the stubs' realization holds the store DB.
     const r = await sh(
-      'cu=$(dirname "$(dirname "$(readlink -f "$(type -P echo)")")") && ' +
-        'tar -cf - $(nix-store -qR "$cu") 2>/dev/null | docker import - scooter-docker-probe >/dev/null && ' +
+      "set -eo pipefail; " +
+        'cu=$(dirname "$(dirname "$(readlink -f "$(type -P echo)")")"); ' +
+        'paths=$(nix-store -qR "$cu"); ' +
+        "docker version >/dev/null; " +
+        "tar -cf - $paths 2>/dev/null | docker import - scooter-docker-probe >/dev/null; " +
         'docker run --rm scooter-docker-probe "$cu/bin/echo" docker-ok',
     );
     if (r.exitCode !== 0) {
