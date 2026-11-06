@@ -100,8 +100,9 @@ describe("reviving into a recreated sandbox", () => {
 
       await sessions.promptByThread("thread-reset" as never, "again", undefined);
       expect(agent.prompts.at(-1), "the note goes out once").not.toContain("/workspace is empty");
+      await logged(conv.id); // drain appends before the directory goes
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -114,8 +115,9 @@ describe("reviving into a recreated sandbox", () => {
       await sessions.promptByThread("thread-plain" as never, "hello", undefined);
       expect(notes(await logged(conv.id))).toEqual([]);
       expect(agent.prompts.at(-1)).not.toContain("/workspace is empty");
+      await logged(conv.id);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 });
