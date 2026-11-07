@@ -152,28 +152,29 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await expect(card).not.toHaveAttribute("data-open");
   });
 
-  test("a stage's New conversation tile starts a conversation filed in that stage", async ({ chat, page, request, baseURL }) => {
+  test("the first stage's New conversation tile starts a conversation filed in it", async ({ chat, page, request, baseURL }) => {
     const base = baseURL ?? "http://localhost:5173";
     const kanban = await serveKanban(page, request, base);
     const board = await kanban.board(`e2e-board-tile-${Date.now()}`);
-    const review = board.stages[2].id;
-    const filedInReview = async () => {
+    const design = board.stages[0].id;
+    const filedInDesign = async () => {
       const { placements } = (await (await request.get(`${base}/folders`)).json()) as { placements: Record<string, string> };
-      return Object.values(placements).filter((f) => f === review).length;
+      return Object.values(placements).filter((f) => f === design).length;
     };
 
-    // An empty board still shows its stages, each with a tile.
+    // An empty board still shows its stages, the first with the tile.
     await page.goto(`/boards/${board.folder}`);
-    await expect(page.getByTestId("kanban-stage-new")).toHaveCount(STAGES.length, { timeout: 20_000 });
+    await expect(page.getByTestId("kanban-lane")).toHaveCount(STAGES.length, { timeout: 20_000 });
+    await expect(page.getByTestId("kanban-stage-new")).toHaveCount(1);
 
-    await lane(page, review).getByTestId("kanban-stage-new").click();
+    await lane(page, design).getByTestId("kanban-stage-new").click();
     await expect(page.getByTestId("kanban-chat")).toBeVisible();
-    await chat.send("started from the review stage");
+    await chat.send("started from the tile");
     await chat.waitForReply(/dummy agent/i);
-    await expect.poll(filedInReview, { timeout: 20_000 }).toBe(1);
-    await expect(lane(page, review).getByTestId("kanban-card")).toHaveCount(1, { timeout: 20_000 });
+    await expect.poll(filedInDesign, { timeout: 20_000 }).toBe(1);
+    await expect(lane(page, design).getByTestId("kanban-card")).toHaveCount(1, { timeout: 20_000 });
 
-    // Editing stages hides the tiles.
+    // Editing stages hides the tile.
     await page.getByTestId("kanban-edit-stages").click();
     await expect(page.getByTestId("kanban-stage-new")).toHaveCount(0);
   });

@@ -544,7 +544,7 @@ function Board({
                 )}
               </header>
               <ol className="flex min-h-16 flex-1 flex-col gap-2 overflow-y-auto px-2 pt-1 pb-2">
-                {!editing && (
+                {i === 0 && !editing && (
                   <li
                     onDragOver={(e) => {
                       // A drop on the tile goes to the top of the lane.
