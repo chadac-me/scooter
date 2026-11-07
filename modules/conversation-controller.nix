@@ -75,7 +75,7 @@ in
     };
     sandboxRetentionSeconds = mkOption {
       type = types.int;
-      default = 7 * 86400;
+      default = 28 * 86400;
       description = ''
         Delete a root conversation's whole sandbox (the Sandbox, its overlay store and its
         `/workspace` PVC) once it has been suspended, unhosted and idle this long. The
