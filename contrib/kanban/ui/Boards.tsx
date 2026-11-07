@@ -5,8 +5,8 @@
 // /boards/<folderId> shows one, with the chat of the open card beside it. Boards and stages come
 // from /kanban/user/boards, each card's note and order from its conversation's relay. Moving a
 // card files the conversation in the stage, then tells it as the user.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronLeft, ChevronRight, Lock, Pencil, Plus, Tag as TagIcon, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Lock, Pencil, Plus, Tag as TagIcon, Trash2, X } from "lucide-react";
 import {
   Button,
   ChatPanel,
@@ -91,14 +91,129 @@ const TAG_CLASS: Record<string, string> = {
 };
 const TAG_COLORS = Object.keys(TAG_CLASS);
 
-function TagChip({ tag }: { tag: Tag }) {
+function TagChip({ tag, onRemove }: { tag: Tag; onRemove?: () => void }) {
   return (
     <span
       data-testid="kanban-tag"
-      className={cn("inline-flex max-w-full items-center truncate rounded px-1.5 py-0.5 text-[11px] font-medium", TAG_CLASS[tag.color] ?? TAG_CLASS.gray)}
+      className={cn(
+        "inline-flex max-w-full items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] font-medium",
+        TAG_CLASS[tag.color] ?? TAG_CLASS.gray,
+      )}
     >
-      {tag.name}
+      <span className="truncate">{tag.name}</span>
+      {onRemove && (
+        <button
+          type="button"
+          aria-label={`Remove ${tag.name}`}
+          // Keep focus in the field; the button unmounts on click.
+          onMouseDown={(e) => e.preventDefault()}
+          className="-me-0.5 rounded-sm px-0.5 leading-none opacity-70 hover:opacity-100"
+          onClick={onRemove}
+        >
+          <X aria-hidden className="size-3" />
+        </button>
+      )}
     </span>
+  );
+}
+
+type TagOption = { tag: Tag; name?: undefined } | { tag?: undefined; name: string };
+
+/** A card's tags as removable chips, with a field that filters the board's tags to add. */
+function TagInput({
+  tags,
+  chosen,
+  change,
+  create,
+  close,
+}: {
+  tags: Tag[];
+  chosen: Tag[];
+  change(ids: string[]): void;
+  // Adds a tag to the board; its id, or null when that failed.
+  create(name: string): Promise<string | null>;
+  close(): void;
+}) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const listId = useId();
+  const ids = chosen.map((t) => t.id);
+  const q = query.trim().toLowerCase();
+  const full = chosen.length >= MAX_CARD_TAGS;
+  const options: TagOption[] = full
+    ? []
+    : [
+        ...tags.filter((t) => !ids.includes(t.id) && t.name.toLowerCase().includes(q)).map((tag) => ({ tag })),
+        ...(q && !tags.some((t) => t.name.toLowerCase() === q) ? [{ name: query.trim() }] : []),
+      ];
+  const at = Math.min(active, options.length - 1);
+  const pick = async (o: TagOption) => {
+    setQuery("");
+    setActive(0);
+    const id = o.tag ? o.tag.id : await create(o.name);
+    if (id) change([...ids, id]);
+  };
+  return (
+    <div
+      className="mt-1"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) close();
+      }}
+    >
+      <div data-testid="kanban-tag-input" className="flex flex-wrap items-center gap-1 rounded-md border border-input bg-background p-1">
+        {chosen.map((t) => (
+          <TagChip key={t.id} tag={t} onRemove={() => change(ids.filter((x) => x !== t.id))} />
+        ))}
+        <input
+          autoFocus
+          role="combobox"
+          aria-label="Add a tag"
+          aria-expanded={options.length > 0}
+          aria-controls={listId}
+          aria-activedescendant={options.length > 0 ? `${listId}-${at}` : undefined}
+          className="min-w-16 flex-1 bg-transparent px-1 text-xs outline-none"
+          placeholder={full ? `${MAX_CARD_TAGS} tags at most` : "Add a tag…"}
+          value={query}
+          onChange={(e) => {
+            setQuery(e.currentTarget.value);
+            setActive(0);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              e.preventDefault();
+              const by = e.key === "ArrowDown" ? 1 : -1;
+              setActive((at + by + options.length) % Math.max(options.length, 1));
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              if (options[at]) void pick(options[at]);
+            } else if (e.key === "Escape") {
+              close();
+            } else if (e.key === "Backspace" && !query && ids.length) {
+              change(ids.slice(0, -1));
+            }
+          }}
+        />
+      </div>
+      {options.length > 0 && (
+        <ul id={listId} role="listbox" aria-label="Tags" className="mt-1 max-h-48 overflow-y-auto rounded-md border bg-popover p-1 shadow-md">
+          {options.map((o, i) => (
+            <li
+              key={o.tag?.id ?? "create"}
+              id={`${listId}-${i}`}
+              role="option"
+              aria-selected={i === at}
+              // Keep focus in the field, so the click lands before blur closes it.
+              onMouseDown={(e) => e.preventDefault()}
+              onMouseEnter={() => setActive(i)}
+              onClick={() => void pick(o)}
+              className={cn("cursor-pointer rounded px-1.5 py-1 text-xs", i === at && "bg-accent")}
+            >
+              {o.tag ? <TagChip tag={o.tag} /> : <>Create “{o.name}”</>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -330,7 +445,7 @@ function Board({
   const [editing, setEditing] = useState(false);
   const [newStage, setNewStage] = useState("");
   const [newTag, setNewTag] = useState("");
-  // The card whose tag picker is open.
+  // The card whose tag field is open.
   const [tagging, setTagging] = useState<string | null>(null);
   const openId = useOpenConversation();
   const live = useRef(true);
@@ -465,6 +580,18 @@ function Board({
     },
     [cards],
   );
+
+  const createTag = async (name: string) => {
+    try {
+      const reply = await tagCalls.add(folder.id, name);
+      setError(null);
+      const row = reply.boards.find((b) => b.folder === folder.id);
+      return row?.tags.find((t) => t.name === name)?.id ?? null;
+    } catch (e) {
+      setError(`Could not add the tag: ${(e as Error).message}`);
+      return null;
+    }
+  };
 
   const shiftTag = (i: number, by: -1 | 1) => {
     const [a, b] = by < 0 ? [tags[i - 2], tags[i - 1]] : [tags[i + 1], tags[i + 2]];
@@ -697,7 +824,7 @@ function Board({
                       onClick={() => {
                         const name = window.prompt("Rename the stage", col.label)?.trim();
                         if (name && name !== col.label) {
-                            void changeBoard(stageCalls.update(folder.id, col.id, { name }), "rename the stage");
+                          void changeBoard(stageCalls.update(folder.id, col.id, { name }), "rename the stage");
                         }
                       }}
                     >
@@ -712,7 +839,7 @@ function Board({
                       onClick={() => {
                         const to = (i === 0 ? stages[1] : stages[0])?.label;
                         if (window.confirm(`Delete the "${col.label}" stage? Its cards move to "${to}".`)) {
-                            void changeBoard(stageCalls.remove(folder.id, col.id), "delete the stage");
+                          void changeBoard(stageCalls.remove(folder.id, col.id), "delete the stage");
                         }
                       }}
                     >
@@ -761,7 +888,7 @@ function Board({
                       data-conversation-id={conv.id}
                       data-open={open || undefined}
                       data-blocked={waiting.length > 0 || undefined}
-                      draggable
+                      draggable={tagging !== conv.id}
                       onDragStart={(e) => {
                         e.dataTransfer.setData(CARD_MIME, conv.id);
                         e.dataTransfer.effectAllowed = "move";
@@ -778,74 +905,61 @@ function Board({
                         if (dropAt?.before !== conv.id) setDropAt({ column: col.id, before: conv.id });
                       }}
                       className={cn(
-                          "group rounded-md border bg-background p-2 text-sm shadow-xs",
+                        "group rounded-md border bg-background p-2 text-sm shadow-xs",
                         open && "ring-2 ring-primary",
                         waiting.length > 0 && "border-dashed bg-muted/40",
                         dragging === conv.id && "opacity-50",
                         dropAt?.before === conv.id && "border-t-2 border-t-primary",
                       )}
                     >
-                        <div className="flex items-start gap-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          openConversation(conv.id);
-                          setPanel(true);
-                        }}
-                            className="flex min-w-0 flex-1 items-start gap-2 text-start"
-                        title={conv.title}
-                      >
-                        {conv.dot && <StatusDot dot={conv.dot} />}
-                        <span className="line-clamp-2 font-medium">{conv.title}</span>
-                      </button>
-                          {tags.length > 0 && (
-                            <Button
-                              size="icon-xs"
-                              variant="ghost"
-                              aria-label="Edit tags"
-                              aria-expanded={tagging === conv.id}
-                              data-testid="kanban-edit-card-tags"
-                              className={cn(
-                                "shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100",
-                                tagging === conv.id && "opacity-100",
-                              )}
-                              onClick={() => setTagging((t) => (t === conv.id ? null : conv.id))}
-                            >
-                              <TagIcon aria-hidden />
-                            </Button>
+                      <div className="flex items-start gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            openConversation(conv.id);
+                            setPanel(true);
+                          }}
+                          className="flex min-w-0 flex-1 items-start gap-2 text-start"
+                          title={conv.title}
+                        >
+                          {conv.dot && <StatusDot dot={conv.dot} />}
+                          <span className="line-clamp-2 font-medium">{conv.title}</span>
+                        </button>
+                        <Button
+                          size="icon-xs"
+                          variant="ghost"
+                          aria-label="Edit tags"
+                          aria-expanded={tagging === conv.id}
+                          data-testid="kanban-edit-card-tags"
+                          // Keep focus in the open field, so this click closes it.
+                          onMouseDown={(e) => e.preventDefault()}
+                          className={cn(
+                            "shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100",
+                            tagging === conv.id && "opacity-100",
                           )}
-                        </div>
-                        {cardTags.length > 0 && (
-                          <ul data-testid="kanban-card-tags" className="mt-1 flex flex-wrap gap-1" aria-label="Tags">
-                            {cardTags.map((t) => (
-                              <li key={t.id} className="max-w-full">
-                                <TagChip tag={t} />
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        {tagging === conv.id && (
-                          <fieldset data-testid="kanban-tag-picker" className="mt-2 space-y-1 rounded border p-2">
-                            <legend className="px-1 text-[11px] text-muted-foreground">Tags</legend>
-                            {tags.map((t) => {
-                              const on = cardTags.some((c) => c.id === t.id);
-                              return (
-                                <label key={t.id} className="flex items-center gap-2 text-xs">
-                                  <input
-                                    type="checkbox"
-                                    checked={on}
-                                    disabled={!on && cardTags.length >= MAX_CARD_TAGS}
-                                    onChange={() => {
-                                      const ids = cardTags.map((c) => c.id);
-                                      void setTags(conv.id, on ? ids.filter((x) => x !== t.id) : [...ids, t.id]);
-                                    }}
-                                  />
-                                  <TagChip tag={t} />
-                                </label>
-                              );
-                            })}
-                          </fieldset>
-                        )}
+                          onClick={() => setTagging((t) => (t === conv.id ? null : conv.id))}
+                        >
+                          <TagIcon aria-hidden />
+                        </Button>
+                      </div>
+                      {tagging !== conv.id && cardTags.length > 0 && (
+                        <ul data-testid="kanban-card-tags" className="mt-1 flex flex-wrap gap-1" aria-label="Tags">
+                          {cardTags.map((t) => (
+                            <li key={t.id} className="max-w-full">
+                              <TagChip tag={t} />
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {tagging === conv.id && (
+                        <TagInput
+                          tags={tags}
+                          chosen={cardTags}
+                          change={(ids) => void setTags(conv.id, ids)}
+                          create={createTag}
+                          close={() => setTagging(null)}
+                        />
+                      )}
                       {card?.note && (
                         <p data-testid="kanban-card-note" className="mt-1 line-clamp-3 text-xs text-muted-foreground">
                           {card.note}
@@ -877,7 +991,7 @@ function Board({
                 e.preventDefault();
                 const name = newStage.trim();
                 if (!name) return;
-                  void changeBoard(
+                void changeBoard(
                   stageCalls.add(folder.id, name).then(() => setNewStage("")),
                   "add the stage",
                 );

@@ -300,7 +300,7 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await expect.poll(childNames).toEqual(["Backlog", "Design", "In progress", "QA"]);
   });
 
-  test("the user makes a board's tags, tags a card, and deleting a tag takes it off", async ({
+  test("the user makes a board's tags, tags a card by typing, and deleting a tag takes it off", async ({
     chat,
     page,
     request,
@@ -320,8 +320,6 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
 
     await page.goto(`/boards/${board.folder}`);
     await expect(card).toHaveCount(1, { timeout: 20_000 });
-    // No tags yet, so no picker.
-    await expect(card.getByTestId("kanban-edit-card-tags")).toHaveCount(0);
 
     await page.getByTestId("kanban-edit-stages").click();
     for (const [i, name] of ["bug", "infra"].entries()) {
@@ -330,18 +328,41 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
       await expect(page.getByTestId("kanban-tag-tools")).toHaveCount(i + 1);
     }
 
+    const field = card.getByRole("combobox", { name: "Add a tag" });
+    const options = () => card.getByRole("option").allTextContents();
+    const editing = () => card.getByTestId("kanban-tag-input").getByTestId("kanban-tag").allTextContents();
     await card.hover();
     await card.getByTestId("kanban-edit-card-tags").click();
-    await card.getByTestId("kanban-tag-picker").getByLabel("infra").check();
-    await expect.poll(chips).toEqual(["infra"]);
-    await card.getByTestId("kanban-tag-picker").getByLabel("bug").check();
+    await expect(field).toBeFocused();
+
+    // Typing filters the board's tags; Enter adds the highlighted one.
+    await field.fill("inf");
+    await expect.poll(options).toEqual(["infra", "Create “inf”"]);
+    await field.press("Enter");
+    await expect.poll(editing).toEqual(["infra"]);
+    await field.fill("b");
+    await card.getByRole("option", { name: "bug" }).click();
     // Chips follow the board's tag order.
-    await expect.poll(chips).toEqual(["bug", "infra"]);
-    expect(kanban.cardTags[id]).toHaveLength(2);
+    await expect.poll(editing).toEqual(["bug", "infra"]);
+
+    // A name the board lacks offers to create it, then puts it on the card.
+    await field.fill("ui");
+    await card.getByRole("option", { name: "Create “ui”" }).click();
+    await expect.poll(editing).toEqual(["bug", "infra", "ui"]);
+    expect(kanban.boards[0].tags.map((t) => t.name)).toEqual(["bug", "infra", "ui"]);
+
+    // × removes a tag, and Backspace in the empty field removes the last.
+    await card.getByRole("button", { name: "Remove infra" }).click();
+    await expect.poll(editing).toEqual(["bug", "ui"]);
+    await field.press("Backspace");
+    await expect.poll(editing).toEqual(["bug"]);
+    await field.press("Escape");
+    await expect.poll(chips).toEqual(["bug"]);
+    await expect.poll(() => kanban.cardTags[id]?.length).toBe(1);
 
     // The tags survive a reload, from the card route.
     await page.reload();
-    await expect.poll(chips, { timeout: 20_000 }).toEqual(["bug", "infra"]);
+    await expect.poll(chips, { timeout: 20_000 }).toEqual(["bug"]);
 
     await page.getByTestId("kanban-edit-stages").click();
     page.once("dialog", (d) => {
@@ -349,7 +370,7 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
       void d.accept();
     });
     await page.getByRole("button", { name: "Delete bug" }).click();
-    await expect.poll(chips).toEqual(["infra"]);
+    await expect.poll(chips).toEqual([]);
   });
 
   test("Rename and Delete board change the board's folder", async ({ page, request, baseURL }) => {
