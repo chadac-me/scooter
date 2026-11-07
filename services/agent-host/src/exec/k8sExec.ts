@@ -14,6 +14,7 @@ import { KubeConfig, Exec, CoreV1Api, type V1Pod, type V1Status } from "@kuberne
 import type { ExecRequest, ExecResult, SandboxRef } from "../types.js";
 import type { SandboxApiClient } from "./sandboxExec.js";
 import { describeSandboxDisruption } from "./podDisruption.js";
+import { describePodNotReady, setPodWaitStatus, type PodNotReady } from "./podReadiness.js";
 
 const log = logger("k8sExec");
 
@@ -138,6 +139,10 @@ export interface ResolveReadyPodDeps {
   ensureRunning?: () => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
   deadlineMs?: number;
+  /** Why the not-ready pod (undefined: no pod) is stuck, e.g. a volume that won't attach; absent means the pod's own status only. */
+  diagnose?: (pod: Pod | undefined) => Promise<PodNotReady>;
+  /** How often to re-diagnose while waiting, since listing events is an extra API call. */
+  diagnoseEveryMs?: number;
 }
 
 /** Poll until a Running and Ready pod backs the sandbox, firing `ensureRunning` once if the first lookup finds no pod at all. */
@@ -148,6 +153,9 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
   let lastRunning: Pod | undefined;
   let healed = false; // ensureRunning is fired at most once
   let waitLogged = false; // one "waiting" line per call, not one per poll
+  let lastDiagnosis: PodNotReady | undefined;
+  let lastDiagnosedAt = -Infinity;
+  const diagnoseEvery = deps.diagnoseEveryMs ?? 10_000;
   for (;;) {
     const candidates = await deps.listCandidates();
     // No pod at all: resume once so the controller recreates it, then keep polling.
@@ -182,6 +190,8 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
         (p.status?.containerStatuses ?? []).every((c) => c.ready),
     );
     if (ready?.metadata?.name) {
+      // Cleared only on success: after a failed wait the last cause stays for conversation_status.
+      setPodWaitStatus(ref, undefined);
       const waitedMs = Date.now() - started;
       // A wait that spanned more than one poll is latency the caller's turn is eating, so record it.
       if (waitedMs > 2_000) {
@@ -193,6 +203,19 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
         });
       }
       return ready;
+    }
+    if (Date.now() - lastDiagnosedAt >= diagnoseEvery) {
+      lastDiagnosedAt = Date.now();
+      const pending = live[0] ?? candidates[0];
+      const next = deps.diagnose
+        ? await deps.diagnose(pending).catch(() => describePodNotReady(pending))
+        : describePodNotReady(pending);
+      // A new storage cause gets a warning line: it is the volume-health signal operators grep for.
+      if (next.storage && next.reason !== lastDiagnosis?.reason) {
+        log.warn("sandbox storage unavailable", { namespace: ref.namespace, sandbox: ref.name, reason: next.reason });
+      }
+      lastDiagnosis = next;
+      setPodWaitStatus(ref, { ...next, since: started });
     }
     if (!waitLogged) {
       waitLogged = true;
@@ -216,7 +239,8 @@ export async function pollForReadyPod(ref: SandboxRef, deps: ResolveReadyPodDeps
         falling_back_to: lastRunning?.metadata?.name ?? null,
       });
       if (lastRunning) return lastRunning;
-      throw new Error(`no ready pod for sandbox ${ref.namespace}/${ref.name}`);
+      const why = lastDiagnosis ? `: ${lastDiagnosis.storage ? "storage unavailable, " : ""}${lastDiagnosis.reason}` : "";
+      throw new Error(`no ready pod for sandbox ${ref.namespace}/${ref.name}${why}`);
     }
     await sleep(1500);
   }
@@ -231,6 +255,17 @@ async function resolveReadyPod(
   const core = kc.makeApiClient(CoreV1Api);
   return pollForReadyPod(ref, {
     ensureRunning,
+    // Pod events carry the volume attach/mount failures. Needs `list events` RBAC; a
+    // denied list falls back to the pod's own status.
+    diagnose: async (pod) => {
+      const name = pod?.metadata?.name;
+      if (!name) return describePodNotReady(pod);
+      const events = await core
+        .listNamespacedEvent({ namespace: ref.namespace, fieldSelector: `involvedObject.kind=Pod,involvedObject.name=${name}` })
+        .then((r) => r.items)
+        .catch(() => []);
+      return describePodNotReady(pod, events);
+    },
     // Try both the label selector and the direct pod-name lookup.
     listCandidates: async () => {
       const pods = await core.listNamespacedPod({
