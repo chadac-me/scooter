@@ -1542,13 +1542,6 @@ in
               resources = [ "serviceaccounts" "persistentvolumeclaims" "pods" "configmaps" ];
               verbs = [ "get" "list" "watch" "create" "update" "patch" "delete" ];
             }
-            {
-              # Read-only: a sandbox pod that won't go Ready is explained from its events
-              # (FailedAttachVolume, FailedMount, FailedScheduling).
-              apiGroups = [ "" ];
-              resources = [ "events" ];
-              verbs = [ "get" "list" ];
-            }
           ];
       };
 

@@ -27,7 +27,7 @@ export interface SandboxApiClient {
   uploadBinary(path: string, base64: string): Promise<void>;
   /** How the exec stream is reached. "k8s-exec" in production. */
   readonly mode: "k8s-exec" | "direct";
-  /** Why commands can't start yet (the pod isn't Ready, e.g. its volume won't attach); undefined once connected. */
+  /** Set while commands can't start because the sandbox pod isn't Ready; undefined once it is. */
   waitingFor?(): string | undefined;
 }
 
@@ -120,7 +120,7 @@ export function createSandboxExecBackend(api: SandboxApiClient, opts: SandboxExe
           const detail = String(formatted.message ?? JSON.stringify(formatted));
           log.errorWith("spawn execute failed", err);
           const msg = notReady
-            ? `the command never started: ${notReady}. This is the platform, not your command; ` +
+            ? `the command never started: ${notReady}. This is the platform, not your command, and ` +
               `/workspace is safe. Tell the user, and retry in a few minutes rather than narrowing the command`
             : timedOut
             ? `command timed out after ${Math.round(timeoutMs / 1000)}s and was terminated — ` +
