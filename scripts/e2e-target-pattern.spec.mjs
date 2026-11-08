@@ -62,6 +62,25 @@ describe("on a pull request", () => {
     expect(r.pattern).toBe("renames a conversation|archives it");
   });
 
+  it("skips an example inside a code fence", () => {
+    const r = run({
+      GITHUB_EVENT_NAME: "pull_request",
+      LABELS: "e2e-target",
+      PR_BODY: "```\r\ne2e-target: an example\r\n```\r\n\r\ne2e-target: the real one\r\n",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.pattern).toBe("the real one");
+  });
+
+  it("fails when the only line is inside a code fence", () => {
+    const r = run({
+      GITHUB_EVENT_NAME: "pull_request",
+      LABELS: "e2e-target",
+      PR_BODY: "~~~\ne2e-target: an example\n~~~\n",
+    });
+    expect(r.ok).toBe(false);
+  });
+
   it("emits nothing without the label, even with the line", () => {
     const r = run({
       GITHUB_EVENT_NAME: "pull_request",

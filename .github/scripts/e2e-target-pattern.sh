@@ -23,16 +23,17 @@ if [[ ",$labels," != *",e2e-target,"* ]]; then
   exit 0
 fi
 
-# First `e2e-target:` value, unquoted, trailing CR stripped.
+# First `e2e-target:` value outside code fences, unquoted, CR stripped.
 pattern="$(printf '%s\n' "$body" \
+  | awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; next } !fenced' \
   | { grep -iE '^[[:space:]]*e2e-target:' || true; } \
   | head -n1 \
   | sed -E "s/^[[:space:]]*[^:]+:[[:space:]]*//; s/^[\`\"']+//; s/[\`\"']+[[:space:]]*\$//; s/[[:space:]]+\$//")"
 
 if [[ -z "$pattern" ]]; then
   echo "::error::The 'e2e-target' label is set but the PR description has no" \
-       "'e2e-target: <pattern>' line. Add one naming the new e2e-full tests, e.g." \
-       "'e2e-target: renames a conversation|archives a conversation'."
+       "'e2e-target: <pattern>' line outside a code block. Add one naming the new" \
+       "e2e-full tests, e.g. 'e2e-target: renames a conversation|archives a conversation'."
   exit 1
 fi
 

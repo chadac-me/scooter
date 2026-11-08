@@ -299,7 +299,8 @@ A PR that **adds new `e2e-full` tests** (browser stories under `--project=full`)
 must prove they pass on the real k3d stack before merge. Neither tier runs
 e2e-full on an ordinary PR or queue entry, so without this a new full test first
 runs on the nightly. Add the **`e2e-target`** label and name the new tests in the
-PR description, as a Playwright `--grep` pattern alone on its line:
+PR description, as a Playwright `--grep` pattern on a plain line of its own
+(**not** in a code block: fenced lines are ignored, so examples never match):
 
 ```
 e2e-target: renames a conversation|archives a conversation
@@ -314,6 +315,8 @@ the tests are new.
 - The pattern is a Playwright `--grep` regex over full test titles. Match only
   the PR's new tests (and any you changed), not the whole spec, or the run gets
   long. A pattern that matches nothing fails the run.
+- Write the bare pattern: anything after the colon, a trailing comment included,
+  becomes part of the `--grep`. The first unfenced line wins.
 - The label is the opt-in because the job runs on the self-hosted fleet, and
   only a maintainer can label. A labelled PR with no `e2e-target:` line fails
   the `tier` job.
