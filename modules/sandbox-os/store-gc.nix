@@ -19,11 +19,14 @@ let
 
   scooterStore = pkgs.writeShellApplication {
     name = "scooter-store";
-    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gawk pkgs.sqlite nix pkgs.nix-heuristic-gc ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.sqlite nix pkgs.nix-heuristic-gc ];
     text = ''
       state=${lib.escapeShellArg state}
       lower_db=/nix/var/nix/db/db.sqlite
       live="$state/gcroots/scooter-live"
+      lower_roots="$state/gcroots/scooter-lower"
+      lower_dir=${lib.escapeShellArg ovl.lowerPath}
+      upper_dir=${lib.escapeShellArg "${upper}/upper"}
       shopt -s nullglob
       profile_dirs=(/nix/var/nix/profiles /root/.local/state/nix/profiles /workspace/.local/state/nix/profiles /home/*/.local/state/nix/profiles)
       profiles=(/nix/var/nix/profiles/* /nix/var/nix/profiles/per-user/*/* /root/.local/state/nix/profiles/* /workspace/.local/state/nix/profiles/* /home/*/.local/state/nix/profiles/*)
@@ -81,11 +84,24 @@ let
         done < <(find /nix/var/nix/gcroots "''${profile_dirs[@]}" -type l 2>/dev/null || true)
         rm -rf "$live"
         mv "$next" "$live"
+        pin_lower
+      }
+
+      # Lower-only paths free nothing but count toward nix-heuristic-gc's limit.
+      pin_lower() {
+        local next="$lower_roots.new"
+        rm -rf "$next"
+        mkdir -p "$next"
+        comm -23 <(find "$lower_dir" -mindepth 1 -maxdepth 1 -name '????????????????????????????????-*' -printf '%f\n' | sort) \
+          <(find "$upper_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort) \
+          | sed "s|^|/nix/store/|" | xargs -r ln -s -t "$next" --
+        rm -rf "$lower_roots"
+        mv "$next" "$lower_roots"
       }
 
       roots() {
         refresh_roots
-        nix-store --gc --print-roots 2>/dev/null | tr -d '"' | grep -v '^/proc/' | while read -r link _ path; do
+        nix-store --gc --print-roots 2>/dev/null | tr -d '"' | grep -v -e '^/proc/' -e "^$lower_roots/" | while read -r link _ path; do
           printf '%s\t%s\t%s\n' "$(nix path-info -S "$path" 2>/dev/null | awk '{print $2}')" "$link" "$path"
         done | sort -rn | numfmt --field=1 --to=iec-i --suffix=B
       }
