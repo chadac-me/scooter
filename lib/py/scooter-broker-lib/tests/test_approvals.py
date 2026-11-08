@@ -7,10 +7,9 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from scooter_broker_lib.approvals import (
-    ApprovalBase,
     Approvals,
     Approver,
     Card,
@@ -18,7 +17,9 @@ from scooter_broker_lib.approvals import (
     HostCards,
     TooManyPending,
 )
+from scooter_broker_lib.store import StoreConfig
 from scooter_broker_lib.testing import create_schema, sqlite_config
+from scooter_schema.broker import Base
 from scooter_broker_lib.types import Identity
 
 CONV = "c-1"
@@ -46,7 +47,7 @@ async def _approvals(**kw) -> tuple[Approvals[Thing], RecordingCards]:
     a = Approvals(contrib="echo", kind="echo.thing", payload=Thing,
                   render=lambda r: Card(f"Do {r.payload.title}?", {"title": r.payload.title}), **kw)
     a.configure(sqlite_config(), cards)
-    await create_schema(a, ApprovalBase)
+    await create_schema(a, Base)
 
     @a.on("approve")
     async def _(req, who):
@@ -176,3 +177,27 @@ async def test_host_cards_retry_a_5xx_then_post_the_card():
     cards = HostCards("http://host", transport=httpx.MockTransport(handle))
     await cards.raise_(CONV, "echo", {"request_id": "r1", "message": "m"})
     assert [c.url.path for c in calls] == [f"/conversations/{CONV}/approvals/echo"] * 2
+
+
+async def test_contribs_sharing_the_table_see_only_their_own_requests(tmp_path):
+    config = StoreConfig(dsn=f"sqlite+aiosqlite:///{tmp_path}/broker.db")
+    mine, theirs = (
+        Approvals(contrib=c, kind=f"{c}.thing", payload=Thing, render=lambda r: Card("?"))
+        for c in ("echo", "other")
+    )
+    for a in (mine, theirs):
+        a.configure(config)
+        a.on("approve")(lambda req, who: _decided())
+    await create_schema(mine, Base)
+    req = await mine.request(CONV, Thing("x"), owner="alice")
+
+    assert await theirs.pending(conversation_id=CONV) == []
+    assert await theirs.get(req.id) is None
+    with pytest.raises(HTTPException) as e:
+        await theirs.answer(req.id, "approve", Approver("alice"))
+    assert e.value.status_code == 404
+    assert [r.id for r in await mine.pending(conversation_id=CONV)] == [req.id]
+
+
+async def _decided() -> Decision:
+    return Decision("approved")

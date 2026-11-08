@@ -16,9 +16,8 @@ the agent-host at:
     POST /approvals/{id}/can-approve           {approver}: may this person press `gated`
     POST /approvals/{id}/{verb}                {approver}: decide once, run the handler
 
-Rows live in `approval_requests` in the contrib's own database. The contrib declares
-that table in its sql/schema.sql, which Atlas migrates, and its test_db.py checks
-`ApprovalBase` against it with `testing.assert_rows_match_schema_sql`.
+Rows live in the broker database's shared `approval_requests` table
+(lib/sql/broker/schema.sql), each scoped to its `contrib`.
 """
 
 from __future__ import annotations
@@ -34,10 +33,10 @@ from typing import Any, Awaitable, Callable, Generic, Protocol, TypeVar
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
-from sqlalchemy import BigInteger, String, Text, func, select, update
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import func, select, update
 
 from scooter_lib.logging_config import format_error
+from scooter_schema.broker import ApprovalRequests as _Row
 
 from .autolink import router_headers
 from .store import StoreConfig, open_sessions
@@ -48,24 +47,6 @@ logger = logging.getLogger(__name__)
 P = TypeVar("P")
 
 DEFAULT_EXPIRY = timedelta(hours=24)
-
-class ApprovalBase(DeclarativeBase):
-    pass
-
-
-class _Row(ApprovalBase):
-    __tablename__ = "approval_requests"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(String)
-    owner: Mapped[str] = mapped_column(String)
-    payload: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String)
-    decided_by: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[int] = mapped_column(BigInteger)
-    decided_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    expires_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-
 
 PENDING = "pending"
 
@@ -213,7 +194,7 @@ class Approvals(Transport, Generic[P]):
     _engine: Any = field(default=None, init=False, repr=False)
 
     def configure(self, config: StoreConfig, cards: Cards | None = None) -> None:
-        """Open the contrib database and, given one, where cards are raised."""
+        """Open the broker database and, given one, where cards are raised."""
         self._engine, self._sessions = open_sessions(config)
         if cards is not None:
             self.cards = cards
@@ -255,7 +236,7 @@ class Approvals(Transport, Generic[P]):
                 if waiting >= self.max_pending:
                     raise TooManyPending(f"this conversation already has {waiting} requests waiting for approval")
             row = _Row(
-                id=str(uuid.uuid4()), conversation_id=conversation_id, owner=owner,
+                id=str(uuid.uuid4()), contrib=self.contrib, conversation_id=conversation_id, owner=owner,
                 payload=json.dumps(asdict(payload)), status=PENDING, created_at=now, expires_at=expires,
             )
             s.add(row)
@@ -274,12 +255,17 @@ class Approvals(Transport, Generic[P]):
 
     async def get(self, request_id: str) -> ApprovalRequest[P] | None:
         async with self._ready()() as s:
-            row = await s.get(_Row, request_id)
+            row = await s.scalar(select(_Row).where(*self._mine(request_id)))
         return self._request(row) if row else None
 
-    @staticmethod
-    def _open(now: int) -> tuple:
-        return (_Row.status == PENDING, (_Row.expires_at.is_(None)) | (_Row.expires_at > now))
+    def _mine(self, request_id: str) -> tuple:
+        return (_Row.id == request_id, _Row.contrib == self.contrib)
+
+    def _open(self, now: int) -> tuple:
+        return (
+            _Row.contrib == self.contrib, _Row.status == PENDING,
+            (_Row.expires_at.is_(None)) | (_Row.expires_at > now),
+        )
 
     async def pending(self, *, conversation_id: str | None = None, owner: str | None = None) -> list[ApprovalRequest[P]]:
         """Unexpired pending requests, oldest first, by conversation and/or owner."""
@@ -296,7 +282,7 @@ class Approvals(Transport, Generic[P]):
         async with self._ready()() as s, s.begin():
             claimed = await s.execute(
                 update(_Row)
-                .where(_Row.id == request_id, _Row.status == PENDING)
+                .where(*self._mine(request_id), _Row.status == PENDING)
                 .values(status=status, decided_by=decided_by, decided_at=_now_ms())
                 .execution_options(synchronize_session=False)
             )
@@ -309,7 +295,7 @@ class Approvals(Transport, Generic[P]):
 
     async def _set_status(self, request_id: str, status: str) -> None:
         async with self._ready()() as s, s.begin():
-            await s.execute(update(_Row).where(_Row.id == request_id).values(status=status))
+            await s.execute(update(_Row).where(*self._mine(request_id)).values(status=status))
 
     # --- routes ---------------------------------------------------------------------
 

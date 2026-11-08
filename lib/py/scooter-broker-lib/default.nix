@@ -1,8 +1,8 @@
-{ lib, python3Packages, scooter-lib, ... }:
+{ lib, python3Packages, scooter-lib, scooter-schema, ... }:
 
 # scooter_broker_lib: the broker extension surface (provider/transport/source
 # contracts and building blocks) that a provider build-depends on instead of the
-# broker app. Depends only on scooter_lib; the DB drivers stay with the app since
+# broker app. Depends on scooter_lib and scooter_schema; the DB drivers stay with the app since
 # engine creation is lazy.
 
 python3Packages.buildPythonPackage {
@@ -15,6 +15,7 @@ python3Packages.buildPythonPackage {
 
   dependencies = with python3Packages; [
     scooter-lib
+    scooter-schema
     fastapi
     httpx
     sqlalchemy
