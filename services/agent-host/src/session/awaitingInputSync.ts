@@ -54,15 +54,15 @@ export function createAwaitingInputSync(deps: AwaitingInputSyncDeps): (id: Sessi
   const failures = new Map<SessionId, number>();
   const retryPending = new Set<SessionId>();
 
-  const writeOnce = async (id: SessionId): Promise<boolean> => {
+  const writeOnce = async (id: SessionId): Promise<void> => {
     let events: AguiEvent[];
     try {
       events = await deps.readEvents(id);
     } catch (e) {
       log.warn("awaiting-input sync could not read the log", { conversation_id: id, error: formatError(e) });
-      return false;
+      throw e;
     }
-    return deps.store.set(id, awaitingSince(events, now()));
+    await deps.store.set(id, awaitingSince(events, now()));
   };
 
   const sync = async (id: SessionId): Promise<void> => {
@@ -77,8 +77,11 @@ export function createAwaitingInputSync(deps: AwaitingInputSyncDeps): (id: Sessi
     try {
       do {
         me.again = false;
-        ok = await writeOnce(id);
+        await writeOnce(id);
       } while (me.again);
+      ok = true;
+    } catch {
+      // Both failure paths have logged; the retry below handles it.
     } finally {
       inFlight.delete(id);
     }

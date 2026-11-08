@@ -2,7 +2,8 @@
  * Which conversations wait on the user's answer, for the sidebar's "!". The table lives in
  * the database a contrib provides as `awaiting-input` (AWAITING_INPUT_DB_NAME), not in
  * agent_host, so there is no foreign key: removeConversation deletes the row itself. A
- * failed write is logged and reported, never thrown; the table's trigger tells the router.
+ * failed write is logged and rethrown for the caller to retry; the table's trigger tells
+ * the router.
  */
 
 import type { Pool } from "pg";
@@ -14,8 +15,8 @@ import type { SessionId } from "../types.js";
 const log = logger("awaitingInput");
 
 export interface AwaitingInputStore {
-  /** Mark the conversation as waiting since `at`, or clear it (null); false if the write failed. */
-  set(id: SessionId, at: number | null): Promise<boolean>;
+  /** Mark the conversation as waiting since `at`, or clear it (null); logs and throws when the write fails. */
+  set(id: SessionId, at: number | null): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -40,13 +41,12 @@ export function createPgAwaitingInputStore(cfg: PgAwaitingInputStoreConfig): Awa
             [id, at],
           );
         }
-        return true;
       } catch (e) {
         log.error("awaiting-input write failed (sidebar question state not persisted)", {
           conversation_id: id,
           error: formatError(e),
         });
-        return false;
+        throw e;
       }
     },
     async close() {

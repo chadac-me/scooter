@@ -33,9 +33,8 @@ function fakeStore() {
     writes: 0,
     async set(_id: SessionId, at: number | null) {
       s.writes++;
-      if (s.failing) return false;
+      if (s.failing) throw new Error("too many clients");
       s.row = at;
-      return true;
     },
   };
   return s;

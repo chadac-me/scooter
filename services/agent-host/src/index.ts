@@ -695,8 +695,8 @@ export async function main(
             await fileStore.removeConversation?.(id);
             // Its links and hidden vars live in the webhooks database, beyond any foreign key.
             await linkStore?.deleteByConversation(id);
-            // No foreign key reaches the awaiting-input database, so its row goes here.
-            await awaitingInput?.set(id, null);
+            // Outside any foreign key; best-effort, and set already logs.
+            await awaitingInput?.set(id, null).catch(() => undefined);
           },
         }
       : {}),
