@@ -299,10 +299,10 @@ A PR that **adds new `e2e-full` tests** (browser stories under `--project=full`)
 must prove they pass on the real k3d stack before merge. Neither tier runs
 e2e-full on an ordinary PR or queue entry, so without this a new full test first
 runs on the nightly. Add the **`e2e-target`** label and name the new tests in the
-PR description:
+PR description, as a Playwright `--grep` pattern alone on its line:
 
 ```
-e2e-target: renames a conversation|archives a conversation   # playwright --grep pattern
+e2e-target: renames a conversation|archives a conversation
 ```
 
 CI then runs e2e-full narrowed to that `--grep`, **once per test on one shard**
