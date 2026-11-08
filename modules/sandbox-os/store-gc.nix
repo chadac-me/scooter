@@ -87,6 +87,14 @@ let
         pin_lower
       }
 
+      # Registered paths, by basename; unregistered roots are ignored by Nix.
+      valid_names() {
+        sqlite3 -readonly "file:$state/db/db.sqlite?mode=ro" "select path from ValidPaths;"
+        if [ -e "$lower_db" ]; then
+          sqlite3 -readonly "file:$lower_db?mode=ro" "select path from ValidPaths;"
+        fi
+      }
+
       # Lower-only paths free nothing but count toward nix-heuristic-gc's limit.
       pin_lower() {
         local next="$lower_roots.new"
@@ -94,6 +102,7 @@ let
         mkdir -p "$next"
         comm -23 <(find "$lower_dir" -mindepth 1 -maxdepth 1 -name '????????????????????????????????-*' -printf '%f\n' | sort) \
           <(find "$upper_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort) \
+          | comm -12 - <(valid_names | sed 's|.*/||' | sort -u) \
           | sed "s|^|/nix/store/|" | xargs -r ln -s -t "$next" --
         rm -rf "$lower_roots"
         mv "$next" "$lower_roots"
@@ -126,10 +135,11 @@ let
         echo "scooter-store: upper holds $(numfmt --to=iec-i "$used")B; freeing down to $(numfmt --to=iec-i "$low")B"
         if [ "$used" -gt "$low" ]; then
           # Interrupting is safe: Nix unregisters each path before deleting it.
+          # Unregistered paths may be lower-only; size ignores them anyway.
           if [ "$budget" -gt 0 ]; then
-            timeout "$budget" nix-heuristic-gc --quiet "$((used - low))" || echo "scooter-store: GC stopped early (exit $?)"
+            timeout "$budget" nix-heuristic-gc --quiet --no-invalid "$((used - low))" || echo "scooter-store: GC stopped early (exit $?)"
           else
-            nix-heuristic-gc --quiet "$((used - low))"
+            nix-heuristic-gc --quiet --no-invalid "$((used - low))"
           fi
         fi
         echo "scooter-store: upper now holds $(numfmt --to=iec-i "$(size)")B"
