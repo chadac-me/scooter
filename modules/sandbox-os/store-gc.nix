@@ -68,6 +68,20 @@ let
         done
       }
 
+      # Dead image paths free nothing but eat heuristic-gc's byte budget.
+      pin_lower() {
+        local dir="$state/gcroots/scooter-lower" stamp_file="$state/scooter-lower.stamp" stamp
+        [ -e "$lower_db" ] || return 0
+        stamp=$(stat -c %i-%Y-%s "$lower_db")
+        if [ -d "$dir" ] && [ "$(cat "$stamp_file" 2>/dev/null)" = "$stamp" ]; then return 0; fi
+        rm -rf "$dir.new"
+        mkdir -p "$dir.new"
+        sqlite3 -readonly "file:$lower_db?mode=ro" "select path from ValidPaths;" | xargs -r ln -s -t "$dir.new"
+        rm -rf "$dir"
+        mv "$dir.new" "$dir"
+        echo "$stamp" > "$stamp_file"
+      }
+
       # The overlay scans only $state/gcroots; pin outside roots there.
       refresh_roots() {
         local p n=0 next="$live.new"
@@ -81,11 +95,12 @@ let
         done < <(find /nix/var/nix/gcroots "''${profile_dirs[@]}" -type l 2>/dev/null || true)
         rm -rf "$live"
         mv "$next" "$live"
+        pin_lower
       }
 
       roots() {
         refresh_roots
-        nix-store --gc --print-roots 2>/dev/null | tr -d '"' | grep -v '^/proc/' | while read -r link _ path; do
+        nix-store --gc --print-roots 2>/dev/null | tr -d '"' | grep -v -e '^/proc/' -e '/scooter-lower/' | while read -r link _ path; do
           printf '%s\t%s\t%s\n' "$(nix path-info -S "$path" 2>/dev/null | awk '{print $2}')" "$link" "$path"
         done | sort -rn | numfmt --field=1 --to=iec-i --suffix=B
       }
