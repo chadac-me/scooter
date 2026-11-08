@@ -42,8 +42,7 @@
         enable = true;
         tables.handoff_conversations = { };
         tables.handoff_messages = { };
-        # Legacy: spawn approvals moved to the broker's approval_requests. Kept so
-        # decided requests survive; the next release drops it.
+        # Unwritten; kept for decided rows, dropped next release.
         tables.handoff_spawn_requests = { };
       };
 

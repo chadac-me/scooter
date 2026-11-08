@@ -27,8 +27,7 @@ CREATE TABLE "handoff_messages" (
 );
 CREATE INDEX "ix_handoff_messages_fts" ON "handoff_messages" USING gin (to_tsvector('english', "text"));
 
--- LEGACY: a handoff an agent asked for, from before spawn approvals moved to the
--- broker database's approval_requests. Nothing writes it; the next release drops it.
+-- Unwritten; kept for decided rows, dropped next release.
 CREATE TABLE "handoff_spawn_requests" (
   "id"              character varying NOT NULL,
   "conversation_id" character varying NOT NULL,
