@@ -16,8 +16,9 @@ the agent-host at:
     POST /approvals/{id}/can-approve           {approver}: may this person press `gated`
     POST /approvals/{id}/{verb}                {approver}: decide once, run the handler
 
-Rows live in `approval_requests` in the contrib's own database. Its DDL is
-`APPROVAL_REQUESTS_DDL`, which the contrib copies into its sql/schema.sql.
+Rows live in `approval_requests` in the contrib's own database. The contrib declares
+that table in its sql/schema.sql, which Atlas migrates, and its test_db.py checks
+`ApprovalBase` against it with `testing.assert_rows_match_schema_sql`.
 """
 
 from __future__ import annotations
@@ -47,25 +48,6 @@ logger = logging.getLogger(__name__)
 P = TypeVar("P")
 
 DEFAULT_EXPIRY = timedelta(hours=24)
-
-APPROVAL_REQUESTS_DDL = """\
--- A request an agent raised, waiting on (or answered by) a person.
-CREATE TABLE "approval_requests" (
-  "id"              character varying NOT NULL,
-  "conversation_id" character varying NOT NULL,
-  "owner"           character varying NOT NULL,
-  "payload"         text NOT NULL,
-  "status"          character varying NOT NULL,
-  "decided_by"      character varying NULL,
-  "created_at"      bigint NOT NULL,
-  "decided_at"      bigint NULL,
-  "expires_at"      bigint NULL,
-  PRIMARY KEY ("id")
-);
-CREATE INDEX "ix_approval_requests_conversation" ON "approval_requests" ("conversation_id", "status");
-CREATE INDEX "ix_approval_requests_owner" ON "approval_requests" ("owner", "status");
-"""
-
 
 class ApprovalBase(DeclarativeBase):
     pass

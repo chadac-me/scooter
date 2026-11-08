@@ -10,7 +10,6 @@ import pytest
 from fastapi import FastAPI
 
 from scooter_broker_lib.approvals import (
-    APPROVAL_REQUESTS_DDL,
     ApprovalBase,
     Approvals,
     Approver,
@@ -177,11 +176,3 @@ async def test_host_cards_retry_a_5xx_then_post_the_card():
     cards = HostCards("http://host", transport=httpx.MockTransport(handle))
     await cards.raise_(CONV, "echo", {"request_id": "r1", "message": "m"})
     assert [c.url.path for c in calls] == [f"/conversations/{CONV}/approvals/echo"] * 2
-
-
-def test_the_row_model_matches_the_shipped_ddl(tmp_path):
-    from scooter_broker_lib.testing import assert_rows_match_schema_sql
-
-    schema = tmp_path / "schema.sql"
-    schema.write_text(APPROVAL_REQUESTS_DDL)
-    assert_rows_match_schema_sql(ApprovalBase, schema)
