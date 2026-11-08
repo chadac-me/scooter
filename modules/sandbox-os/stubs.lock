@@ -59,18 +59,18 @@
       },
       "google-cloud-sdk": {
         "attr": "google-cloud-sdk",
-        "drv": "/nix/store/pkg20adfz2jnz9zpqad0g2iwq5is2fsm-google-cloud-sdk-583.0.0.drv",
+        "drv": "/nix/store/cyj9ag0vc79j6gyrb64vryn8y4jx1wlm-google-cloud-sdk-591.0.0.drv",
         "output": "out",
         "bins": [
           "gcloud",
           "gsutil",
           "bq"
         ],
-        "name": "google-cloud-sdk-583.0.0"
+        "name": "google-cloud-sdk-591.0.0"
       },
       "marimo": {
         "attr": "marimo",
-        "drv": "/nix/store/smzxmflnnj1k0xfwrba7v8p1a5b4w9yq-python3.14-marimo-0.25.1.drv",
+        "drv": "/nix/store/nzx28vwdh5rw48cmzvr3xijjwdfv8xb8-python3.14-marimo-0.25.1.drv",
         "output": "out",
         "bins": [
           "marimo"
