@@ -54,6 +54,7 @@ python3Packages.buildPythonPackage {
     "scooter_broker_lib.user_auth"
     "scooter_broker_lib.commit_identity"
     "scooter_broker_lib.testing"
+    "scooter_broker_lib.approvals"
   ];
 
   meta.description = "The broker extension surface for Scooter providers";
