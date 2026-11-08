@@ -42,6 +42,8 @@
         enable = true;
         tables.handoff_conversations = { };
         tables.handoff_messages = { };
+        # Legacy: spawn approvals moved to the broker's approval_requests. Kept so
+        # decided requests survive; the next release drops it.
         tables.handoff_spawn_requests = { };
       };
 
@@ -52,7 +54,7 @@
         env.HANDOFF_REQUIRE_APPROVAL = lib.boolToString config.requireApproval;
       };
 
-      # Spawns are approved in-conversation; routing lives in ./deployment.nix.
+      # Spawns are approved in-conversation, at /handoff/approvals.
       approvals = { };
 
       skills."scooter-handoff.md" = ./skills/scooter-handoff.md;
