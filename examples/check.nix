@@ -1672,7 +1672,7 @@ let
     ++ (if imageDrv forkedLib "conversation-router" == imageDrv platform "conversation-router" then [ ]
         else [ "scooter.packages.scooter-lib override changed conversation-router, which does not use it" ]);
 
-  # agent.command: GOOSE_BIN names a wrapper the agent-host image ships; unset, goose runs.
+  # GOOSE_BIN names the image's wrapper only when agent.command is set.
   commandEval = extra: evalPlatform {
     module = { config, lib, ... }: {
       imports = [ ./kubenix-config.nix ];
