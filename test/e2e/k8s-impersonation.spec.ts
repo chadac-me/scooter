@@ -48,6 +48,9 @@ async function liveThread(chat: { open(): Promise<void>; completeTurn(t: string,
 fullOnly("needs a real API server enforcing RBAC and impersonation")(
   "k8s writes run as the impersonated user",
   () => {
+    // A write needs an owner to approve it; the stack is anonymous unless the ingress names one.
+    test.use({ extraHTTPHeaders: { "x-auth-user": "k8s-e2e-owner" } });
+
     test.beforeEach(() => {
       test.setTimeout(300_000);
       test.skip(!HOOK, "no rollout hook configured for this run");
