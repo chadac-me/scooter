@@ -102,7 +102,7 @@ fullOnly("needs a real API server enforcing RBAC and impersonation")(
       const asked = await tool(request, thread, "k8s_apply", {
         manifests: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: k8s-e2e-denied\n  namespace: default\ndata: {}\n",
       });
-      expect(asked.error).toBe(true);
+      expect(asked.error, asked.text).toBe(true);
       expect(asked.text).toMatch(/scooter-k8s/);
       await expect(page.locator(panel.root)).toHaveCount(0);
     });
