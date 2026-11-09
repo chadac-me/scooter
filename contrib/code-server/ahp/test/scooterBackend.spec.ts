@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ScooterBackend, type AguiEvent, type ScooterApi } from "../src/scooterBackend.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ScooterBackend, type AguiEvent, type ChildSession, type ScooterApi, type SessionsApi } from "../src/scooterBackend.js";
 import { ProtocolCore } from "../src/vendor/hydra-ahp/protocol/core.js";
 import type { ActionRequest } from "../src/vendor/hydra-ahp/protocol/backend.js";
 
@@ -7,8 +10,8 @@ const CONV = "6c5b0a0c-887e-4328-929f-43f3e727c162";
 const SESSION = `scooter:/${CONV}`;
 const chatOf = (s: string) => "ahp-chat://default/" + Buffer.from(s, "utf8").toString("base64url");
 
-/** A fake router: `emit` feeds the live event stream; history is whatever was emitted before start. */
-function fakeApi(history: AguiEvent[] = []) {
+/** A fake conversation: `emit` feeds the live event stream; history is whatever was emitted before start. */
+function fakeConversation(history: AguiEvent[] = []) {
   let sink: ((ev: AguiEvent) => void) | undefined;
   const sent: string[] = [];
   let cancels = 0;
@@ -24,12 +27,33 @@ function fakeApi(history: AguiEvent[] = []) {
   return { api, sent, cancels: () => cancels, emit: (...evs: AguiEvent[]) => evs.forEach((e) => sink!(e)) };
 }
 
-async function setup(history: AguiEvent[] = []) {
-  const fake = fakeApi(history);
-  const backend = new ScooterBackend({ conversationId: CONV, conversationUrl: "https://scooter.example/?thread=x", api: fake.api });
+/** A fake router: the primary conversation plus the sessions created under it. */
+function fakeRouter(history: AguiEvent[] = [], children: ChildSession[] = []) {
+  const convs = new Map([[CONV, fakeConversation(history)]]);
+  const ended: string[] = [];
+  let next = 0;
+  const api: SessionsApi = {
+    async create() {
+      const child = { id: `child-${++next}`, title: "New session", status: "suspended" };
+      children.push(child);
+      return child;
+    },
+    async list() { return children; },
+    async end(id) { ended.push(id); },
+    conversation(id) {
+      if (!convs.has(id)) convs.set(id, fakeConversation());
+      return convs.get(id)!.api;
+    },
+  };
+  return { api, ended, conv: (id = CONV) => convs.get(id)! };
+}
+
+async function setup(history: AguiEvent[] = [], opts: { children?: ChildSession[]; statePath?: string } = {}) {
+  const router = fakeRouter(history, opts.children);
+  const backend = new ScooterBackend({ conversationId: CONV, conversationUrl: "https://scooter.example/?thread=x", api: router.api, statePath: opts.statePath });
   const core = new ProtocolCore({ backend, detachGraceMs: 0 });
   await core.start();
-  await new Promise((r) => setTimeout(r, 0)); // let the pump replay history
+  await new Promise((r) => setTimeout(r, 0)); // let the pumps replay history
   const chat = (session = SESSION) => core.store.state(chatOf(session)) as any;
   /** What the core does for a client dispatch: ask the backend, then apply the accepted action. */
   const dispatch = async (channel: string, action: Record<string, unknown>) => {
@@ -38,7 +62,8 @@ async function setup(history: AguiEvent[] = []) {
     if (d.accept) core.publish(channel, action as never, req.origin);
     return d;
   };
-  return { ...fake, backend, core, chat, dispatch };
+  const primary = router.conv();
+  return { ...primary, router, backend, core, chat, dispatch };
 }
 
 const user = (id: string, text: string): AguiEvent[] => [
@@ -72,7 +97,7 @@ describe("ScooterBackend", () => {
     expect(root.agents[0].models).toHaveLength(1); // VS Code requires a model for agent-host providers
   });
 
-  it("lists exactly this conversation", async () => {
+  it("lists this conversation when it has no sessions", async () => {
     const { backend } = await setup();
     const { items } = (await backend.listSessions()) as any;
     expect(items.map((s: any) => s.resource)).toEqual([SESSION]);
@@ -122,15 +147,63 @@ describe("ScooterBackend", () => {
     expect(JSON.stringify(c.activeTurn)).toContain("Waiting for approval");
   });
 
-  it("makes a VS Code-created session a second view of the same conversation", async () => {
-    const { backend, chat, emit } = await setup([...user("u1", "earlier"), ...run("r1", say("m1", "earlier reply"))]);
-    const alias = "scooter:/new-from-vscode";
-    await backend.handleCommand("createSession", { channel: alias }, {} as never);
-    expect(chat(alias).turns).toHaveLength(1); // history replayed into the alias
+  it("starts a child conversation for each session VS Code creates", async () => {
+    const { backend, chat, router, emit, dispatch } = await setup([...user("u1", "earlier"), ...run("r1", say("m1", "earlier reply"))]);
+    const created = "scooter:/new-from-vscode";
+    await backend.handleCommand("createSession", { channel: created }, {} as never);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(chat(created).turns).toHaveLength(0); // its own, empty history
+    await dispatch(chatOf(created), { type: "chat/turnStarted", turnId: "vs-1", startedAt: new Date().toISOString(), message: { text: "hi", origin: { kind: "user" } } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(router.conv("child-1").sent).toEqual(["hi"]);
     emit(...user("u2", "later"), ...run("r2", say("m2", "later reply")));
-    expect(chat(alias).turns).toHaveLength(2);
     expect(chat(SESSION).turns).toHaveLength(2);
-    expect(() => backend.handleCommand("createSession", { channel: "copilotcli:/x" }, {} as never)).toThrow();
+    expect(chat(created).turns).toHaveLength(0); // the parent's turns stay out of the session
+    expect(chat(created).activeTurn.id).toBe("vs-1");
+    const { items } = (await backend.listSessions()) as any;
+    expect(items.map((s: any) => s.resource)).toEqual([SESSION, created]);
+    await expect(backend.handleCommand("createSession", { channel: "copilotcli:/x" }, {} as never)).rejects.toThrow();
+  });
+
+  it("lists sessions that existed before the bridge started", async () => {
+    const { backend, chat } = await setup([], { children: [{ id: "old", title: "Earlier chat" }, { id: "gone", status: "ended" }] });
+    const { items } = (await backend.listSessions()) as any;
+    expect(items.map((s: any) => [s.resource, s.title])).toEqual([[SESSION, "Scooter conversation"], ["scooter:/old", "Earlier chat"]]);
+    expect(chat("scooter:/old")).toBeDefined();
+  });
+
+  it("keeps VS Code's URI for a session across a bridge restart", async () => {
+    const statePath = join(mkdtempSync(join(tmpdir(), "ahp-")), "sessions.json");
+    const children: ChildSession[] = [];
+    const first = await setup([], { children, statePath });
+    await first.backend.handleCommand("createSession", { channel: "scooter:/vscode-picked" }, {} as never);
+    first.backend.stop();
+    const second = await setup([], { children, statePath });
+    const { items } = (await second.backend.listSessions()) as any;
+    expect(items.map((s: any) => s.resource)).toEqual([SESSION, "scooter:/vscode-picked"]);
+  });
+
+  it("suspends a deleted session and keeps it hidden", async () => {
+    const statePath = join(mkdtempSync(join(tmpdir(), "ahp-")), "sessions.json");
+    const children: ChildSession[] = [];
+    const { backend, router, core } = await setup([], { children, statePath });
+    await backend.handleCommand("createSession", { channel: "scooter:/doomed" }, {} as never);
+    await backend.handleCommand("disposeSession", { channel: "scooter:/doomed" }, {} as never);
+    expect(router.ended).toEqual(["child-1"]);
+    expect(core.store.has("scooter:/doomed")).toBe(false);
+    await backend.handleCommand("disposeSession", { channel: SESSION }, {} as never); // never the primary
+    expect(core.store.has(SESSION)).toBe(true);
+    const restarted = await setup([], { children, statePath });
+    const { items } = (await restarted.backend.listSessions()) as any;
+    expect(items.map((s: any) => s.resource)).toEqual([SESSION]);
+  });
+
+  it("links a session's approval note to its own conversation", async () => {
+    const { backend, chat, router } = await setup();
+    await backend.handleCommand("createSession", { channel: "scooter:/s" }, {} as never);
+    router.conv("child-1").emit(...user("u", "deploy"), { type: "RUN_STARTED", threadId: "child-1", runId: "r" },
+      { type: "RUN_FINISHED", threadId: "child-1", runId: "r", outcome: { type: "interrupt" } });
+    expect(JSON.stringify(chat("scooter:/s").activeTurn)).toContain("thread=child-1");
   });
 
   it("answers resolveSessionConfig with an empty config", async () => {

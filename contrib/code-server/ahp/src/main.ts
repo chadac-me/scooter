@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * scooter-vscode-ahp: an Agent Host Protocol server exposing this sandbox's ONE conversation
- * to code-server, which connects via `--agent-host-bridge-port` on loopback.
+ * scooter-vscode-ahp: an Agent Host Protocol server exposing this sandbox's conversation (and
+ * its VS Code sessions) to code-server, which connects via `--agent-host-bridge-port` on loopback.
  *
  * Env: CONVERSATION_ID (pod env), SCOOTER_SELF_URL + SCOOTER_SELF_TOKEN_PATH (router
  * self-access), CONVERSATION_URL (link back to the web UI), AHP_PORT (default 8765),
@@ -51,13 +51,14 @@ const backend = new ScooterBackend({
   workspaceUri: process.env.WORKSPACE_URI ?? "file:///workspace",
   conversationUrl: process.env.CONVERSATION_URL,
   api: routerApi(selfUrl, conversationId, tokenPath),
+  statePath: join(stateDir, "sessions.json"),
   log: (m) => console.error(m),
 });
+mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 const core = new ProtocolCore({ backend, detachGraceMs: 5000 });
 await core.start();
 
 // A fresh bridge token per start: only code-server (same pod, loopback) should ever connect.
-mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 const tokens = new TokenRegistry({ path: join(stateDir, "tokens.json") });
 const minted = tokens.mint("code-server");
 writeFileSync(join(stateDir, "bridge-token"), minted.token, { mode: 0o600 });
