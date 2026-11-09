@@ -44,7 +44,7 @@ import { serviceUrl, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { createStateHub, sandboxWatcher, type StateHub } from "../session/stateHub.js";
 import { mountStateStream } from "./stateStream.js";
 import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
-import { DERIVED_SOURCES, HUMAN_TRIGGER_SOURCES } from "../acp/remoteAgentRegistry.js";
+import { DERIVED_SOURCES, HUMAN_TRIGGER_SOURCES, USER_RELAY_SOURCES } from "../acp/remoteAgentRegistry.js";
 import type { HookDef } from "../hooks/types.js";
 import type { UserHookSettingsStore } from "../hooks/userHookSettingsStore.js";
 
@@ -57,7 +57,9 @@ export function isWorkspacePath(p: string): boolean {
 const remoteAgentLog = logger("remote-agent");
 
 /** Sources POST /messages refuses, so a sandbox cannot pose as human. */
-const RESERVED_SOURCES: ReadonlySet<string> = new Set([...HUMAN_TRIGGER_SOURCES, ...DERIVED_SOURCES]);
+const RESERVED_SOURCES: ReadonlySet<string> = new Set(
+  [...HUMAN_TRIGGER_SOURCES, ...DERIVED_SOURCES].filter((s) => !USER_RELAY_SOURCES.has(s)),
+);
 
 /** Set by the router's sandbox self-access listener. */
 const SANDBOX_CALLER_HEADER = "x-scooter-caller";
