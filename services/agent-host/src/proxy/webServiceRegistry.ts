@@ -55,12 +55,32 @@ export function parseManifest(json: string): WebServiceDescriptor[] {
         unit: typeof o.unit === "string" ? o.unit : `webservice-${o.name}`,
         stripBasePath: o.stripBasePath === true,
         ...(o.visibleInMenu === false ? { visibleInMenu: false } : {}),
+        ...(typeof o.listedIf === "string" && o.listedIf ? { listedIf: o.listedIf } : {}),
         ...parseNeed(o.resources),
       }];
     });
   } catch {
     return [];
   }
+}
+
+/** Unlists services whose listedIf path is missing, in one exec. */
+async function applyListedIf(exec: ExecLike, descriptors: WebServiceDescriptor[]): Promise<WebServiceDescriptor[]> {
+  const paths = descriptors.flatMap((d) => (d.listedIf ? [d.listedIf] : []));
+  if (paths.length === 0) return descriptors;
+  let present = new Set<string>();
+  try {
+    const r = await exec.execute({
+      command: "sh",
+      args: ["-c", 'for p; do [ -e "$p" ] && printf "%s\\n" "$p"; done; true', "sh", ...paths],
+    });
+    present = new Set(r.stdout.split("\n").filter(Boolean));
+  } catch {
+    // Unknown counts as missing: listing a half-configured service is worse.
+  }
+  return descriptors.map((d) =>
+    d.listedIf && !present.has(d.listedIf) && d.visibleInMenu !== false ? { ...d, visibleInMenu: false } : d,
+  );
 }
 
 /** How long a successful manifest read stays authoritative, since nothing in the pod signals a `scooter-rebuild`. */
@@ -104,7 +124,7 @@ export function createWebServiceRegistry(
     let descriptors: WebServiceDescriptor[] = [];
     try {
       const exec = await deps.connect(ref);
-      descriptors = parseManifest(await exec.download(MANIFEST_PATH));
+      descriptors = await applyListedIf(exec, parseManifest(await exec.download(MANIFEST_PATH)));
     } catch {
       descriptors = []; // pod asleep, creating, or manifest missing
     }

@@ -57,6 +57,8 @@ export interface WebServiceDescriptor {
   stripBasePath?: boolean;
   /** false for a backend another service frames (webServices.<name>.visibleInMenu): proxied, but not in the Services panel. */
   visibleInMenu?: boolean;
+  /** Listed only while this pod path exists. */
+  listedIf?: string;
   /** What this service declares it needs (webServices.<name>.resources), advisory only. */
   resources?: { cpu?: string; memory?: string; gpu?: number };
 }

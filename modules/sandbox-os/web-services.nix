@@ -30,6 +30,8 @@ let
       stripBasePath = s.stripBasePath;
     } // lib.optionalAttrs (!s.visibleInMenu) {
       visibleInMenu = false;
+    } // lib.optionalAttrs (s.listedIf != null) {
+      inherit (s) listedIf;
     } // lib.optionalAttrs (s.hint != "") {
       inherit (s) hint;
     } // lib.optionalAttrs (s.resources != null) {
@@ -123,10 +125,11 @@ let
           # Emit the table once so an early-closing reader cannot SIGPIPE a
           # mid-loop printf.
           out=$(printf '%-16s %-9s %s\n' NAME STATE URL)
-          while IFS=$'\t' read -r n u; do
+          while IFS=$'\t' read -r n u l; do
             [ -n "$n" ] || continue
+            [ -z "$l" ] || [ -e "$l" ] || continue
             out="$out"$'\n'"$(printf '%-16s %-9s %s' "$n" "$(state "$u")" "$(url_of "$n")")"
-          done <<< "$(jq -r '.services[] | select(.visibleInMenu != false) | "\(.name)\t\(.unit)"' "$MANIFEST")"
+          done <<< "$(jq -r '.services[] | select(.visibleInMenu != false) | "\(.name)\t\(.unit)\t\(.listedIf // "")"' "$MANIFEST")"
           # Tolerate a reader closing the pipe early.
           printf '%s\n' "$out" || true
           ;;
@@ -215,6 +218,18 @@ let
           `scooter-service start|stop|status <name>`: it is a backend another service
           frames or calls (marimo's server, behind "marimo + chat"), started with it
           through `extraConfig` (wants/partOf).
+        '';
+      };
+
+      listedIf = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "/workspace/.scooter/myapp/config.json";
+        description = ''
+          A path in the pod: while it doesn't exist, the service is unlisted as with
+          `visibleInMenu = false`, and once it does, it is listed. For a service that
+          only makes sense once configured (say, a dashboard before it has a data
+          source). Keep the path on the workspace PVC so the listing survives suspend.
         '';
       };
 

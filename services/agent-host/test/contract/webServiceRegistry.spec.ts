@@ -262,6 +262,58 @@ describe("WebServiceRegistry", () => {
   });
 });
 
+describe("listedIf: listed once its path exists", () => {
+  const MYAPP = JSON.stringify({
+    services: [
+      { name: "files", port: 7801 },
+      { name: "myapp", port: 2731, listedIf: "/workspace/.scooter/myapp/config.json" },
+    ],
+  });
+
+  function execWith(exists: boolean) {
+    return fakeExec({
+      download: vi.fn(async (p: string) => (p === MANIFEST_PATH ? MYAPP : "")),
+      execute: vi.fn(async (req: { command: string; args?: string[] }) => ({
+        stdout: exists ? (req.args ?? []).filter((a) => a.startsWith("/workspace/")).join("\n") : "",
+        stderr: "",
+        exitCode: 0,
+      })),
+    });
+  }
+
+  it("parses listedIf", () => {
+    expect(parseManifest(MYAPP)[1].listedIf).toBe("/workspace/.scooter/myapp/config.json");
+  });
+
+  it("is unlisted while the path is missing", async () => {
+    const [files, myapp] = await make(execWith(false)).list("conv-1");
+    expect(files.visibleInMenu).toBeUndefined();
+    expect(myapp.visibleInMenu).toBe(false);
+  });
+
+  it("is listed once the path exists, checked in one exec", async () => {
+    const exec = execWith(true);
+    const [, myapp] = await make(exec).list("conv-1");
+    expect(myapp.visibleInMenu).toBeUndefined();
+    expect(exec.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays unlisted when the check itself fails", async () => {
+    const exec = fakeExec({
+      download: vi.fn(async (p: string) => (p === MANIFEST_PATH ? MYAPP : "")),
+      execute: vi.fn(async () => { throw new Error("exec down"); }),
+    });
+    const [, myapp] = await make(exec).list("conv-1");
+    expect(myapp.visibleInMenu).toBe(false);
+  });
+
+  it("skips the exec when nothing declares listedIf", async () => {
+    const exec = fakeExec();
+    await make(exec).list("conv-1");
+    expect(exec.execute).not.toHaveBeenCalled();
+  });
+});
+
 describe("picking up a scooter-rebuild", () => {
   it("re-reads the manifest once the cached read expires", async () => {
     // A `scooter-rebuild` repoints /run/scooter/web-services.json without telling the host.
