@@ -50,6 +50,10 @@ let
       c.ui.tools))
     withUi));
 
+  # Keyed by contrib name, which is the `source` of the links its rules label.
+  linkLabels = lib.mapAttrs (_: c: map (r: { inherit (r) url label; }) c.ui.linkLabels)
+    (lib.filterAttrs (_: c: c.ui.linkLabels != [ ]) withUi);
+
   linkProviders = lib.attrNames (lib.filterAttrs (_: c: c.ui.source.linkProvider) sourced);
 
   # Keyed by tab id; validated (and thrown on) in settings-tabs.nix.
@@ -80,4 +84,4 @@ let
     (_: c: { inherit (c.approvals) gatedOption blockedTitle blockedHint; })
     (lib.filterAttrs (_: c: c.approvals != null) contribs);
 in
-{ inherit sources toolCards toolTitles linkProviders approvals settingsTabs interruptRenderers panels markdownFences markdownSyntax views brokerPublicPaths; }
+{ inherit sources linkLabels toolCards toolTitles linkProviders approvals settingsTabs interruptRenderers panels markdownFences markdownSyntax views brokerPublicPaths; }

@@ -684,7 +684,19 @@ ui = {
 };
 ```
 
-`enable` defaults to true as soon as `source`, `tools`, `settingsTabs`,
+A contrib can also label its own links, so the Linked panel and the sidebar show a
+PR as `#12 feat: …` rather than just its title. Each rule is a JavaScript regex
+matched against the link's URL and a label using its groups; the first match wins,
+and the label is left off when the title already shows it:
+
+```nix
+ui.linkLabels = [
+  { url = "/-/merge_requests/([0-9]+)(?:[/?#]|$)"; label = "!$1"; }
+  { url = "/-/issues/([0-9]+)(?:[/?#]|$)"; label = "#$1"; }
+];
+```
+
+`enable` defaults to true as soon as `source`, `linkLabels`, `tools`, `settingsTabs`,
 `interruptRenderers`, `panel`, `markdownFences`, `markdownSyntax` or `views` is set, so a declared row cannot
 silently render nothing.
 

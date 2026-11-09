@@ -53,6 +53,27 @@ let
     };
   };
 
+  linkLabelModule = {
+    options = {
+      url = mkOption {
+        type = types.str;
+        example = "/pull/([0-9]+)(?:[/?#]|$)";
+        description = ''
+          A JavaScript regular expression, matched against a link's URL (unanchored).
+          The first rule that matches labels the link.
+        '';
+      };
+      label = mkOption {
+        type = types.str;
+        example = "#$1";
+        description = ''
+          The label shown before the link's title; `$1`…`$9` are the regex's groups.
+          Left off when the title already shows it.
+        '';
+      };
+    };
+  };
+
   toolModule = {
     options = {
       argKey = mkOption {
@@ -282,6 +303,20 @@ let
         '';
       };
 
+      linkLabels = mkOption {
+        type = types.listOf (types.submodule linkLabelModule);
+        default = [ ];
+        example = literalExpression ''
+          [ { url = "/pull/([0-9]+)(?:[/?#]|$)"; label = "#$1"; } ]
+        '';
+        description = ''
+          Short labels (a PR's "#12") for this contrib's linked resources, read from each
+          link's URL by the first rule that matches. They apply only to links whose
+          `source` is this contrib's name, and show before the title in the Linked panel
+          and the sidebar.
+        '';
+      };
+
       tools = mkOption {
         type = types.attrsOf (types.submodule toolModule);
         default = { };
@@ -376,7 +411,7 @@ let
     };
 
     config.enable = lib.mkDefault
-      (config.source != null || config.tools != { } || config.settingsTabs != [ ] || config.interruptRenderers != { }
+      (config.source != null || config.linkLabels != [ ] || config.tools != { } || config.settingsTabs != [ ] || config.interruptRenderers != { }
         || config.panel != null || config.markdownFences != { } || config.markdownSyntax != null || config.views != { });
   };
 

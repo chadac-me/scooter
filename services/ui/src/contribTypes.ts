@@ -24,6 +24,14 @@ export interface ContribSource {
   linkProvider?: boolean;
 }
 
+/** One rule labelling a contrib's links from their URL (`ui.linkLabels`). */
+export interface ContribLinkLabel {
+  /** Matched against the link's URL, unanchored. */
+  url: RegExp;
+  /** The label, with `$1`…`$9` standing for the regex's groups. */
+  label: string;
+}
+
 /** How one agent tool renders as a message card. */
 export interface ContribToolCard {
   /** The source whose brand row the card wears — a contrib name. */
@@ -113,6 +121,8 @@ export interface ContribView {
 export interface ContribManifest {
   /** Brand row per contrib name. */
   sources: Record<string, ContribSource>;
+  /** Link-label rules per contrib name, applied to links whose `source` is that name. */
+  linkLabels: Record<string, ContribLinkLabel[]>;
   /** Tool-call message cards, keyed by tool name. */
   toolCards: Record<string, ContribToolCard>;
   /** registerTool titles (already lowercased) -> the tool name they mean. */

@@ -8,7 +8,7 @@ import { useSyncExternalStore } from "react";
 
 import type { AgentHostConfig } from "./client.js";
 import { Conversation } from "./conversation.js";
-import { contribLinkProviders } from "./contribManifest.js";
+import { contribLinkLabels, contribLinkProviders } from "./contribManifest.js";
 
 export interface Session {
   /** Stable local key that React, selection and the runtime mount on; it may be a placeholder the server has never seen, so address the server with `serverId`. */
@@ -730,11 +730,43 @@ export function linkForProvider(s: Session, provider: LinkProvider): SessionLink
   return (s.links ?? []).find((l) => l.source === provider);
 }
 
-/** A human name for a link: its title, else "<source> <type>", else the source. */
-export function linkName(l: SessionLink): string {
+/**
+ * A link's short label (a PR's "#12"), from the first `ui.linkLabels` rule of the contrib
+ * that owns its source to match its URL; undefined when none does.
+ */
+export function linkLabel(l: SessionLink): string | undefined {
+  if (!l.url) return undefined;
+  for (const rule of contribLinkLabels()[l.source] ?? []) {
+    const m = rule.url.exec(l.url);
+    if (m) return rule.label.replace(/\$(\d)/g, (_, i: string) => m[Number(i)] ?? "").trim() || undefined;
+  }
+  return undefined;
+}
+
+/** Whether `title` already shows `label` as a whole token (e.g. "org/app #7" for "#7"). */
+function titleHasLabel(title: string, label: string): boolean {
+  const esc = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\w])${esc}(?!\\w)`).test(title);
+}
+
+/** The link's title, else "<source> <type>" when it has none. */
+export function linkTitle(l: SessionLink): string {
   if (l.title) return l.title;
   const type = l.resourceType ? ` ${l.resourceType.replace(/_/g, " ")}` : "";
   return `${l.source}${type}`.trim();
+}
+
+/** The label to show beside the title, or undefined when there is none or the title has it. */
+export function linkBadge(l: SessionLink): string | undefined {
+  const label = linkLabel(l);
+  return label && !(l.title && titleHasLabel(l.title, label)) ? label : undefined;
+}
+
+/** A human name for a link: "<label> <title>", else its title, else "<source> <type>". */
+export function linkName(l: SessionLink): string {
+  const badge = linkBadge(l);
+  const title = linkTitle(l);
+  return badge ? `${badge} ${title}` : title;
 }
 
 /** The label shown for a session row under the given label mode, falling back to the title. */

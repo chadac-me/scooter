@@ -13,6 +13,7 @@ import type {
   ContribApproval,
   ContribIcon,
   ContribInterruptRenderer,
+  ContribLinkLabel,
   ContribManifest,
   ContribMarkdownFence,
   ContribMarkdownSyntax,
@@ -32,6 +33,7 @@ const TIMEOUT_MS = 1500;
 
 const EMPTY: ContribManifest = {
   sources: {},
+  linkLabels: {},
   toolCards: {},
   toolTitles: {},
   linkProviders: [],
@@ -62,6 +64,22 @@ function asSource(v: unknown): ContribSource | undefined {
   const icon = asIcon(r.icon);
   if (!icon || !isStr(r.label) || !isStr(r.color)) return undefined;
   return { label: r.label, color: r.color, icon, linkProvider: r.linkProvider === true };
+}
+
+/** A contrib's link-label rules; a rule whose regex doesn't compile is dropped on its own. */
+function asLinkLabels(v: unknown): ContribLinkLabel[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: ContribLinkLabel[] = [];
+  for (const raw of v) {
+    const r = asRecord(raw);
+    if (!isStr(r.url) || !isStr(r.label)) continue;
+    try {
+      out.push({ url: new RegExp(r.url), label: r.label });
+    } catch {
+      /* a bad regex costs only its own rule */
+    }
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function asToolCard(v: unknown): ContribToolCard | undefined {
@@ -150,6 +168,7 @@ function parse(doc: unknown): ContribManifest {
   const sources = rows(d.sources, asSource);
   return {
     sources,
+    linkLabels: rows(d.linkLabels, asLinkLabels),
     toolCards: rows(d.toolCards, asToolCard),
     toolTitles: rows(d.toolTitles, (v) => (isStr(v) ? v : undefined)),
     approvals: rows(d.approvals, asApproval),
@@ -188,6 +207,11 @@ export async function loadContribManifest(): Promise<void> {
 /** Brand row per contrib, merged under the app's own sources (sourceIcon.tsx). */
 export function contribSources(): Record<string, ContribSource> {
   return manifest.sources;
+}
+
+/** Link-label rules per contrib name (sessions.ts linkLabel). */
+export function contribLinkLabels(): Record<string, ContribLinkLabel[]> {
+  return manifest.linkLabels;
 }
 
 /** Tool-call message cards, keyed by tool name (toolCallView.ts). */

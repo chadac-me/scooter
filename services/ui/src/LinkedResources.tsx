@@ -9,14 +9,23 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import type { ConversationLink } from "./client.js";
-import { useSessions } from "./sessions.js";
+import { linkBadge, linkName, linkTitle, useSessions } from "./sessions.js";
 import { SourceBadge } from "./sourceIcon.js";
 import { Button } from "@/components/ui/button";
 
-function linkLabel(l: ConversationLink): string {
-  if (l.title) return l.title;
-  const kind = l.resourceType.replace(/_/g, " ");
-  return `${l.source} ${kind}`;
+/** The link's text: its contrib's label (muted, never truncated) then its title. */
+function LinkText({ link }: { link: ConversationLink }) {
+  const badge = linkBadge(link);
+  return (
+    <>
+      {badge && (
+        <span className="shrink-0 font-mono text-xs text-muted-foreground" data-testid="linked-resource-label">
+          {badge}
+        </span>
+      )}
+      <span className="truncate">{linkTitle(link)}</span>
+    </>
+  );
 }
 
 /** At/above this many links the panel starts collapsed (it shares the column with the session list). */
@@ -52,15 +61,15 @@ export function LinkedResourcesPanel({ links }: { links: ConversationLink[] }) {
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center gap-2 rounded px-2 py-1 hover:bg-accent"
-                  title={linkLabel(l)}
+                  title={linkName(l)}
                 >
                   <SourceBadge source={l.source} />
-                  <span className="truncate">{linkLabel(l)}</span>
+                  <LinkText link={l} />
                 </a>
               ) : (
-                <span className="flex items-center gap-2 px-2 py-1" title={linkLabel(l)}>
+                <span className="flex items-center gap-2 px-2 py-1" title={linkName(l)}>
                   <SourceBadge source={l.source} />
-                  <span className="truncate">{linkLabel(l)}</span>
+                  <LinkText link={l} />
                 </span>
               )}
             </li>
