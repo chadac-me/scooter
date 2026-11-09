@@ -19,7 +19,12 @@ export interface ScooterApi {
 
 export type AguiEvent = { type: string; [k: string]: any };
 
+/** The agent whose chats are all this conversation. */
 export const PROVIDER = "scooter";
+/** The agent whose every chat is its own session conversation. */
+export const SESSION_PROVIDER = "scooter-session";
+/** The system-message source VS Code's prompts carry, so the agent knows where they came from. */
+export const MESSAGE_SOURCE = "vscode";
 const DEFAULT_CHAT_PREFIX = "ahp-chat://default/";
 const IDLE = 1;
 export const chatOf = (session: string) => DEFAULT_CHAT_PREFIX + Buffer.from(session, "utf8").toString("base64url");
@@ -30,6 +35,8 @@ export interface ConversationViewOptions {
   uri: string;
   conversationId: string;
   title: string;
+  /** The agent this chat belongs to. */
+  provider: string;
   directory: string;
   /** Link back to this conversation in the Scooter web UI. */
   conversationUrl?: string;
@@ -58,6 +65,8 @@ export class ConversationView {
   }
 
   get conversationId(): string { return this.opts.conversationId; }
+  get title(): string { return this.opts.title; }
+  set title(t: string) { this.opts.title = t; }
 
   /** Creates the session and chat channels and starts mapping the conversation's events. */
   start(): void {
@@ -65,7 +74,7 @@ export class ConversationView {
     const { title, directory } = this.opts;
     this.core.createChannel(this.chat, A({ resource: this.chat, title, status: IDLE, modifiedAt: now, turns: [] }));
     this.core.createChannel(this.uri, A({
-      provider: PROVIDER, title, status: IDLE, lifecycle: "ready", activeClients: [],
+      provider: this.opts.provider, title, status: IDLE, lifecycle: "ready", activeClients: [],
       chats: [{ resource: this.chat, title, status: IDLE, modifiedAt: now }], defaultChat: this.chat,
       workingDirectories: [directory],
     }));
@@ -82,7 +91,7 @@ export class ConversationView {
   summary() {
     const { title, directory } = this.opts;
     return A({
-      resource: this.uri, provider: PROVIDER, title,
+      resource: this.uri, provider: this.opts.provider, title,
       status: IDLE, createdAt: this.createdAt, modifiedAt: new Date().toISOString(),
       chats: [{ resource: this.chat, title }],
       defaultChat: this.chat,
@@ -167,12 +176,14 @@ export class ConversationView {
         const text = this.userText.get(ev.messageId);
         if (text === undefined) return;
         this.userText.delete(ev.messageId);
-        const i = this.pendingClientTurns.findIndex((p) => p.text === text);
-        if (i >= 0) { this.pendingClientTurns.splice(i, 1); return; } // VS Code already opened this turn
+        if (this.adoptClientTurn(text)) return;
         this.beginTurn(`scooter-${ev.messageId}`, text, "user");
         return;
       }
       case "SYSTEM_MESSAGE":
+        // A prompt sent from VS Code comes back as a system message from the pod.
+        if (ev.source === MESSAGE_SOURCE && this.adoptClientTurn(ev.text ?? "")) return;
+        if (ev.source === MESSAGE_SOURCE) { this.beginTurn(`scooter-${ev.messageId}`, ev.text ?? "", "user"); return; } // another chat's prompt
         this.beginTurn(`scooter-${ev.messageId}`, `[${ev.source ?? "system"}] ${ev.text ?? ""}`, "systemNotification");
         return;
       case "REASONING_MESSAGE_START":
@@ -205,9 +216,6 @@ export class ConversationView {
         } });
         return;
       }
-      case "RUN_STARTED":
-        this.ensureTurn();
-        return;
       case "RUN_FINISHED":
         if (ev.outcome?.type === "interrupt") {
           const link = this.opts.conversationUrl ? ` [Open Scooter](${this.opts.conversationUrl})` : "";
@@ -227,6 +235,14 @@ export class ConversationView {
       default:
         return; // QUEUE_UPDATED, CONTEXT_USAGE, PERMISSION_RESOLVED, … not surfaced yet
     }
+  }
+
+  /** Whether the log's echo of a prompt matches a turn VS Code already opened (this chat's or not). */
+  private adoptClientTurn(text: string): boolean {
+    const i = this.pendingClientTurns.findIndex((p) => p.text === text);
+    if (i < 0) return false;
+    this.pendingClientTurns.splice(i, 1);
+    return true;
   }
 
   private async pump(): Promise<void> {

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { AguiEvent, ChildSession, ScooterApi, SessionsApi } from "./scooterBackend.js";
+import { MESSAGE_SOURCE } from "./conversationView.js";
 
 /** The conversation-router's sandbox self-access API, authenticated as this pod (see conversation-router/selfaccess.go). */
 export function routerApi(baseUrl: string, conversationId: string, tokenPath?: string): SessionsApi {
@@ -16,8 +17,8 @@ export function routerApi(baseUrl: string, conversationId: string, tokenPath?: s
   const post = (url: string, body?: unknown) => request(url, { method: "POST", body: JSON.stringify(body ?? {}) });
   const sessions = `${urlOf(conversationId)}/sessions`;
   return {
-    async create() {
-      return (await (await post(sessions)).json()) as ChildSession;
+    async create(titlePrefix) {
+      return (await (await post(sessions, { titlePrefix })).json()) as ChildSession;
     },
     async list() {
       return ((await (await request(sessions)).json()) as { sessions: ChildSession[] }).sessions;
@@ -31,7 +32,7 @@ export function routerApi(baseUrl: string, conversationId: string, tokenPath?: s
 
 function conversationApi(base: string, headers: () => Record<string, string>, post: (url: string, body?: unknown) => Promise<Response>): ScooterApi {
   return {
-    sendMessage: async (text) => { await post(`${base}/messages`, { text }); },
+    sendMessage: async (text) => { await post(`${base}/messages`, { text, source: MESSAGE_SOURCE }); },
     cancel: async () => { await post(`${base}/cancel`); },
     async stream(onEvent, signal) {
       // /events only replays; live events reach a persistent viewer through /events.integrity.

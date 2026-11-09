@@ -1,16 +1,18 @@
 /**
  * ScooterBackend: an AHP backend exposing this sandbox's Scooter conversation to VS Code,
- * plus one child "session" conversation per extra chat VS Code creates.
+ * plus one child "session" conversation per chat VS Code opens with the session agent.
  *
- *  - Root advertises one agent ("scooter") with one model and no protected resources,
- *    so VS Code needs no GitHub/Copilot sign-in.
+ *  - Root advertises two agents, each with one model and no protected resources, so
+ *    VS Code needs no GitHub/Copilot sign-in:
+ *    - "scooter": every chat is this conversation, the one the web UI shows.
+ *    - "scooter-session": every chat starts its own child session conversation.
  *  - The primary session `scooter:/<conversationId>` is this conversation.
- *  - `createSession` starts a child session through the router; the URI VS Code picked
- *    maps to it. `disposeSession` suspends the child and hides it from VS Code.
- *  - Each session is a ConversationView with its own event pump and turn mapping.
+ *  - `disposeSession` suspends a child and hides it; closing a chat of this
+ *    conversation only drops that chat.
+ *  - Each chat is a ConversationView with its own event pump and turn mapping.
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { ConversationView, PROVIDER, type ScooterApi } from "./conversationView.js";
+import { ConversationView, PROVIDER, SESSION_PROVIDER, type ScooterApi } from "./conversationView.js";
 import type { ProtocolCore } from "./vendor/hydra-ahp/protocol/core.js";
 import type { ActionDecision, ActionRequest, Backend, ClientContext } from "./vendor/hydra-ahp/protocol/backend.js";
 import { ErrorCodes, RpcError } from "./vendor/hydra-ahp/rpc/peer.js";
@@ -18,12 +20,14 @@ import { ErrorCodes, RpcError } from "./vendor/hydra-ahp/rpc/peer.js";
 export type { AguiEvent, ScooterApi } from "./conversationView.js";
 
 const ROOT = "ahp-root://";
+/** Prefixes a session's title, e.g. "vscode: Fix the login redirect". */
+const TITLE_PREFIX = "vscode";
 
 export interface ChildSession { id: string; title?: string; status?: string }
 
 /** The router's session routes on the primary conversation, plus per-conversation access. */
 export interface SessionsApi {
-  create(): Promise<ChildSession>;
+  create(titlePrefix: string): Promise<ChildSession>;
   list(): Promise<ChildSession[]>;
   /** Suspends a session; its history stays. */
   end(id: string): Promise<void>;
@@ -62,18 +66,21 @@ export class ScooterBackend implements Backend {
   start(core: ProtocolCore): void {
     this.core = core;
     core.createChannel(ROOT, {
-      agents: [{
-        provider: PROVIDER,
-        displayName: "Scooter",
-        description: "This Scooter conversation",
-        models: [{ id: "scooter", provider: PROVIDER, name: "Scooter" }],
-        protectedResources: [],
-      }],
+      agents: [
+        agent(PROVIDER, "Scooter", "This Scooter conversation"),
+        agent(SESSION_PROVIDER, "Scooter session", "A new Scooter conversation for this chat"),
+      ],
       activeSessions: 1,
     } as never);
-    this.addView(`${PROVIDER}:/${this.opts.conversationId}`, this.opts.conversationId, this.opts.title ?? "Scooter conversation");
+    this.addView(`${PROVIDER}:/${this.opts.conversationId}`, this.opts.conversationId, this.primaryTitle);
+    // Earlier chats of this conversation; sessions come back in refresh().
+    for (const [uri, id] of Object.entries(this.saved.uris)) {
+      if (id === this.opts.conversationId && !this.views.has(uri)) this.addView(uri, id, this.primaryTitle);
+    }
     this.loaded = this.refresh();
   }
+
+  private get primaryTitle(): string { return this.opts.title ?? "Scooter conversation"; }
 
   stop(): void {
     for (const v of this.views.values()) v.stop();
@@ -84,6 +91,7 @@ export class ScooterBackend implements Backend {
   private addView(uri: string, conversationId: string, title: string): ConversationView {
     const view = new ConversationView(this.core, {
       uri, conversationId, title,
+      provider: uri.startsWith(`${SESSION_PROVIDER}:/`) ? SESSION_PROVIDER : PROVIDER,
       directory: this.defaultDirectory,
       conversationUrl: urlFor(this.opts.conversationUrl, conversationId),
       api: this.opts.api.conversation(conversationId),
@@ -103,10 +111,12 @@ export class ScooterBackend implements Backend {
       this.opts.log?.(`listing sessions failed: ${(e as Error).message}`);
       return;
     }
-    const known = new Set([...this.views.values()].map((v) => v.conversationId));
+    const byId = new Map([...this.views.values()].map((v) => [v.conversationId, v]));
     for (const c of children) {
-      if (known.has(c.id) || c.status === "ended" || this.saved.disposed.includes(c.id)) continue;
-      const uri = Object.keys(this.saved.uris).find((u) => this.saved.uris[u] === c.id) ?? `${PROVIDER}:/${c.id}`;
+      const known = byId.get(c.id);
+      if (known) { if (c.title) known.title = c.title; continue; } // the agent may have named it since
+      if (c.status === "ended" || this.saved.disposed.includes(c.id)) continue;
+      const uri = Object.keys(this.saved.uris).find((u) => this.saved.uris[u] === c.id) ?? `${SESSION_PROVIDER}:/${c.id}`;
       if (this.views.has(uri)) continue;
       this.addView(uri, c.id, c.title || "VS Code session");
     }
@@ -125,35 +135,44 @@ export class ScooterBackend implements Backend {
       case "resolveSessionConfig":
         return { schema: { type: "object", properties: {} }, values: {} };
       case "createSession": {
-        // VS Code picks the URI; it becomes a new child session conversation.
+        // VS Code picks the URI; its scheme names the agent the user chose.
         const channel = body.channel;
-        if (typeof channel !== "string" || !channel.startsWith(`${PROVIDER}:/`)) {
-          throw new RpcError(ErrorCodes.InvalidParams, `only ${PROVIDER}: sessions exist here`);
+        const isSession = typeof channel === "string" && channel.startsWith(`${SESSION_PROVIDER}:/`);
+        if (typeof channel !== "string" || (!isSession && !channel.startsWith(`${PROVIDER}:/`))) {
+          throw new RpcError(ErrorCodes.InvalidParams, `only ${PROVIDER}: and ${SESSION_PROVIDER}: sessions exist here`);
         }
         await this.loaded;
         if (this.views.has(channel)) return null;
-        let child: ChildSession;
-        try {
-          child = await this.opts.api.create();
-        } catch (e) {
-          throw new RpcError(ErrorCodes.InternalError, `Scooter could not start a session: ${(e as Error).message}`);
+        let id = this.opts.conversationId;
+        let title = this.primaryTitle;
+        if (isSession) {
+          let child: ChildSession;
+          try {
+            child = await this.opts.api.create(TITLE_PREFIX);
+          } catch (e) {
+            throw new RpcError(ErrorCodes.InternalError, `Scooter could not start a session: ${(e as Error).message}`);
+          }
+          id = child.id;
+          title = child.title || "VS Code session";
         }
-        this.saved.uris[channel] = child.id;
+        this.saved.uris[channel] = id;
         this.save();
-        const view = this.addView(channel, child.id, child.title || "VS Code session");
+        const view = this.addView(channel, id, title);
         this.core.notify(ROOT, "root/sessionAdded", { channel: ROOT, summary: view.summary() });
         return null;
       }
       case "disposeSession": {
         const channel = String(body.channel ?? "");
         const view = this.views.get(channel);
-        if (!view || view.conversationId === this.opts.conversationId) return null;
+        if (!view || channel === `${PROVIDER}:/${this.opts.conversationId}`) return null;
         this.views.delete(channel);
         view.remove();
         delete this.saved.uris[channel];
-        this.saved.disposed.push(view.conversationId);
+        const isSession = view.conversationId !== this.opts.conversationId;
+        if (isSession) this.saved.disposed.push(view.conversationId);
         this.save();
         this.core.notify(ROOT, "root/sessionRemoved", { channel: ROOT, session: channel });
+        if (!isSession) return null; // another chat of this conversation: nothing to end
         await this.opts.api.end(view.conversationId).catch((e) => this.opts.log?.(`ending session ${view.conversationId} failed: ${(e as Error).message}`));
         return null;
       }
@@ -178,6 +197,10 @@ export class ScooterBackend implements Backend {
       this.opts.log?.(`saving sessions failed: ${(e as Error).message}`);
     }
   }
+}
+
+function agent(provider: string, displayName: string, description: string) {
+  return { provider, displayName, description, models: [{ id: "scooter", provider, name: "Scooter" }], protectedResources: [] };
 }
 
 function load(path?: string): SavedState {

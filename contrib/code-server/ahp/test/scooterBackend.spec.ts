@@ -12,19 +12,19 @@ const chatOf = (s: string) => "ahp-chat://default/" + Buffer.from(s, "utf8").toS
 
 /** A fake conversation: `emit` feeds the live event stream; history is whatever was emitted before start. */
 function fakeConversation(history: AguiEvent[] = []) {
-  let sink: ((ev: AguiEvent) => void) | undefined;
+  const sinks = new Set<(ev: AguiEvent) => void>();
   const sent: string[] = [];
   let cancels = 0;
   const api: ScooterApi = {
     async stream(onEvent, signal) {
       for (const ev of history) onEvent(ev);
-      sink = onEvent;
-      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+      sinks.add(onEvent);
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => { sinks.delete(onEvent); resolve(); }));
     },
     async sendMessage(text) { sent.push(text); },
     async cancel() { cancels++; },
   };
-  return { api, sent, cancels: () => cancels, emit: (...evs: AguiEvent[]) => evs.forEach((e) => sink!(e)) };
+  return { api, sent, cancels: () => cancels, emit: (...evs: AguiEvent[]) => evs.forEach((e) => sinks.forEach((s) => s(e))) };
 }
 
 /** A fake router: the primary conversation plus the sessions created under it. */
@@ -33,8 +33,8 @@ function fakeRouter(history: AguiEvent[] = [], children: ChildSession[] = []) {
   const ended: string[] = [];
   let next = 0;
   const api: SessionsApi = {
-    async create() {
-      const child = { id: `child-${++next}`, title: "New session", status: "suspended" };
+    async create(titlePrefix) {
+      const child = { id: `child-${++next}`, title: `${titlePrefix}: New chat`, status: "suspended" };
       children.push(child);
       return child;
     },
@@ -82,6 +82,7 @@ const tool = (id: string, name: string, args: object, result: string): AguiEvent
   { type: "TOOL_CALL_END", toolCallId: id },
   { type: "TOOL_CALL_RESULT", toolCallId: id, messageId: `${id}-r`, content: result },
 ];
+const fromVscode = (id: string, text: string): AguiEvent => ({ type: "SYSTEM_MESSAGE", messageId: id, source: "vscode", text });
 const run = (runId: string, ...evs: AguiEvent[][]): AguiEvent[] => [
   { type: "RUN_STARTED", threadId: CONV, runId },
   ...evs.flat(),
@@ -89,11 +90,11 @@ const run = (runId: string, ...evs: AguiEvent[][]): AguiEvent[] => [
 ];
 
 describe("ScooterBackend", () => {
-  it("advertises one Scooter agent usable without a GitHub sign-in", async () => {
+  it("advertises this conversation's agent and the session agent, usable without a GitHub sign-in", async () => {
     const { core } = await setup();
     const root = core.store.state("ahp-root://") as any;
-    expect(root.agents).toHaveLength(1);
-    expect(root.agents[0]).toMatchObject({ provider: "scooter", protectedResources: [] });
+    expect(root.agents.map((a: any) => a.provider)).toEqual(["scooter", "scooter-session"]);
+    for (const a of root.agents) expect(a).toMatchObject({ protectedResources: [] });
     expect(root.agents[0].models).toHaveLength(1); // VS Code requires a model for agent-host providers
   });
 
@@ -149,7 +150,7 @@ describe("ScooterBackend", () => {
 
   it("starts a child conversation for each session VS Code creates", async () => {
     const { backend, chat, router, emit, dispatch } = await setup([...user("u1", "earlier"), ...run("r1", say("m1", "earlier reply"))]);
-    const created = "scooter:/new-from-vscode";
+    const created = "scooter-session:/new-from-vscode";
     await backend.handleCommand("createSession", { channel: created }, {} as never);
     await new Promise((r) => setTimeout(r, 0));
     expect(chat(created).turns).toHaveLength(0); // its own, empty history
@@ -168,29 +169,29 @@ describe("ScooterBackend", () => {
   it("lists sessions that existed before the bridge started", async () => {
     const { backend, chat } = await setup([], { children: [{ id: "old", title: "Earlier chat" }, { id: "gone", status: "ended" }] });
     const { items } = (await backend.listSessions()) as any;
-    expect(items.map((s: any) => [s.resource, s.title])).toEqual([[SESSION, "Scooter conversation"], ["scooter:/old", "Earlier chat"]]);
-    expect(chat("scooter:/old")).toBeDefined();
+    expect(items.map((s: any) => [s.resource, s.title])).toEqual([[SESSION, "Scooter conversation"], ["scooter-session:/old", "Earlier chat"]]);
+    expect(chat("scooter-session:/old")).toBeDefined();
   });
 
   it("keeps VS Code's URI for a session across a bridge restart", async () => {
     const statePath = join(mkdtempSync(join(tmpdir(), "ahp-")), "sessions.json");
     const children: ChildSession[] = [];
     const first = await setup([], { children, statePath });
-    await first.backend.handleCommand("createSession", { channel: "scooter:/vscode-picked" }, {} as never);
+    await first.backend.handleCommand("createSession", { channel: "scooter-session:/vscode-picked" }, {} as never);
     first.backend.stop();
     const second = await setup([], { children, statePath });
     const { items } = (await second.backend.listSessions()) as any;
-    expect(items.map((s: any) => s.resource)).toEqual([SESSION, "scooter:/vscode-picked"]);
+    expect(items.map((s: any) => s.resource)).toEqual([SESSION, "scooter-session:/vscode-picked"]);
   });
 
   it("suspends a deleted session and keeps it hidden", async () => {
     const statePath = join(mkdtempSync(join(tmpdir(), "ahp-")), "sessions.json");
     const children: ChildSession[] = [];
     const { backend, router, core } = await setup([], { children, statePath });
-    await backend.handleCommand("createSession", { channel: "scooter:/doomed" }, {} as never);
-    await backend.handleCommand("disposeSession", { channel: "scooter:/doomed" }, {} as never);
+    await backend.handleCommand("createSession", { channel: "scooter-session:/doomed" }, {} as never);
+    await backend.handleCommand("disposeSession", { channel: "scooter-session:/doomed" }, {} as never);
     expect(router.ended).toEqual(["child-1"]);
-    expect(core.store.has("scooter:/doomed")).toBe(false);
+    expect(core.store.has("scooter-session:/doomed")).toBe(false);
     await backend.handleCommand("disposeSession", { channel: SESSION }, {} as never); // never the primary
     expect(core.store.has(SESSION)).toBe(true);
     const restarted = await setup([], { children, statePath });
@@ -200,10 +201,48 @@ describe("ScooterBackend", () => {
 
   it("links a session's approval note to its own conversation", async () => {
     const { backend, chat, router } = await setup();
-    await backend.handleCommand("createSession", { channel: "scooter:/s" }, {} as never);
+    await backend.handleCommand("createSession", { channel: "scooter-session:/s" }, {} as never);
     router.conv("child-1").emit(...user("u", "deploy"), { type: "RUN_STARTED", threadId: "child-1", runId: "r" },
       { type: "RUN_FINISHED", threadId: "child-1", runId: "r", outcome: { type: "interrupt" } });
-    expect(JSON.stringify(chat("scooter:/s").activeTurn)).toContain("thread=child-1");
+    expect(JSON.stringify(chat("scooter-session:/s").activeTurn)).toContain("thread=child-1");
+  });
+
+  it("adopts a prompt's echo as a vscode system message without an extra or empty turn", async () => {
+    const { chat, dispatch, emit } = await setup();
+    await dispatch(chatOf(SESSION), { type: "chat/turnStarted", turnId: "vs-1", startedAt: new Date().toISOString(), message: { text: "hi", origin: { kind: "user" } } });
+    emit(...run("r2", [fromVscode("s1", "hi")], say("m2", "hello!")));
+    const c = chat();
+    expect(c.turns.map((t: any) => t.id)).toEqual(["vs-1"]);
+    expect(c.turns[0].responseParts.map((p: any) => p.content)).toEqual(["hello!"]);
+  });
+
+  it("opens a chat of the Scooter agent on this conversation, and closing it ends nothing", async () => {
+    const statePath = join(mkdtempSync(join(tmpdir(), "ahp-")), "sessions.json");
+    const { backend, chat, dispatch, sent, emit, router } = await setup([...user("u1", "earlier"), ...run("r1", say("m1", "earlier reply"))], { statePath });
+    const other = "scooter:/second-chat";
+    await backend.handleCommand("createSession", { channel: other }, {} as never);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(chat(other).turns).toHaveLength(1); // this conversation's history
+    await dispatch(chatOf(other), { type: "chat/turnStarted", turnId: "vs-2", startedAt: new Date().toISOString(), message: { text: "more", origin: { kind: "user" } } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sent).toEqual(["more"]);
+    emit(...run("r2", [fromVscode("s2", "more")], say("m2", "ok")));
+    expect(chat(other).turns.map((t: any) => t.id)).toEqual(["scooter-u1", "vs-2"]);
+    expect(chat(SESSION).turns.map((t: any) => [t.message.text, t.message.origin?.kind])).toEqual([["earlier", "user"], ["more", "user"]]);
+
+    const restarted = await setup([], { statePath });
+    expect((await restarted.backend.listSessions() as any).items.map((s: any) => s.resource)).toEqual([SESSION, other]);
+    await backend.handleCommand("disposeSession", { channel: other }, {} as never);
+    expect(router.ended).toEqual([]);
+  });
+
+  it("names a session with the vscode prefix and picks up the agent's title", async () => {
+    const children: ChildSession[] = [];
+    const { backend } = await setup([], { children });
+    await backend.handleCommand("createSession", { channel: "scooter-session:/t" }, {} as never);
+    children[0].title = "vscode: Fix the login redirect";
+    const { items } = (await backend.listSessions()) as any;
+    expect(items.map((s: any) => s.title)).toEqual(["Scooter conversation", "vscode: Fix the login redirect"]);
   });
 
   it("answers resolveSessionConfig with an empty config", async () => {
