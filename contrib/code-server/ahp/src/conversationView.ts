@@ -25,6 +25,11 @@ export const PROVIDER = "scooter";
 export const SESSION_PROVIDER = "scooter-session";
 /** The system-message source VS Code's prompts carry, so the agent knows where they came from. */
 export const MESSAGE_SOURCE = "vscode";
+
+/** A router refusal: the conversation is gone or not ours. */
+export class RouterRefused extends Error {
+  constructor(readonly status: number, what: string) { super(`${what}: ${status}`); }
+}
 const DEFAULT_CHAT_PREFIX = "ahp-chat://default/";
 const IDLE = 1;
 export const chatOf = (session: string) => DEFAULT_CHAT_PREFIX + Buffer.from(session, "utf8").toString("base64url");
@@ -248,14 +253,23 @@ export class ConversationView {
   private async pump(): Promise<void> {
     // The events endpoint replays the full log on every connect; skip what we've mapped.
     let seen = 0;
+    let delay = 1000;
     while (!this.abort.signal.aborted) {
       let i = 0;
       try {
         await this.opts.api.stream((ev) => { if (i++ >= seen) { seen++; this.map(ev); } }, this.abort.signal);
       } catch (e) {
-        if (!this.abort.signal.aborted) this.opts.log?.(`${this.conversationId}: event stream error: ${(e as Error).message}`);
+        if (this.abort.signal.aborted) return;
+        if (e instanceof RouterRefused) {
+          this.opts.log?.(`${this.conversationId}: stopped following: ${e.message}`);
+          this.endTurn("error", `Scooter refused this conversation (${e.status}).`);
+          return;
+        }
+        this.opts.log?.(`${this.conversationId}: event stream error: ${(e as Error).message}`);
       }
-      if (!this.abort.signal.aborted) await new Promise((r) => setTimeout(r, 2000));
+      // Back off while unreachable; any delivered event resets it.
+      delay = i > 0 ? 2000 : Math.min(delay * 2, 30_000);
+      if (!this.abort.signal.aborted) await new Promise((r) => setTimeout(r, delay));
     }
   }
 

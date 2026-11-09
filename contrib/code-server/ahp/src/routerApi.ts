@@ -1,6 +1,11 @@
 import { readFileSync } from "node:fs";
 import type { AguiEvent, ChildSession, ScooterApi, SessionsApi } from "./scooterBackend.js";
-import { MESSAGE_SOURCE } from "./conversationView.js";
+import { MESSAGE_SOURCE, RouterRefused } from "./conversationView.js";
+
+function check(res: Response, what: string): void {
+  if (res.status === 403 || res.status === 404) throw new RouterRefused(res.status, what);
+  if (!res.ok || !res.body) throw new Error(`${what}: ${res.status}`);
+}
 
 /** The conversation-router's sandbox self-access API, authenticated as this pod (see conversation-router/selfaccess.go). */
 export function routerApi(baseUrl: string, conversationId: string, tokenPath?: string): SessionsApi {
@@ -39,11 +44,11 @@ function conversationApi(base: string, headers: () => Record<string, string>, po
       // Subscribe first so nothing appended while /history is read is missed, then link the
       // two by checksum: history ends at checksum H, live frames continue from H.
       const res = await fetch(`${base}/events.integrity`, { headers: { ...headers(), accept: "text/event-stream" }, signal });
-      if (!res.ok || !res.body) throw new Error(`events.integrity: ${res.status}`);
+      check(res, "events.integrity");
       const frames = sseData(res.body as unknown as AsyncIterable<Uint8Array>)[Symbol.asyncIterator]();
       const first = frames.next(); // start reading so the subscription is live before /history
       const hist = await fetch(`${base}/history`, { headers: headers(), signal });
-      if (!hist.ok) throw new Error(`history: ${hist.status}`);
+      check(hist, "history");
       const { events, checksum } = (await hist.json()) as { events: AguiEvent[]; checksum: string };
       for (const e of events) onEvent(e);
       const link = linker(checksum);

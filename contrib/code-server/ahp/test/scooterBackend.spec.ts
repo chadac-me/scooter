@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { ScooterBackend, type AguiEvent, type ChildSession, type ScooterApi, type SessionsApi } from "../src/scooterBackend.js";
 import { ProtocolCore } from "../src/vendor/hydra-ahp/protocol/core.js";
 import type { ActionRequest } from "../src/vendor/hydra-ahp/protocol/backend.js";
+import { RouterRefused } from "../src/conversationView.js";
 
 const CONV = "6c5b0a0c-887e-4328-929f-43f3e727c162";
 const SESSION = `scooter:/${CONV}`;
@@ -182,6 +183,19 @@ describe("ScooterBackend", () => {
     const second = await setup([], { children, statePath });
     const { items } = (await second.backend.listSessions()) as any;
     expect(items.map((s: any) => s.resource)).toEqual([SESSION, "scooter-session:/vscode-picked"]);
+  });
+
+  it("stops following a conversation the router refuses", async () => {
+    const { router } = await setup();
+    let attempts = 0;
+    router.conv().api.stream = async () => { attempts++; throw new RouterRefused(403, "events.integrity"); };
+    const logs: string[] = [];
+    const backend = new ScooterBackend({ conversationId: CONV, api: router.api, log: (m) => logs.push(m) });
+    await new ProtocolCore({ backend, detachGraceMs: 0 }).start();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(attempts).toBe(1);
+    expect(logs).toEqual([`${CONV}: stopped following: events.integrity: 403`]);
+    backend.stop();
   });
 
   it("suspends a deleted session and keeps it hidden", async () => {
