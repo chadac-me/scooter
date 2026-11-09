@@ -12,7 +12,7 @@ import { PassThrough } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { createFileConversationStore } from "../../src/session/fileStore.js";
-import { createManagementApi, resumeCursor, RESUME_MAX_EVENTS } from "../../src/api/management.js";
+import { chainsFrom, createManagementApi, resumeCursor, RESUME_MAX_EVENTS } from "../../src/api/management.js";
 import type { ChecksummedEvent, ConversationStore, SessionManager } from "../../src/session/manager.js";
 import type { AguiEvent } from "../../src/bridge.js";
 
@@ -131,9 +131,36 @@ describe("events.integrity — resume cursor", () => {
     expect(out[0]).toEqual({ kind: "reset" });
   });
 
+  it("resets rather than send a slice with a gap in it", async () => {
+    const { store, log } = await setup(2);
+    // A store whose slice drops one event after the anchor.
+    const gappy: ConversationStore = {
+      ...store,
+      readEventsWithChecksum: (id) => store.readEventsWithChecksum!(id),
+      readEventsAfter: async (id, afterSeq, limit) => {
+        const r = await store.readEventsAfter!(id, afterSeq, limit);
+        return { ...r, events: r.events.filter((_, i) => i !== 1) };
+      },
+    };
+    const out = await frames(gappy, cursor(log[2]));
+    expect(out[0]).toEqual({ kind: "reset" });
+    expect(out.some((f) => f.event?.type === "MESSAGES_SNAPSHOT")).toBe(true);
+  });
+
   it("sends no reset frame when no cursor was offered", async () => {
     const { store } = await setup(1);
     expect((await frames(store)).some((f) => f.kind === "reset" || f.kind === "resume")).toBe(false);
+  });
+});
+
+describe("chainsFrom", () => {
+  it("accepts a contiguous chain and rejects a skipped or forked one", async () => {
+    const { log } = await setup(1);
+    const anchor = { seq: log[0].seq!, checksum: log[0].checksum };
+    expect(chainsFrom(anchor, log.slice(1))).toBe(true);
+    expect(chainsFrom(anchor, [])).toBe(true);
+    expect(chainsFrom(anchor, log.slice(2))).toBe(false);
+    expect(chainsFrom({ ...anchor, checksum: "f".repeat(64) }, log.slice(1))).toBe(false);
   });
 });
 

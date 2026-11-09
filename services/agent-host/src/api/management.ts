@@ -74,6 +74,16 @@ export function resumeCursor(query: URLSearchParams): { afterSeq: number; checks
   return { afterSeq, checksum };
 }
 
+/** Whether `events` follow `anchor` with no gap: consecutive seqs, each chaining on the last. */
+export function chainsFrom(anchor: { seq: number; checksum: string }, events: ChecksummedEvent[]): boolean {
+  let at = anchor;
+  for (const c of events) {
+    if (c.seq !== at.seq + 1 || c.prevChecksum !== at.checksum) return false;
+    at = { seq: c.seq, checksum: c.checksum };
+  }
+  return true;
+}
+
 /** The inclusive [start, end] of a single `bytes=` range within `size`, or null if unsatisfiable. */
 export function parseByteRange(header: string, size: number): [number, number] | null {
   const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
@@ -938,8 +948,14 @@ export function createManagementApi(deps: ManagementDeps): Router {
     const resumed = cursor && store.readEventsAfter
       ? await store.readEventsAfter(id, cursor.afterSeq, RESUME_MAX_EVENTS)
       : undefined;
-    if (cursor && resumed && resumed.anchor === cursor.checksum && !resumed.more) {
-      // Cursor matches the log: send only what follows.
+    if (
+      cursor &&
+      resumed &&
+      resumed.anchor === cursor.checksum &&
+      !resumed.more &&
+      chainsFrom({ seq: cursor.afterSeq, checksum: cursor.checksum }, resumed.events)
+    ) {
+      // Cursor matches the log and the slice is gapless: send only what follows.
       send({ kind: "resume" });
       head = { seq: cursor.afterSeq, checksum: cursor.checksum };
       for (const c of resumed.events) {
