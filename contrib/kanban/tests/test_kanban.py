@@ -1131,3 +1131,92 @@ async def test_a_read_sees_a_write_made_inside_it(store):
         assert (await store.card("k")).note == "first"
         await store.put("k", column="c", by="user", note="second")
         assert (await store.card("k")).note == "second"
+
+
+# --- board skills ------------------------------------------------------------------
+
+async def _skills(c, board: dict, skills: list[dict]):
+    return await c.put(
+        f"/kanban/user/boards/{board['folder']}", json={"stages": _kept(board), "tags": [], "skills": skills}
+    )
+
+
+async def test_a_save_sets_the_board_s_skills_and_one_without_them_keeps_them(app):
+    board = await _board(app)
+    async with as_(app, user="alice") as c:
+        r = await _skills(c, board, [{"name": " Release steps ", "body": "Tag, then deploy.\n"}, {"name": "Style", "body": "Short PRs."}])
+        assert r.status_code == 200, r.text
+        saved = r.json()["board"]["skills"]
+        assert [(k["name"], k["body"]) for k in saved] == [("Release steps", "Tag, then deploy."), ("Style", "Short PRs.")]
+        # Stages and tags alone leave the skills be.
+        assert (await _save(c, board, _kept(board))).status_code == 200
+        listed = (await c.get("/kanban/user/boards")).json()["boards"][0]["skills"]
+        assert listed == saved
+        style = next(k for k in saved if k["name"] == "Style")
+        r = await _skills(c, board, [{"id": style["id"], "name": "Style guide", "body": "Small PRs."}])
+        assert [(k["id"], k["name"], k["body"]) for k in r.json()["board"]["skills"]] == [(style["id"], "Style guide", "Small PRs.")]
+
+
+async def test_bad_skills_are_refused(app):
+    board = await _board(app)
+    other = await _board(app, name="Home")
+    async with as_(app, user="alice") as c:
+        r = await _skills(c, other, [{"name": "theirs", "body": "x"}])
+        theirs = r.json()["board"]["skills"][0]["id"]
+        await _skills(c, board, [{"name": "Keep", "body": "kept"}])
+        bad = [
+            [{"name": " ", "body": "x"}],
+            [{"name": "!!!", "body": "x"}],
+            [{"name": "x" * 61, "body": "x"}],
+            [{"name": "a", "body": "  "}],
+            [{"name": "a", "body": "x" * 4001}],
+            [{"name": "Deploy steps", "body": "x"}, {"name": "deploy-steps", "body": "y"}],
+            [{"name": f"s{i}", "body": "x"} for i in range(11)],
+            [{"id": theirs, "name": "a", "body": "x"}],
+        ]
+        for skills in bad:
+            r = await _skills(c, board, skills)
+            assert r.status_code in (400, 409), (skills, r.text)
+        for skills in ["x", [{"name": "a"}], [{"name": "a", "body": 3}]]:
+            assert (await _skills(c, board, skills)).status_code == 400, skills
+        listed = (await c.get("/kanban/user/boards")).json()["boards"][0]["skills"]
+    assert [(k["name"], k["body"]) for k in listed] == [("Keep", "kept")]
+
+
+async def test_the_skill_provider_offers_the_board_s_skills(app, folders):
+    board = await _board(app)
+    async with as_(app, user="alice") as c:
+        await _skills(c, board, [{"name": "Release steps", "body": "Tag, then deploy."}])
+    folders.conversations["key-1"] = Conversation(id="conv-1", owner="alice")
+    folders.conversations["key-2"] = Conversation(id="conv-2", owner="alice")
+    folders.placements[("alice", "conv-1")] = _stage(board, "Review")
+    async with as_(app, conversation="key-1") as c:
+        skills = (await c.get("/kanban/skills")).json()["skills"]
+        card = (await c.get("/kanban/card", params={"folder": _stage(board, "Review")})).json()
+    assert [k["name"] for k in skills] == ["board-release-steps"]
+    assert skills[0]["content"].startswith("---\nname: board-release-steps\ndescription: \"")
+    assert skills[0]["content"].endswith("---\n\n# Release steps\n\nTag, then deploy.\n")
+    assert card["skills"] == ["board-release-steps"]
+    # Off a board, and for a conversation kanban can't find, there are none.
+    for key in ["key-2", "key-404"]:
+        async with as_(app, conversation=key) as c:
+            assert (await c.get("/kanban/skills")).json() == {"skills": []}
+    async with as_(app) as c:
+        assert (await c.get("/kanban/skills")).status_code == 403
+
+
+async def test_deleting_a_board_deletes_its_skills(app, store):
+    board = await _board(app)
+    async with as_(app, user="alice") as c:
+        await _skills(c, board, [{"name": "a", "body": "x"}])
+        assert (await c.delete(f"/kanban/user/boards/{board['folder']}")).status_code == 200
+    assert await store.skills(board["folder"]) == []
+
+
+def test_skill_names_become_skill_slugs():
+    from scooter_contrib_kanban.boards import skill_slug
+
+    assert skill_slug("Release steps!") == "board-release-steps"
+    assert skill_slug("  UI / Layout ") == "board-ui-layout"
+    assert skill_slug("***") == ""
+    assert len(skill_slug("x" * 60)) <= 64

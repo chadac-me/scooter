@@ -60,5 +60,7 @@ With the `kanban` contrib enabled, `/boards` shows a folder as a board, with its
 conversations as cards in stage columns. Each stage is a locked folder inside the board,
 so moving a card files its conversation in another folder. The agent moves its own card as
 the work changes phase, and can add cards to the board for the work it hands off. A card
-can't move on until every card blocking it reaches the last stage. Setup is in
+can't move on until every card blocking it reaches the last stage. Under **Edit board**,
+the user can write a board's skills: short notes, such as conventions or release steps,
+that every agent on the board gets as a skill named `board-<name>`. Setup is in
 [Setting up contribs](../tutorial/contribs.md#kanban-boards).
