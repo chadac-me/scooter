@@ -76,6 +76,8 @@ in
       # The UI row: the GitLab chip, icon and card.
       ui = {
         source = { label = "GitLab"; icon = ./icon.svg; color = "#FC6D26"; linkProvider = true; };
+        # GitLab's own references, "!12" for an MR and "#12" for an issue; ui/linkLabels.test.ts checks the rules.
+        linkLabels = lib.importJSON ./link_labels.json;
         settingsTabs = lib.mkIf config.userAuth.enable [{
           label = "GitLab";
           order = 56;

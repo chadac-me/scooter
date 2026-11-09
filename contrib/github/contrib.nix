@@ -109,6 +109,8 @@ in
       sandbox.module = ./sandbox.nix;
       # The tool card the UI renders for github_comment.
       ui.tools.github_comment = { argKey = "body"; action = "commented on GitHub"; };
+      # A PR or issue shows as "#12 <title>" in the Linked panel and the sidebar; ui/linkLabels.test.ts checks the rules.
+      ui.linkLabels = lib.importJSON ./link_labels.json;
 
       # pyjwt+cryptography sign the RS256 App JWT that both halves mint.
       # Its own database (contrib_github) for linked user accounts.
