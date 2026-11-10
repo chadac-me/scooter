@@ -121,10 +121,10 @@ fullOnly("needs kubectl access to delete the owner pod mid-run")(
       await page.reload();
       await expect(panel).toBeVisible({ timeout: 60_000 });
 
-      // Re-click while the panel is up: a click before it is wired never reaches a pod.
+      // The asking session died with its pod, so the pick reaches the agent as a new prompt.
       await expect(async () => {
         if (await panel.isVisible().catch(() => false)) await red.click({ timeout: 5_000 }).catch(() => {});
-        await expect(page.getByText(/you picked: red/i).first()).toBeVisible({ timeout: 15_000 });
+        await expect(chat.assistantMessages().last()).toContainText(/I picked: Red/i, { timeout: 15_000 });
       }).toPass({ timeout: 120_000 });
       await expect(panel).toHaveCount(0, { timeout: 15_000 });
     });
