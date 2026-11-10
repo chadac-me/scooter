@@ -789,6 +789,38 @@ class Boards:
         await self.changed(where.conversation.owner, where.conversation.id)
         return where
 
+    async def set_skill(self, key: str, name: str, body: str) -> tuple[Located, str, str]:
+        """The agent writes, replaces or (with an empty `body`) deletes one of its board's skills.
+
+        The skill is matched by the name the agent sees it as, so "Release steps" and
+        "board-release-steps" are the same one. Returns where the card is, the skill's name
+        as the agent sees it, and what happened: "added", "updated" or "deleted".
+        """
+        where = await self.locate(key)
+        board = where.place.board
+        have = await self.store.skills(board)
+        want = name.strip()
+        if want.casefold().startswith(SKILL_PREFIX):
+            want = want[len(SKILL_PREFIX) :].strip()
+        slug = skill_slug(want)
+        if not slug:
+            raise BoardError(400, f"the skill name `{name}` needs a letter or a digit")
+        at = next((i for i, k in enumerate(have) if skill_slug(k.name) == slug), None)
+        if not body.strip():
+            if at is None:
+                names = ", ".join(f"`{skill_slug(k.name)}`" for k in have) or "none"
+                raise BoardError(404, f"this board has no skill `{slug}`; its skills: {names}")
+            skills, done = have[:at] + have[at + 1 :], "deleted"
+        elif at is None:
+            skills, done = [*have, Skill(id="", name=want, body=body, position=0.0)], "added"
+        else:
+            # It keeps the name the user gave it.
+            skills, done = [*have[:at], replace(have[at], body=body), *have[at + 1 :]], "updated"
+        skills = self._check_skills(skills, {k.id for k in have})
+        await self.store.save_skills(board, [replace(k, position=float(i + 1)) for i, k in enumerate(skills)])
+        await self.changed(where.conversation.owner)
+        return where, slug, done
+
     async def tag_view(self, key: str, board: str) -> dict[str, list[Tag]]:
         """A board's tags and the card's, as `view` takes them."""
         tags = await self.store.tags(board)

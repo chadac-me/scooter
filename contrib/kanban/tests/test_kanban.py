@@ -1220,3 +1220,41 @@ def test_skill_names_become_skill_slugs():
     assert skill_slug("  UI / Layout ") == "board-ui-layout"
     assert skill_slug("***") == ""
     assert len(skill_slug("x" * 60)) <= 64
+
+
+async def test_the_agent_writes_replaces_and_deletes_a_board_skill(app, boards, folders, store):
+    board = await _board(app)
+    async with as_(app, user="alice") as c:
+        await _skills(c, board, [{"name": "Release steps", "body": "Tag, then deploy."}])
+    folders.conversations["key-1"] = Conversation(id="conv-1", owner="alice")
+    folders.placements[("alice", "conv-1")] = _stage(board, "Review")
+    mcp_tools.configure(boards, timedelta(minutes=30), _keys())
+    out = await mcp_tools.kanban_set_skill(name="Board-Style", body="Short PRs.", ctx=_ctx())
+    assert not out.is_error and out.text == "The board skill `board-style` was added."
+    # Matched by the agent's name for it; the user's name is kept.
+    out = await mcp_tools.kanban_set_skill(name="board-release-steps", body="Deploy, then tag.", ctx=_ctx())
+    assert out.text == "The board skill `board-release-steps` was updated."
+    got = [(k.name, k.body) for k in await store.skills(board["folder"])]
+    assert got == [("Release steps", "Deploy, then tag."), ("Style", "Short PRs.")]
+    status = await mcp_tools.kanban_get_status(ctx=_ctx())
+    assert "Board skills: `board-release-steps`, `board-style`." in status.text
+    assert (await mcp_tools.kanban_set_skill(name="style", body="  ", ctx=_ctx())).text.endswith("was deleted.")
+    assert [k.name for k in await store.skills(board["folder"])] == ["Release steps"]
+
+
+async def test_the_agent_s_bad_board_skills_are_refused(app, boards, folders, store):
+    board = await _board(app)
+    folders.conversations["key-1"] = Conversation(id="conv-1", owner="alice")
+    folders.placements[("alice", "conv-1")] = _stage(board, "Review")
+    mcp_tools.configure(boards, timedelta(minutes=30), _keys())
+    gone = await mcp_tools.kanban_set_skill(name="nope", body="", ctx=_ctx())
+    assert gone.is_error and "no skill `board-nope`; its skills: none" in gone.text
+    assert (await mcp_tools.kanban_set_skill(name="!!", body="x", ctx=_ctx())).is_error
+    assert (await mcp_tools.kanban_set_skill(name="big", body="x" * 4_001, ctx=_ctx())).is_error
+    for i in range(10):
+        assert not (await mcp_tools.kanban_set_skill(name=f"s{i}", body="x", ctx=_ctx())).is_error
+    assert "at most 10 skills" in (await mcp_tools.kanban_set_skill(name="s10", body="x", ctx=_ctx())).text
+    # Off a board there is nothing to write to.
+    folders.placements[("alice", "conv-1")] = ""
+    assert (await mcp_tools.kanban_set_skill(name="s0", body="y", ctx=_ctx())).is_error
+    assert {k.body for k in await store.skills(board["folder"])} == {"x"}

@@ -381,18 +381,25 @@ class KanbanStore:
                 row.name, row.color, row.position = t.name, t.color, t.position
                 out.append(_tag(row))
             if skills is not None:
-                have_skills = {
-                    r.id: r for r in (await s.execute(select(_Skill).where(_Skill.board_id == board_id))).scalars()
-                }
-                keep_skills = [k.id for k in skills if k.id in have_skills]
-                await s.execute(delete(_Skill).where(_Skill.board_id == board_id, _Skill.id.not_in(keep_skills)))
-                for k in skills:
-                    srow = have_skills.get(k.id)
-                    if srow is None:
-                        srow = _Skill(id=str(uuid.uuid4()), board_id=board_id)
-                        s.add(srow)
-                    srow.name, srow.body, srow.position = k.name, k.body, k.position
+                await self._write_skills(s, board_id, skills)
             return out
+
+    async def save_skills(self, board_id: str, skills: list[Skill]) -> None:
+        """Make a board's skills these, leaving its stages and tags; a skill without an id is new."""
+        async with self._session() as s, s.begin():
+            await self._write_skills(s, board_id, skills)
+
+    @staticmethod
+    async def _write_skills(s, board_id: str, skills: list[Skill]) -> None:
+        have = {r.id: r for r in (await s.execute(select(_Skill).where(_Skill.board_id == board_id))).scalars()}
+        keep = [k.id for k in skills if k.id in have]
+        await s.execute(delete(_Skill).where(_Skill.board_id == board_id, _Skill.id.not_in(keep)))
+        for k in skills:
+            row = have.get(k.id)
+            if row is None:
+                row = _Skill(id=str(uuid.uuid4()), board_id=board_id)
+                s.add(row)
+            row.name, row.body, row.position = k.name, k.body, k.position
 
     async def stages(self, board_id: str) -> list[Stage]:
         """A board's stages in board order."""

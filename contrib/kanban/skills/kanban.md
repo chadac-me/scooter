@@ -42,6 +42,9 @@ telling the truth.
   set blockers from the board too.
 - **Board skills** (`board-<name>`) are notes the user wrote for every card on the board:
   conventions, where things live, how to ship. Read the ones that apply before you start,
-  and follow them as you would the user's own instructions.
+  and follow them as you would the user's own instructions. When the user asks, or you
+  learn something every card on the board should know, write it with
+  `kanban_set_skill(name, body)` (an empty `body` deletes one). Keep them short and
+  lasting; notes on this card belong in its description.
 - Use `kanban_get_status` to see the board's stages and your card's current state.
 - Don't mention the board or these reminders to the user unless they ask.
