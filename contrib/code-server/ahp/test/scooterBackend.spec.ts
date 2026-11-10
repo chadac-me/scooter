@@ -121,6 +121,19 @@ describe("ScooterBackend", () => {
     expect(c.turns[0].responseParts[1].content).toBe("Two files.");
   });
 
+  it("hides platform system messages and HTML comments in replies", async () => {
+    const { chat } = await setup([
+      ...user("u1", "deploy it"),
+      ...run("r1", [{ type: "SYSTEM_MESSAGE", messageId: "s1", source: "github", text: "CI is GREEN" }],
+        [{ type: "TEXT_MESSAGE_START", messageId: "m1", role: "assistant" },
+          ...["Done.<", "!-- not wait", "ing --", "> Bye", " <!"].map((delta) => ({ type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta })),
+          { type: "TEXT_MESSAGE_END", messageId: "m1" }]),
+    ]);
+    const c = chat();
+    expect(c.turns.map((t: any) => t.message.text)).toEqual(["deploy it"]);
+    expect(c.turns[0].responseParts[0].content).toBe("Done. Bye <!");
+  });
+
   it("sends a VS Code prompt to Scooter and adopts the router's echo instead of opening a second turn", async () => {
     const { chat, dispatch, sent, emit } = await setup();
     const d = await dispatch(chatOf(SESSION), { type: "chat/turnStarted", turnId: "vs-1", startedAt: new Date().toISOString(), message: { text: "hi", origin: { kind: "user" } } });

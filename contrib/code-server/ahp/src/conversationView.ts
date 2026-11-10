@@ -8,6 +8,7 @@
  */
 import type { ProtocolCore } from "./vendor/hydra-ahp/protocol/core.js";
 import type { ActionDecision, ActionRequest } from "./vendor/hydra-ahp/protocol/backend.js";
+import { CommentStripper } from "./commentStripper.js";
 
 /** The router's self-access API for one conversation. */
 export interface ScooterApi {
@@ -60,6 +61,7 @@ export class ConversationView {
   private turnStartMs = 0;
   private turnSeq = 0;
   private userText = new Map<string, string>();
+  private replyText = new Map<string, CommentStripper>();
   private toolArgs = new Map<string, { name: string; args: string }>();
   /** Turns VS Code started and sent to the router, by text, awaiting their echo in the log. */
   private pendingClientTurns: Array<{ turnId: string; text: string }> = [];
@@ -151,6 +153,10 @@ export class ConversationView {
     this.emit({ type: "chat/turnStarted", turnId, startedAt: new Date().toISOString(), message: { text, origin: { kind } } });
   }
 
+  private reply(messageId: string, content: string): void {
+    if (content) this.emit({ type: "chat/delta", turnId: this.ensureTurn(), partId: messageId, content });
+  }
+
   private ensureTurn(): string {
     if (!this.openTurn) this.beginTurn(`scooter-turn-${++this.turnSeq}`, "", "systemNotification");
     return this.openTurn!;
@@ -171,13 +177,18 @@ export class ConversationView {
     switch (ev.type) {
       case "TEXT_MESSAGE_START":
         if (ev.role === "user") this.userText.set(ev.messageId, "");
-        else this.emit({ type: "chat/responsePart", turnId: this.ensureTurn(), part: { kind: "markdown", id: ev.messageId, content: "" } });
+        else {
+          this.replyText.set(ev.messageId, new CommentStripper());
+          this.emit({ type: "chat/responsePart", turnId: this.ensureTurn(), part: { kind: "markdown", id: ev.messageId, content: "" } });
+        }
         return;
       case "TEXT_MESSAGE_CONTENT":
         if (this.userText.has(ev.messageId)) this.userText.set(ev.messageId, this.userText.get(ev.messageId)! + ev.delta);
-        else this.emit({ type: "chat/delta", turnId: this.ensureTurn(), partId: ev.messageId, content: ev.delta });
+        else this.reply(ev.messageId, this.replyText.get(ev.messageId)?.push(ev.delta) ?? ev.delta);
         return;
       case "TEXT_MESSAGE_END": {
+        const stripper = this.replyText.get(ev.messageId);
+        if (stripper) { this.replyText.delete(ev.messageId); this.reply(ev.messageId, stripper.end()); }
         const text = this.userText.get(ev.messageId);
         if (text === undefined) return;
         this.userText.delete(ev.messageId);
@@ -189,8 +200,7 @@ export class ConversationView {
         // A prompt sent from VS Code comes back as a system message from the pod.
         if (ev.source === MESSAGE_SOURCE && this.adoptClientTurn(ev.text ?? "")) return;
         if (ev.source === MESSAGE_SOURCE) { this.beginTurn(`scooter-${ev.messageId}`, ev.text ?? "", "user"); return; } // another chat's prompt
-        this.beginTurn(`scooter-${ev.messageId}`, `[${ev.source ?? "system"}] ${ev.text ?? ""}`, "systemNotification");
-        return;
+        return; // platform events (hooks, CI, resumes) are noise in an editor chat
       case "REASONING_MESSAGE_START":
         this.emit({ type: "chat/responsePart", turnId: this.ensureTurn(), part: { kind: "reasoning", id: ev.messageId, content: "" } });
         return;
