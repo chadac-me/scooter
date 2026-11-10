@@ -29,7 +29,10 @@ const plugin = {
     if (chatUrl) {
       const frame = document.createElement('iframe');
       frame.title = 'Scooter chat';
-      frame.src = chatUrl;
+      // The sidebar is narrow, so ask for the compact layout.
+      const url = new URL(chatUrl);
+      if (!url.searchParams.has('density')) url.searchParams.set('density', 'compact');
+      frame.src = url.toString();
       frame.allow = 'clipboard-read; clipboard-write; fullscreen';
       widget.node.appendChild(frame);
     } else {
