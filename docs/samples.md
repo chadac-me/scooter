@@ -39,7 +39,7 @@ Scooter works in your open marimo notebook's kernel, adding cells as you watch, 
 
 <div markdown>
 
-## VS Code
+## Pair Programming
 
 Scooter opens your repo in VS Code, and you keep the same conversation going from VS Code's own chat.
 
