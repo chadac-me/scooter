@@ -55,7 +55,7 @@ Comment on Scooter's design doc and it revises in place.
 
 <div markdown>
 
-## Design your full-stack web apps
+## Build web apps together
 
 Pin notes on your app and Scooter edits it live.
 
