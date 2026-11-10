@@ -46,7 +46,7 @@ function fakeRouter(history: AguiEvent[] = [], children: ChildSession[] = []) {
       return convs.get(id)!.api;
     },
   };
-  return { api, ended, conv: (id = CONV) => convs.get(id)! };
+  return { api, ended, get created() { return next; }, conv: (id = CONV) => convs.get(id)! };
 }
 
 async function setup(history: AguiEvent[] = [], opts: { children?: ChildSession[]; statePath?: string } = {}) {
@@ -63,8 +63,13 @@ async function setup(history: AguiEvent[] = [], opts: { children?: ChildSession[
     if (d.accept) core.publish(channel, action as never, req.origin);
     return d;
   };
+  /** Sends a prompt from a session's chat and lets its conversation start. */
+  const prompt = async (session: string, text = "hi") => {
+    await dispatch(chatOf(session), { type: "chat/turnStarted", turnId: `vs-${text}`, startedAt: new Date().toISOString(), message: { text, origin: { kind: "user" } } });
+    await new Promise((r) => setTimeout(r, 0));
+  };
   const primary = router.conv();
-  return { ...primary, router, backend, core, chat, dispatch };
+  return { ...primary, router, backend, core, chat, dispatch, prompt };
 }
 
 const user = (id: string, text: string): AguiEvent[] => [
@@ -168,6 +173,8 @@ describe("ScooterBackend", () => {
     await backend.handleCommand("createSession", { channel: created }, {} as never);
     await new Promise((r) => setTimeout(r, 0));
     expect(chat(created).turns).toHaveLength(0); // its own, empty history
+    expect(router.created).toBe(0); // no conversation until the first prompt
+    expect(((await backend.listSessions()) as any).items.map((s: any) => s.resource)).toEqual([SESSION]);
     await dispatch(chatOf(created), { type: "chat/turnStarted", turnId: "vs-1", startedAt: new Date().toISOString(), message: { text: "hi", origin: { kind: "user" } } });
     await new Promise((r) => setTimeout(r, 0));
     expect(router.conv("child-1").sent).toEqual(["hi"]);
@@ -192,6 +199,7 @@ describe("ScooterBackend", () => {
     const children: ChildSession[] = [];
     const first = await setup([], { children, statePath });
     await first.backend.handleCommand("createSession", { channel: "scooter-session:/vscode-picked" }, {} as never);
+    await first.prompt("scooter-session:/vscode-picked");
     first.backend.stop();
     const second = await setup([], { children, statePath });
     const { items } = (await second.backend.listSessions()) as any;
@@ -214,8 +222,12 @@ describe("ScooterBackend", () => {
   it("suspends a deleted session and keeps it hidden", async () => {
     const statePath = join(mkdtempSync(join(tmpdir(), "ahp-")), "sessions.json");
     const children: ChildSession[] = [];
-    const { backend, router, core } = await setup([], { children, statePath });
+    const { backend, prompt, router, core } = await setup([], { children, statePath });
+    await backend.handleCommand("createSession", { channel: "scooter-session:/idle" }, {} as never);
+    await backend.handleCommand("disposeSession", { channel: "scooter-session:/idle" }, {} as never);
+    expect(router.created).toBe(0); // never prompted: nothing started, nothing to end
     await backend.handleCommand("createSession", { channel: "scooter-session:/doomed" }, {} as never);
+    await prompt("scooter-session:/doomed");
     await backend.handleCommand("disposeSession", { channel: "scooter-session:/doomed" }, {} as never);
     expect(router.ended).toEqual(["child-1"]);
     expect(core.store.has("scooter-session:/doomed")).toBe(false);
@@ -227,8 +239,9 @@ describe("ScooterBackend", () => {
   });
 
   it("links a session's approval note to its own conversation", async () => {
-    const { backend, chat, router } = await setup();
+    const { backend, prompt, chat, router } = await setup();
     await backend.handleCommand("createSession", { channel: "scooter-session:/s" }, {} as never);
+    await prompt("scooter-session:/s");
     router.conv("child-1").emit(...user("u", "deploy"), { type: "RUN_STARTED", threadId: "child-1", runId: "r" },
       { type: "RUN_FINISHED", threadId: "child-1", runId: "r", outcome: { type: "interrupt" } });
     expect(JSON.stringify(chat("scooter-session:/s").activeTurn)).toContain("thread=child-1");
@@ -265,8 +278,9 @@ describe("ScooterBackend", () => {
 
   it("names a session with the vscode prefix and picks up the agent's title", async () => {
     const children: ChildSession[] = [];
-    const { backend } = await setup([], { children });
+    const { backend, prompt } = await setup([], { children });
     await backend.handleCommand("createSession", { channel: "scooter-session:/t" }, {} as never);
+    await prompt("scooter-session:/t");
     children[0].title = "vscode: Fix the login redirect";
     const { items } = (await backend.listSessions()) as any;
     expect(items.map((s: any) => s.title)).toEqual(["Scooter conversation", "vscode: Fix the login redirect"]);

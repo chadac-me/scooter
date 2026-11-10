@@ -88,13 +88,13 @@ export class ScooterBackend implements Backend {
 
   // ── Sessions ───────────────────────────────────────────────────────────
 
-  private addView(uri: string, conversationId: string, title: string): ConversationView {
+  private addView(uri: string, conversationId: string, title: string, api?: ScooterApi): ConversationView {
     const view = new ConversationView(this.core, {
       uri, conversationId, title,
       provider: uri.startsWith(`${SESSION_PROVIDER}:/`) ? SESSION_PROVIDER : PROVIDER,
       directory: this.defaultDirectory,
-      conversationUrl: urlFor(this.opts.conversationUrl, conversationId),
-      api: this.opts.api.conversation(conversationId),
+      conversationUrl: conversationId ? urlFor(this.opts.conversationUrl, conversationId) : undefined,
+      api: api ?? this.opts.api.conversation(conversationId),
       log: this.opts.log,
     });
     this.views.set(uri, view);
@@ -126,7 +126,7 @@ export class ScooterBackend implements Backend {
     await this.loaded;
     this.loaded = this.refresh();
     await this.loaded;
-    return { items: [...this.views.values()].map((v) => v.summary()) } as never;
+    return { items: [...this.views.values()].filter((v) => v.conversationId).map((v) => v.summary()) } as never;
   }
 
   async handleCommand(method: string, params: unknown, _client: ClientContext): Promise<unknown> {
@@ -143,21 +143,14 @@ export class ScooterBackend implements Backend {
         }
         await this.loaded;
         if (this.views.has(channel)) return null;
-        let id = this.opts.conversationId;
-        let title = this.primaryTitle;
+        // VS Code creates sessions speculatively; the child conversation waits for the first prompt.
         if (isSession) {
-          let child: ChildSession;
-          try {
-            child = await this.opts.api.create(TITLE_PREFIX);
-          } catch (e) {
-            throw new RpcError(ErrorCodes.InternalError, `Scooter could not start a session: ${(e as Error).message}`);
-          }
-          id = child.id;
-          title = child.title || "VS Code session";
+          this.addView(channel, "", "VS Code session", this.lazySession(channel));
+          return null;
         }
-        this.saved.uris[channel] = id;
+        this.saved.uris[channel] = this.opts.conversationId;
         this.save();
-        const view = this.addView(channel, id, title);
+        const view = this.addView(channel, this.opts.conversationId, this.primaryTitle);
         this.core.notify(ROOT, "root/sessionAdded", { channel: ROOT, summary: view.summary() });
         return null;
       }
@@ -167,6 +160,7 @@ export class ScooterBackend implements Backend {
         if (!view || channel === `${PROVIDER}:/${this.opts.conversationId}`) return null;
         this.views.delete(channel);
         view.remove();
+        if (!view.conversationId) return null; // never prompted: no child to end
         delete this.saved.uris[channel];
         const isSession = view.conversationId !== this.opts.conversationId;
         if (isSession) this.saved.disposed.push(view.conversationId);
@@ -187,6 +181,36 @@ export class ScooterBackend implements Backend {
     const view = [...this.views.values()].find((v) => v.chat === req.channel || v.uri === req.channel);
     if (!view) return { accept: false, reason: "unknown session" };
     return view.handleAction(req);
+  }
+
+  /** A session's API that starts its child conversation on the first prompt. */
+  private lazySession(channel: string): ScooterApi {
+    let ready!: (api: ScooterApi) => void;
+    const bound = new Promise<ScooterApi>((r) => (ready = r));
+    let starting: Promise<ScooterApi> | undefined;
+    const start = () => starting ??= this.opts.api.create(TITLE_PREFIX).then((child) => {
+      const api = this.opts.api.conversation(child.id);
+      const view = this.views.get(channel);
+      if (view) {
+        view.bind(child.id, child.title || "VS Code session", urlFor(this.opts.conversationUrl, child.id));
+        this.saved.uris[channel] = child.id;
+        this.save();
+        this.core.notify(ROOT, "root/sessionAdded", { channel: ROOT, summary: view.summary() });
+      }
+      ready(api);
+      return api;
+    }, (e) => {
+      starting = undefined; // let the next prompt retry
+      throw new Error(`Scooter could not start a session: ${(e as Error).message}`);
+    });
+    return {
+      async stream(onEvent, signal) {
+        const api = await Promise.race([bound, new Promise<undefined>((r) => signal.addEventListener("abort", () => r(undefined)))]);
+        if (api) await api.stream(onEvent, signal);
+      },
+      async sendMessage(text) { await (await start()).sendMessage(text); },
+      async cancel() { if (starting) await (await starting).cancel(); },
+    };
   }
 
   private save(): void {

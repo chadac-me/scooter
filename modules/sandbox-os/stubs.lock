@@ -90,7 +90,7 @@
       },
       "scooter-vscode-ahp": {
         "attr": "scooter-vscode-ahp",
-        "drv": "/nix/store/qrmn00b6r7y70n9ypmii1vlvkrc3xg44-scooter-vscode-ahp-0.0.0.drv",
+        "drv": "/nix/store/m9b2km88874q0y611vghga5mi9dkk71y-scooter-vscode-ahp-0.0.0.drv",
         "output": "out",
         "bins": [
           "scooter-vscode-ahp"
@@ -242,7 +242,7 @@
       },
       "scooter-vscode-ahp": {
         "attr": "scooter-vscode-ahp",
-        "drv": "/nix/store/dizrf82k5yn1cvhg58ry9jpy2h4dlcwn-scooter-vscode-ahp-0.0.0.drv",
+        "drv": "/nix/store/hj7hvcbdfc46p4s1smzfm7fmak4d629v-scooter-vscode-ahp-0.0.0.drv",
         "output": "out",
         "bins": [
           "scooter-vscode-ahp"
@@ -394,7 +394,7 @@
       },
       "scooter-vscode-ahp": {
         "attr": "scooter-vscode-ahp",
-        "drv": "/nix/store/p0kzwm399252r0k938v4lwa6j76jnigv-scooter-vscode-ahp-0.0.0.drv",
+        "drv": "/nix/store/yhmvr9v0iql7rxm5kbpr69gppld4a99n-scooter-vscode-ahp-0.0.0.drv",
         "output": "out",
         "bins": [
           "scooter-vscode-ahp"

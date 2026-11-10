@@ -75,6 +75,11 @@ export class ConversationView {
   get title(): string { return this.opts.title; }
   set title(t: string) { this.opts.title = t; }
 
+  /** Points a session that had no conversation yet at the one just started for it. */
+  bind(conversationId: string, title: string, conversationUrl?: string): void {
+    Object.assign(this.opts, { conversationId, title, conversationUrl });
+  }
+
   /** Creates the session and chat channels and starts mapping the conversation's events. */
   start(): void {
     const now = new Date().toISOString();
