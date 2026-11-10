@@ -202,7 +202,7 @@ let
     let
       row = id: h: {
         inherit id;
-        inherit (h) event matcher command failClosed userCanDisable description;
+        inherit (h) event matcher command failClosed userCanDisable userCanRun description;
         timeoutSec = h.timeout;
       } // lib.optionalAttrs (h.when != null) { inherit (h) when; };
       enabledRows = prefix: hooks:

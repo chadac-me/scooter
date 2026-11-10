@@ -33,12 +33,24 @@ interface Skill {
   position: number;
 }
 
+interface Gate {
+  id: string;
+  stage: string;
+  kind: "approval" | "command";
+  name: string;
+  position: number;
+  command: string;
+  workdir: string;
+  clean: boolean;
+  timeout_seconds: number;
+}
+
 // Board folders this file made, deleted after each test so the sidebar stays short.
 const madeBoards: string[] = [];
 
 /** Kanban's broker half, in memory: the boards and stages (as router folders), card state, every PUT. */
 async function serveKanban(page: Page, request: APIRequestContext, base: string) {
-  const boards: Array<{ folder: string; stages: Stage[]; tags: Tag[]; skills: Skill[] }> = [];
+  const boards: Array<{ folder: string; stages: Stage[]; tags: Tag[]; skills: Skill[]; gates: Gate[] }> = [];
   const cardTags: Record<string, string[]> = {};
   const cards: Record<string, { column: string; position: number; note: string; updated_by: string; updated_at: string }> = {};
   const puts: Array<{ id: string; body: { column: string } }> = [];
@@ -62,7 +74,7 @@ async function serveKanban(page: Page, request: APIRequestContext, base: string)
   const folder = async (name: string, parentId?: string) =>
     ((await (await request.post(`${base}/folders`, { data: { name, parentId } })).json()) as { id: string }).id;
   const board = async (name: string) => {
-    const made = { folder: await folder(name), stages: [] as Stage[], tags: [] as Tag[], skills: [] as Skill[] };
+    const made = { folder: await folder(name), stages: [] as Stage[], tags: [] as Tag[], skills: [] as Skill[], gates: [] as Gate[] };
     for (const [i, label] of STAGES.entries()) made.stages.push({ id: await folder(label, made.folder), label, position: i + 1 });
     boards.push(made);
     madeBoards.push(made.folder);
@@ -642,5 +654,110 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     // Back on Chat, the open card's thread is there.
     await side.getByTestId("kanban-tab-chat").click();
     await expect(side.getByText(/schema work/).first()).toBeVisible();
+  });
+
+  // A user's move past command gates asks whether to run them; the board runs kanban's gate
+  // hook (here stubbed), shows what failed, and moves the card once they pass.
+  const commandGate = (stage: string): Gate => ({
+    id: "g-tests", stage, kind: "command", name: "Unit tests", position: 1,
+    command: "just test", workdir: "scooter", clean: true, timeout_seconds: 600,
+  });
+  const approvalGate = (stage: string): Gate => ({
+    id: "g-ok", stage, kind: "approval", name: "Design OK", position: 2,
+    command: "", workdir: "", clean: true, timeout_seconds: 600,
+  });
+
+  /** The agent-host's on-demand hook runs, answering each run with the next verdict. */
+  async function serveHookRuns(page: Page, verdicts: Array<{ ran: boolean; block?: string; systemMessages: string[] }>) {
+    const started: Array<{ conversation: string; body: unknown }> = [];
+    await page.route(/\/conversations\/[^/]+\/hooks\/kanban\.gate\/runs(\/[^/]+)?$/, async (route) => {
+      const [, conversation, run] = /\/conversations\/([^/]+)\/hooks\/kanban\.gate\/runs(?:\/([^/]+))?$/.exec(route.request().url())!;
+      if (route.request().method() === "POST") {
+        started.push({ conversation, body: route.request().postDataJSON() });
+        return route.fulfill({ status: 202, json: { run: `run-${started.length}` } });
+      }
+      const outcome = verdicts[Number(run.replace("run-", "")) - 1];
+      return route.fulfill({ json: { state: "done", hook: "kanban.gate", startedAt: 0, endedAt: 1, outcome } });
+    });
+    return started;
+  }
+
+  test("moving past a command gate asks to run the checks, shows what failed, and moves once they pass", async ({ chat, page, request, baseURL }) => {
+    const base = baseURL ?? "http://localhost:5173";
+    const kanban = await serveKanban(page, request, base);
+    const board = await kanban.board(`e2e-board-checks-${Date.now()}`);
+    const [design, inProgress] = board.stages;
+    board.gates = [commandGate(design.id), approvalGate(design.id)];
+    const started = await serveHookRuns(page, [
+      { ran: true, block: 'This card can\'t leave its stage yet.\n\nThe gate "Unit tests" failed:\nFAILED test_login', systemMessages: [] },
+      { ran: true, systemMessages: [] },
+    ]);
+    await chat.open();
+    await chat.send("checks before moving");
+    await chat.waitForReply(/dummy agent/i);
+    await expect.poll(() => threadId(page)).not.toBeNull();
+    const id = threadId(page)!;
+    await request.put(`${base}/conversations/${id}/folder`, { data: { folderId: design.id } });
+    await page.goto(`/boards/${board.folder}`);
+    const card = page.locator(`[data-testid="kanban-card"][data-conversation-id="${id}"]`);
+    await expect(lane(page, design.id).locator(card)).toHaveCount(1, { timeout: 20_000 });
+
+    await card.dragTo(lane(page, inProgress.id));
+    const ask = page.getByTestId("kanban-run-checks");
+    await expect(ask).toBeVisible();
+    await expect(ask).toContainText("Run checks before moving to In progress?");
+    await expect(ask.getByTestId("kanban-run-checks-gates")).toContainText("just test in scooter");
+    await expect(ask).toContainText('Your move counts as the approval for "Design OK"');
+    // Nothing moves while it asks.
+    await expect(lane(page, design.id).locator(card)).toHaveCount(1);
+
+    // The hook gets what the agent's kanban_set_status would hand it, and its refusal shows.
+    await ask.getByRole("button", { name: "Run checks" }).click();
+    await expect(ask.getByTestId("kanban-run-checks-output")).toContainText("FAILED test_login", { timeout: 15_000 });
+    expect(started).toEqual([
+      { conversation: id, body: { input: { tool_name: "kanban_set_status", tool_input: { column: "In progress" } }, target: "kanban_set_status" } },
+    ]);
+    expect(kanban.puts).toEqual([]);
+
+    // Once they pass, the card moves as the user's move.
+    await ask.getByRole("button", { name: "Run again" }).click();
+    await expect(ask).toBeHidden({ timeout: 15_000 });
+    await expect(lane(page, inProgress.id).locator(card)).toHaveCount(1);
+    await expect.poll(() => kanban.puts.map((p) => [p.id, p.body.column])).toEqual([[id, inProgress.id]]);
+  });
+
+  test("Cancel leaves a gated card where it was, Move anyway skips the checks, and a move back doesn't ask", async ({ chat, page, request, baseURL }) => {
+    const base = baseURL ?? "http://localhost:5173";
+    const kanban = await serveKanban(page, request, base);
+    const board = await kanban.board(`e2e-board-skip-${Date.now()}`);
+    const [design, inProgress] = board.stages;
+    board.gates = [commandGate(design.id)];
+    const started = await serveHookRuns(page, []);
+    await chat.open();
+    await chat.send("skip the checks");
+    await chat.waitForReply(/dummy agent/i);
+    await expect.poll(() => threadId(page)).not.toBeNull();
+    const id = threadId(page)!;
+    await request.put(`${base}/conversations/${id}/folder`, { data: { folderId: design.id } });
+    await page.goto(`/boards/${board.folder}`);
+    const card = page.locator(`[data-testid="kanban-card"][data-conversation-id="${id}"]`);
+    await expect(lane(page, design.id).locator(card)).toHaveCount(1, { timeout: 20_000 });
+    const ask = page.getByTestId("kanban-run-checks");
+
+    await card.dragTo(lane(page, inProgress.id));
+    await ask.getByRole("button", { name: "Cancel" }).click();
+    await expect(ask).toBeHidden();
+    await expect(lane(page, design.id).locator(card)).toHaveCount(1);
+
+    await card.dragTo(lane(page, inProgress.id));
+    await ask.getByRole("button", { name: "Move anyway" }).click();
+    await expect(lane(page, inProgress.id).locator(card)).toHaveCount(1);
+    await expect.poll(() => kanban.puts.map((p) => p.body.column)).toEqual([inProgress.id]);
+    expect(started).toEqual([]);
+
+    // Back to Design passes no gate, so it just moves.
+    await card.dragTo(lane(page, design.id));
+    await expect(lane(page, design.id).locator(card)).toHaveCount(1);
+    await expect(ask).toBeHidden();
   });
 });

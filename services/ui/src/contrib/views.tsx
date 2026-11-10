@@ -191,6 +191,67 @@ export function conversationApi(
   });
 }
 
+/** A contrib hook's verdict when the UI ran it: what /conversations/{id}/hooks/{hook}/runs reports. */
+export interface HookRunResult {
+  /** False when the hook didn't run: the user turned it off, or it didn't apply. */
+  ran: boolean;
+  /** Why it refused (its exit-2 stderr): for a check, what failed. */
+  block?: string;
+  /** Messages the hook addressed to the user. */
+  systemMessages: string[];
+  /** A crash or timeout it didn't treat as a refusal. */
+  error?: string;
+}
+
+async function errorText(r: Response): Promise<string> {
+  const text = await r.text().catch(() => "");
+  try {
+    return (JSON.parse(text) as { error?: string }).error || `HTTP ${r.status}`;
+  } catch {
+    return text || `HTTP ${r.status}`;
+  }
+}
+
+const pause = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((done, fail) => {
+    const t = setTimeout(done, ms);
+    signal?.addEventListener("abort", () => (clearTimeout(t), fail(signal.reason)), { once: true });
+  });
+
+/**
+ * Run this contrib's hook `hook` (declared with `userCanRun`) for a conversation, in its
+ * sandbox, and wait for the verdict. Rejects when the run can't be started or read; a
+ * hook that refused resolves with `block`.
+ */
+export async function runConversationHook(
+  contrib: string,
+  conversationId: string,
+  hook: string,
+  opts: { input?: Record<string, unknown>; target?: string; signal?: AbortSignal; pollMs?: number } = {},
+): Promise<HookRunResult> {
+  const base = agentHostConfig.baseUrl.replace(/\/$/, "");
+  // Always the contrib's own hook: `<contrib>.<hook>` is how its hooks are named.
+  const runs = `${base}/conversations/${encodeURIComponent(conversationId)}/hooks/${encodeURIComponent(`${contrib}.${hook}`)}/runs`;
+  const started = await fetch(runs, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input: opts.input ?? {}, ...(opts.target ? { target: opts.target } : {}) }),
+    credentials: "same-origin",
+    signal: opts.signal,
+  });
+  if (!started.ok) throw new Error(await errorText(started));
+  const { run } = (await started.json()) as { run: string };
+  for (;;) {
+    await pause(opts.pollMs ?? 1500, opts.signal);
+    const r = await fetch(`${runs}/${encodeURIComponent(run)}`, { credentials: "same-origin", signal: opts.signal });
+    if (r.status === 404) throw new Error("The run's result was lost, perhaps to a restart. Try again.");
+    if (!r.ok) throw new Error(await errorText(r));
+    const state = (await r.json()) as { state: string; outcome?: HookRunResult; error?: string };
+    if (state.state === "done" && state.outcome) return state.outcome;
+    if (state.state === "error") return { ran: true, systemMessages: [], error: state.error ?? "the run failed" };
+  }
+}
+
 /** Runs `onChange` on this contrib's pushes and stream reconnects. */
 export function useContribChanges(contrib: string, onChange: (conversations: string[]) => void): void {
   const latest = useRef(onChange);

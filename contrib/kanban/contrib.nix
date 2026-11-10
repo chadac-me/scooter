@@ -87,7 +87,9 @@
           when = "filed";
           # The stage's command gates (tests) run here, each up to its own timeout.
           timeout = 3600;
-          description = "Run a stage's command gates (e.g. the tests) before the agent moves its card on.";
+          # The board runs it too, when the user moves a card and chooses to run the checks.
+          userCanRun = true;
+          description = "Run a stage's command gates (e.g. the tests) before a card moves on.";
           command = builtins.readFile ./hooks/gate.sh;
         };
         stop = {

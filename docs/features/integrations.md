@@ -73,5 +73,8 @@ by default on a clean checkout of its last commit. If it fails, the agent gets t
 output instead of the move. An **approval** gate asks you once the commands pass: the
 card shows **Approve**, and its Details tab has Approve and Reject with a comment the
 agent receives. Moving a card past a gate uses up the pass, so a card that comes back
-to the stage has to pass again. Your own moves skip gates. Setup is in
-[Setting up contribs](../tutorial/contribs.md#kanban-boards).
+to the stage has to pass again. Your own moves aren't gated. When you move a card past a
+command gate, the board first asks whether to **Run checks**, which runs those commands in
+the card's sandbox and moves the card once they pass, showing the output if they don't.
+**Move anyway** skips them. Either way, your move counts as the approval for that stage.
+Setup is in [Setting up contribs](../tutorial/contribs.md#kanban-boards).

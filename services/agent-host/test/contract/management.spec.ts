@@ -11,7 +11,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createManagementApi, SANDBOX_SOURCE, raiseApprovalInterrupt, fetchPendingApprovals, fetchPendingApprovalsByKeys, approvalAgentMessage, parseByteRange } from "../../src/api/management.js";
 import { UserSkillError, type UserSkillStore } from "../../src/session/userSkillStore.js";
 import { createMemoryUserHookSettingsStore, type UserHookSettingsStore } from "../../src/hooks/userHookSettingsStore.js";
-import type { HookDef } from "../../src/hooks/types.js";
+import type { HookDef, HookOutcome } from "../../src/hooks/types.js";
 import { parseContribUserApi } from "../../src/api/contribApi.js";
 import { shortId } from "../../src/session/manager.js";
 import { createMemoryIdentityRegistry } from "../../src/session/identityRegistry.js";
@@ -1998,6 +1998,7 @@ describe("hook settings", () => {
     timeoutSec: 30,
     failClosed: false,
     userCanDisable,
+    userCanRun: false,
     description: `${id} hook`,
   });
   const hooks = [hook("finish-or-ask", true), hook("policy", false)];
@@ -2038,6 +2039,96 @@ describe("hook settings", () => {
     const api = mk(undefined);
     expect(((await call(api, "GET", "/user-hooks", undefined, alice)).json as { configurable: boolean }).configurable).toBe(false);
     expect((await call(api, "PATCH", "/user-hooks/finish-or-ask", { enabled: false }, alice)).status).toBe(501);
+  });
+});
+
+// The owner may run a `userCanRun` hook on demand (e.g. kanban's stage gates before they
+// move a card): started, then polled, and only the declared hook's own command runs.
+describe("on-demand hook runs", () => {
+  const hook = (id: string, userCanRun: boolean): HookDef => ({
+    id,
+    event: "PreToolUse",
+    matcher: ".*set_status",
+    command: "true",
+    timeoutSec: 30,
+    failClosed: false,
+    userCanDisable: true,
+    userCanRun,
+    description: `${id} hook`,
+  });
+  const hooks = [hook("kanban.gate", true), hook("policy", false)];
+  const outcome = (over: Partial<HookOutcome> = {}): HookOutcome => ({
+    context: [],
+    systemMessages: [],
+    runs: [{ id: "kanban.gate", event: "PreToolUse", decision: "allow", ms: 5 }],
+    ...over,
+  });
+  const mk = (runHook?: (...a: Parameters<NonNullable<Parameters<typeof createManagementApi>[0]["runHook"]>>) => Promise<HookOutcome>) => {
+    const sessions = fakeSessions();
+    const api = createManagementApi({ sessions, store: fakeStore([]), server: stubServer, answerInterrupt: async () => ({ ok: true }), hooks, runHook });
+    return { api, sessions };
+  };
+  const alice = { "x-auth-user": "alice" };
+  const poll = async (api: ReturnType<typeof mk>["api"], conv: string, run: string) => {
+    for (let i = 0; i < 50; i++) {
+      const r = await call(api, "GET", `/conversations/${conv}/hooks/kanban.gate/runs/${run}`, undefined, alice);
+      if ((r.json as { state: string }).state !== "running") return r;
+      await new Promise((ok) => setTimeout(ok, 5));
+    }
+    throw new Error("run never finished");
+  };
+
+  it("runs the hook with the caller's event input, then reports its verdict", async () => {
+    const runHook = vi.fn(async () => outcome());
+    const { api } = mk(runHook);
+    const input = { tool_name: "kanban_set_status", tool_input: { column: "Review" } };
+    const started = await call(api, "POST", "/conversations/c1/hooks/kanban.gate/runs", { input, target: "kanban_set_status" }, alice);
+    expect(started.status).toBe(202);
+    const { run } = started.json as { run: string };
+    const done = await poll(api, "c1", run);
+    expect(done.json).toMatchObject({ state: "done", hook: "kanban.gate", outcome: { ran: true, systemMessages: [] } });
+    expect(runHook).toHaveBeenCalledWith("c1", "kanban.gate", input, "kanban_set_status");
+  });
+
+  it("reports a refusal's reason, a hook that didn't run, and a crash", async () => {
+    const refused = mk(async () => outcome({ block: "The gate \"Unit tests\" failed", runs: [{ id: "kanban.gate", event: "PreToolUse", decision: "block", ms: 5 }] }));
+    let run = ((await call(refused.api, "POST", "/conversations/c1/hooks/kanban.gate/runs", {}, alice)).json as { run: string }).run;
+    expect((await poll(refused.api, "c1", run)).json).toMatchObject({ state: "done", outcome: { ran: true, block: "The gate \"Unit tests\" failed" } });
+
+    const off = mk(async () => outcome({ runs: [] }));
+    run = ((await call(off.api, "POST", "/conversations/c1/hooks/kanban.gate/runs", {}, alice)).json as { run: string }).run;
+    expect((await poll(off.api, "c1", run)).json).toMatchObject({ state: "done", outcome: { ran: false } });
+
+    const crashed = mk(async () => { throw new Error("sandbox gone"); });
+    run = ((await call(crashed.api, "POST", "/conversations/c1/hooks/kanban.gate/runs", {}, alice)).json as { run: string }).run;
+    expect((await poll(crashed.api, "c1", run)).json).toMatchObject({ state: "error", error: "sandbox gone" });
+  });
+
+  it("refuses a hook that only runs in turns, an unknown hook, run or conversation, and bad input", async () => {
+    const { api } = mk(async () => outcome());
+    expect((await call(api, "POST", "/conversations/c1/hooks/policy/runs", {}, alice)).status).toBe(403);
+    expect((await call(api, "POST", "/conversations/c1/hooks/nope/runs", {}, alice)).status).toBe(404);
+    expect((await call(api, "POST", "/conversations/missing/hooks/kanban.gate/runs", {}, alice)).status).toBe(404);
+    expect((await call(api, "POST", "/conversations/c1/hooks/kanban.gate/runs", { input: [1] }, alice)).status).toBe(400);
+    expect((await call(api, "POST", "/conversations/c1/hooks/kanban.gate/runs", { target: 3 }, alice)).status).toBe(400);
+    expect((await call(api, "GET", "/conversations/c1/hooks/kanban.gate/runs/nope", undefined, alice)).status).toBe(404);
+  });
+
+  it("lets only someone who may change the conversation run it", async () => {
+    const runHook = vi.fn(async () => outcome());
+    const { api, sessions } = mk(runHook);
+    await sessions.start("c2" as never, undefined, "alice");
+    expect((await call(api, "POST", "/conversations/c2/hooks/kanban.gate/runs", {}, { "x-auth-user": "bob" })).status).toBe(403);
+    const mine = await call(api, "POST", "/conversations/c2/hooks/kanban.gate/runs", {}, alice);
+    expect(mine.status).toBe(202);
+    // Bob can't read alice's run either.
+    const { run } = mine.json as { run: string };
+    expect((await call(api, "GET", `/conversations/c2/hooks/kanban.gate/runs/${run}`, undefined, { "x-auth-user": "bob" })).status).toBe(403);
+  });
+
+  it("answers 501 when the deployment has no on-demand hooks", async () => {
+    const { api } = mk(undefined);
+    expect((await call(api, "POST", "/conversations/c1/hooks/kanban.gate/runs", {}, alice)).status).toBe(501);
   });
 });
 
