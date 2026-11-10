@@ -218,7 +218,8 @@ goes right of the chat. web-review's shell does this so its toolbar sits above t
 `cfg` is `{ chatUrl, convUrl, storageKey, full: { href, title, target }, minApp }`: an
 empty `chatUrl` shows the fallback, an empty `convUrl` hides the 🛴 link, and `minApp` is
 the narrowest the app pane gets (px, default 320). It returns `{ layout, chat, rail, full }`;
-set `full.href` as the app navigates.
+set `full.href` as the app navigates. The chat loads with `?density=compact` unless
+`chatUrl` already sets a density.
 
 **Only the conversation's own sandbox may frame it.** The UI sends
 `Content-Security-Policy: frame-ancestors <scheme>://<label>.<sandboxDomain>` on

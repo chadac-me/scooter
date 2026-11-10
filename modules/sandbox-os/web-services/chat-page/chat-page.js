@@ -24,7 +24,10 @@ window.ChatPage = {
     layout.append(chat, rail, appPane);
 
     if (cfg.chatUrl) {
-      chat.append(el("iframe", { title: "Scooter chat", src: cfg.chatUrl, allow: "clipboard-read; clipboard-write" }));
+      // A side pane: compact unless the URL already picks a density.
+      const src = new URL(cfg.chatUrl, location.href);
+      if (!src.searchParams.has("density")) src.searchParams.set("density", "compact");
+      chat.append(el("iframe", { title: "Scooter chat", src: src.href, allow: "clipboard-read; clipboard-write" }));
     } else {
       chat.append(el("p", { id: "missing", textContent: "No chat URL: this sandbox has no CONVERSATION_URL." }));
     }
