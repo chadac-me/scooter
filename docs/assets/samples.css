@@ -1,0 +1,9 @@
+/* Demo videos on the Samples page: one render per colour scheme. */
+.scooter-demo { margin: 1em 0 2em; }
+.scooter-demo video {
+  width: 100%;
+  border-radius: 6px;
+  box-shadow: var(--md-shadow-z2);
+}
+[data-md-color-scheme="default"] .scooter-demo .only-dark,
+[data-md-color-scheme="slate"] .scooter-demo .only-light { display: none; }
