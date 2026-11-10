@@ -1190,8 +1190,7 @@ function Board({
                       data-open={open || undefined}
                       data-blocked={waiting.length > 0 || undefined}
                       draggable={tagging !== conv.id}
-                      // The whole card opens its chat; controls inside it (title button, tag
-                      // editor) keep their own clicks.
+                      // Card opens its chat; inner controls keep their clicks.
                       onClick={(e) => {
                         if (tagging === conv.id || (e.target as HTMLElement).closest("button, input, a, [role=listbox]")) return;
                         openConversation(conv.id);
