@@ -1,9 +1,14 @@
-/* Demo videos on the Samples page: one render per colour scheme. */
-.scooter-demo { margin: 1em 0 2em; }
-.scooter-demo video {
+/* Samples page: a grid of demos, one render per colour scheme. */
+.scooter-demos {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr));
+  gap: 1.5rem 2rem;
+}
+.scooter-demos h2 { margin-top: 0.5em; }
+.scooter-demos video {
   width: 100%;
   border-radius: 6px;
   box-shadow: var(--md-shadow-z2);
 }
-[data-md-color-scheme="default"] .scooter-demo .only-dark,
-[data-md-color-scheme="slate"] .scooter-demo .only-light { display: none; }
+[data-md-color-scheme="default"] .scooter-demos .only-dark,
+[data-md-color-scheme="slate"] .scooter-demos .only-light { display: none; }

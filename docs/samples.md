@@ -1,108 +1,95 @@
+---
+hide:
+  - toc
+---
+
 # Samples
 
 Short recordings of Scooter at work. Each one plays the real Scooter UI; only
 the agent's side is scripted, so the same story renders the same way every
-time.
+time. Notebooks, VS Code, web apps and desktops run as
+[web services in the sandbox](features/integrations.md#web-services-from-the-sandbox).
 
 All of them, with light and dark renders, are in the
 [demo gallery](https://chadac-me.github.io/scooter-demos/).
 
-## Working with you
+<div class="scooter-demos" markdown>
 
-### Asking before it decides
+<div markdown>
 
-When a choice is yours to make, Scooter stops and asks with a question card,
-then carries on with your answer.
+## Inline dashboards
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/ask-user-light.mp4" poster="https://chadac-me.github.io/scooter-demos/ask-user-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/ask-user-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/ask-user-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+Scooter builds a dashboard, publishes it as a share, and embeds it live in the reply.
 
-### Design review in Files
+<video class="only-light" src="https://chadac-me.github.io/scooter-demos/inline-dashboard-light.mp4" poster="https://chadac-me.github.io/scooter-demos/inline-dashboard-light.png" muted loop playsinline preload="none"></video>
+<video class="only-dark" src="https://chadac-me.github.io/scooter-demos/inline-dashboard-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/inline-dashboard-dark.png" muted loop playsinline preload="none"></video>
 
-Scooter writes a design doc and links it in Files. You comment on a line and
-answer a question in the page, and Scooter revises the doc, replies in the
-thread and resolves it.
+</div>
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/design-review-light.mp4" poster="https://chadac-me.github.io/scooter-demos/design-review-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/design-review-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/design-review-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+<div markdown>
 
-## In the chat
+## Pairing in a notebook
 
-### Math
+Scooter works in your open marimo notebook's kernel, adding cells as you watch, and reads your edits before it answers.
 
-Scooter writes TeX and the chat renders it with KaTeX, inline and as display
-math.
+<video class="only-light" src="https://chadac-me.github.io/scooter-demos/marimo-pair-light.mp4" poster="https://chadac-me.github.io/scooter-demos/marimo-pair-light.png" muted loop playsinline preload="none"></video>
+<video class="only-dark" src="https://chadac-me.github.io/scooter-demos/marimo-pair-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/marimo-pair-dark.png" muted loop playsinline preload="none"></video>
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/math-light.mp4" poster="https://chadac-me.github.io/scooter-demos/math-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/math-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/math-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+</div>
 
-### Inline dashboards
+<div markdown>
 
-Scooter builds a dashboard, publishes it as a share, and embeds it live in the
-reply.
+## VS Code
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/inline-dashboard-light.mp4" poster="https://chadac-me.github.io/scooter-demos/inline-dashboard-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/inline-dashboard-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/inline-dashboard-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+Scooter opens your repo in VS Code, and you keep the same conversation going from VS Code's own chat.
 
-## Services in the sandbox
+<video class="only-light" src="https://chadac-me.github.io/scooter-demos/vscode-light.mp4" poster="https://chadac-me.github.io/scooter-demos/vscode-light.png" muted loop playsinline preload="none"></video>
+<video class="only-dark" src="https://chadac-me.github.io/scooter-demos/vscode-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/vscode-dark.png" muted loop playsinline preload="none"></video>
 
-Every conversation's sandbox can run web services, and the UI opens them beside
-the chat. See [Integrations](features/integrations.md#web-services-from-the-sandbox) for how they're proxied.
+</div>
 
-### marimo notebooks
+<div markdown>
 
-Scooter writes a marimo notebook, starts it in the sandbox, and you explore it
-with the chat alongside.
+## Design Review
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/marimo-light.mp4" poster="https://chadac-me.github.io/scooter-demos/marimo-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/marimo-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/marimo-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+Scooter writes a design doc and links it in Files. You comment on a line and answer a question in the page, and Scooter revises the doc, replies in the thread and resolves it.
 
-### Pairing in a notebook
+<video class="only-light" src="https://chadac-me.github.io/scooter-demos/design-review-light.mp4" poster="https://chadac-me.github.io/scooter-demos/design-review-light.png" muted loop playsinline preload="none"></video>
+<video class="only-dark" src="https://chadac-me.github.io/scooter-demos/design-review-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/design-review-dark.png" muted loop playsinline preload="none"></video>
 
-Scooter works in your open notebook's kernel, adding cells as you watch, and
-reads your edits before it answers.
+</div>
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/marimo-pair-light.mp4" poster="https://chadac-me.github.io/scooter-demos/marimo-pair-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/marimo-pair-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/marimo-pair-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+<div markdown>
 
-### VS Code
+## Design your full-stack web apps
 
-Scooter opens your repo in VS Code, and you keep the same conversation going
-from VS Code's own chat.
+Pin notes on your own app, served from the sandbox, and Scooter edits it live beside the chat.
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/vscode-light.mp4" poster="https://chadac-me.github.io/scooter-demos/vscode-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/vscode-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/vscode-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+<video class="only-light" src="https://chadac-me.github.io/scooter-demos/webservice-light.mp4" poster="https://chadac-me.github.io/scooter-demos/webservice-light.png" muted loop playsinline preload="none"></video>
+<video class="only-dark" src="https://chadac-me.github.io/scooter-demos/webservice-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/webservice-dark.png" muted loop playsinline preload="none"></video>
 
-### Your own web apps
+</div>
 
-Pin notes on your company's own app, served from the sandbox, and Scooter edits
-it live beside the chat.
+<div markdown>
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/webservice-light.mp4" poster="https://chadac-me.github.io/scooter-demos/webservice-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/webservice-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/webservice-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+## Whatever you want
 
-### A desktop in the sandbox
+Ask for any app and Scooter spins it up in the sandbox for you to see. Here it's GPlates, on a desktop Scooter set up and drives while you watch.
 
-Scooter writes a desktop service, runs GPlates on it, and drives the app while
-you watch.
+<video class="only-light" src="https://chadac-me.github.io/scooter-demos/desktop-light.mp4" poster="https://chadac-me.github.io/scooter-demos/desktop-light.png" muted loop playsinline preload="none"></video>
+<video class="only-dark" src="https://chadac-me.github.io/scooter-demos/desktop-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/desktop-dark.png" muted loop playsinline preload="none"></video>
 
-<figure class="scooter-demo">
-  <video class="only-light" src="https://chadac-me.github.io/scooter-demos/desktop-light.mp4" poster="https://chadac-me.github.io/scooter-demos/desktop-light.png" muted loop playsinline preload="none"></video>
-  <video class="only-dark" src="https://chadac-me.github.io/scooter-demos/desktop-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/desktop-dark.png" muted loop playsinline preload="none"></video>
-</figure>
+</div>
+
+<div markdown>
+
+## Math
+
+Scooter writes TeX and the chat renders it with KaTeX, inline and as display math.
+
+<video class="only-light" src="https://chadac-me.github.io/scooter-demos/math-light.mp4" poster="https://chadac-me.github.io/scooter-demos/math-light.png" muted loop playsinline preload="none"></video>
+<video class="only-dark" src="https://chadac-me.github.io/scooter-demos/math-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/math-dark.png" muted loop playsinline preload="none"></video>
+
+</div>
+
+</div>

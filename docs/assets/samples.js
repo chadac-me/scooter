@@ -1,7 +1,7 @@
 /* Play demo videos only while on screen, so the page loads one at a time. */
 (function () {
   function init() {
-    var videos = document.querySelectorAll(".scooter-demo video");
+    var videos = document.querySelectorAll(".scooter-demos video");
     if (!videos.length || !("IntersectionObserver" in window)) return;
     var seen = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
