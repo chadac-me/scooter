@@ -47,6 +47,10 @@ test("the Session tab shows resources, the size picker, and restart and stop", a
 
   await expect(page.locator('[data-testid="sandbox-resources-limits"]')).toHaveText("1 CPU · 2Gi");
   await expect(page.locator('[data-testid="sandbox-update-banner"]')).toContainText("Update available");
+  await page.locator('[data-testid="sandbox-update-hint"]').hover();
+  await expect(page.getByRole("tooltip")).toContainText("A restart picks up");
+  await page.mouse.move(0, 0);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
 
   const select = page.locator('[data-testid="sandbox-size-select"]');
   await expect(select).toHaveValue("small");

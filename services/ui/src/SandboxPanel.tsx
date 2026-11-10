@@ -258,18 +258,7 @@ export function SizeSection({ sizes, resources, onSelect, saving, error, pending
       <div className="mb-1 flex items-center gap-1 text-xs font-medium text-muted-foreground">
         Size
         {/* An <option> cannot wrap, so the preset's guidance is a tooltip. */}
-        {hint ? (
-          <TooltipProvider delayDuration={150}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button type="button" aria-label={hint} data-testid="sandbox-size-hint" className="hover:text-foreground">
-                  <CircleHelp className="h-3 w-3" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{hint}</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        ) : null}
+        {hint ? <HelpTip text={hint} testId="sandbox-size-hint" /> : null}
       </div>
       <select
         data-testid="sandbox-size-select"
@@ -314,6 +303,24 @@ export function SizeSection({ sizes, resources, onSelect, saving, error, pending
   );
 }
 
+/** A ? icon that shows `text` on hover or focus. */
+function HelpTip({ text, testId }: { text: string; testId: string }) {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button type="button" aria-label={text} data-testid={testId} className="text-muted-foreground hover:text-foreground">
+            <CircleHelp className="h-3 w-3" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-64">
+          {text}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 /** The "Update available" banner with a restart button. */
 export function UpdateBanner({
   pending,
@@ -333,28 +340,29 @@ export function UpdateBanner({
   return (
     <div
       data-testid="sandbox-update-banner"
-      className="flex flex-col gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2.5"
+      className="flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5"
     >
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-medium">{update ? "Update available" : "Size change pending"}</span>
-        {running && onRestart ? (
-          <Button
-            variant="default"
-            size="xs"
-            data-testid="sandbox-restart"
-            disabled={restarting}
-            onClick={onRestart}
-            className="ml-auto"
-          >
-            {restarting ? "Restarting…" : "Restart sandbox"}
-          </Button>
-        ) : null}
-      </div>
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
-        {running
-          ? `A restart picks up ${what}. /workspace, installed modules and /nix/store builds persist; running processes, background jobs and web services stop.`
-          : `The sandbox picks up ${what} when it next starts.`}
-      </p>
+      <span className="text-sm font-medium">{update ? "Update available" : "Size change pending"}</span>
+      <HelpTip
+        testId="sandbox-update-hint"
+        text={
+          running
+            ? `A restart picks up ${what}. /workspace, installed modules and /nix/store builds persist; running processes, background jobs and web services stop.`
+            : `The sandbox picks up ${what} when it next starts.`
+        }
+      />
+      {running && onRestart ? (
+        <Button
+          variant="default"
+          size="xs"
+          data-testid="sandbox-restart"
+          disabled={restarting}
+          onClick={onRestart}
+          className="ml-auto"
+        >
+          {restarting ? "Restarting…" : "Restart sandbox"}
+        </Button>
+      ) : null}
     </div>
   );
 }
