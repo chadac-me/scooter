@@ -3,7 +3,6 @@
 { config, lib, pkgs, ... }:
 
 let
-  assets = ./chat-page;
   head = "<style>\n${builtins.readFile ./chat-page/chat-page.css}</style>\n"
     + "<script>\n${builtins.readFile ./chat-page/chat-page.js}</script>";
 
@@ -104,7 +103,7 @@ in
 
   options.chatPage.assets = lib.mkOption {
     type = lib.types.path;
-    default = assets;
+    default = ./chat-page;
     readOnly = true;
     internal = true;
     description = "chat-page.js and chat-page.css, for a chat page served by its own server.";
