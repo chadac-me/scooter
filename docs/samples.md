@@ -33,7 +33,7 @@ Scooter works in your marimo notebook alongside you.
 
 <div markdown>
 
-## Pair Programming
+## Pair programming
 
 Open your repo in VS Code and keep chatting there.
 
@@ -44,7 +44,7 @@ Open your repo in VS Code and keep chatting there.
 
 <div markdown>
 
-## Design Review
+## Plan together
 
 Comment on Scooter's design doc and it revises in place.
 
