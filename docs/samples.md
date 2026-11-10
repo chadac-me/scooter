@@ -75,15 +75,4 @@ Ask for any app and Scooter spins it up for you.
 
 </div>
 
-<div markdown>
-
-## Math
-
-Math renders right in the chat.
-
-<video class="only-light" src="https://chadac-me.github.io/scooter-demos/math-light.mp4" poster="https://chadac-me.github.io/scooter-demos/math-light.png" muted loop playsinline preload="none"></video>
-<video class="only-dark" src="https://chadac-me.github.io/scooter-demos/math-dark.mp4" poster="https://chadac-me.github.io/scooter-demos/math-dark.png" muted loop playsinline preload="none"></video>
-
-</div>
-
 </div>
