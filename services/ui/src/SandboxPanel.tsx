@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { RotateCw } from "lucide-react";
+import { CircleHelp, RotateCw } from "lucide-react";
 
 import {
   resumeConversation,
@@ -29,6 +29,7 @@ import { ServiceRows } from "./ServicesPanel.js";
 import { PanelSection } from "./PanelSection.js";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 const BASE_URL = (import.meta.env.VITE_AGENT_HOST_URL ?? "").replace(/\/$/, "");
 
@@ -254,7 +255,22 @@ export function SizeSection({ sizes, resources, onSelect, saving, error, pending
   const hint = selected ? (sizes[selected]?.hint ?? "") : "";
   return (
     <div data-testid="sandbox-size">
-      <div className="mb-1 text-xs font-medium text-muted-foreground">Size</div>
+      <div className="mb-1 flex items-center gap-1 text-xs font-medium text-muted-foreground">
+        Size
+        {/* An <option> cannot wrap, so the preset's guidance is a tooltip. */}
+        {hint ? (
+          <TooltipProvider delayDuration={150}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button type="button" aria-label={hint} data-testid="sandbox-size-hint" className="hover:text-foreground">
+                  <CircleHelp className="h-3 w-3" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top">{hint}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : null}
+      </div>
       <select
         data-testid="sandbox-size-select"
         className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground disabled:opacity-50"
@@ -274,12 +290,6 @@ export function SizeSection({ sizes, resources, onSelect, saving, error, pending
           </option>
         ))}
       </select>
-      {/* The selected preset's guidance, kept out of the option labels because an <option> cannot wrap. */}
-      {hint ? (
-        <p className="mt-1 text-xs text-muted-foreground" data-testid="sandbox-size-hint">
-          {hint}
-        </p>
-      ) : null}
       {error ? (
         <p className="mt-1 text-xs text-destructive" data-testid="sandbox-size-error">
           {error}

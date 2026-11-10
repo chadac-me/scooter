@@ -10,7 +10,7 @@ import { test, expect } from "./fixtures.js";
 const json = (body: unknown) => ({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 
 const SIZES = {
-  sizes: { small: { cpu: "1", memory: "2Gi" }, large: { cpu: "4", memory: "8Gi", hint: "For builds" } },
+  sizes: { small: { cpu: "1", memory: "2Gi" }, large: { cpu: "4", memory: "8Gi", gpu: 1, hint: "For builds" } },
   default: "small",
 };
 const SMALL = { cpu: "1", memory: "2Gi" };
@@ -52,7 +52,9 @@ test("the Session tab shows resources, the size picker, and restart and stop", a
   await expect(select).toHaveValue("small");
   await select.selectOption("large");
   await expect(page.locator('[data-testid="sandbox-size-pending"]')).toBeVisible();
-  await expect(page.locator('[data-testid="sandbox-resources-limits"]')).toHaveText("4 CPU · 8Gi");
+  await expect(page.locator('[data-testid="sandbox-resources-limits"]')).toHaveText("4 CPU · 8Gi · 1 GPU");
+  await page.locator('[data-testid="sandbox-size-hint"]').hover();
+  await expect(page.getByRole("tooltip")).toContainText("For builds");
 
   await page.locator('[data-testid="sandbox-restart"]').click();
   await expect.poll(() => sent.includes("restart")).toBe(true);
