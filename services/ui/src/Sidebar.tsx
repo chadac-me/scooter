@@ -197,8 +197,13 @@ const SessionRow = memo(function SessionRow({
           </span>
         )}
         {childCount > 0 && (
-          <span data-testid="subagent-count" className="ms-1.5 shrink-0 text-xs text-muted-foreground">
-            <Bot className="me-0.5 inline size-3" aria-hidden />{childCount} subagent{childCount === 1 ? "" : "s"}
+          <span
+            data-testid="subagent-count"
+            className="ms-1.5 shrink-0 text-xs text-muted-foreground"
+            title={`${childCount} subagent${childCount === 1 ? "" : "s"}`}
+            aria-label={`${childCount} subagent${childCount === 1 ? "" : "s"}`}
+          >
+            <Bot className="me-0.5 inline size-3" aria-hidden />{childCount}
           </span>
         )}
       </Button>
