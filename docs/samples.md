@@ -5,8 +5,6 @@ hide:
 
 # Samples
 
-Short videos of Scooter at work, in the real UI.
-
 More in the [demo gallery](https://chadac-me.github.io/scooter-demos/).
 
 <div class="scooter-demos" markdown>
