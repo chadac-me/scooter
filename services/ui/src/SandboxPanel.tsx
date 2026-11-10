@@ -4,7 +4,7 @@
  * section, then the caller's further sections. State arrives on the `sandbox` topic.
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { RotateCw } from "lucide-react";
 
 import {
@@ -23,7 +23,6 @@ import {
   type SandboxSizePreset,
   type PendingRestart,
 } from "./client.js";
-import { agentHostConfig } from "./config.js";
 import { useSessions, currentConversation } from "./sessions.js";
 import { useConversationTopic } from "./conversationState.js";
 import { ServiceRows } from "./ServicesPanel.js";
@@ -549,8 +548,15 @@ export function SandboxPanelView({
   );
 }
 
-export function SandboxPanel() {
-  const s = useSandboxStatus();
+export interface SandboxPanelProps {
+  /** The host's sandbox status, so both share one Start state. */
+  status: ReturnType<typeof useSandboxStatus>;
+  /** Further Session-tab sections, rendered after Services. */
+  children?: ReactNode;
+}
+
+/** Loads resources, sizes and pending restarts; wires restart and stop. */
+export function SandboxPanel({ status: s, children }: SandboxPanelProps) {
   const { sessions, currentId } = useSessions();
   const owner = sessions.find((x) => x.id === currentId)?.owner ?? null;
 
@@ -682,6 +688,8 @@ export function SandboxPanel() {
       onStartSandbox={() => void s.startSandbox()}
       onStartService={s.startService}
       onStopService={s.stopService}
-    />
+    >
+      {children}
+    </SandboxPanelView>
   );
 }
