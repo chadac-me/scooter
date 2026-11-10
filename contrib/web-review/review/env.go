@@ -51,6 +51,9 @@ type Site struct {
 	Chromium  string
 	VendorDir string
 	Target    *Target // from REVIEW_TARGET, rendered at rebuild time
+
+	// REVIEW_CHAT_PAGE_DIR: the shared chat-page.css and .js
+	ChatPageDir string
 }
 
 func (s Site) ShellBase() string { return s.Prefix + "/review" }
@@ -70,6 +73,8 @@ func loadSite() Site {
 		ConvURL:   env("CONVERSATION_URL"),
 		Chromium:  env("REVIEW_CHROMIUM"),
 		VendorDir: env("REVIEW_VENDOR_DIR"),
+
+		ChatPageDir: env("REVIEW_CHAT_PAGE_DIR"),
 	}
 	if p := env("REVIEW_TARGET"); p != "" {
 		t, err := readTarget(p)
