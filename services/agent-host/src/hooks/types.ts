@@ -26,8 +26,6 @@ export interface HookDef {
   /** A crash or timeout blocks instead of being skipped. */
   failClosed: boolean;
   userCanDisable: boolean;
-  /** The owner may run it on demand from the UI (POST /conversations/{id}/hooks/{hook}/runs). */
-  userCanRun: boolean;
   /** Checked in-process; the hook runs only while it holds. */
   when?: HookCondition;
   description: string;

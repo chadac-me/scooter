@@ -74,7 +74,8 @@ output instead of the move. An **approval** gate asks you once the commands pass
 card shows **Approve**, and its Details tab has Approve and Reject with a comment the
 agent receives. Moving a card past a gate uses up the pass, so a card that comes back
 to the stage has to pass again. Your own moves aren't gated. When you move a card past a
-command gate, the board first asks whether to **Run checks**, which runs those commands in
-the card's sandbox and moves the card once they pass, showing the output if they don't.
-**Move anyway** skips them. Either way, your move counts as the approval for that stage.
+command gate, the board first offers to **Ask the agent**: the card's agent is asked to make
+the move itself, so its gates run as for its own moves, and the card moves once they pass. If
+they fail, the agent says why in the chat. **Move anyway** moves it now without them, and counts
+as the approval for that stage.
 Setup is in [Setting up contribs](../tutorial/contribs.md#kanban-boards).

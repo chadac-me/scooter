@@ -1,17 +1,10 @@
-# Before the agent's kanban_set_status, or when the user runs a card's checks from the board
-# (scooter.source "user"): run the command gates the move must pass, in this sandbox, and
-# record each run with the broker, which refuses the agent's move without a fresh pass.
+# Before the agent's kanban_set_status: run the command gates its move must pass, in this
+# sandbox, and record each run with the broker, which refuses the move without a fresh pass.
 in=$(cat)
 stage=$(printf '%s' "$in" | jq -r '.tool_input.column // empty')
 [ -n "$stage" ] || exit 0
 query=$(jq -rn --arg s "$stage" '"stage=\($s | @uri)"')
-source=$(printf '%s' "$in" | jq -r '.scooter.source // empty')
-# The agent's move is refused later without a recorded pass, but a check the user asked for
-# must not read as passed when it never ran.
-todo=$(agent-broker "kanban/gates/run?$query" -f) || {
-  [ "$source" = user ] && { echo "Couldn't read this card's gates from kanban; try again." >&2; exit 2; }
-  exit 0
-}
+todo=$(agent-broker "kanban/gates/run?$query" -f) || exit 0
 n=$(printf '%s' "$todo" | jq '.gates | length')
 [ "${n:-0}" -gt 0 ] || exit 0
 
@@ -68,11 +61,7 @@ printf '%s' "$runs" | jq -c '{runs: .}' | agent-broker kanban/gates/runs -f -X P
 if [ -n "$failed" ]; then
   echo "This card can't leave its stage yet.$failed
 
-$(if [ "$source" = user ]; then
-  echo "Fix what failed (or ask the agent to), commit, and run the checks again."
-else
-  echo "Fix what failed, commit, and call kanban_set_status again."
-fi)" >&2
+Fix what failed, commit, and call kanban_set_status again." >&2
   exit 2
 fi
 exit 0

@@ -1822,43 +1822,6 @@ export async function main(
     return { url, headers: await brokerAuthHeaders() };
   };
 
-  // A `userCanRun` hook the owner starts from the UI: the runner and event facts a turn's
-  // hooks get, with `source: "user"`, on the conversation's sandbox (resumed if it slept).
-  const runHook = (config.hooks ?? []).some((h) => h.userCanRun)
-    ? async (conversationId: string, hookId: string, input: Record<string, unknown>, target?: string) => {
-        const conv = sessions.get(conversationId as SessionId);
-        const hook = (config.hooks ?? []).find((h) => h.id === hookId && h.userCanRun);
-        if (!conv || !hook) throw new Error("unknown conversation or hook");
-        const exec = createSandboxExecBackend(
-          config.fakeSandbox ? createLocalSandboxApiClient() : sandboxClientFor(conversationId),
-          { commandTimeoutMs: config.commandTimeoutMs },
-        );
-        const runner = hookRunnerFor(conversationId, exec, conv.sandbox, conv.owner)!;
-        const folder = hookFolders ? await hookFolders.folderOf(conv.owner ?? "", conversationId).catch(() => null) : null;
-        return runner.run(
-          hook.event,
-          {
-            session_id: conversationId,
-            transcript_path: "",
-            permission_mode: "default",
-            ...input,
-            scooter: {
-              conversation_id: conversationId,
-              owner: conv.owner ?? null,
-              parent_id: conv.parentId ?? null,
-              provider: null,
-              run_id: null,
-              source: "user",
-              folder,
-            },
-          },
-          target,
-          undefined,
-          new Set([hookId]),
-        );
-      }
-    : undefined;
-
   // In-pod web-service registry shared by the management API and the reverse proxy;
   // undefined for a fake sandbox, which has no pod.
   const webServices = config.fakeSandbox
@@ -1903,7 +1866,6 @@ export async function main(
       conversationOwner,
       userSkills: userSkillStore,
       hooks: config.hooks,
-      runHook,
       userHookSettings,
       // Settings tabs reach their contrib's broker half as the signed-in user.
       contribApi: {

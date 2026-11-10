@@ -21,7 +21,6 @@ import {
   newConversation,
   openConversation,
   openInChat,
-  runConversationHook,
   send,
   setThreadInUrl,
   Spinner,
@@ -785,7 +784,7 @@ function Board({
   );
 
   // The user's move is never gated, but a move past command gates (e.g. the tests) asks
-  // first whether to run them, in the card's sandbox; the move then counts as the approval.
+  // first whether the card's agent should make it instead, so its gate hook runs them.
   const [checking, setChecking] = useState<CheckAsk | null>(null);
   const requestMove = useCallback(
     (id: string, column: string, before?: string) => {
@@ -1675,54 +1674,38 @@ interface CheckAsk {
 
 type CheckPhase =
   | { at: "ask" }
-  | { at: "running" }
-  /** `text`: what failed, or why the checks couldn't run. */
+  | { at: "asking" }
+  | { at: "asked" }
+  /** `text`: why the agent couldn't be asked. */
   | { at: "failed"; text: string };
 
 /**
- * Asks, before the user's move past command gates, whether to run them. Run checks runs
- * kanban's gate hook in the card's sandbox (as before the agent's own move) and moves the
- * card when they pass; Move anyway moves it as the user always may.
+ * Asks, before the user's move past command gates, whether the card's agent should run them.
+ * Ask the agent messages it to make the move itself: its kanban_set_status runs kanban's gate
+ * hook in its sandbox, and the card moves once they pass. Move anyway moves it now, ungated.
  */
 function RunChecks({ ask, move, cancel }: { ask: CheckAsk; move(): void; cancel(): void }) {
   const title = useId();
   const [phase, setPhase] = useState<CheckPhase>({ at: "ask" });
-  const stop = useRef<AbortController | null>(null);
-  useEffect(() => () => stop.current?.abort(), []);
-  const close = () => {
-    stop.current?.abort();
-    cancel();
-  };
 
-  const run = async () => {
-    setPhase({ at: "running" });
-    const ctl = new AbortController();
-    stop.current = ctl;
+  const request = async () => {
+    setPhase({ at: "asking" });
     try {
-      const out = await runConversationHook("kanban", ask.id, "gate", {
-        // What the agent's kanban_set_status hands the hook.
-        input: { tool_name: "kanban_set_status", tool_input: { column: ask.stage } },
-        target: "kanban_set_status",
-        signal: ctl.signal,
-      });
-      if (ctl.signal.aborted) return;
-      if (out.ran && !out.block && !out.error) return move();
-      setPhase({
-        at: "failed",
-        text:
-          out.block ??
-          (out.error
-            ? `The checks didn't finish: ${out.error}`
-            : "The checks didn't run. The kanban gate hook may be turned off in your settings."),
-      });
+      const r = await conversationApi("kanban", ask.id, "card/request", { method: "POST", json: { column: ask.column } });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => null)) as { detail?: string } | null;
+        return setPhase({ at: "failed", text: body?.detail ?? `The agent couldn't be asked (${r.status}).` });
+      }
+      setPhase({ at: "asked" });
     } catch (e) {
-      if (!ctl.signal.aborted) setPhase({ at: "failed", text: `The checks couldn't run: ${(e as Error).message}` });
+      setPhase({ at: "failed", text: `The agent couldn't be asked: ${(e as Error).message}` });
     }
   };
 
   const names = (gs: Gate[]) => gs.map((g) => `"${g.name}"`).join(", ");
+  const busy = phase.at === "asking";
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={phase.at === "running" ? undefined : close}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={busy ? undefined : cancel}>
       <div
         role="alertdialog"
         aria-modal="true"
@@ -1731,16 +1714,17 @@ function RunChecks({ ask, move, cancel }: { ask: CheckAsk; move(): void; cancel(
         data-phase={phase.at}
         className="w-[28rem] max-w-[92vw] rounded-lg border bg-background p-4 shadow-lg"
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.key === "Escape" && close()}
+        onKeyDown={(e) => e.key === "Escape" && !busy && cancel()}
       >
         <h2 id={title} className="flex items-center gap-1.5 font-medium">
           <ShieldCheck className="size-4 shrink-0" aria-hidden />
           Run checks before moving to {ask.stage}?
         </h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          To move on, <span className="font-medium text-foreground">{ask.title}</span> must pass {names(ask.commands)}.{" "}
-          {ask.commands.length === 1 ? "It runs" : "They run"} in the card's sandbox, on a clean checkout of its last commit.
-          {ask.approvals.length > 0 && <> Your move counts as the approval for {names(ask.approvals)}.</>}
+          To move on, <span className="font-medium text-foreground">{ask.title}</span> must pass {names(ask.commands)}. The
+          card's agent can run {ask.commands.length === 1 ? "it" : "them"} in its sandbox and move the card once{" "}
+          {ask.commands.length === 1 ? "it passes" : "they pass"}.
+          {ask.approvals.length > 0 && <> Moving it anyway counts as the approval for {names(ask.approvals)}.</>}
         </p>
         <ul className="mt-2 space-y-1 text-xs" data-testid="kanban-run-checks-gates">
           {ask.commands.map((g) => (
@@ -1753,29 +1737,39 @@ function RunChecks({ ask, move, cancel }: { ask: CheckAsk; move(): void; cancel(
             </li>
           ))}
         </ul>
-        {phase.at === "running" && (
-          <p className="mt-3 flex items-center gap-2 text-sm" role="status">
-            <Spinner /> Running the checks. Tests can take a while.
+        {phase.at === "asked" && (
+          <p className="mt-3 text-sm" role="status" data-testid="kanban-run-checks-asked">
+            Asked the agent. The card moves when the checks pass; if they don't, the agent says why in the chat.
           </p>
         )}
         {phase.at === "failed" && (
-          <pre
+          <p
+            role="alert"
             data-testid="kanban-run-checks-output"
-            className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded border border-destructive/40 bg-destructive/5 p-2 text-xs"
+            className="mt-3 rounded border border-destructive/40 bg-destructive/5 p-2 text-xs"
           >
             {phase.text}
-          </pre>
+          </p>
         )}
         <div className="mt-4 flex justify-end gap-2">
-          <Button size="sm" variant="ghost" onClick={close}>
-            Cancel
-          </Button>
-          <Button size="sm" variant="outline" disabled={phase.at === "running"} onClick={move}>
-            Move anyway
-          </Button>
-          <Button size="sm" autoFocus disabled={phase.at === "running"} onClick={() => void run()}>
-            {phase.at === "failed" ? "Run again" : "Run checks"}
-          </Button>
+          {phase.at === "asked" ? (
+            <Button size="sm" autoFocus onClick={cancel}>
+              Done
+            </Button>
+          ) : (
+            <>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={cancel}>
+                Cancel
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={move}>
+                Move anyway
+              </Button>
+              <Button size="sm" autoFocus disabled={busy} onClick={() => void request()}>
+                {busy ? <Spinner /> : null}
+                Ask the agent
+              </Button>
+            </>
+          )}
         </div>
       </div>
     </div>

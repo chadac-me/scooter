@@ -656,8 +656,8 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await expect(side.getByText(/schema work/).first()).toBeVisible();
   });
 
-  // A user's move past command gates asks whether to run them; the board runs kanban's gate
-  // hook (here stubbed), shows what failed, and moves the card once they pass.
+  // A user's move past command gates asks whether the card's agent should make it, so the
+  // gate hook runs them: Ask the agent messages it (here stubbed) and leaves the card be.
   const commandGate = (stage: string): Gate => ({
     id: "g-tests", stage, kind: "command", name: "Unit tests", position: 1,
     command: "just test", workdir: "scooter", clean: true, timeout_seconds: 600,
@@ -667,30 +667,26 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     command: "", workdir: "", clean: true, timeout_seconds: 600,
   });
 
-  /** The agent-host's on-demand hook runs, answering each run with the next verdict. */
-  async function serveHookRuns(page: Page, verdicts: Array<{ ran: boolean; block?: string; systemMessages: string[] }>) {
-    const started: Array<{ conversation: string; body: unknown }> = [];
-    await page.route(/\/conversations\/[^/]+\/hooks\/kanban\.gate\/runs(\/[^/]+)?$/, async (route) => {
-      const [, conversation, run] = /\/conversations\/([^/]+)\/hooks\/kanban\.gate\/runs(?:\/([^/]+))?$/.exec(route.request().url())!;
-      if (route.request().method() === "POST") {
-        started.push({ conversation, body: route.request().postDataJSON() });
-        return route.fulfill({ status: 202, json: { run: `run-${started.length}` } });
-      }
-      const outcome = verdicts[Number(run.replace("run-", "")) - 1];
-      return route.fulfill({ json: { state: "done", hook: "kanban.gate", startedAt: 0, endedAt: 1, outcome } });
+  /** Kanban's POST /conversation/{key}/card/request, answering each with the next reply. */
+  async function serveMoveRequests(page: Page, replies: Array<{ status: number; json: unknown }>) {
+    const asked: Array<{ conversation: string; body: unknown }> = [];
+    await page.route(/\/conversations\/[^/]+\/contrib-api\/kanban\/card\/request$/, async (route) => {
+      const [, conversation] = /\/conversations\/([^/]+)\/contrib-api/.exec(route.request().url())!;
+      asked.push({ conversation, body: route.request().postDataJSON() });
+      return route.fulfill(replies[asked.length - 1] ?? { status: 500, json: {} });
     });
-    return started;
+    return asked;
   }
 
-  test("moving past a command gate asks to run the checks, shows what failed, and moves once they pass", async ({ chat, page, request, baseURL }) => {
+  test("moving past a command gate offers to ask the agent, which leaves the card until it moves it", async ({ chat, page, request, baseURL }) => {
     const base = baseURL ?? "http://localhost:5173";
     const kanban = await serveKanban(page, request, base);
     const board = await kanban.board(`e2e-board-checks-${Date.now()}`);
     const [design, inProgress] = board.stages;
     board.gates = [commandGate(design.id), approvalGate(design.id)];
-    const started = await serveHookRuns(page, [
-      { ran: true, block: 'This card can\'t leave its stage yet.\n\nThe gate "Unit tests" failed:\nFAILED test_login', systemMessages: [] },
-      { ran: true, systemMessages: [] },
+    const asked = await serveMoveRequests(page, [
+      { status: 502, json: { detail: "couldn't reach this conversation's agent" } },
+      { status: 200, json: { requested: inProgress.id } },
     ]);
     await chat.open();
     await chat.send("checks before moving");
@@ -707,23 +703,23 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await expect(ask).toBeVisible();
     await expect(ask).toContainText("Run checks before moving to In progress?");
     await expect(ask.getByTestId("kanban-run-checks-gates")).toContainText("just test in scooter");
-    await expect(ask).toContainText('Your move counts as the approval for "Design OK"');
-    // Nothing moves while it asks.
+    await expect(ask).toContainText('Moving it anyway counts as the approval for "Design OK"');
     await expect(lane(page, design.id).locator(card)).toHaveCount(1);
 
-    // The hook gets what the agent's kanban_set_status would hand it, and its refusal shows.
-    await ask.getByRole("button", { name: "Run checks" }).click();
-    await expect(ask.getByTestId("kanban-run-checks-output")).toContainText("FAILED test_login", { timeout: 15_000 });
-    expect(started).toEqual([
-      { conversation: id, body: { input: { tool_name: "kanban_set_status", tool_input: { column: "In progress" } }, target: "kanban_set_status" } },
+    // Why the agent couldn't be asked shows, and it can be asked again.
+    await ask.getByRole("button", { name: "Ask the agent" }).click();
+    await expect(ask.getByTestId("kanban-run-checks-output")).toContainText("couldn't reach this conversation's agent");
+    await ask.getByRole("button", { name: "Ask the agent" }).click();
+    await expect(ask.getByTestId("kanban-run-checks-asked")).toBeVisible();
+    expect(asked).toEqual([
+      { conversation: id, body: { column: inProgress.id } },
+      { conversation: id, body: { column: inProgress.id } },
     ]);
+    // The card waits for the agent's own move; the user's move isn't made.
+    await ask.getByRole("button", { name: "Done" }).click();
+    await expect(ask).toBeHidden();
+    await expect(lane(page, design.id).locator(card)).toHaveCount(1);
     expect(kanban.puts).toEqual([]);
-
-    // Once they pass, the card moves as the user's move.
-    await ask.getByRole("button", { name: "Run again" }).click();
-    await expect(ask).toBeHidden({ timeout: 15_000 });
-    await expect(lane(page, inProgress.id).locator(card)).toHaveCount(1);
-    await expect.poll(() => kanban.puts.map((p) => [p.id, p.body.column])).toEqual([[id, inProgress.id]]);
   });
 
   test("Cancel leaves a gated card where it was, Move anyway skips the checks, and a move back doesn't ask", async ({ chat, page, request, baseURL }) => {
@@ -732,7 +728,7 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     const board = await kanban.board(`e2e-board-skip-${Date.now()}`);
     const [design, inProgress] = board.stages;
     board.gates = [commandGate(design.id)];
-    const started = await serveHookRuns(page, []);
+    const asked = await serveMoveRequests(page, []);
     await chat.open();
     await chat.send("skip the checks");
     await chat.waitForReply(/dummy agent/i);
@@ -753,7 +749,7 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await ask.getByRole("button", { name: "Move anyway" }).click();
     await expect(lane(page, inProgress.id).locator(card)).toHaveCount(1);
     await expect.poll(() => kanban.puts.map((p) => p.body.column)).toEqual([inProgress.id]);
-    expect(started).toEqual([]);
+    expect(asked).toEqual([]);
 
     // Back to Design passes no gate, so it just moves.
     await card.dragTo(lane(page, design.id));

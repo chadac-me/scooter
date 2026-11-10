@@ -39,7 +39,6 @@ export function parseHooks(raw: string | undefined, warn?: (msg: string) => void
       timeoutSec: typeof r.timeoutSec === "number" && r.timeoutSec > 0 ? r.timeoutSec : 30,
       failClosed: r.failClosed === true,
       userCanDisable: r.userCanDisable === true,
-      userCanRun: r.userCanRun === true,
       description: typeof r.description === "string" ? r.description : "",
       ...(r.when != null ? { when: r.when as HookCondition } : {}),
     });

@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { createRouter, type Ctx, type JsonResult, type Router, type ResolveUser } from "../http/router.js";
+import { createRouter, type JsonResult, type Router, type ResolveUser } from "../http/router.js";
 import type { SessionManager, Conversation } from "../session/manager.js";
 import type { ConversationStore, ChecksummedEvent, ConversationLink } from "../session/manager.js";
 import { PLACEHOLDER_TITLE, prefixedPlaceholder, sandboxKey } from "../session/manager.js";
@@ -48,8 +48,7 @@ import { createStateHub, sandboxWatcher, type StateHub } from "../session/stateH
 import { mountStateStream } from "./stateStream.js";
 import { EMPTY_CHECKSUM, chainAll } from "../agui/integrity.js";
 import { DERIVED_SOURCES, HUMAN_TRIGGER_SOURCES, USER_RELAY_SOURCES } from "../acp/remoteAgentRegistry.js";
-import type { HookDef, HookOutcome } from "../hooks/types.js";
-import { createUserHookRuns } from "../hooks/userRuns.js";
+import type { HookDef } from "../hooks/types.js";
 import type { UserHookSettingsStore } from "../hooks/userHookSettingsStore.js";
 
 const log = logger("agent-host");
@@ -227,8 +226,6 @@ export interface ManagementDeps {
   hooks?: readonly HookDef[];
   /** Per-user hook opt-outs; absent makes the toggles read-only. */
   userHookSettings?: UserHookSettingsStore;
-  /** Runs a `userCanRun` hook for a conversation on the owner's request; absent answers 501. */
-  runHook?: (conversationId: string, hookId: string, input: Record<string, unknown>, target?: string) => Promise<HookOutcome>;
   /** The /contrib-api relay for contrib settings tabs; absent means the routes are not mounted. */
   contribApi?: ContribApiDeps;
   /** Absent builds one with the built-in `sandbox` watcher. */
@@ -1709,46 +1706,6 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (typeof body.enabled !== "boolean") return { status: 400, json: { error: "enabled must be a boolean" } };
     await deps.userHookSettings.set(skillOwner(ctx), hook.id, body.enabled);
     return { json: { id: hook.id, enabled: body.enabled } };
-  });
-
-  // --- Hooks the owner runs on demand (`userCanRun`) -------------------------------
-  // Started, then polled: a hook may run as long as its timeout. Only the hook's own
-  // command runs, so the caller picks which declared hook and its event input, never a
-  // command; and only someone who may mutate the conversation may start one.
-  const hookRuns = deps.runHook ? createUserHookRuns({ run: deps.runHook }) : undefined;
-  const runnableHook = async (ctx: Ctx) => {
-    if (!hookRuns) return { error: { status: 501, json: { error: "on-demand hooks unavailable" } } };
-    const hook = (deps.hooks ?? []).find((h) => h.id === ctx.params.hook);
-    if (!hook) return { error: { status: 404, json: { error: "unknown hook" } } };
-    if (!hook.userCanRun) return { error: { status: 403, json: { error: "this hook only runs during the agent's turns" } } };
-    if (!sessions.get(ctx.params.id)) await sessions.ensureReadable(ctx.params.id);
-    const { conv, error } = mutableFor(ctx.params.id, ctx.user);
-    if (error === 404) return { error: { status: 404, json: { error: "not found" } } };
-    if (error === 403) return { error: { status: 403, json: { error: "not your conversation" } } };
-    return { hook, conv: conv! };
-  };
-
-  r.post("/conversations/:id/hooks/:hook/runs", async (ctx) => {
-    const found = await runnableHook(ctx);
-    if (found.error) return found.error;
-    const body = await ctx.body<{ input?: unknown; target?: unknown }>().catch(() => ({}) as { input?: unknown; target?: unknown });
-    const input = body.input ?? {};
-    if (typeof input !== "object" || input === null || Array.isArray(input)) {
-      return { status: 400, json: { error: "input must be an object (the hook event's fields)" } };
-    }
-    if (body.target !== undefined && typeof body.target !== "string") {
-      return { status: 400, json: { error: "target must be a string" } };
-    }
-    const run = hookRuns!.start(found.conv.id, found.hook.id, input as Record<string, unknown>, body.target as string | undefined);
-    return { status: 202, json: { run } };
-  });
-
-  r.get("/conversations/:id/hooks/:hook/runs/:run", async (ctx) => {
-    const found = await runnableHook(ctx);
-    if (found.error) return found.error;
-    const state = hookRuns!.get(found.conv.id, ctx.params.run);
-    if (!state || state.hook !== found.hook.id) return { status: 404, json: { error: "unknown run" } };
-    return { json: state };
   });
 
   // --- Contrib settings-tab API -------------------------------------------------

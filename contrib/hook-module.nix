@@ -72,16 +72,6 @@ in
       description = "Users may turn this hook off for their own conversations in settings.";
     };
 
-    userCanRun = mkOption {
-      type = types.bool;
-      default = false;
-      description = ''
-        The owner's UI may run this hook on demand, outside an agent turn, with an event
-        input of its own (POST /conversations/{id}/hooks/{hook}/runs). For checks the user
-        wants to run themselves, e.g. kanban's stage gates before they move a card.
-      '';
-    };
-
     description = mkOption {
       type = types.str;
       default = "";

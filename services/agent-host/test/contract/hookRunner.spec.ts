@@ -14,7 +14,6 @@ const hook = (over: Partial<HookDef>): HookDef => ({
   timeoutSec: 30,
   failClosed: false,
   userCanDisable: false,
-  userCanRun: false,
   description: "",
   ...over,
 });
