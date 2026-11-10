@@ -17,13 +17,10 @@ import {
 
 export interface AddServiceForm {
   name: string;
-  purpose: string;
-  command: string;
-  port: string;
-  start: boolean;
+  description: string;
 }
 
-const EMPTY: AddServiceForm = { name: "", purpose: "", command: "", port: "", start: true };
+const EMPTY: AddServiceForm = { name: "", description: "" };
 
 /** The service's path segment, as the `webServices.<name>` option takes it. */
 const NAME_RE = /^[a-z][a-z0-9-]{0,30}$/;
@@ -33,28 +30,20 @@ export function addServiceError(form: AddServiceForm, existing: readonly string[
   const name = form.name.trim();
   if (name && !NAME_RE.test(name)) return "Use lowercase letters, digits and dashes, starting with a letter.";
   if (existing.includes(name)) return `A service named “${name}” already exists.`;
-  const port = form.port.trim();
-  if (port && !(/^\d+$/.test(port) && +port >= 1024 && +port <= 65535)) return "Pick a port from 1024 to 65535.";
   return null;
 }
 
 /** The chat message that asks Scooter to build the service. */
 export function addServicePrompt(form: AddServiceForm): string {
   const name = form.name.trim();
-  const lines = [
+  return [
     "Please add a web service to this sandbox.",
     "",
     `- Name: \`${name}\``,
-    `- What it serves: ${form.purpose.trim()}`,
-  ];
-  if (form.command.trim()) lines.push(`- Start command: \`${form.command.trim()}\``);
-  if (form.port.trim()) lines.push(`- Port: ${form.port.trim()}`);
-  lines.push(
+    `- Description: ${form.description.trim()}`,
     "",
-    `Declare it as \`webServices.${name}\` and apply it with \`scooter-rebuild switch\`.` +
-      (form.start ? " Then start it and send me the link." : " Leave it stopped; I'll start it from the Services panel."),
-  );
-  return lines.join("\n");
+    `Declare it as \`webServices.${name}\` and apply it with \`scooter-rebuild switch\`, then start it and send me the link.`,
+  ].join("\n");
 }
 
 const field = "rounded-md border border-input bg-background px-2 py-1.5 text-sm";
@@ -80,7 +69,7 @@ export function AddServiceDialog({
   const set = <K extends keyof AddServiceForm>(k: K, v: AddServiceForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const error = addServiceError(form, existing);
-  const ready = !error && form.name.trim() !== "" && form.purpose.trim() !== "";
+  const ready = !error && form.name.trim() !== "" && form.description.trim() !== "";
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -112,58 +101,17 @@ export function AddServiceDialog({
           </div>
 
           <div className="flex flex-col gap-1">
-            <label htmlFor="add-service-purpose" className={label}>What should it serve?</label>
+            <label htmlFor="add-service-description" className={label}>Description</label>
             <textarea
-              id="add-service-purpose"
-              data-testid="add-service-purpose"
-              value={form.purpose}
-              onChange={(e) => set("purpose", e.target.value)}
+              id="add-service-description"
+              data-testid="add-service-description"
+              value={form.description}
+              onChange={(e) => set("description", e.target.value)}
               placeholder="A Streamlit dashboard for /workspace/app.py"
               rows={3}
               className={field}
             />
           </div>
-
-          <div className="flex gap-3">
-            <div className="flex min-w-0 flex-1 flex-col gap-1">
-              <label htmlFor="add-service-command" className={label}>
-                Start command <span className="font-normal">(optional)</span>
-              </label>
-              <input
-                id="add-service-command"
-                data-testid="add-service-command"
-                value={form.command}
-                onChange={(e) => set("command", e.target.value)}
-                placeholder="streamlit run app.py"
-                autoComplete="off"
-                className={`${field} font-mono`}
-              />
-            </div>
-            <div className="flex w-24 flex-col gap-1">
-              <label htmlFor="add-service-port" className={label}>
-                Port <span className="font-normal">(optional)</span>
-              </label>
-              <input
-                id="add-service-port"
-                data-testid="add-service-port"
-                value={form.port}
-                onChange={(e) => set("port", e.target.value)}
-                placeholder="8501"
-                inputMode="numeric"
-                className={`${field} font-mono`}
-              />
-            </div>
-          </div>
-
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              data-testid="add-service-start"
-              checked={form.start}
-              onChange={(e) => set("start", e.target.checked)}
-            />
-            Start it once it&apos;s ready
-          </label>
 
           {error ? (
             <p data-testid="add-service-error" className="text-xs text-destructive">

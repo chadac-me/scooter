@@ -20,8 +20,7 @@ test("the Add service dialog sends Scooter a request to build the service", asyn
   await dialog.locator('[data-testid="add-service-name"]').fill("Bad Name");
   await expect(dialog.locator('[data-testid="add-service-error"]')).toContainText("lowercase");
   await dialog.locator('[data-testid="add-service-name"]').fill("dashboard");
-  await dialog.locator('[data-testid="add-service-purpose"]').fill("A Streamlit dashboard for app.py");
-  await dialog.locator('[data-testid="add-service-port"]').fill("8501");
+  await dialog.locator('[data-testid="add-service-description"]').fill("A Streamlit dashboard for app.py");
   await submit.click();
 
   await expect(dialog).toBeHidden();

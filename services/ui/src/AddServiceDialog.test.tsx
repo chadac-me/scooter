@@ -9,16 +9,13 @@ import { SandboxPanelView } from "./SandboxPanel.js";
 
 const form = (over: Partial<AddServiceForm> = {}): AddServiceForm => ({
   name: "dashboard",
-  purpose: "A Streamlit dashboard for app.py",
-  command: "",
-  port: "",
-  start: true,
+  description: "A Streamlit dashboard for app.py",
   ...over,
 });
 
 describe("addServiceError", () => {
-  it("accepts a slug name and an unprivileged port", () => {
-    expect(addServiceError(form({ port: "8501" }), [])).toBeNull();
+  it("accepts a slug name", () => {
+    expect(addServiceError(form({ name: "my-app2" }), [])).toBeNull();
   });
 
   it("rejects a name that is not a slug, or already declared", () => {
@@ -26,28 +23,15 @@ describe("addServiceError", () => {
     expect(addServiceError(form({ name: "1app" }), [])).toMatch(/lowercase/);
     expect(addServiceError(form(), ["dashboard"])).toMatch(/already exists/);
   });
-
-  it("rejects a port that is not a number in 1024–65535", () => {
-    for (const port of ["80", "70000", "abc"]) expect(addServiceError(form({ port }), [])).toMatch(/port/);
-  });
 });
 
 describe("addServicePrompt", () => {
-  it("names the service, its purpose and the option to declare", () => {
+  it("names the service, describes it and says which option to declare", () => {
     const p = addServicePrompt(form());
     expect(p).toContain("- Name: `dashboard`");
-    expect(p).toContain("- What it serves: A Streamlit dashboard for app.py");
+    expect(p).toContain("- Description: A Streamlit dashboard for app.py");
     expect(p).toContain("`webServices.dashboard`");
     expect(p).toContain("send me the link");
-    expect(p).not.toContain("Start command");
-    expect(p).not.toContain("Port");
-  });
-
-  it("includes the optional command and port, and can leave the service stopped", () => {
-    const p = addServicePrompt(form({ command: "streamlit run app.py", port: "8501", start: false }));
-    expect(p).toContain("- Start command: `streamlit run app.py`");
-    expect(p).toContain("- Port: 8501");
-    expect(p).toContain("Leave it stopped");
   });
 });
 
