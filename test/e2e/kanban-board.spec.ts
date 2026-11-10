@@ -241,6 +241,11 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await page.getByTestId("kanban-close-chat").click();
     await expect.poll(() => threadId(page)).toBeNull();
 
+    // Clicking the card's box (not its title) opens the chat, with no Close first.
+    await card.click({ position: { x: 4, y: 4 } });
+    await expect(side).toBeVisible();
+    await expect(card).toHaveAttribute("data-open", "true");
+
     // Switching conversations keeps the board's state: the chat stays beside it.
     await page.getByTestId("kanban-new").click();
     await expect(side).toBeVisible();
