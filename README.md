@@ -39,6 +39,21 @@ The core of Scooter is five services:
 
 These core five components provide you with **secure**, **powerful**, and **extensible** agents that can run at scale whenever needed.
 
+## Try it on your machine
+
+With [Nix](https://nixos.org/download/) and Docker installed:
+
+```bash
+nix run github:chadac-me/scooter#local -- up
+```
+
+This creates a small [k3d](https://k3d.io/) cluster on your machine, deploys Scooter
+into it from the published images, asks which model provider to use (a Claude
+subscription, an Anthropic API key, or Ollama), and opens the chat at
+`http://localhost:8080`. `scooter-local down` stops it with everything kept;
+`destroy` removes it. See [Run it on your machine](https://chadac-me.github.io/scooter/tutorial/local/)
+for the details and the limits of a single-machine setup.
+
 ## Getting started
 
 You'll need a Kubernetes cluster with the

@@ -144,6 +144,29 @@
           ghcrRefs = lib.mapAttrs' (_: img: lib.nameValuePair img.refKey img.ref.fullUrl)
             (lib.filterAttrs (_: img: img.refKey != null) ghcrImageRefs);
 
+          # The single-machine preset (modules/local.nix), rendered once per provider
+          # for `nix run .#local`. buildSystem stays x86_64-linux on every host: the
+          # published tags are that build's content hashes (publish-images.yml).
+          hostPkgs = nixpkgs.legacyPackages.${system};
+          localRenders = lib.genAttrs [ "claude-code" "anthropic" "ollama" ] (provider:
+            evalPlatformWith {
+              inherit system;
+              modules = [{
+                imports = [ ./modules/local.nix ];
+                scooter.local.provider = provider;
+                scooter.agent.skills = scooterSkills;
+              }];
+            });
+          localManifests = lib.mapAttrs (_: r: r.config.kubernetes.resultYAML) localRenders;
+          scooterLocal = import ./local {
+            pkgs = hostPkgs;
+            inherit lib;
+            version = lib.removeSuffix "\n" (builtins.readFile ./VERSION);
+            flake = self;
+            manifests = localManifests;
+            agentSandboxVersion = "v0.5.2";
+          };
+
           # Tier-1-style config-correctness tests for the dev-environment sandbox
           devEnvTests =
             if pkgs.stdenv.isLinux
@@ -528,9 +551,23 @@
               (evalPlatform { module = ./examples/kubenix-config.nix; })
                 .config.kubernetes.resultYAML;
 
+            # `nix run .#local -- up` -> Scooter on this machine (docs/tutorial/local.md),
+            # and the YAML it applies, per provider.
+            scooter-local = scooterLocal;
+            local-manifests-claude-code = localManifests.claude-code;
+            local-manifests-anthropic = localManifests.anthropic;
+            local-manifests-ollama = localManifests.ollama;
+
             # nix build .#ghcr-image-refs -> JSON { <camelName> = "ghcr.io/…:<tag>" }
             ghcr-image-refs = pkgs.writeText "ghcr-image-refs.json" (builtins.toJSON ghcrRefs);
           } (lib.optionals (!pkgs.stdenv.hostPlatform.isLinux) linuxOnlyPackages);
+
+          # `nix run github:chadac-me/scooter#local -- up`
+          apps.local = {
+            type = "app";
+            program = lib.getExe scooterLocal;
+            meta.description = scooterLocal.meta.description;
+          };
 
           # Dev shell
           devShells.default = import ./nix/devshell.nix {
@@ -539,6 +576,8 @@
           };
 
           checks = {
+            # The local preset renders, with the wiring scooter-local relies on.
+            local-manifests = import ./local/check.nix { pkgs = hostPkgs; inherit lib; renders = localRenders; };
             agentHost = p.scooter-agent-host;
             ui = p.scooter-ui;
             # Who may frame which UI page, against the rendered nginx config.
@@ -621,6 +660,14 @@
         kubenixModules.platform = platformModule;
         # The conventional entry point
         kubenixModules.default = platformModule;
+        # The single-machine preset, for a deployment that starts from `nix run .#local`
+        kubenixModules.local = ./modules/local.nix;
+
+        # `nix flake init -t github:chadac-me/scooter#local`: that deployment.
+        templates.local = {
+          path = ./local/template;
+          description = "Scooter on one machine: the local preset as a deployment of your own";
+        };
       };
     };
 }
