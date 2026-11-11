@@ -92,5 +92,8 @@ describe("highlightCode", () => {
     for (const l of ["python", "cpp", "c", "rust", "javascript", "typescript", "go", "java", "bash", "json", "yaml", "sql", "nix", "dockerfile", "markdown", "diff"]) {
       expect(langs, l).toContain(l);
     }
+    // A curated set, not highlight.js's `common`: the grammars are a third of the chunk.
+    expect(langs.length).toBeLessThanOrEqual(24);
+    expect(langs).not.toContain("swift");
   });
 });

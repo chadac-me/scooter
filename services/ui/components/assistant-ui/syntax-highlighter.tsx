@@ -7,22 +7,50 @@
  * The hast tree becomes React elements through the JSX runtime, never innerHTML. A
  * language with no grammar renders the raw text, as before.
  *
+ * The highlighter (core + grammars) is its own chunk, fetched on the first fenced block
+ * rather than with the app: that block renders plain for one round-trip, and every block
+ * after is coloured synchronously, token by token while streaming.
+ *
  * Token colours live in globals.css under `.aui-md .hljs-*`.
  */
 
-import { Fragment, memo, useMemo, type FC } from "react";
+import { Fragment, memo, useEffect, useMemo, useState, type FC } from "react";
 import { jsx, jsxs } from "react/jsx-runtime";
 import { toJsxRuntime } from "hast-util-to-jsx-runtime";
 import type { SyntaxHighlighterProps } from "@assistant-ui/react-markdown";
 
-import { highlightCode } from "@/src/codeHighlight";
+type Highlighter = typeof import("@/src/codeHighlight");
+
+let highlighter: Highlighter | undefined;
+let loading: Promise<Highlighter> | undefined;
+
+/** Load the highlighter chunk once; resolves to the module and keeps it for sync use. */
+export function preloadHighlighter(): Promise<Highlighter> {
+  return (loading ??= import("@/src/codeHighlight").then((m) => (highlighter = m)));
+}
 
 const SyntaxHighlighterImpl: FC<Omit<SyntaxHighlighterProps, "node">> = ({
   components: { Pre, Code },
   language,
   code,
 }) => {
-  const tree = useMemo(() => highlightCode(language, code), [language, code]);
+  const [ready, setReady] = useState(highlighter !== undefined);
+  useEffect(() => {
+    if (ready) return;
+    let live = true;
+    preloadHighlighter().then(
+      () => live && setReady(true),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [ready]);
+
+  const tree = useMemo(
+    () => (ready && highlighter ? highlighter.highlightCode(language, code) : null),
+    [ready, language, code],
+  );
   const children = useMemo(
     () => (tree ? toJsxRuntime(tree, { Fragment, jsx, jsxs }) : code),
     [tree, code],

@@ -1,22 +1,64 @@
 /**
  * Syntax highlighting for fenced code blocks in the thread's markdown
- * (components/assistant-ui/syntax-highlighter.tsx).
+ * (components/assistant-ui/syntax-highlighter.tsx, which loads this module lazily so
+ * the grammars stay out of the initial bundle).
  *
  * lowlight runs highlight.js over the code and returns a hast tree, so the colouring is
  * synchronous (a streaming block is coloured on every token with no flash) and never goes
- * through innerHTML. The grammar set is highlight.js's `common` (python, c, cpp, rust,
- * javascript, typescript, json, bash, sql, go, java, …) plus nix and dockerfile;
- * highlight.js aliases (`py`, `js`, `ts`, `sh`, `c++`, `yml`, `html`, `console`) resolve
- * through the registry. A language nobody registered, or a block too large to colour
- * cheaply, returns null and the caller shows plain text.
+ * through innerHTML. The grammar set is the languages a coding agent here writes:
+ * python, c, cpp, rust, javascript, typescript, json, bash, shell, sql, go, java, yaml,
+ * xml/html, css, markdown, diff, makefile, ini/toml, nix, dockerfile. highlight.js
+ * aliases (`py`, `js`, `jsx`, `ts`, `tsx`, `sh`, `zsh`, `c++`, `yml`, `html`, `console`,
+ * `toml`) resolve through the registry. A language nobody registered, or a block too
+ * large to colour cheaply, returns null and the caller shows plain text.
  */
 
-import { common, createLowlight } from "lowlight";
+import { createLowlight } from "lowlight";
+import bash from "highlight.js/lib/languages/bash";
+import c from "highlight.js/lib/languages/c";
+import cpp from "highlight.js/lib/languages/cpp";
+import css from "highlight.js/lib/languages/css";
+import diff from "highlight.js/lib/languages/diff";
 import dockerfile from "highlight.js/lib/languages/dockerfile";
+import go from "highlight.js/lib/languages/go";
+import ini from "highlight.js/lib/languages/ini";
+import java from "highlight.js/lib/languages/java";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import makefile from "highlight.js/lib/languages/makefile";
+import markdown from "highlight.js/lib/languages/markdown";
 import nix from "highlight.js/lib/languages/nix";
+import python from "highlight.js/lib/languages/python";
+import rust from "highlight.js/lib/languages/rust";
+import shell from "highlight.js/lib/languages/shell";
+import sql from "highlight.js/lib/languages/sql";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
 
-const lowlight = createLowlight(common);
-lowlight.register({ nix, dockerfile });
+const lowlight = createLowlight({
+  bash,
+  c,
+  cpp,
+  css,
+  diff,
+  dockerfile,
+  go,
+  ini,
+  java,
+  javascript,
+  json,
+  makefile,
+  markdown,
+  nix,
+  python,
+  rust,
+  shell,
+  sql,
+  typescript,
+  xml,
+  yaml,
+});
 
 export type HighlightTree = ReturnType<typeof lowlight.highlight>;
 
