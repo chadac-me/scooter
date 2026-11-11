@@ -28,6 +28,9 @@ export interface LinkStore {
   /** A clash when another conversation owns the resource; undefined otherwise, DB failures included. */
   addLink(id: SessionId, link: ConversationLink): Promise<LinkClash | undefined>;
   listLinks(id: SessionId): Promise<ConversationLink[]>;
+  /** Record where a linked resource stands ("open", "merged", "approved", …) on the conversation's own
+   *  link for `url`; false when it has none. */
+  setLinkState(id: SessionId, url: string, state: string): Promise<boolean>;
   /** Which conversation owns this resource, or undefined. */
   conversationForResource(
     source: string,
@@ -79,6 +82,7 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
     url: string | null;
     title: string | null;
     ref: ConversationLink["ref"] | string | null;
+    state: string | null;
   };
 
   const rowToLink = (row: LinkRow): ConversationLink => ({
@@ -86,6 +90,7 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
     resourceType: row.resourceType,
     ...(row.url == null ? {} : { url: row.url }),
     ...(row.title == null ? {} : { title: row.title }),
+    ...(row.state == null ? {} : { state: row.state }),
     // jsonb arrives parsed, but a driver configured to return raw text must not
     // produce a string where the tools expect an object.
     ...(row.ref == null
@@ -171,6 +176,7 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
               url: resourceLinks.url,
               title: resourceLinks.title,
               ref: resourceLinks.ref,
+              state: resourceLinks.state,
             })
             .from(resourceLinks)
             .where(eq(resourceLinks.conversationId, id))
@@ -201,6 +207,15 @@ export function createPgLinkStore(config: PgLinkStoreConfig): LinkStore {
         }),
       );
       return legacy;
+    },
+
+    async setLinkState(id, url, state) {
+      // Scoped to the conversation so an agent can only move its own links.
+      const res = await db
+        .update(resourceLinks)
+        .set({ state })
+        .where(and(eq(resourceLinks.conversationId, id), eq(resourceLinks.url, url)));
+      return (res.rowCount ?? 0) > 0;
     },
 
     async conversationForResource(source, resourceType, resourceId) {

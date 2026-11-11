@@ -47,6 +47,34 @@ def test_post_link_forwards_to_agent_host(monkeypatch):
     assert captured["link"].resource_type == "pr"
 
 
+def test_patch_link_records_state_for_the_token_s_conversation(monkeypatch):
+    captured: dict = {}
+
+    async def fake_set_link_state(agent_host_url, conversation_id, url, state):
+        captured.update(conv=conversation_id, link=url, state=state)
+
+    monkeypatch.setattr(app_mod, "set_link_state", fake_set_link_state)
+
+    resp = _client().patch("/link", json={"url": "https://x/pull/1", "state": "merged"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "updated"}
+    # The conversation comes from the token, not the body.
+    assert captured == {"conv": "conv-link1", "link": "https://x/pull/1", "state": "merged"}
+
+
+def test_patch_link_rejects_missing_fields_and_maps_an_unknown_link_to_404(monkeypatch):
+    assert _client().patch("/link", json={"url": "https://x/pull/1"}).status_code == 400
+
+    async def no_such_link(agent_host_url, conversation_id, url, state):
+        raise LookupError(f"no link for {url} on this conversation")
+
+    monkeypatch.setattr(app_mod, "set_link_state", no_such_link)
+    resp = _client().patch("/link", json={"url": "https://x/pull/9", "state": "merged"})
+    assert resp.status_code == 404
+    assert "no link for https://x/pull/9" in resp.json()["detail"]
+
+
 def test_post_link_accepts_type_alias(monkeypatch):
     captured: dict = {}
 

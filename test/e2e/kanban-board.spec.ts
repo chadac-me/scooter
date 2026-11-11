@@ -189,6 +189,15 @@ async function filedIn(request: APIRequestContext, base: string, id: string) {
   return ((await (await request.get(`${base}/folders`)).json()) as { placements: Record<string, string> }).placements[id];
 }
 
+/**
+ * What `agent-broker link set <url> <state>` records once the forge's "merged" message reaches the
+ * agent: the state on the conversation's link, through the same agent-host route the broker calls.
+ */
+async function setLinkState(request: APIRequestContext, base: string, id: string, url: string, state: string) {
+  const r = await request.patch(`${base}/conversations/${id}/links`, { data: { url, state } });
+  expect(r.ok()).toBeTruthy();
+}
+
 const lane = (page: Page, id: string) => page.locator(`[data-testid="kanban-lane"][data-column="${id}"]`);
 
 fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards view", () => {
@@ -631,7 +640,6 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     const kanban = await serveKanban(page, request, base);
     const board = await kanban.board(`e2e-board-todos-${Date.now()}`);
     const review = board.stages[2].id;
-    const done = board.stages[3].id;
     board.gates = [approvalGate(review)];
     const ids: string[] = [];
     for (const text of ["needs review", "already shipped"]) {
@@ -643,20 +651,22 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
       ids.push(threadId(page)!);
     }
     const [open, shipped] = ids;
-    for (const [id, stage, n] of [[open, review, 1], [shipped, done, 2]] as const) {
-      await request.put(`${base}/conversations/${id}/folder`, { data: { folderId: stage } });
+    // Both cards sit in Review with a PR; the shipped card's agent has recorded its PR as merged.
+    for (const [id, n] of [[open, 1], [shipped, 2]] as const) {
+      await request.put(`${base}/conversations/${id}/folder`, { data: { folderId: review } });
       const url = `https://github.com/example-org/example-app/pull/${n}`;
       const r = await request.post(`${base}/conversations/${id}/links`, {
         data: { source: "github", resourceType: "pull_request", url, title: `example-app #${n}` },
       });
       expect(r.ok()).toBeTruthy();
     }
+    await setLinkState(request, base, shipped, "https://github.com/example-org/example-app/pull/2", "merged");
     kanban.awaiting[open] = [approvalGate(review).id];
 
     await page.goto(`/boards/${board.folder}`);
     const card = (id: string) => page.locator(`[data-testid="kanban-card"][data-conversation-id="${id}"]`);
     const filter = page.getByTestId("kanban-for-you");
-    // One card waits on an approval and a PR; the shipped card's PR is done, so it doesn't count.
+    // One card waits on an approval and an open PR; the shipped card's PR is merged, so it doesn't count.
     await expect(filter.getByTestId("kanban-for-you-count")).toHaveText("1", { timeout: 30_000 });
     await expect(filter).toHaveAttribute("aria-pressed", "false");
     await expect(card(shipped)).toBeVisible();

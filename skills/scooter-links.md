@@ -64,6 +64,21 @@ UI.
 agent-broker link ls
 ```
 
+## Keep a link's state current
+
+The boards read each link's **state** to decide what still waits on the user:
+a PR whose state is `merged` or `closed` no longer counts. The forge's events
+reach you as messages in this conversation ("PR #42 was merged", a review that
+approved it); when one arrives, record it on the link:
+
+```bash
+agent-broker link set https://github.com/OWNER/REPO/pull/42 merged
+agent-broker link set https://github.com/OWNER/REPO/pull/42 approved
+```
+
+The state is free text; `open`, `approved`, `merged` and `closed` are the ones
+the UI understands. `link ls` shows the current state next to each link.
+
 ## Rule of thumb
 
 If you just created a PR/MR/issue and you're **not sure** it went through the

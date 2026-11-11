@@ -87,6 +87,18 @@ describe("merge reference stability (sidebar re-render / flake root)", () => {
     expect(byId("ch-y")).not.toBe(y1);
     expect(byId("ch-y")?.title).toBe("Y renamed");
   });
+
+  it("produces a NEW reference when only a link's state changed (a PR going merged)", () => {
+    const link = { source: "github", url: "https://g/pull/1", title: "#1" };
+    sessionStore.mergeFromServer([{ id: "st-a", title: "A", createdAt: 1, lastActivityAt: 1, sources: ["github"], links: [link] }]);
+    const a1 = byId("st-a");
+    // The forge reported the merge; the link's url and title are as before, so only its state moved.
+    sessionStore.mergeFromServer([
+      { id: "st-a", title: "A", createdAt: 1, lastActivityAt: 1, sources: ["github"], links: [{ ...link, state: "merged" }] },
+    ]);
+    expect(byId("st-a")).not.toBe(a1);
+    expect(byId("st-a")?.links?.[0]?.state).toBe("merged");
+  });
 });
 
 describe("link sources ownership (an upsert owns its own row's links, and only its own)", () => {

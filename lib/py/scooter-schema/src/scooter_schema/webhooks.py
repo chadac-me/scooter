@@ -79,6 +79,7 @@ class ResourceLinks(Base):
     url: Mapped[Optional[str]] = mapped_column(Text)
     title: Mapped[Optional[str]] = mapped_column(Text)
     ref: Mapped[Optional[dict]] = mapped_column(JSONB)
+    state: Mapped[Optional[str]] = mapped_column(String)
 
 
 class UserIdentity(Base):

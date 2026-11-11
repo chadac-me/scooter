@@ -1343,6 +1343,22 @@ export function createManagementApi(deps: ManagementDeps): Router {
     return { status: 201, json: { ok: true } };
   });
 
+  // The agent records where a linked PR, MR or issue stands once the forge tells it (merged, closed,
+  // approved, …) and the boards read it. `url` names the link; `state` is free text.
+  r.patch("/conversations/:id/links", async (ctx) => {
+    if (!(await fromService(ctx.req))) return serviceOnly;
+    const body = await ctx.body<{ url?: string; state?: string }>();
+    const url = body.url?.trim();
+    const state = body.state?.trim();
+    if (!url || !state) return { status: 400, json: { error: "url and state required" } };
+    if (!store.setLinkState) return { status: 501, json: { error: "link state unavailable" } };
+    const id = (await resolveConvId(ctx.params.id)) ?? ctx.params.id;
+    if (!(await store.setLinkState(id, url, state))) {
+      return { status: 404, json: { error: "no such link on this conversation" } };
+    }
+    return { json: { ok: true } };
+  });
+
   // Contribs run outside the sandbox, so file I/O for them goes through here.
   r.post("/conversations/:id/files", async (ctx) => {
     if (!deps.writeSandboxFile) return { status: 501, json: { error: "sandbox file writes unavailable" } };

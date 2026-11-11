@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -66,12 +68,12 @@ async def test_maybe_autolink_swallows_bad_response(monkeypatch):
     await proxy._maybe_autolink("POST", "repos/a/b/pulls", resp, "conv-1")  # must not raise
 
 
-def _capture_client(monkeypatch, seen: list[httpx.Request]) -> None:
+def _capture_client(monkeypatch, seen: list[httpx.Request], status: int = 201) -> None:
     import scooter_broker_lib.autolink as al
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(201, json={"links": []})
+        return httpx.Response(status, json={"links": []})
 
     real = httpx.AsyncClient
     monkeypatch.setattr(al.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
@@ -93,10 +95,22 @@ async def test_router_calls_carry_the_router_token_when_mounted(monkeypatch, tmp
     await al.post_link("http://router", "c1", link)
     await al.create_link("http://router", "c1", link)
     await al.list_links("http://router", "c1")
+    await al.set_link_state("http://router", "c1", link.url, "merged")
 
-    assert len(seen) == 3
+    assert len(seen) == 4
     want = "Bearer router-sa-token" if mounted else None
-    assert [r.headers.get("authorization") for r in seen] == [want] * 3
+    assert [r.headers.get("authorization") for r in seen] == [want] * 4
+    assert seen[3].method == "PATCH" and seen[3].url.path == "/conversations/c1/links"
+    assert json.loads(seen[3].content) == {"url": link.url, "state": "merged"}
+
+
+async def test_set_link_state_raises_lookup_error_when_the_conversation_has_no_such_link(monkeypatch):
+    import scooter_broker_lib.autolink as al
+
+    seen: list[httpx.Request] = []
+    _capture_client(monkeypatch, seen, status=404)
+    with pytest.raises(LookupError, match="https://x/pull/9"):
+        await al.set_link_state("http://router", "c1", "https://x/pull/9", "merged")
 
 
 async def test_an_unreadable_router_token_does_not_break_a_link(monkeypatch, tmp_path):

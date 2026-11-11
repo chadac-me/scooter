@@ -104,6 +104,19 @@ describe("userTodos", () => {
     expect(todos.map((t) => t.url)).toEqual(["https://l/1", "https://g/3"]);
   });
 
+  it("leaves out PRs the agent has recorded as merged or closed, keeping a card's open ones", () => {
+    const convs = [
+      conv("landed", 1, { links: [{ ...pr("https://g/1"), state: "merged" }] }),
+      conv("dropped", 2, { links: [{ ...pr("https://g/2"), state: "closed" }] }),
+      conv("mixed", 3, { links: [{ ...pr("https://g/3"), state: "merged" }, { ...pr("https://g/4"), state: "open" }, pr("https://g/5")] }),
+    ];
+    const todos = userTodos(convs, none);
+    expect(todos.map((t) => [t.id, t.url])).toEqual([
+      ["mixed", "https://g/4"],
+      ["mixed", "https://g/5"],
+    ]);
+  });
+
   it("is empty when nothing waits on the user", () => {
     expect(userTodos([conv("a", 1, { dot: "active" }), conv("b", 2, { dot: "unread" })], none)).toEqual([]);
   });

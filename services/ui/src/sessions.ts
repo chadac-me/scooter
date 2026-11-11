@@ -85,6 +85,8 @@ export interface SessionLink {
   resourceType: string; // "pull_request" | "merge_request" | "issue" | "thread" | …
   url?: string;
   title?: string;
+  /** Where a PR or MR stands as the agent last recorded it: "open", "merged", "closed", "approved", …. Unset until it says. */
+  state?: string;
 }
 
 /** The placeholder title, until something names the conversation. */
@@ -175,7 +177,8 @@ const sameSession = (a: Session, b: Session): boolean => {
   if (srcA.length !== srcB.length || srcA.some((v, i) => v !== srcB[i])) return false;
   const lnA = a.links ?? [], lnB = b.links ?? [];
   if (lnA.length !== lnB.length) return false;
-  return lnA.every((l, i) => l.url === lnB[i].url && l.title === lnB[i].title && l.source === lnB[i].source);
+  // state too: a PR going merged changes what the boards show for the row, with url and title as before.
+  return lnA.every((l, i) => l.url === lnB[i].url && l.title === lnB[i].title && l.source === lnB[i].source && l.state === lnB[i].state);
 };
 
 /** Sidebar order: starred conversations first, then most recently active first within each group. */

@@ -129,6 +129,21 @@ async def create_link(agent_host_url: str, conversation_id: str, link: Link) -> 
         resp.raise_for_status()
 
 
+async def set_link_state(agent_host_url: str, conversation_id: str, url: str, state: str) -> None:
+    """Record where a linked resource stands ("merged", "approved", …); LookupError when the conversation has no link for `url`."""
+    if not agent_host_url:
+        raise RuntimeError("agent-host URL not configured (AGENT_HOST_URL)")
+    if not conversation_id:
+        raise RuntimeError("no conversation for this identity — cannot set a link's state")
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.patch(
+            _links_url(agent_host_url, conversation_id), json={"url": url, "state": state}, headers=router_headers()
+        )
+        if resp.status_code == 404:
+            raise LookupError(f"no link for {url} on this conversation")
+        resp.raise_for_status()
+
+
 async def list_links(agent_host_url: str, conversation_id: str) -> list[dict]:
     """The conversation's current links from the agent-host."""
     if not agent_host_url or not conversation_id:

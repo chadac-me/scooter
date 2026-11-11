@@ -13,12 +13,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Link is one linked resource, projected to the four fields the sidebar list shows.
+// Link is one linked resource, projected to the fields the sidebar list and the boards show.
 type Link struct {
 	Source       string  `json:"source"`
 	ResourceType string  `json:"resourceType"`
 	URL          *string `json:"url,omitempty"`
 	Title        *string `json:"title,omitempty"`
+	// Where a PR or MR stands ("open", "merged", "closed", "approved", …), once the agent has recorded it.
+	State *string `json:"state,omitempty"`
 }
 
 // LinkStore is a read-only handle on the webhooks database's resource_links table, nil when not configured.
@@ -70,7 +72,7 @@ func linkStoreDSNFromEnv() string {
 // LinksByConversation reads every link in one query and groups by conversation id.
 func (s *LinkStore) LinksByConversation(ctx context.Context) (map[string][]Link, error) {
 	rs, err := s.pool.Query(ctx, `
-		SELECT conversation_id, source, resource_type, url, title
+		SELECT conversation_id, source, resource_type, url, title, state
 		  FROM resource_links`)
 	if err != nil {
 		return nil, err
@@ -80,7 +82,7 @@ func (s *LinkStore) LinksByConversation(ctx context.Context) (map[string][]Link,
 	for rs.Next() {
 		var convID string
 		var l Link
-		if err := rs.Scan(&convID, &l.Source, &l.ResourceType, &l.URL, &l.Title); err != nil {
+		if err := rs.Scan(&convID, &l.Source, &l.ResourceType, &l.URL, &l.Title, &l.State); err != nil {
 			return nil, err
 		}
 		out[convID] = append(out[convID], l)
@@ -91,7 +93,7 @@ func (s *LinkStore) LinksByConversation(ctx context.Context) (map[string][]Link,
 // LinksForConversation reads the links of one conversation, returning an empty slice rather than nil.
 func (s *LinkStore) LinksForConversation(ctx context.Context, convID string) ([]Link, error) {
 	rs, err := s.pool.Query(ctx, `
-		SELECT source, resource_type, url, title
+		SELECT source, resource_type, url, title, state
 		  FROM resource_links
 		 WHERE conversation_id = $1`, convID)
 	if err != nil {
@@ -101,7 +103,7 @@ func (s *LinkStore) LinksForConversation(ctx context.Context, convID string) ([]
 	out := []Link{}
 	for rs.Next() {
 		var l Link
-		if err := rs.Scan(&l.Source, &l.ResourceType, &l.URL, &l.Title); err != nil {
+		if err := rs.Scan(&l.Source, &l.ResourceType, &l.URL, &l.Title, &l.State); err != nil {
 			return nil, err
 		}
 		out = append(out, l)

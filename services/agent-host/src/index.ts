@@ -725,6 +725,7 @@ export async function main(
       ? {
           addLink: (id: SessionId, link: ConversationLink) => linkStore.addLink(id, link),
           listLinks: (id: SessionId) => linkStore.listLinks(id),
+          setLinkState: (id: SessionId, url: string, state: string) => linkStore.setLinkState(id, url, state),
         }
       : {}),
     ...(metaStore

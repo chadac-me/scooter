@@ -12,7 +12,7 @@ from .auth import authenticate, authenticate_mcp
 from .authz import authorizer_from_settings
 from .db_unavailable import install_db_unavailable_handler
 from ..config import refresh_settings, settings
-from scooter_broker_lib.autolink import Link, create_link, list_links
+from scooter_broker_lib.autolink import Link, create_link, list_links, set_link_state
 from scooter_broker_lib.commit_identity import resolve as resolve_commit_identity
 from scooter_broker_lib.context import BrokerContext
 from scooter_broker_lib.owner import OwnerResolver, agent_host_fetcher
@@ -133,6 +133,26 @@ def create_app() -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         return {"status": "linked"}
+
+    # The agent records where a linked PR, MR or issue stands ("merged", "approved", …) once the
+    # forge's event reaches it; the boards read the state.
+    @app.patch("/link")
+    async def set_link_state_endpoint(
+        body: dict, identity: Identity = Depends(authenticate)
+    ) -> dict[str, str]:
+        url = (body.get("url") or "").strip()
+        state = (body.get("state") or "").strip()
+        if not url or not state:
+            raise HTTPException(status_code=400, detail="url and state are required")
+        try:
+            await set_link_state(settings.agent_host_url, identity.conversation_id, url, state)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"agent-host link failed: {e}") from e
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return {"status": "updated"}
 
     @app.get("/link")
     async def get_links(identity: Identity = Depends(authenticate)) -> dict[str, list]:

@@ -16,6 +16,7 @@ usage:
   agent-broker <path> [curl-args...]     # <path> is FIRST; curl flags come after
   agent-broker link add <url> [--type pr|mr|issue] [--source github|gitlab|jira] [--title TITLE]
   agent-broker link ls
+  agent-broker link set <url> <state>    # record where a linked PR/MR/issue stands: open|merged|closed|approved|...
 
 note: this is NOT plain curl — the broker path is a positional arg, not a URL.
   right:  agent-broker github/repos/o/r/issues -X POST -d '{...}'
@@ -76,8 +77,15 @@ if [ "$1" = "link" ]; then
             call GET /link | jq -r '
                 (.links // []) as $l
                 | if ($l | length) == 0 then "no links attached to this conversation"
-                  else ($l[] | "- \(.source // "?")/\(.resourceType // .type // "?")  \(.url)\(if .title then "  (\(.title))" else "" end)")
+                  else ($l[] | "- \(.source // "?")/\(.resourceType // .type // "?")  \(.url)\(if .title then "  (\(.title))" else "" end)\(if .state then "  [\(.state)]" else "" end)")
                   end'
+            ;;
+        set)
+            url="${1:-}"; state="${2:-}"
+            if [ -z "$url" ] || [ -z "$state" ]; then echo "agent-broker link set: <url> <state> required" >&2; exit 2; fi
+            body="$(jq -n --arg u "$url" --arg s "$state" '{url:$u, state:$s}')"
+            call PATCH /link -H "Content-Type: application/json" --fail-with-body -d "$body" >/dev/null
+            echo "$url -> $state"
             ;;
         add)
             url="${1:-}"; shift || true
@@ -103,7 +111,7 @@ if [ "$1" = "link" ]; then
         ""|-h|--help)
             usage; exit 2 ;;
         *)
-            echo "agent-broker link: unknown subcommand '$sub' (want: add | ls)" >&2; exit 2 ;;
+            echo "agent-broker link: unknown subcommand '$sub' (want: add | ls | set)" >&2; exit 2 ;;
     esac
     exit 0
 fi

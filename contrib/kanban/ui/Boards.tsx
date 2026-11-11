@@ -343,10 +343,13 @@ export interface Todo {
 }
 
 const REVIEWABLE = new Set(["pull_request", "merge_request"]);
+/** A link's state once the agent has recorded that the PR or MR is no longer open. */
+const RESOLVED = new Set(["merged", "closed"]);
 
 /**
  * What the board waits on the user for: approvals the agents asked for, then agents waiting on
- * an answer, then PRs and MRs on cards short of the last stage. Newest first within each.
+ * an answer, then the still-open PRs and MRs on cards short of the last stage. Newest first
+ * within each.
  */
 export function userTodos(
   convs: Array<Pick<ViewConversation, "id" | "title" | "lastActivityAt" | "dot" | "links">>,
@@ -365,6 +368,8 @@ export function userTodos(
     const seen = new Set<string>();
     return c.links.flatMap((l): Todo[] => {
       if (!REVIEWABLE.has(l.resourceType) || !l.url || seen.has(l.url)) return [];
+      // A merged or closed PR is nobody's to review; the card still counts for its open ones.
+      if (l.state && RESOLVED.has(l.state)) return [];
       seen.add(l.url);
       return [{ kind: "review", id: c.id, title: c.title, detail: l.title || l.url, url: l.url }];
     });

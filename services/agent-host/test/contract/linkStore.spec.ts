@@ -79,7 +79,7 @@ function fakeDb(): { db: NodePgDatabase; rows: Array<Record<string, unknown>> } 
 
       // drizzle asks for rowMode:"array", positional values in SELECT order.
       if (head.startsWith("SELECT")) {
-        // The reverse lookup selects conversation_id alone; the panel read selects five.
+        // The reverse lookup selects conversation_id alone; the panel read selects six.
         const reverse = /SELECT\s+"?RESOURCE_LINKS"?\."?CONVERSATION_ID/i.test(text)
           || /^SELECT\s+"?CONVERSATION_ID/i.test(head);
         if (reverse) {
@@ -95,8 +95,16 @@ function fakeDb(): { db: NodePgDatabase; rows: Array<Record<string, unknown>> } 
         const out = rows
           .filter((r) => r.conversation_id === conv)
           .sort((a, b) => (a.id as number) - (b.id as number))
-          .map((r) => [r.source, r.resource_type, r.url, r.title, r.ref]);
+          .map((r) => [r.source, r.resource_type, r.url, r.title, r.ref, r.state ?? null]);
         return { rows: out, rowCount: out.length };
+      }
+
+      // setLinkState: one column, scoped to the conversation's own row for the url.
+      if (head.startsWith("UPDATE")) {
+        const [state, conv, url] = values as [string, string, string];
+        const hits = rows.filter((r) => r.conversation_id === conv && r.url === url);
+        for (const r of hits) r.state = state;
+        return { rows: [], rowCount: hits.length };
       }
 
       if (head.startsWith("DELETE")) {
@@ -202,6 +210,18 @@ describe("linked resources in Postgres", () => {
     const listed = await store.listLinks(CONV);
     expect(listed).toHaveLength(1);
     expect(listed[0]).toMatchObject({ title: "C123 thread", ref });
+  });
+
+  it("setLinkState records where a link stands, only on the conversation that owns it", async () => {
+    const { db } = fakeDb();
+    const store = createPgLinkStore({ db });
+    await store.addLink(CONV, pr());
+
+    expect(await store.setLinkState(CONV, pr().url!, "merged")).toBe(true);
+    expect(await store.listLinks(CONV)).toMatchObject([{ url: pr().url, state: "merged" }]);
+    // Another conversation naming the same url moves nothing: the row is not its to move.
+    expect(await store.setLinkState("conv-2" as SessionId, pr().url!, "closed")).toBe(false);
+    expect(await store.listLinks(CONV)).toMatchObject([{ state: "merged" }]);
   });
 
   it("two Slack threads in ONE channel are two links, one per conversation", async () => {

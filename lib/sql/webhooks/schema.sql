@@ -49,6 +49,9 @@ CREATE TABLE "resource_links" (
   "url"             text NULL,
   "title"           text NULL,
   "ref"             jsonb NULL,
+  -- Where a PR, MR or issue stands, as the agent last recorded it (`agent-broker link set`):
+  -- "open", "merged", "closed", "approved", …. NULL until it says, which the UI reads as open.
+  "state"           character varying NULL,
   "created_at"      timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY ("id"),
   -- GLOBAL, not per-conversation: webhooks' get_conversation_for_resource routes an

@@ -199,6 +199,8 @@ export interface ConversationLink {
   url?: string;
   /** A short human label (e.g. "example-org/example-app #203", "#eng-help thread"). */
   title?: string;
+  /** Where the resource stands, as the agent last recorded it: "open", "merged", "closed", "approved", …. Unset until it says. */
+  state?: string;
   /**
    * Structured target identifiers the agent-tools use to infer where to respond, populated
    * by push_link: slack `{ channel, threadTs }`, gitlab `{ projectId, mrIid }` for a merge
@@ -288,6 +290,8 @@ export interface ConversationStore {
   addLink?(id: SessionId, link: ConversationLink): Promise<LinkClash | void>;
   /** The conversation's external resource links; optional. */
   listLinks?(id: SessionId): Promise<ConversationLink[]>;
+  /** Record where a linked resource stands on the conversation's link for `url`; false when it has none; optional. */
+  setLinkState?(id: SessionId, url: string, state: string): Promise<boolean>;
   /** Append a background-job record so list_background survives a restart; optional. */
   saveJob?(id: SessionId, job: JobRecord): Promise<void>;
   /** The conversation's background-job records (newest first; [] if none). */

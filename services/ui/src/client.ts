@@ -71,6 +71,7 @@ export interface ConversationLink {
   resourceType: string; // "pull_request" | "issue" | "thread" | …
   url?: string;
   title?: string;
+  state?: string;       // "open" | "merged" | "closed" | "approved" | …, once the agent has recorded it
 }
 
 /** A web service running in the conversation's sandbox, reverse-proxied at /c/<id>/<name>/. */

@@ -102,6 +102,12 @@ function fakeStore(events: AguiEvent[]): ConversationStore {
     async listLinks(id) {
       return links.get(id) ?? [];
     },
+    async setLinkState(id, url, state) {
+      const link = links.get(id)?.find((l) => l.url === url);
+      if (!link) return false;
+      link.state = state;
+      return true;
+    },
   };
 }
 
@@ -785,6 +791,22 @@ describe("management API", () => {
     const { json } = await call(api, "GET", "/conversations/c1/links");
     expect((json as any).links).toHaveLength(1);
     expect((json as any).links[0]).toMatchObject({ source: "github", resourceType: "pull_request" });
+  });
+
+  it("PATCH /conversations/:id/links records a link's state, and 404s a url the conversation has no link for", async () => {
+    const api = createManagementApi({ sessions: fakeSessions(), store: fakeStore([]), server: stubServer, answerInterrupt: async () => ({ ok: true }) });
+    const url = "https://github.com/example-org/example-app/pull/203";
+    await call(api, "POST", "/conversations/c1/links", { source: "github", resourceType: "pull_request", url });
+
+    const patched = await call(api, "PATCH", "/conversations/c1/links", { url, state: "merged" });
+    expect(patched.status).toBe(200);
+    const { json } = await call(api, "GET", "/conversations/c1/links");
+    expect((json as any).links[0]).toMatchObject({ url, state: "merged" });
+
+    const missing = await call(api, "PATCH", "/conversations/c1/links", { url: "https://github.com/example-org/example-app/pull/999", state: "merged" });
+    expect(missing.status).toBe(404);
+    const bare = await call(api, "PATCH", "/conversations/c1/links", { url });
+    expect(bare.status).toBe(400);
   });
 
   it("POST /conversations/:id/links answers 409 when another conversation owns the resource", async () => {

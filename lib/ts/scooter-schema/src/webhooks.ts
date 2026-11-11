@@ -33,6 +33,7 @@ export const resourceLinks = pgTable("resource_links", {
 	url: text(),
 	title: text(),
 	ref: jsonb(),
+	state: varchar(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	index("resource_links_conversation_id").using("btree", table.conversationId.asc().nullsLast().op("text_ops")),
