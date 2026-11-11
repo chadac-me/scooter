@@ -265,8 +265,8 @@ export function configFromEnv(): AgentHostConfig & AgentHostConfigExtra {
     commandTimeoutMs: Number(process.env.COMMAND_TIMEOUT_MS ?? 5 * 60 * 1000),
     // Dead-on-arrival run watchdog; FIRST_ACTIVITY_TIMEOUT_MS=0 disables.
     firstActivityTimeoutMs: Number(process.env.FIRST_ACTIVITY_TIMEOUT_MS ?? 60 * 1000),
-    // Sandbox cold-start budget; SETUP_TIMEOUT_MS is its old name.
-    sandboxWaitMs: Number(process.env.SANDBOX_WAIT_MS ?? process.env.SETUP_TIMEOUT_MS ?? 5 * 60 * 1000),
+    // Sandbox cold-start budget; SANDBOX_WAIT_MS=0 disables.
+    sandboxWaitMs: Number(process.env.SANDBOX_WAIT_MS ?? 5 * 60 * 1000),
     livenessProbeMs: Number(process.env.AGENT_LIVENESS_PROBE_MS ?? 30 * 1000),
     fakeSandbox,
     // The default model and the offered ids are derived from the catalog.
