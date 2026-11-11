@@ -147,11 +147,7 @@
     replicas = 2;
     statelessReplicas = 2;
     # Spread and a PDB keep these up through drains.
-    availability = {
-      deployments = [ "agent-host" "conversation-router" "agent-broker" "agent-scheduler" "agent-webhooks" "ui" ];
-      maxUnavailable = 1;
-      topologyKeys = [ "kubernetes.io/hostname" "topology.kubernetes.io/zone" ];
-    };
+    availability.maxUnavailable = 1;
     idleSuspendMs = 30 * 60 * 1000;
     sandboxUpdatePolicy = "deferred";
     retentionMaxAgeMs = 0;
