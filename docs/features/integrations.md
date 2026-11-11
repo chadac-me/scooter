@@ -78,4 +78,11 @@ command gate, the board first offers to **Ask the agent**: the card's agent is a
 the move itself, so its gates run as for its own moves, and the card moves once they pass. If
 they fail, the agent says why in the chat. **Move anyway** moves it now without them, and counts
 as the approval for that stage.
+
+Above the lanes, **For you** lists what the board is waiting on you for: approval gates
+an agent has asked you for, agents waiting on an answer to a question, and pull or merge
+requests linked to cards that haven't reached the last stage. Each item opens its card:
+an approval on its Details tab, the others on its chat, and a PR also links out to the PR.
+The list hides when nothing is waiting, and folds away with its toggle.
+
 Setup is in [Setting up contribs](../tutorial/contribs.md#kanban-boards).

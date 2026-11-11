@@ -8,7 +8,22 @@
 // conversation in the stage, then tells it as the user.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { DropdownMenu } from "radix-ui";
-import { ArrowLeft, ChevronLeft, ChevronRight, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, Tag as TagIcon, Trash2, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  GitPullRequest,
+  Lock,
+  MessageCircleQuestion,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  ShieldCheck,
+  Tag as TagIcon,
+  Trash2,
+  X,
+} from "lucide-react";
 import {
   Button,
   ChatPanel,
@@ -312,6 +327,48 @@ export function pageLane<C extends { id: string; lastActivityAt: number }>(
     .sort((a, b) => recent(b) - recent(a))
     .slice(0, limit)
     .sort((a, b) => position(a.id) - position(b.id) || b.lastActivityAt - a.lastActivityAt);
+}
+
+/** Something on the board waiting on the user. */
+export interface Todo {
+  kind: "approval" | "question" | "review";
+  /** The card's conversation id. */
+  id: string;
+  title: string;
+  /** The gates to approve, or the PR's title. */
+  detail: string;
+  /** The PR or MR to review. */
+  url?: string;
+}
+
+const REVIEWABLE = new Set(["pull_request", "merge_request"]);
+
+/**
+ * What the board waits on the user for: approvals the agents asked for, then agents waiting on
+ * an answer, then PRs and MRs on cards short of the last stage. Newest first within each.
+ */
+export function userTodos(
+  convs: Array<Pick<ViewConversation, "id" | "title" | "lastActivityAt" | "dot" | "links">>,
+  { done, awaiting }: { done(id: string): boolean; awaiting(id: string): string[] },
+): Todo[] {
+  const recent = [...convs].sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+  const approvals = recent.flatMap((c): Todo[] => {
+    const gates = awaiting(c.id);
+    return gates.length ? [{ kind: "approval", id: c.id, title: c.title, detail: gates.join(", ") }] : [];
+  });
+  const questions = recent.flatMap((c): Todo[] =>
+    c.dot === "question" ? [{ kind: "question", id: c.id, title: c.title, detail: "Waiting on your answer" }] : [],
+  );
+  const reviews = recent.flatMap((c): Todo[] => {
+    if (done(c.id)) return [];
+    const seen = new Set<string>();
+    return c.links.flatMap((l): Todo[] => {
+      if (!REVIEWABLE.has(l.resourceType) || !l.url || seen.has(l.url)) return [];
+      seen.add(l.url);
+      return [{ kind: "review", id: c.id, title: c.title, detail: l.title || l.url, url: l.url }];
+    });
+  });
+  return [...approvals, ...questions, ...reviews];
 }
 
 /** A position strictly between two neighbours; either may be missing. */
@@ -630,6 +687,8 @@ function Board({
 
   // Recency when first seen, so later activity doesn't reshuffle what shows.
   const rank = useRef(new Map<string, number>());
+  // Bumped when `rank` changes outside a card update, so the lanes re-page.
+  const [ranked, setRanked] = useState(0);
   for (const c of conversations) if (!rank.current.has(c.id)) rank.current.set(c.id, c.lastActivityAt);
   const [limits, setLimits] = useState<Record<string, number>>({});
   const more = (lane: string) => setLimits((l) => ({ ...l, [lane]: (l[lane] ?? LANE_PAGE) + LANE_PAGE }));
@@ -693,10 +752,14 @@ function Board({
       lanes[id] = pageLane(lane, limits[id] ?? LANE_PAGE, recent, pos);
     }
     return { lanes, counts };
-  }, [stages, conversations, cards, stageOf, limits]);
+  }, [stages, conversations, cards, stageOf, limits, ranked]);
 
-  // Read each shown card once; pushes re-read the cards they name.
-  const shown = useMemo(() => Object.values(lanes).flat().map((c) => c.id), [lanes]);
+  // Read each shown card once, and every card short of the last stage for its to-dos;
+  // pushes re-read the cards they name.
+  const shown = useMemo(
+    () => [...new Set([...Object.values(lanes).flat(), ...conversations.filter((c) => stageOf(c) !== last)].map((c) => c.id))],
+    [lanes, conversations, stageOf, last],
+  );
   const read = useRef(new Set<string>());
   const shownKey = shown.join(",");
   useEffect(() => {
@@ -725,6 +788,22 @@ function Board({
     if (showing && openId) setThreadInUrl(openId);
     else if (!panel) setThreadInUrl(null);
   }, [showing, openId, panel]);
+  const todos = useMemo(() => {
+    const done = new Set(conversations.filter((c) => stageOf(c) === last).map((c) => c.id));
+    const gateName = new Map(savedGates.map((g) => [g.id, g.name]));
+    return userTodos(conversations, {
+      done: (id) => done.has(id),
+      awaiting: (id) => (cards[id]?.awaiting ?? []).flatMap((g) => (gateName.has(g) ? [gateName.get(g)!] : [])),
+    });
+  }, [conversations, cards, savedGates, stageOf, last]);
+  const openTodo = (todo: Todo) => {
+    // Shown in its lane, however old it is, so the panel can open it.
+    rank.current.set(todo.id, Date.now());
+    setRanked((n) => n + 1);
+    openConversation(todo.id);
+    setTab(todo.kind === "approval" ? "details" : "chat");
+    setPanel(true);
+  };
   const step = (by: -1 | 1) => {
     const next = order[at + by];
     if (next) openConversation(next.id);
@@ -1025,6 +1104,7 @@ function Board({
           </DropdownMenu.Root>
         </div>
       </div>
+      {!editing && <Todos todos={todos} open={openTodo} />}
       {error && (
         <p role="alert" className="px-4 pt-2 text-xs text-destructive">
           {error}
@@ -1694,6 +1774,76 @@ function Board({
 }
 
 /** A move the user asked for that passes command gates, waiting on whether to run them. */
+const TODO_KIND: Record<Todo["kind"], { label: string; icon: typeof ShieldCheck; className: string }> = {
+  approval: { label: "Approve", icon: ShieldCheck, className: "text-amber-700 dark:text-amber-300" },
+  question: { label: "Answer", icon: MessageCircleQuestion, className: "text-red-700 dark:text-red-300" },
+  review: { label: "Review PR", icon: GitPullRequest, className: "text-blue-700 dark:text-blue-300" },
+};
+
+/** The board's to-dos for the user, above the lanes; each opens its card. */
+function Todos({ todos, open }: { todos: Todo[]; open(todo: Todo): void }) {
+  const [shown, setShown] = useState(true);
+  if (todos.length === 0) return null;
+  return (
+    <section data-testid="kanban-todos" aria-label="For you" className="border-b px-2 py-1.5 md:px-4">
+      <button
+        type="button"
+        data-testid="kanban-todos-toggle"
+        aria-expanded={shown}
+        onClick={() => setShown((s) => !s)}
+        className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+      >
+        <ChevronRight aria-hidden className={cn("size-3.5 transition-transform", shown && "rotate-90")} />
+        For you
+        <span data-testid="kanban-todos-count" className="rounded-full bg-primary/10 px-1.5 tabular-nums text-foreground">
+          {todos.length}
+        </span>
+      </button>
+      {shown && (
+        <ul className="mt-1.5 flex max-h-40 flex-wrap gap-1.5 overflow-y-auto pb-0.5">
+          {todos.map((t) => {
+            const kind = TODO_KIND[t.kind];
+            const Icon = kind.icon;
+            return (
+              <li
+                key={`${t.kind}:${t.id}:${t.url ?? ""}`}
+                data-testid="kanban-todo"
+                data-kind={t.kind}
+                data-conversation-id={t.id}
+                className="flex max-w-full items-center rounded-md border bg-background text-xs shadow-xs md:max-w-[28rem]"
+              >
+                <button
+                  type="button"
+                  onClick={() => open(t)}
+                  title={`${kind.label}: ${t.detail} (${t.title})`}
+                  className="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-start hover:bg-muted"
+                >
+                  <Icon aria-hidden className={cn("size-3.5 shrink-0", kind.className)} />
+                  <span className={cn("shrink-0 font-semibold", kind.className)}>{kind.label}</span>
+                  <span className="truncate font-medium">{t.title}</span>
+                  {t.kind !== "question" && <span className="truncate text-muted-foreground">· {t.detail}</span>}
+                </button>
+                {t.url && (
+                  <a
+                    href={t.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-testid="kanban-todo-link"
+                    aria-label={`Open ${t.detail}`}
+                    className="shrink-0 border-s px-1.5 py-1 text-muted-foreground hover:text-foreground"
+                  >
+                    <ExternalLink aria-hidden className="size-3.5" />
+                  </a>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 interface CheckAsk {
   id: string;
   column: string;
