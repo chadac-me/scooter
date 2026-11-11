@@ -211,8 +211,8 @@ export interface AgentHostConfig {
   /** Dead-on-arrival run watchdog (ms): a run with no ACP activity within this window ends
    *  with a RUN_ERROR; 0 = off. */
   firstActivityTimeoutMs: number;
-  // Pre-prompt setup budget in ms; 0 = off.
-  setupTimeoutMs: number;
+  // Sandbox cold-start budget (ms) for setup and pod waits; 0 = off.
+  sandboxWaitMs: number;
   /** Liveness probe cadence (ms) at which an active run checks the agent process is alive,
    *  force-terminating only when it has died; 0 = off. */
   livenessProbeMs: number;
@@ -265,8 +265,8 @@ export function configFromEnv(): AgentHostConfig & AgentHostConfigExtra {
     commandTimeoutMs: Number(process.env.COMMAND_TIMEOUT_MS ?? 5 * 60 * 1000),
     // Dead-on-arrival run watchdog; FIRST_ACTIVITY_TIMEOUT_MS=0 disables.
     firstActivityTimeoutMs: Number(process.env.FIRST_ACTIVITY_TIMEOUT_MS ?? 60 * 1000),
-    // Covers a sandbox cold start; SETUP_TIMEOUT_MS=0 disables.
-    setupTimeoutMs: Number(process.env.SETUP_TIMEOUT_MS ?? 5 * 60 * 1000),
+    // Sandbox cold-start budget; SETUP_TIMEOUT_MS is its old name.
+    sandboxWaitMs: Number(process.env.SANDBOX_WAIT_MS ?? process.env.SETUP_TIMEOUT_MS ?? 5 * 60 * 1000),
     livenessProbeMs: Number(process.env.AGENT_LIVENESS_PROBE_MS ?? 30 * 1000),
     fakeSandbox,
     // The default model and the offered ids are derived from the catalog.
@@ -1212,7 +1212,7 @@ export async function main(
   };
 
   // Every pod lookup waits out a cold start as long as setup does.
-  const podWaitMs = config.setupTimeoutMs > 0 ? config.setupTimeoutMs : 90_000;
+  const podWaitMs = config.sandboxWaitMs > 0 ? config.sandboxWaitMs : 90_000;
 
   // The fake sandbox runs no providers.
   const skillProviders = config.fakeSandbox ? [] : (config.skillProviders ?? []);
@@ -2464,7 +2464,7 @@ export async function main(
         // would read a run stranded by its previous process as its own.
         generation: () => ownership?.guard.observedGeneration?.(conversationId as SessionId),
       firstActivityTimeoutMs: config.firstActivityTimeoutMs,
-      setupTimeoutMs: config.setupTimeoutMs,
+      setupTimeoutMs: config.sandboxWaitMs,
       livenessProbeMs: config.livenessProbeMs,
       // Transcript recorder for the test harness, off unless TRANSCRIPT_RECORD_DIR is set.
       recorder: transcriptRecorder,
