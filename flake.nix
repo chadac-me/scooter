@@ -220,8 +220,8 @@
             # marimo ships as a contrib: its service, and marimo-pair's directory for the agent's shell.
             assert builtins.elem "contrib/marimo/sandbox.nix" (derive [ ]).treeRelative;
             assert shipped.nixos.config.webServices.marimo.enable;
-            # marimo's settings are on the workspace PVC, beside the agent's own ~/.config.
-            assert marimoCfg.environment.XDG_CONFIG_HOME == "/workspace/.config";
+            # marimo shares the agent's HOME, so its ~/.config is on the workspace PVC.
+            assert shipped.nixos.config.systemd.services.webservice-marimo.environment.HOME == "/workspace";
             # Its rules are printed whenever the agent starts or checks it (scooter-service).
             assert lib.hasInfix "ctx.packages.add()" notebookCfg.hint;
             assert shipped.nixos.config.environment.etc ? "scooter/skills/marimo-pair";
