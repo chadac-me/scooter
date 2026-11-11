@@ -626,7 +626,7 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     expect(kanban.cardReads).toEqual([]);
   });
 
-  test("For you lists the approvals and open PRs waiting on the user, and each opens its card", async ({ chat, page, request, baseURL }) => {
+  test("the For you filter shows only the cards waiting on the user, and an approval opens on Details", async ({ chat, page, request, baseURL }) => {
     const base = baseURL ?? "http://localhost:5173";
     const kanban = await serveKanban(page, request, base);
     const board = await kanban.board(`e2e-board-todos-${Date.now()}`);
@@ -654,29 +654,34 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     kanban.awaiting[open] = [approvalGate(review).id];
 
     await page.goto(`/boards/${board.folder}`);
-    const todos = page.getByTestId("kanban-todos");
-    const todo = todos.getByTestId("kanban-todo");
-    // The approval comes first; the shipped card's PR is done, so it isn't listed.
-    await expect(todo).toHaveCount(2, { timeout: 30_000 });
-    await expect(todos.getByTestId("kanban-todos-count")).toHaveText("2");
-    await expect(todo.nth(0)).toHaveAttribute("data-kind", "approval");
-    await expect(todo.nth(0)).toContainText("Design OK");
-    await expect(todo.nth(1)).toHaveAttribute("data-kind", "review");
-    await expect(todo.nth(1)).toContainText("example-app #1");
-    await expect(todo.nth(1).getByTestId("kanban-todo-link")).toHaveAttribute("href", "https://github.com/example-org/example-app/pull/1");
-    await expect(todos.locator(`[data-conversation-id="${shipped}"]`)).toHaveCount(0);
+    const card = (id: string) => page.locator(`[data-testid="kanban-card"][data-conversation-id="${id}"]`);
+    const filter = page.getByTestId("kanban-for-you");
+    // One card waits on an approval and a PR; the shipped card's PR is done, so it doesn't count.
+    await expect(filter.getByTestId("kanban-for-you-count")).toHaveText("1", { timeout: 30_000 });
+    await expect(filter).toHaveAttribute("aria-pressed", "false");
+    await expect(card(shipped)).toBeVisible();
 
-    // An approval opens the card's Details, where it is answered; a PR opens its chat.
-    await todo.nth(0).getByRole("button").click();
+    await filter.click();
+    await expect(filter).toHaveAttribute("aria-pressed", "true");
+    await expect(card(open)).toBeVisible();
+    await expect(card(shipped)).toHaveCount(0);
+    await expect(page.getByTestId("kanban-card")).toHaveCount(1);
+    await expect(card(open).getByTestId("kanban-card-awaiting")).toBeVisible();
+    await expect(card(open).getByTestId("kanban-card-review")).toHaveAttribute("href", "https://github.com/example-org/example-app/pull/1");
+
+    // A card waiting on an approval opens on its Details, where it is answered.
+    await card(open).locator("button").first().click();
     await expect(page.getByTestId("kanban-chat")).toBeVisible();
     await expect(page.getByTestId("kanban-tab-details")).toHaveAttribute("aria-selected", "true");
     await expect.poll(() => threadId(page)).toBe(open);
-    await todo.nth(1).getByRole("button").click();
-    await expect(page.getByTestId("kanban-tab-chat")).toHaveAttribute("aria-selected", "true");
 
-    // The list folds away.
-    await todos.getByTestId("kanban-todos-toggle").click();
-    await expect(todo).toHaveCount(0);
+    // The filter is kept for the board, and turns off again.
+    await page.reload();
+    await expect(page.getByTestId("kanban-for-you")).toHaveAttribute("aria-pressed", "true", { timeout: 30_000 });
+    await expect(card(open)).toBeVisible();
+    await expect(card(shipped)).toHaveCount(0);
+    await page.getByTestId("kanban-for-you").click();
+    await expect(card(shipped)).toBeVisible();
   });
 
   test("the Details tab edits a card's priority, description and blockers, and keeps the chat", async ({ chat, page, request, baseURL }) => {

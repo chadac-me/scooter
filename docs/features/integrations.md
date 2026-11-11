@@ -79,10 +79,10 @@ the move itself, so its gates run as for its own moves, and the card moves once 
 they fail, the agent says why in the chat. **Move anyway** moves it now without them, and counts
 as the approval for that stage.
 
-Above the lanes, **For you** lists what the board is waiting on you for: approval gates
-an agent has asked you for, agents waiting on an answer to a question, and pull or merge
-requests linked to cards that haven't reached the last stage. Each item opens its card:
-an approval on its Details tab, the others on its chat, and a PR also links out to the PR.
-The list hides when nothing is waiting, and folds away with its toggle.
+**For you**, in the board's header, filters the lanes to the cards waiting on you: an approval
+gate an agent has asked you for, an agent waiting on an answer to a question, or a pull or
+merge request linked to a card that hasn't reached the last stage. Its count says how many
+cards that is. Under the filter each card says what it waits on, a PR links out to the PR, and a
+card waiting on an approval opens on its Details tab. The board remembers the filter.
 
 Setup is in [Setting up contribs](../tutorial/contribs.md#kanban-boards).

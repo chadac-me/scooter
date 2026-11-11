@@ -14,6 +14,7 @@ import {
   ChevronRight,
   ExternalLink,
   GitPullRequest,
+  Inbox,
   Lock,
   MessageCircleQuestion,
   MoreHorizontal,
@@ -687,8 +688,6 @@ function Board({
 
   // Recency when first seen, so later activity doesn't reshuffle what shows.
   const rank = useRef(new Map<string, number>());
-  // Bumped when `rank` changes outside a card update, so the lanes re-page.
-  const [ranked, setRanked] = useState(0);
   for (const c of conversations) if (!rank.current.has(c.id)) rank.current.set(c.id, c.lastActivityAt);
   const [limits, setLimits] = useState<Record<string, number>>({});
   const more = (lane: string) => setLimits((l) => ({ ...l, [lane]: (l[lane] ?? LANE_PAGE) + LANE_PAGE }));
@@ -739,20 +738,43 @@ function Board({
     },
     [pending, stages, first],
   );
-  // Each lane's cards, the most recent LANE_PAGE (or more once scrolled) shown.
+  const todos = useMemo(() => {
+    const done = new Set(conversations.filter((c) => stageOf(c) === last).map((c) => c.id));
+    const gateName = new Map(savedGates.map((g) => [g.id, g.name]));
+    return userTodos(conversations, {
+      done: (id) => done.has(id),
+      awaiting: (id) => (cards[id]?.awaiting ?? []).flatMap((g) => (gateName.has(g) ? [gateName.get(g)!] : [])),
+    });
+  }, [conversations, cards, savedGates, stageOf, last]);
+  const todosOf = useMemo(() => {
+    const by = new Map<string, Todo[]>();
+    for (const t of todos) by.set(t.id, [...(by.get(t.id) ?? []), t]);
+    return by;
+  }, [todos]);
+  // The For you filter, kept per board; editing shows every card.
+  const forYouKey = `kanban.forYou.${folder.id}`;
+  const [forYou, setForYou] = useState(() => readFlag(forYouKey));
+  useEffect(() => setForYou(readFlag(forYouKey)), [forYouKey]);
+  const toggleForYou = () => {
+    writeFlag(forYouKey, !forYou);
+    setForYou(!forYou);
+  };
+  const filtering = forYou && !editing;
+  // Each lane's cards, the most recent LANE_PAGE (or more once scrolled) shown; under the
+  // For you filter, every card waiting on the user and nothing else.
   const { lanes, counts } = useMemo(() => {
     const all: Record<string, ViewConversation[]> = Object.fromEntries(stages.map((s) => [s.id, []]));
-    for (const conv of conversations) all[stageOf(conv)]?.push(conv);
+    for (const conv of conversations) if (!filtering || todosOf.has(conv.id)) all[stageOf(conv)]?.push(conv);
     const recent = (c: ViewConversation) => rank.current.get(c.id) ?? c.lastActivityAt;
     const pos = (id: string) => cards[id]?.card?.position ?? 0;
     const lanes: Record<string, ViewConversation[]> = {};
     const counts: Record<string, number> = {};
     for (const [id, lane] of Object.entries(all)) {
       counts[id] = lane.length;
-      lanes[id] = pageLane(lane, limits[id] ?? LANE_PAGE, recent, pos);
+      lanes[id] = pageLane(lane, filtering ? lane.length : (limits[id] ?? LANE_PAGE), recent, pos);
     }
     return { lanes, counts };
-  }, [stages, conversations, cards, stageOf, limits, ranked]);
+  }, [stages, conversations, cards, stageOf, limits, filtering, todosOf]);
 
   // Read each shown card once, and every card short of the last stage for its to-dos;
   // pushes re-read the cards they name.
@@ -788,20 +810,10 @@ function Board({
     if (showing && openId) setThreadInUrl(openId);
     else if (!panel) setThreadInUrl(null);
   }, [showing, openId, panel]);
-  const todos = useMemo(() => {
-    const done = new Set(conversations.filter((c) => stageOf(c) === last).map((c) => c.id));
-    const gateName = new Map(savedGates.map((g) => [g.id, g.name]));
-    return userTodos(conversations, {
-      done: (id) => done.has(id),
-      awaiting: (id) => (cards[id]?.awaiting ?? []).flatMap((g) => (gateName.has(g) ? [gateName.get(g)!] : [])),
-    });
-  }, [conversations, cards, savedGates, stageOf, last]);
-  const openTodo = (todo: Todo) => {
-    // Shown in its lane, however old it is, so the panel can open it.
-    rank.current.set(todo.id, Date.now());
-    setRanked((n) => n + 1);
-    openConversation(todo.id);
-    setTab(todo.kind === "approval" ? "details" : "chat");
+  // A card opens its chat, or its Details when the filter shows it for an approval.
+  const openCard = (id: string) => {
+    openConversation(id);
+    if (filtering && todosOf.get(id)?.some((t) => t.kind === "approval")) setTab("details");
     setPanel(true);
   };
   const step = (by: -1 | 1) => {
@@ -1028,6 +1040,25 @@ function Board({
           ))}
         </select>
         <div className="ms-auto flex items-center gap-1 md:gap-2">
+          {!editing && (
+            <Button
+              size="sm"
+              variant={forYou ? "secondary" : "ghost"}
+              data-testid="kanban-for-you"
+              aria-pressed={forYou}
+              aria-label="For you"
+              title="Show only the cards waiting on you: approvals, questions and open PRs"
+              onClick={toggleForYou}
+            >
+              <Inbox aria-hidden />
+              <span className="max-md:hidden">For you</span>
+              {todosOf.size > 0 && (
+                <span data-testid="kanban-for-you-count" className="rounded-full bg-primary/10 px-1.5 text-xs tabular-nums">
+                  {todosOf.size}
+                </span>
+              )}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -1104,7 +1135,11 @@ function Board({
           </DropdownMenu.Root>
         </div>
       </div>
-      {!editing && <Todos todos={todos} open={openTodo} />}
+      {filtering && todos.length === 0 && (
+        <p data-testid="kanban-for-you-empty" className="px-4 pt-2 text-xs text-muted-foreground">
+          Nothing on this board is waiting on you.
+        </p>
+      )}
       {error && (
         <p role="alert" className="px-4 pt-2 text-xs text-destructive">
           {error}
@@ -1506,8 +1541,7 @@ function Board({
                       // Card opens its chat; inner controls keep their clicks.
                       onClick={(e) => {
                         if (tagging === conv.id || (e.target as HTMLElement).closest("button, input, a, [role=listbox]")) return;
-                        openConversation(conv.id);
-                        setPanel(true);
+                        openCard(conv.id);
                       }}
                       onDragStart={(e) => {
                         e.dataTransfer.setData(CARD_MIME, conv.id);
@@ -1535,10 +1569,7 @@ function Board({
                       <div className="flex items-start gap-1">
                         <button
                           type="button"
-                          onClick={() => {
-                            openConversation(conv.id);
-                            setPanel(true);
-                          }}
+                          onClick={() => openCard(conv.id)}
                           className="flex min-w-0 flex-1 items-start gap-2 text-start"
                           title={conv.title}
                         >
@@ -1555,6 +1586,15 @@ function Board({
                               className="inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-500/15 px-1 text-[10px] font-semibold uppercase leading-4 text-amber-700 dark:text-amber-300"
                             >
                               <ShieldCheck aria-hidden className="size-3" /> Approve
+                            </span>
+                          )}
+                          {filtering && conv.dot === "question" && (
+                            <span
+                              data-testid="kanban-card-question"
+                              title="Waiting on your answer"
+                              className="inline-flex shrink-0 items-center gap-0.5 rounded bg-red-500/15 px-1 text-[10px] font-semibold uppercase leading-4 text-red-700 dark:text-red-300"
+                            >
+                              <MessageCircleQuestion aria-hidden className="size-3" /> Answer
                             </span>
                           )}
                         </button>
@@ -1594,6 +1634,7 @@ function Board({
                           close={() => setTagging(null)}
                         />
                       )}
+                      {filtering && <ReviewLinks todos={todosOf.get(conv.id) ?? []} />}
                       {card?.note && (
                         <p data-testid="kanban-card-note" className="mt-1 line-clamp-3 text-xs text-muted-foreground">
                           {card.note}
@@ -1773,77 +1814,50 @@ function Board({
   );
 }
 
-/** A move the user asked for that passes command gates, waiting on whether to run them. */
-const TODO_KIND: Record<Todo["kind"], { label: string; icon: typeof ShieldCheck; className: string }> = {
-  approval: { label: "Approve", icon: ShieldCheck, className: "text-amber-700 dark:text-amber-300" },
-  question: { label: "Answer", icon: MessageCircleQuestion, className: "text-red-700 dark:text-red-300" },
-  review: { label: "Review PR", icon: GitPullRequest, className: "text-blue-700 dark:text-blue-300" },
-};
-
-/** The board's to-dos for the user, above the lanes; each opens its card. */
-function Todos({ todos, open }: { todos: Todo[]; open(todo: Todo): void }) {
-  const [shown, setShown] = useState(true);
-  if (todos.length === 0) return null;
+/** A card's PRs and MRs to review, each linking out. */
+function ReviewLinks({ todos }: { todos: Todo[] }) {
+  const reviews = todos.filter((t) => t.kind === "review");
+  if (reviews.length === 0) return null;
   return (
-    <section data-testid="kanban-todos" aria-label="For you" className="border-b px-2 py-1.5 md:px-4">
-      <button
-        type="button"
-        data-testid="kanban-todos-toggle"
-        aria-expanded={shown}
-        onClick={() => setShown((s) => !s)}
-        className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
-      >
-        <ChevronRight aria-hidden className={cn("size-3.5 transition-transform", shown && "rotate-90")} />
-        For you
-        <span data-testid="kanban-todos-count" className="rounded-full bg-primary/10 px-1.5 tabular-nums text-foreground">
-          {todos.length}
-        </span>
-      </button>
-      {shown && (
-        <ul className="mt-1.5 flex max-h-40 flex-wrap gap-1.5 overflow-y-auto pb-0.5">
-          {todos.map((t) => {
-            const kind = TODO_KIND[t.kind];
-            const Icon = kind.icon;
-            return (
-              <li
-                key={`${t.kind}:${t.id}:${t.url ?? ""}`}
-                data-testid="kanban-todo"
-                data-kind={t.kind}
-                data-conversation-id={t.id}
-                className="flex max-w-full items-center rounded-md border bg-background text-xs shadow-xs md:max-w-[28rem]"
-              >
-                <button
-                  type="button"
-                  onClick={() => open(t)}
-                  title={`${kind.label}: ${t.detail} (${t.title})`}
-                  className="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-start hover:bg-muted"
-                >
-                  <Icon aria-hidden className={cn("size-3.5 shrink-0", kind.className)} />
-                  <span className={cn("shrink-0 font-semibold", kind.className)}>{kind.label}</span>
-                  <span className="truncate font-medium">{t.title}</span>
-                  {t.kind !== "question" && <span className="truncate text-muted-foreground">· {t.detail}</span>}
-                </button>
-                {t.url && (
-                  <a
-                    href={t.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    data-testid="kanban-todo-link"
-                    aria-label={`Open ${t.detail}`}
-                    className="shrink-0 border-s px-1.5 py-1 text-muted-foreground hover:text-foreground"
-                  >
-                    <ExternalLink aria-hidden className="size-3.5" />
-                  </a>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
+    <ul data-testid="kanban-card-reviews" aria-label="To review" className="mt-1 flex flex-col gap-0.5">
+      {reviews.map((t) => (
+        <li key={t.url} className="min-w-0">
+          <a
+            href={t.url}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="kanban-card-review"
+            className="inline-flex max-w-full items-center gap-1 text-xs font-medium text-blue-700 hover:underline dark:text-blue-300"
+          >
+            <GitPullRequest aria-hidden className="size-3 shrink-0" />
+            <span className="truncate">Review {t.detail}</span>
+            <ExternalLink aria-hidden className="size-3 shrink-0" />
+          </a>
+        </li>
+      ))}
+    </ul>
   );
 }
 
+/** A saved on/off setting; off when storage is unavailable. */
+function readFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeFlag(key: string, on: boolean) {
+  try {
+    if (on) localStorage.setItem(key, "1");
+    else localStorage.removeItem(key);
+  } catch {
+    // Not kept past this page.
+  }
+}
+
+/** A move the user asked for that passes command gates, waiting on whether to run them. */
 interface CheckAsk {
   id: string;
   column: string;
