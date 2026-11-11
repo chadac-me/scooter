@@ -76,9 +76,14 @@ export const ToolCallView: ToolCallMessagePartComponent = (props) => {
     </div>
   );
 
+  // A shell's output keeps its lines; a post's status is one line of prose.
   const result = resultText && (
     <div
-      className={"border-t px-3 py-1.5 text-xs " + (failed ? "text-destructive" : "text-muted-foreground")}
+      className={cn(
+        "border-t px-3 py-1.5 text-xs",
+        failed ? "text-destructive" : "text-muted-foreground",
+        isShell && "max-h-96 overflow-auto font-mono whitespace-pre-wrap",
+      )}
       data-testid="provider-tool-result"
     >
       {resultText}
