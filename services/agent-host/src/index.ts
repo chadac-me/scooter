@@ -1211,13 +1211,16 @@ export async function main(
     return rows.map((r) => personalSkill({ name: r.name, description: r.description, body: r.body }));
   };
 
+  // Every pod lookup waits out a cold start as long as setup does.
+  const podWaitMs = config.setupTimeoutMs > 0 ? config.setupTimeoutMs : 90_000;
+
   // The fake sandbox runs no providers.
   const skillProviders = config.fakeSandbox ? [] : (config.skillProviders ?? []);
   hostLog.info("skill providers", { providers: skillProviders.map((p) => p.id) });
   const skillProviderRegistry = createSkillProviderRegistry({
     providers: skillProviders,
     sandboxFor: (id) => sessions.get(id)?.sandbox,
-    connect: (ref) => connectSandbox(ref),
+    connect: (ref) => connectSandbox(ref, { readyDeadlineMs: podWaitMs }),
   });
 
   const lastDropped = new Map<string, string>();
@@ -1251,7 +1254,7 @@ export async function main(
   // A conversation's pod-exec client, resuming a suspended sandbox on first use.
   const sandboxClientFor = (id: string) => {
     const sb = sessions.get(id as SessionId)!.sandbox;
-    return deferredSandboxApi(sb, healingResume(id as SessionId, sb));
+    return deferredSandboxApi(sb, podWaitMs, healingResume(id as SessionId, sb));
   };
   const jobsEnabled = process.env.AGENT_BACKGROUND_JOBS !== "0" && !config.fakeSandbox && !!jobRegistry;
   const jobManager = jobsEnabled
@@ -1602,7 +1605,7 @@ export async function main(
     ? undefined
     : createMcpServerRegistry({
         sandboxFor: (id) => sessions.get(id)?.sandbox,
-        connect: (ref) => connectSandbox(ref),
+        connect: (ref) => connectSandbox(ref, { readyDeadlineMs: podWaitMs }),
       });
   const sandboxMcpProxy =
     sandboxMcpServers && mcpEndpoint && convTokenSecret
@@ -1838,7 +1841,7 @@ export async function main(
     ? undefined
     : createWebServiceRegistry({
         sandboxFor: (id) => sessions.get(id)?.sandbox,
-        connect: (ref) => connectSandbox(ref),
+        connect: (ref) => connectSandbox(ref, { readyDeadlineMs: podWaitMs }),
       });
 
   // Management REST API (conversation CRUD, lifecycle, history), mounted on the same server
@@ -2202,7 +2205,7 @@ export async function main(
     const exec = createSandboxExecBackend(
       config.fakeSandbox
         ? createLocalSandboxApiClient()
-        : deferredSandboxApi(sandbox, healingResume(conversationId as SessionId, sandbox)),
+        : deferredSandboxApi(sandbox, podWaitMs, healingResume(conversationId as SessionId, sandbox)),
       { commandTimeoutMs: config.commandTimeoutMs },
     );
     const hookRunner = hookRunnerFor(conversationId, exec, sandbox, owner);
@@ -2524,10 +2527,10 @@ export async function main(
 
 /** A SandboxApiClient that resolves the real pod-exec client on first use, since
  *  connectSandbox is async and the ExecBackend is sync-constructed. */
-function deferredSandboxApi(sandbox: SandboxRef, ensureRunning?: () => Promise<void>) {
+function deferredSandboxApi(sandbox: SandboxRef, readyDeadlineMs: number, ensureRunning?: () => Promise<void>) {
   // Concurrent first tool calls share one connect, and ensureRunning resumes a sandbox
   // idle-suspended out from under a live bridge when connect finds no pod.
-  const ensure = createEpochConnector(() => connectSandbox(sandbox, { ensureRunning }), () => sandboxEpoch(sandbox));
+  const ensure = createEpochConnector(() => connectSandbox(sandbox, { ensureRunning, readyDeadlineMs }), () => sandboxEpoch(sandbox));
   return {
     mode: "k8s-exec" as const,
     // Set only while a readiness poll is waiting on this sandbox's pod.
