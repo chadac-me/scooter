@@ -29,6 +29,8 @@ MAX_DESCRIPTION_CHARS = 10_000
 PRIORITIES = ("none", "low", "medium", "high", "urgent")
 # What a gate checks: the user approves, or a script passes in the card's sandbox.
 GATE_KINDS = ("approval", "command")
+# When a gate applies: as a card leaves its stage, or as it enters it.
+GATE_DIRECTIONS = ("leave", "enter")
 MAX_GATE_DETAIL_CHARS = 4_000
 
 
@@ -113,6 +115,7 @@ class _Gate(_Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     board_id: Mapped[str] = mapped_column(String, index=True)
     stage_id: Mapped[str] = mapped_column(String)
+    direction: Mapped[str] = mapped_column(String, default="leave")
     kind: Mapped[str] = mapped_column(String)
     name: Mapped[str] = mapped_column(String)
     command: Mapped[str] = mapped_column(Text, default="")
@@ -204,7 +207,7 @@ class Skill:
 
 @dataclass(frozen=True)
 class Gate:
-    """A check a card must pass before the agent moves it on from `stage`."""
+    """A check a card must pass as the agent moves it out of `stage` (`leave`) or into it (`enter`)."""
 
     id: str
     stage: str
@@ -215,6 +218,7 @@ class Gate:
     workdir: str = ""
     clean: bool = True
     timeout_seconds: int = 600
+    direction: str = "leave"
 
     def payload(self) -> dict:
         return asdict(self)
@@ -477,10 +481,12 @@ class KanbanStore:
             if row is None:
                 row = _Gate(id=str(uuid.uuid4()), board_id=board_id)
                 s.add(row)
-            elif (row.kind, row.command, row.workdir, row.clean) != (g.kind, g.command, g.workdir, g.clean):
-                # What passed before is no longer what the gate checks.
+            elif (row.kind, row.command, row.workdir, row.clean, row.stage_id, row.direction) != (
+                g.kind, g.command, g.workdir, g.clean, g.stage, g.direction
+            ):
+                # What passed before is no longer what the gate checks, or where.
                 await s.execute(delete(_GateResult).where(_GateResult.gate_id == row.id))
-            row.stage_id, row.kind, row.name, row.position = g.stage, g.kind, g.name, g.position
+            row.stage_id, row.direction, row.kind, row.name, row.position = g.stage, g.direction, g.kind, g.name, g.position
             row.command, row.workdir, row.clean, row.timeout_seconds = g.command, g.workdir, g.clean, g.timeout_seconds
 
     async def save_skills(self, board_id: str, skills: list[Skill]) -> None:
@@ -714,7 +720,7 @@ def _gate(row: _Gate) -> Gate:
     return Gate(
         id=row.id, stage=row.stage_id, kind=row.kind, name=row.name, position=row.position,
         command=row.command or "", workdir=row.workdir or "", clean=bool(row.clean),
-        timeout_seconds=row.timeout_seconds or 600,
+        timeout_seconds=row.timeout_seconds or 600, direction=row.direction or "leave",
     )
 
 

@@ -19,7 +19,9 @@ import httpx
 from .filed import Filings
 from .folders import Conversation, FolderError, Folders
 from .messages import Send
-from .store import GATE_KINDS, PRIORITIES, Card, Details, Gate, GateResult, KanbanStore, Place, Skill, Stage, Tag
+from .store import (
+    GATE_DIRECTIONS, GATE_KINDS, PRIORITIES, Card, Details, Gate, GateResult, KanbanStore, Place, Skill, Stage, Tag,
+)
 
 MAX_TAG_CHARS = 24
 MAX_BOARD_TAGS = 20
@@ -107,11 +109,12 @@ def skill_file(skill: Skill) -> dict:
     return {"name": name, "content": content}
 
 
-def gate_line(g: Gate, r: GateResult | None) -> str:
-    """One gate as the agent reads it, e.g. `Unit tests` (command: just test) — passed on abc123."""
+def gate_line(g: Gate, r: GateResult | None, stage: str = "") -> str:
+    """One gate as the agent reads it, e.g. `"Unit tests" (command `just test`, leaving Design) — passed on abc123`."""
     what = f"command `{g.command}`" + (f" in {g.workdir}" if g.workdir else "") if g.kind == "command" else "the user's approval"
+    when = f", {'entering' if g.direction == 'enter' else 'leaving'} {stage}" if stage else ""
     state = f" — {r.state}" + (f" on {r.commit[:12]}" if r.commit else "") if r else ""
-    return f'"{g.name}" ({what}){state}'
+    return f'"{g.name}" ({what}{when}){state}'
 
 
 def parse_priority(name: str) -> int:
@@ -390,6 +393,8 @@ class Boards:
                 raise BoardError(400, "a gate must be on one of this board's saved stages")
             if g.kind not in GATE_KINDS:
                 raise BoardError(400, f"a gate's kind is one of {', '.join(GATE_KINDS)}")
+            if g.direction not in GATE_DIRECTIONS:
+                raise BoardError(400, f"a gate's direction is one of {', '.join(GATE_DIRECTIONS)}")
             name = g.name.strip()
             if not name:
                 raise BoardError(400, "a gate needs a name")
@@ -483,8 +488,7 @@ class Boards:
                     f"or earlier until they reach \"{last.name}\". Do what you can here, then end your turn: "
                     "a message comes when they are done",
                 )
-        crossed = self._crossed(where.stages, where.stage, to)
-        gates = [g for g in await self.store.gates(board) if g.stage in crossed]
+        gates = self._owed(where.stages, where.stage, to, await self.store.gates(board))
         if gates:
             await self._pass_gates(key, where, gates)
         if to.folder != where.folder:
@@ -550,10 +554,19 @@ class Boards:
         return to
 
     @staticmethod
-    def _crossed(stages: list[Stage], at: Stage, to: Stage) -> set[str]:
-        """The stages a move from `at` to `to` leaves, whose gates it must pass; none going back."""
+    def _owed(stages: list[Stage], at: Stage, to: Stage, gates: list[Gate]) -> list[Gate]:
+        """The gates a move from `at` to `to` must pass: for leaving each stage it leaves and
+        entering each it enters, the stages it jumps over included; none going back."""
         i, j = stages.index(at), stages.index(to)
-        return {s.folder for s in stages[i:j]}
+        left = {s.folder for s in stages[i:j]}
+        entered = {s.folder for s in stages[i + 1 : j + 1]}
+        return [g for g in gates if g.stage in (entered if g.direction == "enter" else left)]
+
+    @staticmethod
+    def _in_order(stages: list[Stage], gates: list[Gate]) -> list[Gate]:
+        """Gates in the order a move meets them: leaving a stage, then entering the next."""
+        order = {s.folder: i for i, s in enumerate(stages)}
+        return sorted(gates, key=lambda g: (order.get(g.stage, 0) * 2 - (g.direction == "enter"), g.position))
 
     async def _pass_gates(self, key: str, where: Located, gates: list[Gate]) -> None:
         """Raise the BoardError holding the card back, unless it has passed every gate.
@@ -564,8 +577,7 @@ class Boards:
         """
         results = await self.store.gate_results(key)
         now = datetime.now(timezone.utc)
-        order = {s.folder: i for i, s in enumerate(where.stages)}
-        gates = sorted(gates, key=lambda g: (g.kind != "command", order.get(g.stage, 0), g.position))
+        gates = sorted(self._in_order(where.stages, gates), key=lambda g: g.kind != "command")
         problems: list[str] = []
         for g in (g for g in gates if g.kind == "command"):
             r = results.get(g.id)
@@ -611,9 +623,14 @@ class Boards:
                 "or reject it",
             )
 
-    async def gate_view(self, key: str, board: str, stage: Stage) -> list[tuple[Gate, GateResult | None]]:
-        """The gates on the card's stage, each with where the card stands on it."""
-        gates = [g for g in await self.store.gates(board) if g.stage == stage.folder]
+    async def gate_view(
+        self, key: str, board: str, stages: list[Stage], stage: Stage
+    ) -> list[tuple[Gate, GateResult | None]]:
+        """The gates the card's move to the next stage owes, each with where the card stands on it."""
+        i = stages.index(stage)
+        if i + 1 >= len(stages):
+            return []
+        gates = self._in_order(stages, self._owed(stages, stage, stages[i + 1], await self.store.gates(board)))
         results = await self.store.gate_results(key) if gates else {}
         return [(g, results.get(g.id)) for g in gates]
 
@@ -627,15 +644,13 @@ class Boards:
         to = next((s for s in where.stages if want in (s.name.casefold(), s.folder.casefold())), None)
         if to is None:
             return where, []
-        crossed = self._crossed(where.stages, where.stage, to)
-        if not crossed:
+        if where.stages.index(to) <= where.stages.index(where.stage):
             return where, []
         owner, board = where.conversation.owner, where.place.board
         if any(not b.done for b in await self.blockers(key, owner, board)):
             return where, []
-        order = {s.folder: i for i, s in enumerate(where.stages)}
-        gates = [g for g in await self.store.gates(board) if g.kind == "command" and g.stage in crossed]
-        return where, sorted(gates, key=lambda g: (order.get(g.stage, 0), g.position))
+        owed = self._owed(where.stages, where.stage, to, await self.store.gates(board))
+        return where, self._in_order(where.stages, [g for g in owed if g.kind == "command"])
 
     async def record_runs(self, key: str, runs: list[dict]) -> list[GateResult]:
         """The gate hook records its runs: each {gate, passed, output, commit}, for a command gate on the card's board."""
@@ -687,14 +702,14 @@ class Boards:
         await self.changed(owner, conv.id)
         return result
 
-    async def stage_of_card(self, key: str, owner: str) -> tuple[str, Stage] | None:
-        """The board and stage `owner` filed the card on; None off every board."""
+    async def stage_of_card(self, key: str, owner: str) -> tuple[str, list[Stage], Stage] | None:
+        """The board, its stages and the stage `owner` filed the card on; None off every board."""
         on = await self._board_of(key, owner)
         if on is None:
             return None
         conv, board, placements = on
         found = await self.at(placements.get(conv.id) or "")
-        return (board, found[2]) if found else None
+        return (board, found[1], found[2]) if found else None
 
     async def _conversation(self, ref: str) -> Conversation | None:
         try:

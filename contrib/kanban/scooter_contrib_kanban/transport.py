@@ -7,7 +7,7 @@
     GET    /user/boards                            the user's boards and their stages (the view, via /contrib-api)
     POST   /user/boards                            {name}: a new board, with the default stages
     PATCH  /user/boards/{board}                    {name}: rename a board
-    PUT    /user/boards/{board}                    {stages: [{id?, name}], tags: [{id?, name, color?}], skills?: [{id?, name, body}], gates?: [{id?, stage, kind, name, command?, workdir?, clean?, timeout_seconds?}]}: save the board at once; a dropped stage's cards move to the first
+    PUT    /user/boards/{board}                    {stages: [{id?, name}], tags: [{id?, name, color?}], skills?: [{id?, name, body}], gates?: [{id?, stage, direction?, kind, name, command?, workdir?, clean?, timeout_seconds?}]}: save the board at once; a dropped stage's cards move to the first
     DELETE /user/boards/{board}                    delete a board and its stages; its conversations stay, unfiled
     POST   /user/boards/{board}/cards              {conversations}: those cards on the board, as GET /conversation/{key}/card shows one
     GET    /conversation/{key}/card                one card, its blockers, tag ids and priority (the board, via the conversation relay)
@@ -86,19 +86,21 @@ def view(
         "details": (details or Details()).payload(),
         # The agent's names for the board's skills, which the skill provider offers it.
         "skills": [skill_slug(k.name) for k in skills or []],
-        # What the card must pass to leave its stage, and how it stands on each.
-        "gates": [gate_payload(g, r) for g, r in gates or []],
+        # What the card must pass to move on to the next stage, and how it stands on each.
+        "gates": [gate_payload(g, r, stages) for g, r in gates or []],
         "stale": is_stale(card, stale_after, now, since),
         # The broker's clock, so a hook marks a run's start without trusting its own.
         "now": now.isoformat(),
     }
 
 
-def gate_payload(g: Gate, r: GateResult | None) -> dict:
+def gate_payload(g: Gate, r: GateResult | None, stages: list[Stage]) -> dict:
+    stage = next((s.name for s in stages if s.folder == g.stage), "")
     return {
         "id": g.id, "name": g.name, "kind": g.kind, "command": g.command, "workdir": g.workdir,
+        "stage": g.stage, "stage_name": stage, "direction": g.direction,
         "state": r.state if r else "", "detail": r.detail if r else "", "commit": r.commit if r else "",
-        "updated_at": r.updated_at if r else "", "line": gate_line(g, r),
+        "updated_at": r.updated_at if r else "", "line": gate_line(g, r, stage),
     }
 
 
@@ -198,7 +200,7 @@ class Kanban(Transport):
                 tags = await _boards().tag_view(key, place.board)
                 details = await _store().details(key)
                 skills = await _store().skills(place.board)
-                gates = await _boards().gate_view(key, place.board, stage)
+                gates = await _boards().gate_view(key, place.board, stages, stage)
             return view(
                 card,
                 stages,
@@ -295,16 +297,16 @@ class Kanban(Transport):
             return items
 
         def _gate(g: dict) -> Gate:
-            stage, kind = g.get("stage"), g.get("kind")
+            stage, kind, direction = g.get("stage"), g.get("kind"), g.get("direction", "leave")
             command, workdir = g.get("command", ""), g.get("workdir", "")
             clean, timeout = g.get("clean", True), g.get("timeout_seconds", 600)
-            if not isinstance(stage, str) or not isinstance(kind, str):
-                raise HTTPException(status_code=400, detail="each gate needs a stage id and a kind")
+            if not isinstance(stage, str) or not isinstance(kind, str) or not isinstance(direction, str):
+                raise HTTPException(status_code=400, detail="each gate needs a stage id, a kind and a direction")
             if not isinstance(command, str) or not isinstance(workdir, str) or not isinstance(clean, bool):
                 raise HTTPException(status_code=400, detail="a gate's command and workdir are strings, clean a boolean")
             if isinstance(timeout, bool) or not isinstance(timeout, int):
                 raise HTTPException(status_code=400, detail="a gate's timeout_seconds is a whole number")
-            return Gate(g.get("id", ""), stage, kind, g["name"], 0.0, command, workdir, clean, timeout)
+            return Gate(g.get("id", ""), stage, kind, g["name"], 0.0, command, workdir, clean, timeout, direction)
 
         @router.put("/user/boards/{board}")
         async def save_board(board: str, body: dict = Body(...), owner: str = user) -> dict:
@@ -426,7 +428,7 @@ class Kanban(Transport):
                 **details.payload(),
                 "blocked_by": [b.payload() for b in blocked_by],
                 "blocking": [b.payload() for b in blocking],
-                "gates": [gate_payload(g, r) for g, r in gates],
+                "gates": [gate_payload(g, r, at[1] if at else []) for g, r in gates],
             }
 
         @router.get("/conversation/{key}/details")

@@ -37,11 +37,14 @@ interface Related {
   done: boolean;
 }
 
-/** A check the card must pass to leave its stage, and where it stands on it. */
+/** A check the card must pass to move on to the next stage, and where it stands on it. */
 export interface GateRow {
   id: string;
   name: string;
   kind: "approval" | "command";
+  /** Whether it guards leaving `stage_name` or entering it. */
+  direction: "leave" | "enter";
+  stage_name: string;
   command: string;
   workdir: string;
   /** command: passed | failed; approval: pending | approved | rejected; "" before any. */
@@ -95,6 +98,7 @@ function GateItem({ gate, decide }: { gate: GateRow; decide(approve: boolean, co
         ) : (
           "Your approval"
         )}
+        {gate.stage_name ? ` · ${gate.direction === "enter" ? "entering" : "leaving"} ${gate.stage_name}` : ""}
       </span>
       {gate.detail && (gate.state === "failed" ? (
         <pre data-testid="kanban-gate-output" className="max-h-40 overflow-auto rounded bg-muted p-1.5 text-[11px] whitespace-pre-wrap">

@@ -36,6 +36,7 @@ interface Skill {
 interface Gate {
   id: string;
   stage: string;
+  direction: "leave" | "enter";
   kind: "approval" | "command";
   name: string;
   position: number;
@@ -747,12 +748,12 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
 
   // A user's move past command gates asks whether the card's agent should make it, so the
   // gate hook runs them: Ask the agent messages it (here stubbed) and leaves the card be.
-  const commandGate = (stage: string): Gate => ({
-    id: "g-tests", stage, kind: "command", name: "Unit tests", position: 1,
+  const commandGate = (stage: string, direction: Gate["direction"] = "leave"): Gate => ({
+    id: "g-tests", stage, direction, kind: "command", name: "Unit tests", position: 1,
     command: "just test", workdir: "scooter", clean: true, timeout_seconds: 600,
   });
   const approvalGate = (stage: string): Gate => ({
-    id: "g-ok", stage, kind: "approval", name: "Design OK", position: 2,
+    id: "g-ok", stage, direction: "leave", kind: "approval", name: "Design OK", position: 2,
     command: "", workdir: "", clean: true, timeout_seconds: 600,
   });
 
@@ -816,7 +817,8 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     const kanban = await serveKanban(page, request, base);
     const board = await kanban.board(`e2e-board-skip-${Date.now()}`);
     const [design, inProgress] = board.stages;
-    board.gates = [commandGate(design.id)];
+    // A gate on entering In progress is owed by the move in, like one on leaving Design.
+    board.gates = [commandGate(inProgress.id, "enter")];
     const asked = await serveMoveRequests(page, []);
     await chat.open();
     await chat.send("skip the checks");

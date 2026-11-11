@@ -74,11 +74,12 @@ interface Skill {
   position: number;
 }
 
-/** A check a card must pass before its agent moves it on from `stage`. */
+/** A check a card must pass as its agent moves it out of `stage` (`leave`) or into it (`enter`). */
 interface Gate {
   id: string;
   /** The stage's id. */
   stage: string;
+  direction: "leave" | "enter";
   kind: "approval" | "command";
   name: string;
   position: number;
@@ -374,16 +375,23 @@ export function userTodos(
 
 /** A position strictly between two neighbours; either may be missing. */
 /**
- * The gates a move from stage `from` to `to` passes, as the broker counts them: every
- * gate on the stages it leaves behind, so a jump past a stage owes that stage's too. A
- * move back, or within a stage, passes none.
+ * The gates a move from stage `from` to `to` passes, as the broker counts them: the
+ * leaving gates of every stage it leaves behind and the entering gates of every stage it
+ * enters, so a jump past a stage owes that stage's too. A move back, or within a stage,
+ * passes none.
  */
-export function gatesOnTheWay<G extends { stage: string }>(stages: Array<{ id: string }>, gates: G[], from: string, to: string): G[] {
+export function gatesOnTheWay<G extends { stage: string; direction?: "leave" | "enter" }>(
+  stages: Array<{ id: string }>,
+  gates: G[],
+  from: string,
+  to: string,
+): G[] {
   const at = stages.findIndex((s) => s.id === from);
   const until = stages.findIndex((s) => s.id === to);
   if (at < 0 || until <= at) return [];
   const left = new Set(stages.slice(at, until).map((s) => s.id));
-  return gates.filter((g) => left.has(g.stage));
+  const entered = new Set(stages.slice(at + 1, until + 1).map((s) => s.id));
+  return gates.filter((g) => (g.direction === "enter" ? entered : left).has(g.stage));
 }
 
 function between(before?: number, after?: number): number {
@@ -429,9 +437,10 @@ const draftBody = ({ stages, tags, skills, gates }: Draft) => ({
   // A gate goes with its stage, and a new stage gets gates once saved.
   gates: gates
     .filter((g) => stages.some((s) => s.id === g.stage && !isNew(s.id)))
-    .map(({ id, stage, kind, name, command, workdir, clean, timeout_seconds }) => ({
+    .map(({ id, stage, direction, kind, name, command, workdir, clean, timeout_seconds }) => ({
       ...(isNew(id) ? {} : { id }),
       stage,
+      direction,
       kind,
       name,
       ...(kind === "command" ? { command, workdir, clean, timeout_seconds } : {}),
@@ -955,7 +964,7 @@ function Board({
       gates: [
         ...d.gates,
         {
-          id: newId(), stage, kind, name: kind === "approval" ? "Your approval" : "", position: 0,
+          id: newId(), stage, direction: "leave", kind, name: kind === "approval" ? "Your approval" : "", position: 0,
           command: "", workdir: "", clean: true, timeout_seconds: 600,
         },
       ],
@@ -1293,8 +1302,8 @@ function Board({
           <div className="flex flex-wrap items-baseline gap-2">
             <h2 className="text-xs font-medium text-muted-foreground">Gates</h2>
             <span className="text-xs text-muted-foreground">
-              What a card must pass before its agent moves it on from a stage. Commands run in the card's sandbox on its
-              last commit; approvals ask you. Your own moves skip them.
+              What a card must pass as its agent moves it out of a stage, or into one. Commands run in the card's
+              sandbox on its last commit; approvals ask you. Your own moves skip them.
             </span>
           </div>
           {draft.stages.map((st) => {
@@ -1302,7 +1311,7 @@ function Board({
             return (
               <div key={st.id} data-testid="kanban-stage-gates" data-stage={st.label} className="space-y-1 rounded border p-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-medium">Leaving {st.label || "this stage"}</span>
+                  <span className="text-xs font-medium">{st.label || "This stage"}</span>
                   {isNew(st.id) ? (
                     <span className="text-[11px] text-muted-foreground">Save the board to add gates to a new stage.</span>
                   ) : (
@@ -1332,6 +1341,16 @@ function Board({
                   <div key={g.id} data-testid="kanban-gate-edit" data-gate-kind={g.kind} className="space-y-1 rounded bg-muted/40 p-1.5">
                     <div className="flex items-center gap-2">
                       <span className="shrink-0 text-[11px] text-muted-foreground">{g.kind === "approval" ? "Approval" : "Command"}</span>
+                      <select
+                        aria-label={`When ${g.name || "the gate"} applies`}
+                        data-testid="kanban-gate-direction"
+                        className={cn(inputClass, "w-auto shrink-0 py-1 text-xs")}
+                        value={g.direction}
+                        onChange={(e) => changeGate(g.id, { direction: e.currentTarget.value as Gate["direction"] })}
+                      >
+                        <option value="leave">Leaving</option>
+                        <option value="enter">Entering</option>
+                      </select>
                       <input
                         aria-label="Gate name"
                         data-testid="kanban-gate-name"

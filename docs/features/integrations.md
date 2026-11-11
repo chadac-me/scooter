@@ -66,8 +66,9 @@ that every agent on the board gets as a skill named `board-<name>`. Agents can w
 and update them too, when asked or when they learn something the whole board should
 know.
 
-Edit board also sets each stage's **gates**: checks a card must pass before its agent
-moves it on from that stage. A **command** gate, such as `nix develop -c just test` in
+Edit board also sets each stage's **gates**: checks a card must pass as its agent moves it
+on, either to **leave** that stage or to **enter** it. A move that jumps over stages owes
+the gates of every stage it leaves and enters; a move back owes none. A **command** gate, such as `nix develop -c just test` in
 `/workspace/<repo>`, runs in the card's sandbox when the agent calls `kanban_set_status`,
 by default on a clean checkout of its last commit. If it fails, the agent gets the
 output instead of the move. An **approval** gate asks you once the commands pass: the

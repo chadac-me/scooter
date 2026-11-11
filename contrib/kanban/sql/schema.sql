@@ -116,8 +116,10 @@ CREATE TABLE "kanban_gates" (
   "id"              character varying NOT NULL,
   -- The board's folder id (kanban_boards.folder_id).
   "board_id"        character varying NOT NULL,
-  -- The stage the gate guards leaving (kanban_stages.folder_id).
+  -- The stage the gate guards (kanban_stages.folder_id).
   "stage_id"        character varying NOT NULL,
+  -- "leave" (a card must pass it to leave the stage) or "enter" (to enter it).
+  "direction"       character varying NOT NULL DEFAULT 'leave',
   -- "approval" (the user approves) or "command" (a script passes in the sandbox).
   "kind"            character varying NOT NULL,
   -- What the user and the agent call it, e.g. "Unit tests".

@@ -25,8 +25,10 @@ telling the truth.
   stage but `kanban_set_status` won't move it to a later one. Do what you can there,
   say what you're waiting on, and end your turn: a message comes when the blockers
   reach the last stage. Don't poll for it.
-- **A stage can have gates** the card must pass before you move it on from that stage;
-  the hook and `kanban_get_status` list them. A *command* gate (e.g. the tests) runs in
+- **A stage can have gates** the card must pass as you move it on: for *leaving* that
+  stage, or for *entering* it. A jump over stages owes the gates of every stage it
+  leaves and enters; moving back owes none. The hook and `kanban_get_status` list what
+  the next move owes. A *command* gate (e.g. the tests) runs in
   your sandbox on a clean checkout of your last commit when you call
   `kanban_set_status`, so commit first; uncommitted edits don't count. If it fails, the
   call is refused with the output: fix it, commit, and call again. An *approval* gate asks
