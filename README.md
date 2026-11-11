@@ -51,8 +51,11 @@ This creates a small [k3d](https://k3d.io/) cluster on your machine, deploys Sco
 into it from the published images, asks which model provider to use (a Claude
 subscription, an Anthropic API key, or Ollama), and opens the chat at
 `http://localhost:8080`. `scooter-local down` stops it with everything kept;
-`destroy` removes it. See [Run it on your machine](https://chadac-me.github.io/scooter/tutorial/local/)
-for the details and the limits of a single-machine setup.
+`destroy` removes it. To declare the configuration instead, `nix flake init -t
+github:chadac-me/scooter#local` gives a flake whose `nix run . -- up` does the same with
+your `scooter.nix`, and `services.scooter-local` does it on NixOS. See
+[Run it on your machine](https://chadac-me.github.io/scooter/tutorial/local/) for the
+details and the limits of a single-machine setup.
 
 ## Getting started
 

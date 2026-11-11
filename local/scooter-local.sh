@@ -5,6 +5,8 @@
 VERSION="@version@"
 # This flake's source, for the one eval `up` runs itself (the claude image tag).
 FLAKE="@flake@"
+# Set by scooter.lib.mkLocal: the one provider the baked configuration names.
+FIXED_PROVIDER="@fixedProvider@"
 MANIFESTS_CLAUDE_CODE="@manifestsClaudeCode@"
 MANIFESTS_ANTHROPIC="@manifestsAnthropic@"
 MANIFESTS_OLLAMA="@manifestsOllama@"
@@ -28,7 +30,7 @@ die() { printf '[scooter-local] error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<EOF
-scooter-local ${VERSION} — Scooter on this machine (k3d + the published images)
+scooter-local ${VERSION} — Scooter on this machine (k3d + the published images)${FIXED_PROVIDER:+, provider: $FIXED_PROVIDER}
 
   scooter-local up         create or start the cluster and deploy; asks for a provider the first time
   scooter-local down       stop the cluster; conversations, sandboxes and files are kept
@@ -116,7 +118,9 @@ install_controller() {
 provider_file="$STATE/provider"
 
 current_provider() {
-  if [ -n "${SCOOTER_LOCAL_PROVIDER:-}" ]; then
+  if [ -n "$FIXED_PROVIDER" ]; then
+    echo "$FIXED_PROVIDER"
+  elif [ -n "${SCOOTER_LOCAL_PROVIDER:-}" ]; then
     echo "$SCOOTER_LOCAL_PROVIDER"
   elif [ -s "$provider_file" ]; then
     cat "$provider_file"
@@ -136,7 +140,9 @@ ask() {
 
 choose_provider() {
   local choice
-  if [ -n "${SCOOTER_LOCAL_PROVIDER:-}" ]; then
+  if [ -n "$FIXED_PROVIDER" ]; then
+    choice="$FIXED_PROVIDER"
+  elif [ -n "${SCOOTER_LOCAL_PROVIDER:-}" ]; then
     choice="$SCOOTER_LOCAL_PROVIDER"
   else
     cat <<EOF
@@ -163,6 +169,18 @@ EOF
 }
 
 secret_exists() { kubectl -n "$NAMESPACE" get secret "$1" >/dev/null 2>&1; }
+
+# The baked render for a provider.
+render_source() {
+  case "$1" in
+    claude-code) echo "$MANIFESTS_CLAUDE_CODE" ;;
+    anthropic) echo "$MANIFESTS_ANTHROPIC" ;;
+    ollama) echo "$MANIFESTS_OLLAMA" ;;
+  esac
+}
+# Whether the render still carries a placeholder; a configuration that set the value
+# itself (scooter.local.ollama.model, scooter.local.agentHostClaudeTag) has none.
+render_has() { grep -q -- "$2" "$(render_source "$1")"; }
 
 # `kubectl create secret` from a literal, replacing an existing one.
 put_secret() {
@@ -194,6 +212,7 @@ ensure_provider_secret() {
       put_secret agent-anthropic-key api-key "$value"
       ;;
     ollama)
+      render_has ollama '@OLLAMA_MODEL@' || return 0
       if [ -z "$force" ] && [ -z "${OLLAMA_MODEL:-}" ] && [ -s "$STATE/ollama-model" ]; then return; fi
       value="${OLLAMA_MODEL:-}"
       if [ -z "$value" ]; then
@@ -243,15 +262,21 @@ render() {
   local provider="$1" out="$STATE/rendered.yaml"
   case "$provider" in
     claude-code)
-      local tag; tag=$(claude_tag)
-      subst '@AGENT_HOST_CLAUDE_TAG@' "$tag" < "$MANIFESTS_CLAUDE_CODE" > "$out"
+      if render_has claude-code '@AGENT_HOST_CLAUDE_TAG@'; then
+        local tag; tag=$(claude_tag)
+        subst '@AGENT_HOST_CLAUDE_TAG@' "$tag" < "$MANIFESTS_CLAUDE_CODE" > "$out"
+      else
+        cp "$MANIFESTS_CLAUDE_CODE" "$out"
+      fi
       ;;
     anthropic)
       cp "$MANIFESTS_ANTHROPIC" "$out"
       ;;
     ollama)
+      local model=""
+      if render_has ollama '@OLLAMA_MODEL@'; then model="${OLLAMA_MODEL:-$(cat "$STATE/ollama-model")}"; fi
       subst '@OLLAMA_HOST@' "$OLLAMA_CLUSTER_HOST" < "$MANIFESTS_OLLAMA" \
-        | subst '@OLLAMA_MODEL@' "${OLLAMA_MODEL:-$(cat "$STATE/ollama-model")}" > "$out"
+        | subst '@OLLAMA_MODEL@' "$model" > "$out"
       ;;
   esac
   chmod 644 "$out"
@@ -388,7 +413,12 @@ cmd_logs() {
 
 cmd_config() {
   mkdir -p "$STATE"
-  choose_provider
+  if [ -n "$FIXED_PROVIDER" ]; then
+    log "provider: $FIXED_PROVIDER (set by this build's configuration)"
+    echo "$FIXED_PROVIDER" > "$provider_file"
+  else
+    choose_provider
+  fi
   if cluster_running; then
     ensure_namespace
     ensure_provider_secret "$(current_provider)" force

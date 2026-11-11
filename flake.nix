@@ -51,6 +51,31 @@
 
       # k3d's registry: `.localhost` resolves on host and in-cluster.
       k3dRegistry = "k3d-scooter-reg.localhost:5800/";
+
+      version = nixpkgs.lib.removeSuffix "\n" (builtins.readFile ./VERSION);
+      # The agent-sandbox release scooter-local installs (test/support/cluster-up.sh pins the same).
+      agentSandboxVersion = "v0.5.2";
+
+      # `scooter.lib.mkLocal { system; module; }`: scooter-local built for one configuration
+      # on top of the local preset (local/preset.nix). The module names the provider, so
+      # `up` asks for nothing but a credential. buildSystem stays x86_64-linux on every
+      # host: the published tags are that build's content hashes.
+      mkLocal = { system, module, buildSystem ? "x86_64-linux" }:
+        let
+          render = evalPlatformWith {
+            inherit system buildSystem;
+            modules = [ ./local/preset.nix { scooter.agent.skills = scooterSkills; } module ];
+          };
+          provider = render.config.scooter.local.provider;
+        in
+        import ./local {
+          pkgs = nixpkgs.legacyPackages.${system};
+          lib = nixpkgs.lib;
+          inherit version agentSandboxVersion;
+          flake = self;
+          manifests = { ${provider} = render.config.kubernetes.resultYAML; };
+          fixedProvider = provider;
+        };
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
@@ -144,7 +169,7 @@
           ghcrRefs = lib.mapAttrs' (_: img: lib.nameValuePair img.refKey img.ref.fullUrl)
             (lib.filterAttrs (_: img: img.refKey != null) ghcrImageRefs);
 
-          # The single-machine preset (modules/local.nix), rendered once per provider
+          # The single-machine preset (local/preset.nix), rendered once per provider
           # for `nix run .#local`. buildSystem stays x86_64-linux on every host: the
           # published tags are that build's content hashes (publish-images.yml).
           hostPkgs = nixpkgs.legacyPackages.${system};
@@ -152,7 +177,7 @@
             evalPlatformWith {
               inherit system;
               modules = [{
-                imports = [ ./modules/local.nix ];
+                imports = [ ./local/preset.nix ];
                 scooter.local.provider = provider;
                 scooter.agent.skills = scooterSkills;
               }];
@@ -160,11 +185,9 @@
           localManifests = lib.mapAttrs (_: r: r.config.kubernetes.resultYAML) localRenders;
           scooterLocal = import ./local {
             pkgs = hostPkgs;
-            inherit lib;
-            version = lib.removeSuffix "\n" (builtins.readFile ./VERSION);
+            inherit lib version agentSandboxVersion;
             flake = self;
             manifests = localManifests;
-            agentSandboxVersion = "v0.5.2";
           };
 
           # Tier-1-style config-correctness tests for the dev-environment sandbox
@@ -578,6 +601,36 @@
           checks = {
             # The local preset renders, with the wiring scooter-local relies on.
             local-manifests = import ./local/check.nix { pkgs = hostPkgs; inherit lib; renders = localRenders; };
+            # `scooter.lib.mkLocal` on the template's configuration: the declared shape builds.
+            local-example = mkLocal { inherit system; module = ./local/template/scooter.nix; };
+          } // lib.optionalAttrs hostPkgs.stdenv.hostPlatform.isLinux {
+            # nixosModules.local evaluates into a service running that build.
+            local-nixos-module =
+              let
+                os = nixpkgs.lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.local
+                    {
+                      services.scooter-local = {
+                        enable = true;
+                        settings.scooter.local = { provider = "ollama"; ollama.model = "qwen2.5-coder:7b"; };
+                        environmentFile = "/run/secrets/scooter-local";
+                      };
+                      boot.loader.grub.enable = false;
+                      fileSystems."/" = { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
+                      system.stateVersion = "25.11";
+                    }
+                  ];
+                };
+                svc = os.config.systemd.services.scooter-local.serviceConfig;
+              in
+              hostPkgs.runCommand "local-nixos-module-check" { start = svc.ExecStart; stop = svc.ExecStop; } ''
+                case "$start" in */bin/scooter-local\ up) ;; *) echo "ExecStart is $start" >&2; exit 1 ;; esac
+                case "$stop" in */bin/scooter-local\ down) ;; *) echo "ExecStop is $stop" >&2; exit 1 ;; esac
+                echo ok > $out
+              '';
+          } // {
             agentHost = p.scooter-agent-host;
             ui = p.scooter-ui;
             # Who may frame which UI page, against the rendered nginx config.
@@ -661,7 +714,11 @@
         # The conventional entry point
         kubenixModules.default = platformModule;
         # The single-machine preset, for a deployment that starts from `nix run .#local`
-        kubenixModules.local = ./modules/local.nix;
+        kubenixModules.local = ./local/preset.nix;
+        # scooter-local built for one configuration (a flake's `nix run . -- up`).
+        lib.mkLocal = mkLocal;
+        # services.scooter-local: the same, as a NixOS service.
+        nixosModules.local = import ./local/nixos-module.nix { inherit mkLocal; };
 
         # `nix flake init -t github:chadac-me/scooter#local`: that deployment.
         templates.local = {

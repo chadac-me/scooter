@@ -54,7 +54,7 @@ For a script or a CI job, the prompts can be answered from the environment:
 ## What runs
 
 The same platform a cluster deployment runs, configured by the `local` preset
-([`modules/local.nix`](https://github.com/chadac-me/scooter/blob/main/modules/local.nix)):
+([`local/preset.nix`](https://github.com/chadac-me/scooter/blob/main/local/preset.nix)):
 
 - the agent-host, UI, broker and conversation controller, one replica each, and Postgres
   in the cluster;
@@ -89,19 +89,68 @@ subscription.
 **Everything is on one disk**: Postgres and the sandbox volumes live in the k3d node's
 Docker volume, and the uploads in the state directory. `destroy` removes all of it.
 
-## From here to a deployment
+## Declare it instead
 
-The preset is an ordinary Scooter module, so the same configuration can grow into a
-deployment of your own:
+`nix run …#local` takes no configuration. To pin the provider, pick models, turn on
+contribs, or size the sandboxes, write the configuration down and build `scooter-local`
+for it.
+
+### From a flake
 
 ```bash
 nix flake init -t github:chadac-me/scooter#local
 ```
 
-writes a `flake.nix` that imports the preset and a `scooter.nix` for your settings on
-top of it; every setting in the preset is a default, so yours win. From there,
-[Getting started](../getting-started.md) and [Deploying Scooter](deploying/index.md)
-cover authentication, a hostname, and a cluster.
+writes a `flake.nix` and a `scooter.nix`:
+
+```nix
+# scooter.nix — on top of the preset; every setting there is a default, so yours win.
+{
+  scooter = {
+    local.provider = "ollama";
+    local.ollama.model = "qwen2.5-coder:7b";
+    sandboxSizes.medium = { cpu = "4"; memory = "8Gi"; hint = "Builds."; default = true; };
+  };
+  contribs.github.enable = true;
+}
+```
+
+```bash
+nix run . -- up        # the same commands, with this configuration baked in
+```
+
+The flake calls `scooter.lib.mkLocal { system; module = ./scooter.nix; }`, which
+renders the preset plus your module and bakes it into `scooter-local`. Since the module
+names the provider, `up` asks for nothing but the credential (or reads it from the
+environment). `nix build .#manifests` gives the same render as YAML for
+`kubectl apply -f` on a cluster of your own.
+
+### On NixOS
+
+```nix
+# configuration.nix (with Scooter as a flake input)
+{
+  imports = [ scooter.nixosModules.local ];
+  services.scooter-local = {
+    enable = true;
+    settings.scooter.local = { provider = "anthropic"; };
+    # ANTHROPIC_API_KEY=… / CLAUDE_CODE_OAUTH_TOKEN=… / OLLAMA_MODEL=…, outside the store.
+    environmentFile = "/run/secrets/scooter-local";
+  };
+}
+```
+
+This enables Docker, installs the `scooter-local` built for `settings`, and runs `up`
+as `scooter-local.service` at boot (`down` when it stops); `port` and `stateDir`
+(default `/var/lib/scooter-local`) are options too. The service has no terminal, so the
+credential comes from `environmentFile`.
+
+## From here to a deployment
+
+The preset is an ordinary Scooter module (`scooter.kubenixModules.local`), so the same
+`scooter.nix` can grow into a deployment of your own: [Getting started](../getting-started.md)
+and [Deploying Scooter](deploying/index.md) cover authentication, a hostname, and a
+cluster.
 
 !!! note "The Claude image tag"
     With the `claude-code` provider the agent-host runs the `agent-host-claude` image,
