@@ -210,7 +210,7 @@
               notebookStart = shipped.nixos.config.systemd.services.webservice-notebook.serviceConfig.ExecStart;
               notebookPort = shipped.nixos.config.webServices.notebook.port;
               marimoCfg = shipped.nixos.config.webServices.marimo;
-              marimoStart = shipped.nixos.config.systemd.services.webservice-marimo.serviceConfig.ExecStart;
+              marimoStart = marimoCfg.command;
               notebookCfg = shipped.nixos.config.webServices.notebook;
             in
             assert sandboxWithEcho.nixos.config.environment.etc ? "scooter/contrib-echo";
