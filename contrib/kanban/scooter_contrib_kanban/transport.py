@@ -2,12 +2,10 @@
 
     GET    /card?folder=<id>&since=<t>             this conversation's card and stage, if the folder is on a board (hooks)
     GET    /skills                                 the skills of this conversation's board, as a skill provider prints them
-    GET    /gates/run?stage=<name>                 the command gates this conversation's move to that stage must pass (the gate hook)
-    POST   /gates/runs                             {runs: [{gate, passed, output?, commit?}]}: the gate hook records what it ran
     GET    /user/boards                            the user's boards and their stages (the view, via /contrib-api)
     POST   /user/boards                            {name}: a new board, with the default stages
     PATCH  /user/boards/{board}                    {name}: rename a board
-    PUT    /user/boards/{board}                    {stages: [{id?, name}], tags: [{id?, name, color?}], skills?: [{id?, name, body}], gates?: [{id?, stage, direction?, kind, name, command?, workdir?, clean?, timeout_seconds?}]}: save the board at once; a dropped stage's cards move to the first
+    PUT    /user/boards/{board}                    {stages: [{id?, name}], tags: [{id?, name, color?}], skills?: [{id?, name, body}], gates?: [{id?, stage, direction?, kind, name, prompt?, skill?}]}: save the board at once; a dropped stage's cards move to the first
     DELETE /user/boards/{board}                    delete a board and its stages; its conversations stay, unfiled
     POST   /user/boards/{board}/cards              {conversations}: those cards on the board, as GET /conversation/{key}/card shows one
     GET    /conversation/{key}/card                one card, its blockers, tag ids and priority (the board, via the conversation relay)
@@ -87,20 +85,21 @@ def view(
         # The agent's names for the board's skills, which the skill provider offers it.
         "skills": [skill_slug(k.name) for k in skills or []],
         # What the card must pass to move on to the next stage, and how it stands on each.
-        "gates": [gate_payload(g, r, stages) for g, r in gates or []],
+        "gates": [gate_payload(g, r, stages, skills or []) for g, r in gates or []],
         "stale": is_stale(card, stale_after, now, since),
         # The broker's clock, so a hook marks a run's start without trusting its own.
         "now": now.isoformat(),
     }
 
 
-def gate_payload(g: Gate, r: GateResult | None, stages: list[Stage]) -> dict:
+def gate_payload(g: Gate, r: GateResult | None, stages: list[Stage], skills: list[Skill]) -> dict:
     stage = next((s.name for s in stages if s.folder == g.stage), "")
+    skill = next((k.name for k in skills if k.id == g.skill), "") if g.skill else ""
     return {
-        "id": g.id, "name": g.name, "kind": g.kind, "command": g.command, "workdir": g.workdir,
+        "id": g.id, "name": g.name, "kind": g.kind, "prompt": g.prompt, "skill": g.skill, "skill_name": skill,
         "stage": g.stage, "stage_name": stage, "direction": g.direction,
-        "state": r.state if r else "", "detail": r.detail if r else "", "commit": r.commit if r else "",
-        "updated_at": r.updated_at if r else "", "line": gate_line(g, r, stage),
+        "state": r.state if r else "", "detail": r.detail if r else "",
+        "updated_at": r.updated_at if r else "", "line": gate_line(g, r, stage, skill_slug(skill) if skill else ""),
     }
 
 
@@ -215,42 +214,6 @@ class Kanban(Transport):
                 gates=gates,
             )
 
-        @router.get("/gates/run")
-        async def gates_to_run(stage: str = "", identity: Identity = Depends(authed)) -> dict:
-            """The gate hook's list: what to run before the agent's move to `stage`; none off a board."""
-            key = identity.conversation_id
-            if not key:
-                raise HTTPException(status_code=403, detail="a conversation identity is required")
-            try:
-                _, gates = await _boards().gates_to_run(key, stage)
-            except BoardError as e:
-                if e.status in (404, 409):
-                    return {"gates": []}
-                raise _http(e) from None
-            return {"gates": [
-                {"id": g.id, "name": g.name, "command": g.command, "workdir": g.workdir, "clean": g.clean,
-                 "timeout_seconds": g.timeout_seconds}
-                for g in gates
-            ]}
-
-        @router.post("/gates/runs")
-        async def record_runs(body: dict = Body(...), identity: Identity = Depends(authed)) -> dict:
-            key = identity.conversation_id
-            if not key:
-                raise HTTPException(status_code=403, detail="a conversation identity is required")
-            runs = body.get("runs")
-            if not isinstance(runs, list) or not all(
-                isinstance(r, dict) and isinstance(r.get("gate"), str) and isinstance(r.get("passed"), bool)
-                and isinstance(r.get("output", ""), str) and isinstance(r.get("commit", ""), str)
-                for r in runs
-            ):
-                raise HTTPException(status_code=400, detail="runs must be a list of {gate, passed, output?, commit?}")
-            try:
-                results = await _boards().record_runs(key, runs)
-            except BoardError as e:
-                raise _http(e) from None
-            return {"results": [r.payload() for r in results]}
-
         @router.get("/skills")
         async def own_skills(identity: Identity = Depends(authed)) -> dict:
             """The kanban skill provider's answer: none off a board."""
@@ -298,15 +261,12 @@ class Kanban(Transport):
 
         def _gate(g: dict) -> Gate:
             stage, kind, direction = g.get("stage"), g.get("kind"), g.get("direction", "leave")
-            command, workdir = g.get("command", ""), g.get("workdir", "")
-            clean, timeout = g.get("clean", True), g.get("timeout_seconds", 600)
+            prompt, skill = g.get("prompt", ""), g.get("skill", "")
             if not isinstance(stage, str) or not isinstance(kind, str) or not isinstance(direction, str):
                 raise HTTPException(status_code=400, detail="each gate needs a stage id, a kind and a direction")
-            if not isinstance(command, str) or not isinstance(workdir, str) or not isinstance(clean, bool):
-                raise HTTPException(status_code=400, detail="a gate's command and workdir are strings, clean a boolean")
-            if isinstance(timeout, bool) or not isinstance(timeout, int):
-                raise HTTPException(status_code=400, detail="a gate's timeout_seconds is a whole number")
-            return Gate(g.get("id", ""), stage, kind, g["name"], 0.0, command, workdir, clean, timeout, direction)
+            if not isinstance(prompt, str) or not isinstance(skill, str):
+                raise HTTPException(status_code=400, detail="a gate's prompt and skill are strings")
+            return Gate(g.get("id", ""), stage, kind, g["name"], 0.0, prompt, skill, direction)
 
         @router.put("/user/boards/{board}")
         async def save_board(board: str, body: dict = Body(...), owner: str = user) -> dict:
@@ -424,11 +384,12 @@ class Kanban(Transport):
                 details = await _store().details(key)
                 at = await _boards().stage_of_card(key, owner)
                 gates = await _boards().gate_view(key, *at) if at else []
+                skills = await _store().skills(at[0]) if at else []
             return {
                 **details.payload(),
                 "blocked_by": [b.payload() for b in blocked_by],
                 "blocking": [b.payload() for b in blocking],
-                "gates": [gate_payload(g, r, at[1] if at else []) for g, r in gates],
+                "gates": [gate_payload(g, r, at[1] if at else [], skills) for g, r in gates],
             }
 
         @router.get("/conversation/{key}/details")

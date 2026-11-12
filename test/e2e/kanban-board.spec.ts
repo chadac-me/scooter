@@ -37,13 +37,11 @@ interface Gate {
   id: string;
   stage: string;
   direction: "leave" | "enter";
-  kind: "approval" | "command";
+  kind: "approval" | "prompt";
   name: string;
   position: number;
-  command: string;
-  workdir: string;
-  clean: boolean;
-  timeout_seconds: number;
+  prompt: string;
+  skill: string;
 }
 
 // Board folders this file made, deleted after each test so the sidebar stays short.
@@ -130,7 +128,7 @@ async function serveKanban(page: Page, request: APIRequestContext, base: string)
         : row.skills;
       const gates = want.gates
         ? want.gates.map((g, i) => ({
-            command: "", workdir: "", clean: true, timeout_seconds: 600, ...g, id: g.id ?? `gate-${Date.now()}-${i}`, position: i + 1,
+            prompt: "", skill: "", ...g, id: g.id ?? `gate-${Date.now()}-${i}`, position: i + 1,
           }))
         : row.gates;
       Object.assign(row, { stages, tags, skills, gates });
@@ -557,6 +555,7 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     const kanban = await serveKanban(page, request, base);
     const board = await kanban.board(`e2e-board-gates-${Date.now()}`);
     const [design, inProgress] = board.stages;
+    board.skills.push({ id: "sk-release", name: "Release steps", body: "Tag, then deploy.", position: 1 });
 
     await page.goto(`/boards/${board.folder}`);
     await expect(page.getByTestId("kanban-board")).toBeVisible({ timeout: 20_000 });
@@ -573,20 +572,23 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await first.getByTestId("kanban-gate-name").fill("Plan approved");
     await page.getByTestId("kanban-add-gate").click();
     const second = gates.nth(1);
-    await second.getByTestId("kanban-gate-kind").selectOption("command");
-    // The kind took the placeholder name with it; the command's options stay folded until opened.
+    await second.getByTestId("kanban-gate-kind").selectOption("prompt");
+    // The kind took the placeholder name with it.
     await expect(second.getByTestId("kanban-gate-name")).toHaveValue("");
-    await expect(second.getByTestId("kanban-gate-workdir")).toBeHidden();
     await second.getByTestId("kanban-gate-name").fill("Unit tests");
-    await second.getByTestId("kanban-gate-command").fill("just test");
-    await second.getByTestId("kanban-gate-options").locator("summary").click();
-    await second.getByTestId("kanban-gate-workdir").fill("scooter");
+    await second.getByTestId("kanban-gate-prompt").fill("Run just test; pass if it exits 0.");
+    // A gate can follow one of the board's skills instead.
+    await page.getByTestId("kanban-add-gate").click();
+    const third = gates.nth(2);
+    await third.getByTestId("kanban-gate-kind").selectOption("skill:sk-release");
+    await third.getByTestId("kanban-gate-name").fill("Released");
     await page.getByTestId("kanban-edit-stages").click();
     await expect
-      .poll(() => kanban.boards[0].gates.map((g) => [g.stage, g.direction, g.kind, g.name, g.command, g.workdir]))
+      .poll(() => kanban.boards[0].gates.map((g) => [g.stage, g.direction, g.kind, g.name, g.prompt, g.skill]))
       .toEqual([
         [inProgress.id, "enter", "approval", "Plan approved", "", ""],
-        [design.id, "leave", "command", "Unit tests", "just test", "scooter"],
+        [design.id, "leave", "prompt", "Unit tests", "Run just test; pass if it exits 0.", ""],
+        [design.id, "leave", "prompt", "Released", "", "sk-release"],
       ]);
     expect(kanban.saves).toHaveLength(1);
   });
@@ -791,15 +793,14 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await expect(side.getByText(/schema work/).first()).toBeVisible();
   });
 
-  // A user's move past command gates asks whether the card's agent should make it, so the
-  // gate hook runs them: Ask the agent messages it (here stubbed) and leaves the card be.
-  const commandGate = (stage: string, direction: Gate["direction"] = "leave"): Gate => ({
-    id: "g-tests", stage, direction, kind: "command", name: "Unit tests", position: 1,
-    command: "just test", workdir: "scooter", clean: true, timeout_seconds: 600,
+  // A user's move past prompt gates asks whether the card's agent should make it, so the
+  // agent carries them out: Ask the agent messages it (here stubbed) and leaves the card be.
+  const promptGate = (stage: string, direction: Gate["direction"] = "leave"): Gate => ({
+    id: "g-tests", stage, direction, kind: "prompt", name: "Unit tests", position: 1,
+    prompt: "Run just test in /workspace/scooter; pass if it exits 0.", skill: "",
   });
   const approvalGate = (stage: string): Gate => ({
-    id: "g-ok", stage, direction: "leave", kind: "approval", name: "Design OK", position: 2,
-    command: "", workdir: "", clean: true, timeout_seconds: 600,
+    id: "g-ok", stage, direction: "leave", kind: "approval", name: "Design OK", position: 2, prompt: "", skill: "",
   });
 
   /** Kanban's POST /conversation/{key}/card/request, answering each with the next reply. */
@@ -813,12 +814,12 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     return asked;
   }
 
-  test("moving past a command gate offers to ask the agent, which leaves the card until it moves it", async ({ chat, page, request, baseURL }) => {
+  test("moving past a prompt gate offers to ask the agent, which leaves the card until it moves it", async ({ chat, page, request, baseURL }) => {
     const base = baseURL ?? "http://localhost:5173";
     const kanban = await serveKanban(page, request, base);
     const board = await kanban.board(`e2e-board-checks-${Date.now()}`);
     const [design, inProgress] = board.stages;
-    board.gates = [commandGate(design.id), approvalGate(design.id)];
+    board.gates = [promptGate(design.id), approvalGate(design.id)];
     const asked = await serveMoveRequests(page, [
       { status: 502, json: { detail: "couldn't reach this conversation's agent" } },
       { status: 200, json: { requested: inProgress.id } },
@@ -837,7 +838,7 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     const ask = page.getByTestId("kanban-run-checks");
     await expect(ask).toBeVisible();
     await expect(ask).toContainText("Run checks before moving to In progress?");
-    await expect(ask.getByTestId("kanban-run-checks-gates")).toContainText("just test in scooter");
+    await expect(ask.getByTestId("kanban-run-checks-gates")).toContainText("Run just test in /workspace/scooter");
     await expect(ask).toContainText('Moving it anyway counts as the approval for "Design OK"');
     await expect(lane(page, design.id).locator(card)).toHaveCount(1);
 
@@ -863,7 +864,7 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     const board = await kanban.board(`e2e-board-skip-${Date.now()}`);
     const [design, inProgress] = board.stages;
     // A gate on entering In progress is owed by the move in, like one on leaving Design.
-    board.gates = [commandGate(inProgress.id, "enter")];
+    board.gates = [promptGate(inProgress.id, "enter")];
     const asked = await serveMoveRequests(page, []);
     await chat.open();
     await chat.send("skip the checks");
