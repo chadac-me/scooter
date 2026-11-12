@@ -133,6 +133,8 @@ const MAX_SKILL_NAME_CHARS = 60;
 const MAX_SKILL_CHARS = 4000;
 const MAX_BOARD_GATES = 20;
 const MAX_GATE_NAME_CHARS = 60;
+/** What a gate of each kind is called until the user names it. */
+const GATE_NAMES: Record<Gate["kind"], string> = { approval: "Your approval", command: "" };
 // `tagging` while the Details tab's tag field is open.
 const DETAILS_TAGS = "details";
 // Cards a lane shows at first, and adds per scroll.
@@ -958,13 +960,15 @@ function Board({
     edit((d) => ({ ...d, skills: d.skills.map((k) => (k.id === id ? { ...k, ...patch } : k)) }));
   const changeGate = (id: string, patch: Partial<Gate>) =>
     edit((d) => ({ ...d, gates: d.gates.map((g) => (g.id === id ? { ...g, ...patch } : g)) }));
-  const addGate = (stage: string, kind: Gate["kind"]) =>
+  // A gate sits on a saved stage; a new stage gets its gates once the board is saved.
+  const gateStages = draft?.stages.filter((s) => !isNew(s.id)) ?? [];
+  const addGate = (stage: string) =>
     edit((d) => ({
       ...d,
       gates: [
         ...d.gates,
         {
-          id: newId(), stage, direction: "leave", kind, name: kind === "approval" ? "Your approval" : "", position: 0,
+          id: newId(), stage, direction: "leave", kind: "approval", name: GATE_NAMES.approval, position: 0,
           command: "", workdir: "", clean: true, timeout_seconds: 600,
         },
       ],
@@ -1306,121 +1310,133 @@ function Board({
               sandbox on its last commit; approvals ask you. Your own moves skip them.
             </span>
           </div>
-          {draft.stages.map((st) => {
-            const mine = draft.gates.filter((g) => g.stage === st.id);
-            return (
-              <div key={st.id} data-testid="kanban-stage-gates" data-stage={st.label} className="space-y-1 rounded border p-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-medium">{st.label || "This stage"}</span>
-                  {isNew(st.id) ? (
-                    <span className="text-[11px] text-muted-foreground">Save the board to add gates to a new stage.</span>
-                  ) : (
-                    <>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        data-testid="kanban-add-approval-gate"
-                        disabled={draft.gates.length >= MAX_BOARD_GATES}
-                        onClick={() => addGate(st.id, "approval")}
-                      >
-                        <Plus aria-hidden /> Approval
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        data-testid="kanban-add-command-gate"
-                        disabled={draft.gates.length >= MAX_BOARD_GATES}
-                        onClick={() => addGate(st.id, "command")}
-                      >
-                        <Plus aria-hidden /> Command
-                      </Button>
-                    </>
-                  )}
-                </div>
-                {mine.map((g) => (
-                  <div key={g.id} data-testid="kanban-gate-edit" data-gate-kind={g.kind} className="space-y-1 rounded bg-muted/40 p-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="shrink-0 text-[11px] text-muted-foreground">{g.kind === "approval" ? "Approval" : "Command"}</span>
-                      <select
-                        aria-label={`When ${g.name || "the gate"} applies`}
-                        data-testid="kanban-gate-direction"
-                        className={cn(inputClass, "w-auto shrink-0 py-1 text-xs")}
-                        value={g.direction}
-                        onChange={(e) => changeGate(g.id, { direction: e.currentTarget.value as Gate["direction"] })}
-                      >
-                        <option value="leave">Leaving</option>
-                        <option value="enter">Entering</option>
-                      </select>
-                      <input
-                        aria-label="Gate name"
-                        data-testid="kanban-gate-name"
-                        className={cn(inputClass, "min-w-0 flex-1 py-1 text-xs")}
-                        placeholder={g.kind === "approval" ? "Name, e.g. Design approved" : "Name, e.g. Unit tests"}
-                        maxLength={MAX_GATE_NAME_CHARS}
-                        value={g.name}
-                        onChange={(e) => changeGate(g.id, { name: e.currentTarget.value })}
-                      />
-                      <Button
-                        size="icon-xs"
-                        variant="ghost"
-                        aria-label={`Delete ${g.name || "this gate"}`}
-                        onClick={() => edit((d) => ({ ...d, gates: d.gates.filter((x) => x.id !== g.id) }))}
-                      >
-                        <Trash2 aria-hidden />
-                      </Button>
-                    </div>
-                    {g.kind === "command" && (
-                      <>
-                        <textarea
-                          aria-label={`Command for ${g.name || "the gate"}`}
-                          data-testid="kanban-gate-command"
-                          className={cn(inputClass, "min-h-12 w-full py-1 font-mono text-xs")}
-                          placeholder="nix develop -c just test"
-                          value={g.command}
-                          onChange={(e) => changeGate(g.id, { command: e.currentTarget.value })}
-                        />
-                        <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                          <label className="flex items-center gap-1">
-                            /workspace/
-                            <input
-                              aria-label="Directory"
-                              data-testid="kanban-gate-workdir"
-                              className={cn(inputClass, "w-32 py-0.5 text-xs")}
-                              placeholder="repo"
-                              value={g.workdir}
-                              onChange={(e) => changeGate(g.id, { workdir: e.currentTarget.value })}
-                            />
-                          </label>
-                          <label className="flex items-center gap-1">
-                            <input
-                              type="checkbox"
-                              data-testid="kanban-gate-clean"
-                              checked={g.clean}
-                              onChange={(e) => changeGate(g.id, { clean: e.currentTarget.checked })}
-                            />
-                            Clean checkout of the last commit
-                          </label>
-                          <label className="flex items-center gap-1">
-                            Timeout
-                            <input
-                              type="number"
-                              aria-label="Timeout in seconds"
-                              className={cn(inputClass, "w-20 py-0.5 text-xs")}
-                              min={10}
-                              max={3600}
-                              value={g.timeout_seconds}
-                              onChange={(e) => changeGate(g.id, { timeout_seconds: Math.round(Number(e.currentTarget.value) || 0) })}
-                            />
-                            s
-                          </label>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
+          {draft.gates.map((g) => (
+            <div key={g.id} data-testid="kanban-gate-edit" data-gate-kind={g.kind} className="space-y-1 rounded bg-muted/40 p-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  aria-label={`Direction of ${g.name || "the gate"}`}
+                  data-testid="kanban-gate-direction"
+                  className={cn(inputClass, "w-auto shrink-0 py-1 text-xs")}
+                  value={g.direction}
+                  onChange={(e) => changeGate(g.id, { direction: e.currentTarget.value as Gate["direction"] })}
+                >
+                  <option value="leave">Leaving</option>
+                  <option value="enter">Entering</option>
+                </select>
+                <select
+                  aria-label={`Stage of ${g.name || "the gate"}`}
+                  data-testid="kanban-gate-stage"
+                  className={cn(inputClass, "w-auto shrink-0 py-1 text-xs")}
+                  value={g.stage}
+                  onChange={(e) => changeGate(g.id, { stage: e.currentTarget.value })}
+                >
+                  {gateStages.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label={`Kind of ${g.name || "the gate"}`}
+                  data-testid="kanban-gate-kind"
+                  className={cn(inputClass, "w-auto shrink-0 py-1 text-xs")}
+                  value={g.kind}
+                  onChange={(e) => {
+                    const kind = e.currentTarget.value as Gate["kind"];
+                    // A name the user hasn't touched follows the kind.
+                    changeGate(g.id, { kind, name: g.name === GATE_NAMES[g.kind] ? GATE_NAMES[kind] : g.name });
+                  }}
+                >
+                  <option value="approval">asks your approval</option>
+                  <option value="command">runs a command</option>
+                </select>
+                <input
+                  aria-label="Gate name"
+                  data-testid="kanban-gate-name"
+                  className={cn(inputClass, "min-w-0 flex-1 py-1 text-xs")}
+                  placeholder={g.kind === "approval" ? "Name, e.g. Design approved" : "Name, e.g. Unit tests"}
+                  maxLength={MAX_GATE_NAME_CHARS}
+                  value={g.name}
+                  onChange={(e) => changeGate(g.id, { name: e.currentTarget.value })}
+                />
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={`Delete ${g.name || "this gate"}`}
+                  onClick={() => edit((d) => ({ ...d, gates: d.gates.filter((x) => x.id !== g.id) }))}
+                >
+                  <Trash2 aria-hidden />
+                </Button>
               </div>
-            );
-          })}
+              {g.kind === "command" && (
+                <>
+                  <textarea
+                    aria-label={`Command for ${g.name || "the gate"}`}
+                    data-testid="kanban-gate-command"
+                    className={cn(inputClass, "min-h-12 w-full py-1 font-mono text-xs")}
+                    placeholder="nix develop -c just test"
+                    value={g.command}
+                    onChange={(e) => changeGate(g.id, { command: e.currentTarget.value })}
+                  />
+                  <details data-testid="kanban-gate-options" className="text-[11px]">
+                    <summary className="cursor-pointer text-muted-foreground">
+                      In /workspace/{g.workdir || "…"}, {g.clean ? "on a clean checkout of the last commit" : "as the sandbox is"},{" "}
+                      {g.timeout_seconds}s at most
+                    </summary>
+                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                      <label className="flex items-center gap-1">
+                        /workspace/
+                        <input
+                          aria-label="Directory"
+                          data-testid="kanban-gate-workdir"
+                          className={cn(inputClass, "w-32 py-0.5 text-xs")}
+                          placeholder="repo"
+                          value={g.workdir}
+                          onChange={(e) => changeGate(g.id, { workdir: e.currentTarget.value })}
+                        />
+                      </label>
+                      <label className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          data-testid="kanban-gate-clean"
+                          checked={g.clean}
+                          onChange={(e) => changeGate(g.id, { clean: e.currentTarget.checked })}
+                        />
+                        Clean checkout of the last commit
+                      </label>
+                      <label className="flex items-center gap-1">
+                        Timeout
+                        <input
+                          type="number"
+                          aria-label="Timeout in seconds"
+                          className={cn(inputClass, "w-20 py-0.5 text-xs")}
+                          min={10}
+                          max={3600}
+                          value={g.timeout_seconds}
+                          onChange={(e) => changeGate(g.id, { timeout_seconds: Math.round(Number(e.currentTarget.value) || 0) })}
+                        />
+                        s
+                      </label>
+                    </div>
+                  </details>
+                </>
+              )}
+            </div>
+          ))}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="xs"
+              variant="ghost"
+              data-testid="kanban-add-gate"
+              disabled={!gateStages.length || draft.gates.length >= MAX_BOARD_GATES}
+              onClick={() => addGate(gateStages[0].id)}
+            >
+              <Plus aria-hidden /> Add gate
+            </Button>
+            {draft.stages.some((s) => isNew(s.id)) && (
+              <span className="text-[11px] text-muted-foreground">Save the board to put gates on a new stage.</span>
+            )}
+          </div>
         </section>
       )}
       <div className="flex min-h-0 flex-1">

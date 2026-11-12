@@ -111,6 +111,7 @@ async function serveKanban(page: Page, request: APIRequestContext, base: string)
         stages: Array<{ id?: string; name: string }>;
         tags: Array<{ id?: string; name: string; color: string }>;
         skills?: Array<{ id?: string; name: string; body: string }>;
+        gates?: Array<Partial<Gate> & { stage: string; direction: Gate["direction"]; kind: Gate["kind"]; name: string }>;
       };
       saves.push(want);
       const keep = new Set(want.stages.map((x) => x.id));
@@ -127,7 +128,12 @@ async function serveKanban(page: Page, request: APIRequestContext, base: string)
       const skills = want.skills
         ? want.skills.map((k, i) => ({ id: k.id ?? `skill-${Date.now()}-${i}`, name: k.name, body: k.body, position: i + 1 }))
         : row.skills;
-      Object.assign(row, { stages, tags, skills });
+      const gates = want.gates
+        ? want.gates.map((g, i) => ({
+            command: "", workdir: "", clean: true, timeout_seconds: 600, ...g, id: g.id ?? `gate-${Date.now()}-${i}`, position: i + 1,
+          }))
+        : row.gates;
+      Object.assign(row, { stages, tags, skills, gates });
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ board: row }) });
       return;
     }
@@ -544,6 +550,45 @@ fastOnly("the kanban broker routes are stubbed in the browser")("kanban /boards 
     await page.getByTestId("kanban-edit-stages").click();
     await expect.poll(() => kanban.boards[0].skills.map((k) => [k.name, k.body])).toEqual([["Style", "Small PRs, one change each."]]);
     expect(kanban.saves).toHaveLength(2);
+  });
+
+  test("the user adds a board's gates in Edit board: Add gate, then pick the stage, direction and kind", async ({ page, request, baseURL }) => {
+    const base = baseURL ?? "http://localhost:5173";
+    const kanban = await serveKanban(page, request, base);
+    const board = await kanban.board(`e2e-board-gates-${Date.now()}`);
+    const [design, inProgress] = board.stages;
+
+    await page.goto(`/boards/${board.folder}`);
+    await expect(page.getByTestId("kanban-board")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId("kanban-gates")).toHaveCount(0);
+    await page.getByTestId("kanban-edit-stages").click();
+    const gates = page.getByTestId("kanban-gates").getByTestId("kanban-gate-edit");
+    await page.getByTestId("kanban-add-gate").click();
+    // A new gate asks the user's approval to leave the first stage, and is named for it.
+    const first = gates.first();
+    await expect(first.getByTestId("kanban-gate-name")).toHaveValue("Your approval");
+    await expect(first.getByTestId("kanban-gate-stage")).toHaveValue(design.id);
+    await first.getByTestId("kanban-gate-stage").selectOption(inProgress.id);
+    await first.getByTestId("kanban-gate-direction").selectOption("enter");
+    await first.getByTestId("kanban-gate-name").fill("Plan approved");
+    await page.getByTestId("kanban-add-gate").click();
+    const second = gates.nth(1);
+    await second.getByTestId("kanban-gate-kind").selectOption("command");
+    // The kind took the placeholder name with it; the command's options stay folded until opened.
+    await expect(second.getByTestId("kanban-gate-name")).toHaveValue("");
+    await expect(second.getByTestId("kanban-gate-workdir")).toBeHidden();
+    await second.getByTestId("kanban-gate-name").fill("Unit tests");
+    await second.getByTestId("kanban-gate-command").fill("just test");
+    await second.getByTestId("kanban-gate-options").locator("summary").click();
+    await second.getByTestId("kanban-gate-workdir").fill("scooter");
+    await page.getByTestId("kanban-edit-stages").click();
+    await expect
+      .poll(() => kanban.boards[0].gates.map((g) => [g.stage, g.direction, g.kind, g.name, g.command, g.workdir]))
+      .toEqual([
+        [inProgress.id, "enter", "approval", "Plan approved", "", ""],
+        [design.id, "leave", "command", "Unit tests", "just test", "scooter"],
+      ]);
+    expect(kanban.saves).toHaveLength(1);
   });
 
   test("Rename and Delete board change the board's folder", async ({ page, request, baseURL }) => {
