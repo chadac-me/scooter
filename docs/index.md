@@ -37,7 +37,7 @@ provides the execution **body** (pods, warm pools, suspend/resume); Scooter adds
 ## Where to start
 
 - [Samples](samples.md) — short videos of Scooter at work.
-- [Run it on your machine](tutorial/local.md) — one command, no cluster of your own.
+- [Local deployments](tutorial/deploying/local.md) — one command, no cluster of your own.
 - [Getting started](getting-started.md) — deploy the platform to a cluster.
 - [Features](features/index.md) — what's in the box.
 - [Configuration options](reference/options/index.md) — every `scooter.*` option, generated

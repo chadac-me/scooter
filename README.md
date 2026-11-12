@@ -54,7 +54,7 @@ subscription, an Anthropic API key, or Ollama), and opens the chat at
 `destroy` removes it. To declare the configuration instead, `nix flake init -t
 github:chadac-me/scooter#local` gives a flake whose `nix run . -- up` does the same with
 your `scooter.nix`, and `services.scooter-local` does it on NixOS. See
-[Run it on your machine](https://chadac-me.github.io/scooter/tutorial/local/) for the
+[Local deployments](https://chadac-me.github.io/scooter/tutorial/deploying/local/) for the
 details and the limits of a single-machine setup.
 
 ## Getting started

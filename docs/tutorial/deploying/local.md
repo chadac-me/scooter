@@ -1,4 +1,4 @@
-# Run it on your machine
+# Local deployments
 
 One command runs Scooter on a laptop or a single server, with nothing of your own to set
 up first:
@@ -61,10 +61,10 @@ The same platform a cluster deployment runs, configured by the `local` preset
 - the stock Ingress, served by the Traefik that k3s ships, on the port k3d maps to
   `localhost`;
 - the uploads volume on a host directory (the single-node escape hatch described in
-  [Getting started](../getting-started.md#storage-on-single-node-clusters));
+  [Getting started](../../getting-started.md#storage-on-single-node-clusters));
 - Scooter's own agent skills, and the contribs that need no credentials: web search
   (DuckDuckGo), file attachments, personal skills, personalization, hand-off, shares and
-  commits. [Setting up contribs](contribs.md) adds the rest.
+  commits. [Setting up contribs](../contribs.md) adds the rest.
 
 Each conversation still gets its own NixOS sandbox: a container inside the k3d node, with
 its workspace on a volume that survives `down`.
@@ -74,7 +74,7 @@ its workspace on a volume that survives `down`.
 **There is no login.** Scooter trusts whatever identity sits in front of it, and here
 nothing does: everyone who can reach the port is the same user. The port is bound to
 `127.0.0.1`, so that is only your machine; do not forward it to a network. For other
-people, make a real deployment ([Getting started](../getting-started.md)).
+people, make a real deployment ([Getting started](../../getting-started.md)).
 
 **Sandboxes run privileged.** Without a cgroup-delegating runtime such as crun in the
 cluster, the sandbox's systemd needs a privileged container, which here is a container
@@ -148,8 +148,8 @@ credential comes from `environmentFile`.
 ## From here to a deployment
 
 The preset is an ordinary Scooter module (`scooter.kubenixModules.local`), so the same
-`scooter.nix` can grow into a deployment of your own: [Getting started](../getting-started.md)
-and [Deploying Scooter](deploying/index.md) cover authentication, a hostname, and a
+`scooter.nix` can grow into a deployment of your own: [Getting started](../../getting-started.md)
+and [Deploying Scooter](index.md) cover authentication, a hostname, and a
 cluster.
 
 !!! note "The Claude image tag"
@@ -158,7 +158,7 @@ cluster.
     ([#824](https://github.com/chadac-me/scooter/issues/824)). `scooter-local up` resolves
     it with one `nix eval` the first time, and caches it. A deployment of your own sets
     `scooter.local.agentHostClaudeTag` the way
-    [Running on a Claude subscription](deploying/published-images.md#running-on-a-claude-subscription)
+    [Running on a Claude subscription](published-images.md#running-on-a-claude-subscription)
     describes. `SCOOTER_LOCAL_CLAUDE_TAG` overrides it for `scooter-local`.
 
 ## Troubleshooting

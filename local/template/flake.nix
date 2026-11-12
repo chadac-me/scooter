@@ -1,4 +1,4 @@
-# Scooter on this machine, declared: `nix run . -- up` (docs: "Run it on your machine").
+# Scooter on this machine, declared: `nix run . -- up` (docs: "Local deployments").
 {
   inputs = {
     scooter.url = "github:chadac-me/scooter";

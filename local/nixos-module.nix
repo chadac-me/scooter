@@ -7,7 +7,7 @@
 #   };
 #
 # Enables Docker, installs the `scooter-local` built for `settings`, and runs `up` as a
-# systemd service (`down` on stop). The docs: "Run it on your machine".
+# systemd service (`down` on stop). The docs: "Local deployments".
 { mkLocal }:
 { config, lib, pkgs, ... }:
 let
