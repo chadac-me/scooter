@@ -27,12 +27,10 @@ scooter.agent.availableModels = {
 
 ## GitHub Copilot
 
-A GitHub Copilot seat can power the agent through goose's `github_copilot` provider: GitHub
-governs which models the seat may use, and Scooter lists them under the `copilot` group,
-in Copilot's own (dotted) ids. The credential is a GitHub token of a user with a seat
-(`gh auth token`, or a fine-grained token), in a Secret the agent-host reads as
-`GITHUB_COPILOT_TOKEN`; goose exchanges it for a Copilot API token, cached under the
-agent-host's `$HOME` (an emptyDir, never a sandbox) and refreshed on its own.
+A Copilot seat drives the agent through goose's `github_copilot` provider. The credential is
+the seat's GitHub token (`gh auth token`, or a fine-grained token) in a Secret, read as
+`GITHUB_COPILOT_TOKEN`; goose exchanges it for a Copilot token on its own. Models go under
+the `copilot` group, in Copilot's dotted ids:
 
 ```nix
 scooter.agent = {
@@ -41,25 +39,17 @@ scooter.agent = {
   availableModels.copilot = {
     "gpt-5.4"           = { default = true; hint = "Fast enough for most work; streams."; };
     "claude-sonnet-4.6" = { hint = "Small edits and PRs. Answers arrive in one block."; };
-    "claude-opus-4.7"   = { contextLimit = 200000; hint = "The hardest reasoning."; };
   };
 };
 ```
 
-What to know before choosing it:
-
-- **One credential for the deployment.** Every conversation runs on that seat's token; the
-  per-user path is bring-your-own (`byoc`), not this provider.
-- **Claude models do not stream** through goose's Copilot provider (GPT, Gemini and Grok
-  models do): a Claude reply shows up as one block when the turn finishes, so the preset's
-  default is a GPT model.
-- **Context windows**: goose's model table knows many Copilot ids; declare `contextLimit`
-  for one it does not (see below).
-- **GitHub Enterprise**: `scooter.agent.env.GITHUB_COPILOT_HOST` (and `GITHUB_COPILOT_TOKEN_URL`)
-  point goose at your host; both are forwarded to goose.
-- goose talks to the same internal GitHub endpoint editors do, presenting itself as one. A
-  shared server on a service account is a different posture from a developer's editor;
-  check it against your Copilot terms before deploying it for a team.
+- One token serves every conversation; per-user Copilot is not this provider.
+- Claude models do not stream through Copilot (GPT, Gemini and Grok do): a reply arrives as
+  one block, so prefer a GPT default.
+- GitHub Enterprise: set `GITHUB_COPILOT_HOST` (and `GITHUB_COPILOT_TOKEN_URL`) in
+  `scooter.agent.env`.
+- goose uses the internal endpoint editors use, presenting itself as one; check your Copilot
+  terms before deploying it for a team.
 
 ## Context windows
 
