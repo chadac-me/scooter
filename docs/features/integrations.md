@@ -16,7 +16,9 @@ run on the platform's floor model.
 
 A per-conversation **permissions broker** vends scoped credentials into the sandbox — git
 credentials, cloud (AWS) access — with a policy and audit layer between the agent and anything
-sensitive. Third-party providers plug in as Python modules behind core-enforced middleware.
+sensitive. Third-party providers plug in as Python modules behind core-enforced middleware:
+a credential-injecting proxy, typed agent tools, or both. Adding one is a contrib of two
+files; see [Writing a contrib](../tutorial/writing-a-contrib/quickstart.md).
 
 ## Contrib modules
 
