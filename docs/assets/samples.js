@@ -47,8 +47,10 @@
       link.className = "scooter-demo-open";
       link.href = "#" + h.id;
       link.title = "Open full view";
+      // The title link replaces the heading's permalink.
       Array.from(h.childNodes).forEach(function (n) {
-        if (!(n.classList && n.classList.contains("headerlink"))) link.append(n);
+        if (n.classList && n.classList.contains("headerlink")) n.remove();
+        else link.append(n);
       });
       link.insertAdjacentHTML("beforeend", EXPAND);
       h.prepend(link);
