@@ -14,6 +14,10 @@
  * broker trusts that header only from the agent-host's account (USER_RELAY_SERVICE_ACCOUNTS),
  * and the relay builds its outgoing headers from scratch, so nothing the browser sends,
  * a forged X-Scooter-User included, reaches the broker.
+ *
+ * An anonymous caller follows the management API's single-user rule: refused under
+ * AUTH_ENFORCE, and relayed as the `anonymous` user without it (a deployment with no
+ * auth proxy, such as scooter-local, where every caller is that one user).
  */
 
 import type { IncomingMessage } from "node:http";
@@ -41,6 +45,8 @@ export interface ContribApiDeps {
   authHeaders: () => Promise<Record<string, string>>;
   /** A conversation id or sandbox key -> the broker's key for it; null when unknown. */
   conversationKey?: (id: string) => Promise<string | null>;
+  /** AUTH_ENFORCE: refuse anonymous callers. Unset, anonymous is the single user and is relayed as such. */
+  authEnforced?: boolean;
   /** Injected for tests. */
   fetch?: typeof fetch;
 }
@@ -93,7 +99,7 @@ export function mountContribApi(r: Router, deps: ContribApiDeps): void {
 
   // `subtree` is the broker path under the contrib's prefix; null means 404.
   const relayTo = (subtree: (ctx: Ctx) => Promise<string | null>) => async (ctx: Ctx) => {
-    if (ctx.user.anonymous) return { status: 401, json: { error: "sign in first" } };
+    if (ctx.user.anonymous && deps.authEnforced) return { status: 401, json: { error: "sign in first" } };
     const name = ctx.params.contrib;
     const cfg = Object.hasOwn(deps.contribs, name) ? deps.contribs[name] : undefined;
     if (!cfg) return { status: 404, json: { error: `no settings API for contrib '${name}'` } };
