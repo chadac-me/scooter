@@ -67,13 +67,17 @@ let
 
   problems = structural ++ perProvider ++ providerWiring;
 in
-if problems != [ ] then
-  throw "local preset render check failed:\n  ${lib.concatStringsSep "\n  " problems}"
-else
-  pkgs.runCommand "local-manifests-check" {
-    # The YAML renders themselves, so the check also builds what `up` applies.
-    renders = lib.mapAttrsToList (_: r: r.config.kubernetes.resultYAML) renders;
-  } ''
+# The verdict lives in an attribute, not around the derivation: `nix flake show`
+# reads only `type` and `name`, and each render it would otherwise force is a full
+# platform eval, per provider and per system. Instantiating the check (`nix build`,
+# `nix flake check`) still fails at eval time with the list.
+pkgs.runCommand "local-manifests-check" {
+  # The YAML renders themselves, so the check also builds what `up` applies.
+  renders =
+    if problems != [ ] then
+      throw "local preset render check failed:\n  ${lib.concatStringsSep "\n  " problems}"
+    else lib.mapAttrsToList (_: r: r.config.kubernetes.resultYAML) renders;
+} ''
     for r in $renders; do grep -q 'kind: Deployment' "$r"; done
     echo ok > $out
   ''
