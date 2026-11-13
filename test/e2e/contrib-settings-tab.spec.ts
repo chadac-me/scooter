@@ -105,11 +105,12 @@ test.describe("contrib settings tabs", () => {
     expect(seen).toBe("/contrib-api/echo/whoami");
   });
 
-  // Unstubbed, the call goes through the dev proxy to the real agent-host, whose relay
-  // refuses a caller with no ingress identity before looking anything up.
-  test("the real relay refuses an anonymous caller", async ({ page }) => {
+  // Unstubbed, the call goes through the dev proxy to the real agent-host. The fast stack
+  // runs without AUTH_ENFORCE, so the anonymous single user passes the sign-in gate and
+  // the relay answers 404: no echo contrib with a settings API ships on this stack.
+  test("the real relay reaches the contrib lookup for the anonymous single user", async ({ page }) => {
     await serveTabs(page, { echo: ECHO });
     await page.goto("/settings/echo");
-    await expect(page.locator('[data-testid="echo-relayed-user"]')).toHaveText("The broker sees HTTP 401.", { timeout: 20_000 });
+    await expect(page.locator('[data-testid="echo-relayed-user"]')).toHaveText("The broker sees HTTP 404.", { timeout: 20_000 });
   });
 });
