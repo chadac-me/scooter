@@ -58,7 +58,12 @@ let
       "anthropic: ANTHROPIC_API_KEY is not read from the agent-anthropic-key Secret"
     ++ lib.optional (envValue "ollama" "GOOSE_PROVIDER" != "ollama") "ollama: GOOSE_PROVIDER is not ollama"
     ++ lib.optional (envValue "ollama" "OLLAMA_HOST" != "@OLLAMA_HOST@") "ollama: OLLAMA_HOST is not the placeholder"
-    ++ lib.optional (envValue "ollama" "GOOSE_MODEL" != "@OLLAMA_MODEL@") "ollama: GOOSE_MODEL is not the placeholder";
+    ++ lib.optional (envValue "ollama" "GOOSE_MODEL" != "@OLLAMA_MODEL@") "ollama: GOOSE_MODEL is not the placeholder"
+    ++ lib.optional (envValue "copilot" "GOOSE_PROVIDER" != "github_copilot") "copilot: GOOSE_PROVIDER is not github_copilot"
+    ++ lib.optional ((envValue "copilot" "GITHUB_COPILOT_TOKEN").secretKeyRef.name or null != "agent-copilot-token")
+      "copilot: GITHUB_COPILOT_TOKEN is not read from the agent-copilot-token Secret"
+    ++ lib.optional (!(lib.hasInfix "\"copilot\"" (toString (envValue "copilot" "AGENT_MODELS_JSON"))))
+      "copilot: the catalog has no copilot-tagged model";
 
   problems = structural ++ perProvider ++ providerWiring;
 in
