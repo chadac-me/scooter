@@ -10,6 +10,9 @@ tracker at `https://api.acme.example`. By the end, the agent can call the Acme A
 token it never sees, comment on issues through a typed tool, and be started by a mention
 in an Acme comment.
 
+If all you need is "proxy this API and add the token", the
+[quick start](quickstart.md) is the whole thing in two files.
+
 ## Where a contrib lives
 
 Contribs are built **into Scooter's images**. The broker image contains every contrib's
