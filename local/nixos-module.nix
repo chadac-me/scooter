@@ -37,8 +37,8 @@ in
 
     package = mkOption {
       type = types.package;
-      default = mkLocal { system = pkgs.stdenv.hostPlatform.system; module = cfg.settings; };
-      defaultText = literalExpression "scooter.lib.mkLocal { module = cfg.settings; }";
+      default = mkLocal { system = pkgs.stdenv.hostPlatform.system; module = cfg.settings; inherit (cfg) port; };
+      defaultText = literalExpression "scooter.lib.mkLocal { module = cfg.settings; inherit (cfg) port; }";
       description = "The `scooter-local` the service runs; built from `settings` by default.";
     };
 

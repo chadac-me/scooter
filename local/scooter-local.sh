@@ -16,7 +16,7 @@ AGENT_SANDBOX_VERSION="@agentSandboxVersion@"
 
 CLUSTER="${SCOOTER_LOCAL_CLUSTER:-scooter}"
 NAMESPACE="scooter"
-PORT="${SCOOTER_LOCAL_PORT:-8080}"
+PORT="${SCOOTER_LOCAL_PORT:-@defaultPort@}"
 API_PORT="${SCOOTER_LOCAL_API_PORT:-6445}"
 STATE="${SCOOTER_LOCAL_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/scooter-local}"
 URL="http://localhost:${PORT}"
@@ -37,12 +37,15 @@ scooter-local ${VERSION} — Scooter on this machine (k3d + the published images
   scooter-local down       stop the cluster; conversations, sandboxes and files are kept
   scooter-local destroy    delete the cluster and everything in it
   scooter-local status     cluster, pods and the URL
-  scooter-local logs       follow the agent-host's log
+  scooter-local logs [D]   follow a deployment's log (default agent-host; e.g. agent-broker)
   scooter-local config     choose the provider or credential again (then \`up\` applies it)
   scooter-local kubeconfig print the kubeconfig path, for kubectl
+  scooter-local kubectl …  kubectl against the cluster, in the scooter namespace
 
 Environment:
-  SCOOTER_LOCAL_PORT       the UI port on localhost (default 8080)
+  SCOOTER_LOCAL_PORT       the UI port on localhost (default @defaultPort@), chosen when the cluster is created
+  SCOOTER_LOCAL_USER       your user id on every request (default: your login name)
+  SCOOTER_LOCAL_EMAIL      your email on every request (default: git config user.email)
   SCOOTER_LOCAL_STATE      state dir (default \$XDG_STATE_HOME/scooter-local)
   SCOOTER_LOCAL_PROVIDER   claude-code | anthropic | ollama | copilot, to skip the prompt
   CLAUDE_CODE_OAUTH_TOKEN  the \`claude setup-token\` token, to skip the prompt
@@ -59,6 +62,37 @@ EOF
 need_docker() {
   command -v docker >/dev/null 2>&1 || die "docker is not on PATH; k3d runs the cluster in Docker (Docker Desktop, OrbStack, or the docker daemon)."
   docker info >/dev/null 2>&1 || die "docker is installed but the daemon is not reachable; start it and retry."
+}
+
+# What a fresh platform needs: 4 CPUs and 8 GB. Docker Desktop, OrbStack and colima
+# run Docker in a VM whose default size (colima's is 2 CPUs / 2 GiB) is too small.
+check_docker_size() {
+  local info cpus mem_bytes mem_gib
+  info=$(docker info --format '{{.NCPU}} {{.MemTotal}}' 2>/dev/null) || return 0
+  read -r cpus mem_bytes <<<"$info"
+  [[ "$cpus" =~ ^[0-9]+$ && "$mem_bytes" =~ ^[0-9]+$ ]] || return 0
+  mem_gib=$(( mem_bytes / 1024 / 1024 / 1024 ))
+  # 8 GB of VM memory reports a little under 8 GiB.
+  if [ "$cpus" -lt 4 ] || [ "$mem_bytes" -lt $(( 7 * 1024 * 1024 * 1024 )) ]; then
+    log "WARN: Docker has ${cpus} CPUs and ${mem_gib} GiB; Scooter wants at least 4 CPUs and 8 GiB, and pods stay Pending below that."
+    if docker context show 2>/dev/null | grep -q colima || command -v colima >/dev/null 2>&1; then
+      log "      colima: colima stop && colima start --cpu 6 --memory 16"
+    else
+      log "      raise the VM's CPUs and memory in Docker Desktop's or OrbStack's settings."
+    fi
+  fi
+}
+
+# Whether something on this machine already listens on 127.0.0.1:<port>.
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# The first free port after $1, for the error message.
+free_port_after() {
+  local p
+  for p in $(seq $(( $1 + 1 )) $(( $1 + 50 ))); do
+    port_in_use "$p" || { echo "$p"; return; }
+  done
+  echo "<port>"
 }
 
 # --- cluster -----------------------------------------------------------------
@@ -79,6 +113,9 @@ cluster_up() {
       k3d cluster start "$CLUSTER"
     fi
   else
+    if port_in_use "$PORT"; then
+      die "port ${PORT} on 127.0.0.1 is taken by another program; choose another, e.g. SCOOTER_LOCAL_PORT=$(free_port_after "$PORT") scooter-local up (or \`port\` in mkLocal / services.scooter-local)."
+    fi
     log "creating cluster '$CLUSTER' (http://localhost:${PORT} -> the cluster's ingress)..."
     # SCOOTER_LOCAL_K3D_ARGS is word-split on purpose: it is a list of arguments.
     # shellcheck disable=SC2086
@@ -113,6 +150,41 @@ install_controller() {
   kubectl apply -f "${base}/sandbox.yaml"
   kubectl apply -f "${base}/extensions.yaml"
   kubectl wait --for=condition=Available deploy --all -n agent-sandbox-system --timeout=300s
+}
+
+# k3s installs Traefik (and its CRDs) with a Helm job a little after the node is
+# Ready; the identity Middleware cannot be applied before the CRD exists.
+wait_for_traefik_crd() {
+  grep -q '^kind: Middleware' "$1" || return 0
+  # Polled rather than `kubectl wait`: a CRD created a moment ago has no
+  # status.conditions yet, and `kubectl wait` errors out instead of waiting.
+  for _ in $(seq 1 120); do
+    [ "$(kubectl get crd middlewares.traefik.io -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ] && return
+    sleep 2
+  done
+  die "k3s's Traefik did not install its CRDs; \`kubectl -n kube-system get pods\` shows the helm-install-traefik job."
+}
+
+# --- identity ----------------------------------------------------------------
+
+# The one user the ingress stamps on every request: remembered, so a GUI launch
+# without the variable keeps the same identity (and the same conversations).
+local_user() {
+  local value="${SCOOTER_LOCAL_USER:-}"
+  if [ -z "$value" ] && [ -s "$STATE/user" ]; then value=$(cat "$STATE/user"); fi
+  [ -n "$value" ] || value=$(id -un)
+  [[ "$value" =~ ^[A-Za-z0-9._@+-]+$ ]] || die "user '$value' has characters outside [A-Za-z0-9._@+-]; set SCOOTER_LOCAL_USER"
+  echo "$value" > "$STATE/user"
+  echo "$value"
+}
+
+local_email() {
+  local value="${SCOOTER_LOCAL_EMAIL:-}"
+  if [ -z "$value" ] && [ -f "$STATE/email" ]; then value=$(cat "$STATE/email"); fi
+  if [ -z "$value" ] && command -v git >/dev/null 2>&1; then value=$(git config --global user.email 2>/dev/null || true); fi
+  [ -z "$value" ] || [[ "$value" =~ ^[A-Za-z0-9._@+-]+$ ]] || die "email '$value' has characters outside [A-Za-z0-9._@+-]; set SCOOTER_LOCAL_EMAIL"
+  echo "$value" > "$STATE/email"
+  echo "$value"
 }
 
 # --- provider ----------------------------------------------------------------
@@ -301,6 +373,11 @@ render() {
       cp "$MANIFESTS_COPILOT" "$out"
       ;;
   esac
+  # The identity placeholders, in every render that still carries them.
+  local user email
+  user=$(local_user); email=$(local_email)
+  subst '@LOCAL_USER@' "$user" < "$out" | subst '@LOCAL_EMAIL@' "$email" > "$out.tmp"
+  mv "$out.tmp" "$out"
   chmod 644 "$out"
   echo "$out"
 }
@@ -366,6 +443,7 @@ wait_ready() {
 
 cmd_up() {
   need_docker
+  check_docker_size
   mkdir -p "$STATE"
   cluster_up
   install_controller
@@ -378,6 +456,7 @@ cmd_up() {
   ensure_provider_secret "$provider"
   local manifests; manifests=$(render "$provider")
   check_images "$manifests"
+  wait_for_traefik_crd "$manifests"
   apply "$manifests"
   wait_ready
   cat <<EOF
@@ -385,6 +464,7 @@ cmd_up() {
   Scooter is up: ${URL}
 
   provider:   ${provider}
+  user:       $(cat "$STATE/user")
   kubeconfig: ${KUBECONFIG}
   stop:       scooter-local down     (keeps everything)
   remove:     scooter-local destroy
@@ -430,7 +510,14 @@ cmd_status() {
 
 cmd_logs() {
   cluster_running || die "the cluster is not running"
-  kubectl -n "$NAMESPACE" logs deploy/agent-host -f --tail=200
+  local target="${1:-agent-host}"
+  case "$target" in */*) ;; *) target="deploy/$target" ;; esac
+  kubectl -n "$NAMESPACE" logs "$target" -f --tail=200
+}
+
+cmd_kubectl() {
+  cluster_running || die "the cluster is not running"
+  kubectl -n "$NAMESPACE" "$@"
 }
 
 cmd_config() {
@@ -457,7 +544,8 @@ main() {
     down|stop) cmd_down ;;
     destroy|delete) cmd_destroy ;;
     status) cmd_status ;;
-    logs) cmd_logs ;;
+    logs) shift; cmd_logs "$@" ;;
+    kubectl) shift; cmd_kubectl "$@" ;;
     config|configure) cmd_config ;;
     kubeconfig) echo "$KUBECONFIG" ;;
     version) echo "$VERSION" ;;

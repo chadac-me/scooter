@@ -1,6 +1,7 @@
 # The single-machine preset behind `nix run .#local` (docs/tutorial/local.md): one
-# user on a trusted machine, a single-node cluster (k3d) with no auth proxy, no RWX
-# storage and no ingress controller beyond k3s's Traefik, and the published images.
+# user on a trusted machine, a single-node cluster (k3d) with no auth proxy (a Traefik
+# middleware stamps that user's identity instead), no RWX storage and no ingress
+# controller beyond k3s's Traefik, and the published images.
 #
 # Import it from a deployment's own module too (`imports = [ scooter.kubenixModules.local ]`);
 # every setting is a `mkDefault`, so the deployment's values win.
@@ -82,6 +83,28 @@ in
         '';
       };
     };
+    user = mkOption {
+      type = types.str;
+      default = "@LOCAL_USER@";
+      example = "alice";
+      description = ''
+        The one user, as the identity header the ingress sets on every request
+        (`scooter.auth.userHeader`). Without it every caller is the `anonymous` user,
+        whom the contrib APIs (kanban, personal tokens) refuse. The default is a
+        placeholder scooter-local fills in at `up` (`SCOOTER_LOCAL_USER`, else the login
+        name). Characters: `[A-Za-z0-9._@+-]`.
+      '';
+    };
+    email = mkOption {
+      type = types.str;
+      default = "@LOCAL_EMAIL@";
+      example = "alice@example.com";
+      description = ''
+        The user's email, as `scooter.auth.emailHeader`. The default is a placeholder
+        scooter-local fills in at `up` (`SCOOTER_LOCAL_EMAIL`, else `git config
+        user.email`, else empty, which sends none).
+      '';
+    };
     assetsHostPath = mkOption {
       type = types.str;
       default = "/var/lib/scooter/assets";
@@ -106,10 +129,14 @@ in
         auth.enforce = mkDefault false;
 
         # k3s ships Traefik, and a host-less rule is a catch-all, so the stock Ingress
-        # serves http://localhost:<port> with nothing else installed.
+        # serves http://localhost:<port> with nothing else installed. The middleware
+        # below stamps the one user's identity on every request (and overwrites any
+        # copy a client sent).
         ingress = {
           enable = mkDefault true;
           className = mkDefault "traefik";
+          annotations."traefik.ingress.kubernetes.io/router.middlewares" =
+            mkDefault "${config.scooter.namespace}-local-identity@kubernetescrd";
         };
 
         # One of everything.
@@ -181,6 +208,23 @@ in
       })
     ];
 
+    # Traefik's Middleware (k3s installs the CRD), here only to set the identity
+    # headers; an empty value makes Traefik remove the header.
+    kubernetes.customTypes = [{
+      group = "traefik.io";
+      version = "v1alpha1";
+      kind = "Middleware";
+      attrName = "traefikMiddlewares";
+      module = { freeformType = types.attrsOf types.anything; };
+    }];
+    kubernetes.resources.traefikMiddlewares.local-identity = {
+      metadata.namespace = config.scooter.namespace;
+      spec.headers.customRequestHeaders = {
+        ${config.scooter.auth.userHeader} = cfg.user;
+        ${config.scooter.auth.emailHeader} = cfg.email;
+      };
+    };
+
     # The contribs that need no credentials.
     contribs = {
       ask-user.enable = mkDefault true;
@@ -188,6 +232,7 @@ in
       duckduckgo.enable = mkDefault true;
       files.enable = mkDefault true;
       handoff.enable = mkDefault true;
+      kanban.enable = mkDefault true;
       personalization.enable = mkDefault true;
       shares.enable = mkDefault true;
       skills.enable = mkDefault true;

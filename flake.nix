@@ -60,7 +60,9 @@
       # on top of the local preset (local/preset.nix). The module names the provider, so
       # `up` asks for nothing but a credential. buildSystem stays x86_64-linux on every
       # host: the published tags are that build's content hashes.
-      mkLocal = { system, module, buildSystem ? "x86_64-linux" }:
+      # `port` is the default for SCOOTER_LOCAL_PORT, baked in so a GUI launch (which
+      # misses a shell's environment) agrees with the terminal.
+      mkLocal = { system, module, buildSystem ? "x86_64-linux", port ? 8080 }:
         let
           render = evalPlatformWith {
             inherit system buildSystem;
@@ -75,6 +77,7 @@
           flake = self;
           manifests = { ${provider} = render.config.kubernetes.resultYAML; };
           fixedProvider = provider;
+          inherit port;
         };
     in
     flake-parts.lib.mkFlake { inherit inputs; } {

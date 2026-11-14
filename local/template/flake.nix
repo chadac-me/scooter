@@ -11,6 +11,8 @@
       perSystem = { system, ... }:
         let
           # scooter-local built for ./scooter.nix: `up` applies that configuration.
+          # Add `port = 8090;` if 8080 is taken: it is baked in, so apps started outside
+          # a shell use it too.
           local = scooter.lib.mkLocal { inherit system; module = ./scooter.nix; };
         in
         {
