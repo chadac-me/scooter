@@ -40,11 +40,25 @@ let
       ingress = (find provider "Ingress" "agent-host").spec;
       rule = builtins.head ingress.rules;
       pv = (find provider "PersistentVolume" "agent-host-assets").spec;
+      identity = find provider "Middleware" "local-identity";
+      stamped = identity.spec.headers.customRequestHeaders or { };
+      brokerEnv = name:
+        let
+          ctr = builtins.head (find provider "Deployment" "agent-broker").spec.template.spec.containers;
+          hits = builtins.filter (e: e.name == name) (ctr.env or [ ]);
+        in if hits == [ ] then null else (builtins.head hits).value or null;
     in
     lib.optional (rule ? host) "${provider}: the Ingress names a host; it must be a catch-all"
     ++ lib.optional (ingress.ingressClassName or null != "traefik") "${provider}: ingressClassName is not traefik"
     ++ lib.optional (envValue provider "AUTH_ENFORCE" != null) "${provider}: AUTH_ENFORCE is set; the preset runs without an auth proxy"
     ++ lib.optional (!(pv ? hostPath)) "${provider}: the assets PV is not a hostPath"
+    ++ lib.optional (identity == null) "${provider}: Middleware/local-identity missing"
+    ++ lib.optional (stamped.x-auth-user or null != "@LOCAL_USER@" || stamped.x-auth-email or null != "@LOCAL_EMAIL@")
+      "${provider}: the identity Middleware does not stamp the user and email placeholders"
+    ++ lib.optional ((find provider "Ingress" "agent-host").metadata.annotations."traefik.ingress.kubernetes.io/router.middlewares" or null
+        != "scooter-local-identity@kubernetescrd")
+      "${provider}: the Ingress does not use the identity Middleware"
+    ++ lib.optional (brokerEnv "KANBAN_ENABLED" != "true") "${provider}: kanban is not enabled"
     ++ lib.optional ((agentHost provider).spec.replicas or 1 != 1) "${provider}: agent-host has more than one replica"
     ++ lib.optional (controllerEnv provider "AGENT_HOST_MIN_REPLICAS" != "1") "${provider}: the agent-host autoscaler floor is not 1"
   ) renders);

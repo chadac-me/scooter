@@ -933,6 +933,16 @@ jobs:
           nix shell nixpkgs#k3d -c k3d cluster create scooter-example \
             --agents 0 --wait --timeout 180s
 
+      # The local preset's identity Middleware is a Traefik CRD, which k3s installs
+      # with a Helm job shortly after the node is Ready (scooter-local waits the same way).
+      - name: wait for Traefik's CRDs
+        run: |
+          for _ in $(seq 1 90); do
+            nix shell nixpkgs#kubectl -c kubectl get crd middlewares.traefik.io >/dev/null 2>&1 && break
+            sleep 2
+          done
+          nix shell nixpkgs#kubectl -c kubectl wait --for=condition=Established crd/middlewares.traefik.io --timeout=60s
+
       # A dry-run validates against current cluster state, so the namespace and the
       # CRDs the manifests' own resources depend on must be applied for real first.
       - name: install the rendered namespace + CRDs

@@ -16,10 +16,17 @@ and takes a few minutes; later runs take about a minute.
 ## What you need
 
 - **Nix** with flakes enabled ([install](https://nixos.org/download/)).
-- **Docker**: the daemon on Linux, or Docker Desktop / OrbStack on macOS. k3d runs the
-  cluster as containers.
-- **4 CPUs and 8 GB of memory** to spare, more for several conversations at once. Each
-  conversation runs in its own sandbox container with 1 CPU and 2 GB by default.
+- **Docker**: the daemon on Linux, or Docker Desktop, OrbStack or
+  [colima](https://github.com/abiosoft/colima) on macOS. k3d runs the cluster as
+  containers.
+- **4 CPUs and 8 GB of memory** for Docker, more for several conversations at once. Each
+  conversation runs in its own sandbox container with 1 CPU and 2 GB by default. On
+  macOS that is the Docker VM's size, not the Mac's, and the defaults are smaller
+  (colima's is 2 CPUs and 2 GiB). `up` warns when Docker has less; resize the VM first:
+  `colima start --cpu 6 --memory 16`, or Settings → Resources in Docker Desktop and
+  OrbStack.
+- **A free port** for the UI, 8080 by default. Other development servers often hold it;
+  `up` stops with a free one to use instead (see [Your port](#your-port)).
 - **A model provider**, one of:
     - a **Claude subscription**: `claude setup-token` (from the Claude Code CLI) prints
       a long-lived token;
@@ -39,9 +46,10 @@ and takes a few minutes; later runs take about a minute.
 | `scooter-local down` | Stop the cluster. Conversations, sandboxes and uploaded files are kept; `up` brings them back. |
 | `scooter-local destroy` | Delete the cluster and everything in it. |
 | `scooter-local status` | The cluster's state, its pods, and the URL. |
-| `scooter-local logs` | Follow the agent-host's log. |
+| `scooter-local logs [deploy]` | Follow a deployment's log: the agent-host's by default, or e.g. `agent-broker`. |
 | `scooter-local config` | Choose the provider or credential again; the next `up` applies it. |
 | `scooter-local kubeconfig` | The kubeconfig path, for `kubectl` against the cluster. |
+| `scooter-local kubectl …` | `kubectl` against the cluster, in the `scooter` namespace: `scooter-local kubectl get pods`. |
 
 `nix run github:chadac-me/scooter#local -- <command>` runs each; `nix profile install
 github:chadac-me/scooter#scooter-local` puts `scooter-local` on your PATH.
@@ -53,7 +61,26 @@ the cluster, as Secrets.
 For a script or a CI job, the prompts can be answered from the environment:
 `SCOOTER_LOCAL_PROVIDER=claude-code|anthropic|ollama|copilot`, and `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_API_KEY`, `OLLAMA_MODEL` or `GITHUB_COPILOT_TOKEN`. `SCOOTER_LOCAL_PORT` changes
-the port.
+the port, and `SCOOTER_LOCAL_USER` / `SCOOTER_LOCAL_EMAIL` the identity.
+
+### Your port
+
+k3d binds the port when it creates the cluster, so choose it before the first `up`
+(or `destroy` and `up` again). An environment variable reaches only the shells that
+set it, not an editor or app started from the dock, so a port of your own belongs in
+the build: `scooter.lib.mkLocal { …; port = 8090; }`, or `services.scooter-local.port`
+on NixOS. `SCOOTER_LOCAL_PORT` still wins when set.
+
+### Your identity
+
+There is no login, but Scooter still needs to know who you are: per-user features
+(boards, personal access tokens, private conversations) refuse an `anonymous` caller.
+The preset adds a Traefik middleware that stamps one user on every request, as the
+`x-auth-user` and `x-auth-email` headers an auth proxy would set. `up` fills it in
+with `SCOOTER_LOCAL_USER` (default: your login name) and `SCOOTER_LOCAL_EMAIL`
+(default: `git config user.email`), and remembers both in the state directory. A
+declared configuration sets `scooter.local.user` and `scooter.local.email` instead.
+Conversations started before this identity existed have no owner and stay visible.
 
 ## What runs
 
@@ -63,12 +90,12 @@ The same platform a cluster deployment runs, configured by the `local` preset
 - the agent-host, UI, broker and conversation controller, one replica each, and Postgres
   in the cluster;
 - the stock Ingress, served by the Traefik that k3s ships, on the port k3d maps to
-  `localhost`;
+  `localhost`, with a middleware that sets your identity (see [Your identity](#your-identity));
 - the uploads volume on a host directory (the single-node escape hatch described in
   [Getting started](../../getting-started.md#storage-on-single-node-clusters));
 - Scooter's own agent skills, and the contribs that need no credentials: web search
-  (DuckDuckGo), file attachments, personal skills, personalization, hand-off, shares and
-  commits. [Setting up contribs](../contribs.md) adds the rest.
+  (DuckDuckGo), file attachments, personal skills, personalization, hand-off, shares,
+  commits and [kanban boards](../../features/integrations.md#kanban-boards) (at `/boards`). [Setting up contribs](../contribs.md) adds the rest.
 
 Each conversation still gets its own NixOS sandbox: a container inside the k3d node, with
 its workspace on a volume that survives `down`.
@@ -76,7 +103,7 @@ its workspace on a volume that survives `down`.
 ## What a single machine does not do
 
 **There is no login.** Scooter trusts whatever identity sits in front of it, and here
-nothing does: everyone who can reach the port is the same user. The port is bound to
+that is a fixed one: everyone who can reach the port is you. The port is bound to
 `127.0.0.1`, so that is only your machine; do not forward it to a network. For other
 people, make a real deployment ([Getting started](../../getting-started.md)).
 
@@ -174,9 +201,19 @@ cluster.
   `main` and of every release, so run from one of those
   (`nix run github:chadac-me/scooter#local`, or `…/scooter/v1.5.0#local`) rather than
   from a branch or an unpublished commit.
+- **`port 8080 on 127.0.0.1 is taken`**: another program holds it. Use the port the
+  message suggests, or set one in the build (see [Your port](#your-port)).
+- **`Docker has 2 CPUs and 2 GiB`**: the Docker VM is too small; resize it as the
+  warning says, then `up` again.
 - **A pod stays `Pending` or `ImagePullBackOff`**: `scooter-local status` shows the
-  pods; `kubectl --kubeconfig $(scooter-local kubeconfig) -n scooter describe pod <name>`
-  says why. Memory is the usual reason on a small machine.
+  pods; `scooter-local kubectl describe pod <name>` says why. Memory is the usual
+  reason on a small machine.
+- **Boards or settings answer 401**: the request reached Scooter without an identity.
+  Check that `scooter-local kubectl get middleware local-identity -o yaml` names your
+  user, and that `up` finished after upgrading.
+- **A change does not show in an old conversation**: a conversation keeps the sandbox
+  settings it was created with. Start a new one after changing contribs or the
+  provider.
 - **The agent answers nothing** with Ollama: `ollama serve` must be running and the
   model pulled; `scooter-local logs` shows goose's errors.
 - **Start over**: `scooter-local destroy`, then `up`.
