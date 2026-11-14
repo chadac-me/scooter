@@ -180,3 +180,37 @@ async def test_a_missing_bearer_token_is_a_401(_as):
     with pytest.raises(HTTPException) as e:
         await auth_mod.authenticate_mcp(req)
     assert e.value.status_code == 401
+
+
+# --- the REST routes (`authenticate`): the agent-host answering a hook as a conversation ---
+
+async def test_rest_control_plane_acts_for_the_conversation_in_its_token(_as, monkeypatch):
+    """Checked before the approver list, since the agent-host is on both."""
+    monkeypatch.setattr(auth_mod.settings, "approver_service_accounts", AGENT_HOST)
+    _as(AGENT_HOST)
+    identity = await auth_mod.authenticate(_request(_conv_token("conv-7")))
+    assert identity.conversation_id == "conv-7"
+    assert not identity.is_approver
+
+
+async def test_rest_control_plane_without_a_token_is_still_the_approver(_as, monkeypatch):
+    monkeypatch.setattr(auth_mod.settings, "approver_service_accounts", AGENT_HOST)
+    _as(AGENT_HOST)
+    identity = await auth_mod.authenticate(_request())
+    assert identity.is_approver and identity.conversation_id == ""
+
+
+async def test_rest_control_plane_with_a_bad_token_is_refused(_as):
+    _as(AGENT_HOST)
+    with pytest.raises(HTTPException) as e:
+        await auth_mod.authenticate(_request(_conv_token("conv-7", secret="wrong")))
+    assert e.value.status_code == 403
+
+
+async def test_rest_an_approver_not_allowlisted_cannot_use_a_conversation_token(_as, monkeypatch):
+    """The approver list alone grants no conversation, on REST as on MCP."""
+    monkeypatch.setattr(auth_mod.settings, "mcp_caller_service_accounts", "")
+    monkeypatch.setattr(auth_mod.settings, "approver_service_accounts", AGENT_HOST)
+    _as(AGENT_HOST)
+    identity = await auth_mod.authenticate(_request(_conv_token("conv-7")))
+    assert identity.is_approver and identity.conversation_id == ""

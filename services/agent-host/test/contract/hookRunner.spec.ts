@@ -50,6 +50,22 @@ describe("parseHooks (AGENT_HOOKS_JSON)", () => {
     expect(warns).toHaveLength(3);
   });
 
+  it("takes a broker path in place of a command, but never both or neither", () => {
+    const warns: string[] = [];
+    const out = parseHooks(
+      JSON.stringify([
+        { id: "a", event: "SessionStart", broker: " kanban/hooks/session-start " },
+        { id: "b", event: "SessionStart", broker: "x", command: "true" },
+        { id: "c", event: "SessionStart" },
+      ]),
+      (m) => warns.push(m),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ id: "a", broker: "kanban/hooks/session-start" });
+    expect(out[0].command).toBeUndefined();
+    expect(warns).toHaveLength(2);
+  });
+
   it("is empty for unset or invalid JSON", () => {
     expect(parseHooks(undefined)).toEqual([]);
     expect(parseHooks("{")).toEqual([]);
@@ -247,6 +263,46 @@ describe("hooks on a cold sandbox pod", () => {
     await runner.run("Stop", {});
     expect(calls).toHaveLength(2);
     expect(checks).toBe(0);
+  });
+
+  it("runs a broker hook on a cold pod, posting the event JSON instead of an exec", async () => {
+    const { exec, calls } = fakeExec(() => ok());
+    const posted: Array<{ path: string; body: unknown }> = [];
+    let checks = 0;
+    const runner = createHookRunner({
+      exec,
+      hooks: [
+        hook({ id: "card", event: "SessionStart", command: undefined, broker: "kanban/hooks/session-start" }),
+        hook({ id: "sh", event: "SessionStart" }),
+      ],
+      sandboxReady: async () => (checks++, false),
+      broker: async (path, body) => {
+        posted.push({ path, body: JSON.parse(body) });
+        return { status: 200, body: JSON.stringify({ hookSpecificOutput: { additionalContext: "in Design" } }) };
+      },
+    });
+    const out = await runner.run("SessionStart", { scooter: { folder: { id: "f" } } });
+    expect(out.context).toEqual(["in Design"]);
+    expect(out.skipped).toEqual(["sh"]);
+    expect(calls).toHaveLength(0);
+    expect(posted).toEqual([{ path: "kanban/hooks/session-start", body: { cwd: "/workspace", hook_event_name: "SessionStart", scooter: { folder: { id: "f" } } } }]);
+    expect(checks).toBe(1);
+  });
+
+  it("reads a broker hook's non-2xx as a failed hook, or a block when it is fail-closed", async () => {
+    const { exec } = fakeExec(() => ok());
+    const broker = async () => ({ status: 503, body: "kanban not configured" });
+    const soft = createHookRunner({ exec, broker, hooks: [hook({ command: undefined, broker: "x" })] });
+    const runs: string[] = [];
+    const hard = createHookRunner({
+      exec,
+      broker,
+      hooks: [hook({ command: undefined, broker: "x", failClosed: true })],
+      onRun: (r) => runs.push(`${r.decision}:${r.error}`),
+    });
+    expect((await soft.run("Stop", {})).block).toBeUndefined();
+    expect((await hard.run("Stop", {})).block).toMatch(/required/);
+    expect(runs[0]).toMatch(/HTTP 503 kanban not configured/);
   });
 
   it("limits a run to the `only` ids", async () => {

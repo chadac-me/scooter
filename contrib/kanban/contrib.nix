@@ -53,7 +53,7 @@
 
       # The skills the user wrote on the conversation's board (Edit board), as `board-<name>`.
       agent.skillProviders.board = {
-        command = "agent-broker kanban/skills -f";
+        broker = "kanban/skills";
         timeout = 20;
         wait = 5;
         description = "The skills written on the board this conversation is filed on.";
@@ -71,21 +71,21 @@
           when = "filed";
           userCanDisable = true;
           description = "Tell the agent its card's column when a board conversation starts.";
-          command = builtins.readFile ./hooks/session-start.sh;
+          broker = "kanban/hooks/session-start";
         };
         prompt-submit = {
           event = "UserPromptSubmit";
           when = "filed";
           userCanDisable = true;
           description = "Remind the agent of its card's column with each message.";
-          command = builtins.readFile ./hooks/prompt-submit.sh;
+          broker = "kanban/hooks/prompt-submit";
         };
         stop = {
           event = "Stop";
           when = "filed";
           userCanDisable = true;
           description = "Once per run, ask the agent to set its card's status unless it did this run.";
-          command = builtins.readFile ./hooks/stop.sh;
+          broker = "kanban/hooks/stop";
         };
       };
     };

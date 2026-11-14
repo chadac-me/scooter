@@ -436,6 +436,15 @@ The script prints `{"skills": [{"name", "content", "dir"?}]}`, where `content` i
 whole SKILL.md and `dir` is the sandbox directory its relative paths resolve
 against. A deployment declares its own under `scooter.agent.skillProviders`.
 
+Set `broker = "<contrib>/<path>"` instead of `command` to have the agent-host GET that
+broker route as the conversation (its SA token plus a conversation token) and take
+the same answer from it. A broker provider needs no sandbox, so its skills reach even
+a conversation's first message while the pod is still starting; kanban's board skills
+work this way. `agent.hooks` take `broker` the same way: the agent-host POSTs the
+event JSON and reads a 2xx body as the hook's stdout, and since nothing runs in the
+pod, a cold sandbox never skips a broker hook. Set exactly one of `command` and
+`broker`; the render fails otherwise.
+
 - **Never shadows.** A deployment or personal skill with the same name wins, then the
   provider whose id sorts first.
 - **Budgets.** Every provider counts toward one budget: 50 skills and 128 KiB in

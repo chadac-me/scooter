@@ -197,6 +197,33 @@ describe("skill provider registry", () => {
     expect(calls).toEqual([]);
   });
 
+  it("asks the broker for a broker provider's skills, with or without a sandbox", async () => {
+    const execs: unknown[] = [];
+    const asked: Array<[string, string, string]> = [];
+    const registry = createSkillProviderRegistry(
+      {
+        providers: [provider("board", { command: undefined, broker: "kanban/skills" }), provider("sh")],
+        sandboxFor: () => undefined,
+        connect: async () => ({ execute: async () => (execs.push(1), ok()) }),
+        broker: async (id, path, init) => {
+          asked.push([id, path, init.method]);
+          return { status: 200, body: JSON.stringify({ skills: [file("board-repos")] }) };
+        },
+      },
+      { ttlMs: 0 },
+    );
+    expect((await registry.skills("c1")).map((f) => f.name)).toEqual(["board-repos"]);
+    expect(asked).toEqual([["c1", "kanban/skills", "GET"]]);
+    expect(execs).toEqual([]);
+  });
+
+  it("parseSkillProviders takes a broker path in place of a command, never both", () => {
+    const rows = parseSkillProviders(
+      JSON.stringify([{ id: "a", broker: "kanban/skills" }, { id: "b", broker: "x", command: "y" }]),
+    );
+    expect(rows.map((r) => [r.id, r.broker, r.command])).toEqual([["a", "kanban/skills", undefined]]);
+  });
+
   it("parseProvidedSkills drops malformed entries and rejects other shapes", () => {
     expect(parseProvidedSkills(JSON.stringify({ skills: [file("a"), { name: 1 }] })).map((f) => f.name)).toEqual(["a"]);
     expect(() => parseProvidedSkills("{}")).toThrow();

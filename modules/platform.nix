@@ -209,14 +209,22 @@ let
   blockingTools = import ../contrib/blocking-tools.nix { inherit lib; }
     (lib.filterAttrs (_: c: c.enable) config.contribs);
 
+  # A hook's or skill provider's `command` or `broker`, whichever it set; a `throw` for
+  # both or neither, since kubenix has no `assertions` option.
+  oneTarget = kind: id: x:
+    if (x.command == null) == (x.broker == null) then
+      throw "${kind} ${id}: set exactly one of `command` (run in the sandbox) and `broker` (a broker path)."
+    else if x.broker != null then { inherit (x) broker; }
+    else { inherit (x) command; };
+
   # Deployment hooks plus enabled contribs' (`<contrib>.<id>`), for AGENT_HOOKS_JSON.
   agentHooks =
     let
       row = id: h: {
         inherit id;
-        inherit (h) event matcher command failClosed userCanDisable description;
+        inherit (h) event matcher failClosed userCanDisable description;
         timeoutSec = h.timeout;
-      } // lib.optionalAttrs (h.when != null) { inherit (h) when; };
+      } // oneTarget "hook" id h // lib.optionalAttrs (h.when != null) { inherit (h) when; };
       enabledRows = prefix: hooks:
         lib.mapAttrsToList (id: row "${prefix}${id}") (lib.filterAttrs (_: h: h.enable) hooks);
     in
@@ -227,9 +235,9 @@ let
   # Deployment skill providers plus enabled contribs', for SKILL_PROVIDERS_JSON.
   skillProviders =
     let
-      row = id: p: {
+      row = id: p: oneTarget "skill provider" id p // {
         inherit id;
-        inherit (p) command description;
+        inherit (p) description;
         timeoutSec = p.timeout;
         waitSec = if p.wait == null then p.timeout else p.wait;
       };
@@ -793,7 +801,8 @@ in
           }
         '';
         description = ''
-          Conversation hooks, keyed by id: bash scripts run in each conversation's sandbox
+          Conversation hooks, keyed by id: bash scripts run in each conversation's sandbox (or
+          broker paths the agent-host calls as the conversation)
           at fixed points in a turn, speaking Claude Code's hook protocol. A contrib adds its
           own under `contribs.<name>.agent.hooks` (ids `<name>.<id>`).
         '';
@@ -806,7 +815,8 @@ in
           { team-skills.command = "cat /etc/team-skills.json"; }
         '';
         description = ''
-          Skill providers, keyed by id: bash scripts run in each conversation's sandbox
+          Skill providers, keyed by id: bash scripts run in each conversation's sandbox (or
+          broker paths the agent-host calls as the conversation)
           before every agent run, each printing skills to offer next to the deployment's
           and the user's own. A contrib adds its own under
           `contribs.<name>.agent.skillProviders` (ids `<name>.<id>`).

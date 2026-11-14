@@ -1084,6 +1084,8 @@ export function createSessionBridge(deps: BridgeDeps): SessionBridge {
           parent_id: deps.parentId?.() ?? null,
           provider: currentProviderKind ?? null,
           run_id: st?.runId ?? null,
+          // So a Stop hook can tell what changed this run without a marker of its own.
+          run_started_at: st?.startedAt ? new Date(st.startedAt).toISOString() : null,
           source: st?.source ?? null,
           folder,
           ...scooterExtra,
