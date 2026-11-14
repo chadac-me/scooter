@@ -14,10 +14,6 @@
  * broker trusts that header only from the agent-host's account (USER_RELAY_SERVICE_ACCOUNTS),
  * and the relay builds its outgoing headers from scratch, so nothing the browser sends,
  * a forged X-Scooter-User included, reaches the broker.
- *
- * An anonymous caller follows the management API's single-user rule: refused under
- * AUTH_ENFORCE, and relayed as the `anonymous` user without it (a deployment with no
- * auth proxy, such as scooter-local, where every caller is that one user).
  */
 
 import type { IncomingMessage } from "node:http";
