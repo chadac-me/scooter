@@ -156,11 +156,10 @@ install_controller() {
 # Ready; the identity Middleware cannot be applied before the CRD exists.
 wait_for_traefik_crd() {
   grep -q '^kind: Middleware' "$1" || return 0
-  for _ in $(seq 1 90); do
-    if kubectl get crd middlewares.traefik.io >/dev/null 2>&1; then
-      kubectl wait --for=condition=Established crd/middlewares.traefik.io --timeout=60s >/dev/null
-      return
-    fi
+  # Polled rather than `kubectl wait`: a CRD created a moment ago has no
+  # status.conditions yet, and `kubectl wait` errors out instead of waiting.
+  for _ in $(seq 1 120); do
+    [ "$(kubectl get crd middlewares.traefik.io -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ] && return
     sleep 2
   done
   die "k3s's Traefik did not install its CRDs; \`kubectl -n kube-system get pods\` shows the helm-install-traefik job."
