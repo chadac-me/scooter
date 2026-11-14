@@ -1664,7 +1664,15 @@ let
     ++ (if builtins.elem "echo.ping" (hookIds (echoHook true)) then [ ]
         else [ "an enabled contrib's hook is not in AGENT_HOOKS_JSON as <contrib>.<id>" ])
     ++ (if !(builtins.elem "echo.ping" (hookIds (echoHook false))) then [ ]
-        else [ "a disabled contrib's hook is in AGENT_HOOKS_JSON" ]);
+        else [ "a disabled contrib's hook is in AGENT_HOOKS_JSON" ])
+    # kanban's hooks are broker calls, so a cold sandbox doesn't skip them (#1368).
+    ++ (let k = builtins.filter (h: h.id == "kanban.session-start") (hooksOf (hostEnvOf { })); in
+        if k != [ ] && (builtins.head k).broker == "kanban/hooks/session-start" && !((builtins.head k) ? command) then [ ]
+        else [ "kanban.session-start is not a broker hook" ])
+    ++ (if !(builtins.tryEval (builtins.deepSeq (hookIds { scooter.agent.hooks.both = { event = "Stop"; command = "x"; broker = "y"; }; }) true)).success then [ ]
+        else [ "a hook with both `command` and `broker` rendered" ])
+    ++ (if !(builtins.tryEval (builtins.deepSeq (hookIds { scooter.agent.hooks.neither = { event = "Stop"; }; }) true)).success then [ ]
+        else [ "a hook with neither `command` nor `broker` rendered" ]);
 
   # Skill providers: only the shipped contribs' (kanban, skills) by default, wait capped, contrib namespacing and gating.
   providersOf = extra:
@@ -1685,7 +1693,10 @@ let
         if r != [ ] && nixpkgsLib.hasInfix "echo-provided-skill-marker" (builtins.head r).command then [ ]
         else [ "an enabled contrib's provider is not in SKILL_PROVIDERS_JSON as <contrib>.<id>" ])
     ++ (if providerById (echoProvider false) "echo.hello" == [ ] then [ ]
-        else [ "a disabled contrib's provider is in SKILL_PROVIDERS_JSON" ]);
+        else [ "a disabled contrib's provider is in SKILL_PROVIDERS_JSON" ])
+    ++ (let r = providerById { } "kanban.board"; in
+        if r != [ ] && (builtins.head r).broker == "kanban/skills" then [ ]
+        else [ "kanban.board is not a broker skill provider" ]);
 
   # The UI pod serves the DEPLOYMENT's contrib manifest, mounted from a ConfigMap, so a
   # contrib left off here shows no settings tab even though the image's built-in

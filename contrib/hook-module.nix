@@ -35,12 +35,27 @@ in
     };
 
     command = mkOption {
-      type = types.lines;
+      type = types.nullOr types.lines;
+      default = null;
       example = lib.literalExpression "builtins.readFile ./check.sh";
       description = ''
         A bash script, run as `bash -c` in /workspace inside the sandbox with the event JSON
         on stdin. Exit 2 blocks, with stderr as the reason; exit 0 may print a JSON object
         (`decision`, `reason`, `hookSpecificOutput`, `systemMessage`, `continue`).
+        Set exactly one of `command` and `broker`.
+      '';
+    };
+
+    broker = mkOption {
+      type = types.nullOr types.nonEmptyStr;
+      default = null;
+      example = "kanban/hooks/session-start";
+      description = ''
+        A broker path the agent-host POSTs the event JSON to, as the conversation, instead of
+        running a script in the sandbox. A 2xx body is read as a script's stdout (the same
+        JSON object); any other status is a failed hook. It needs no sandbox, so unlike a
+        `command`, a `SessionStart` or `UserPromptSubmit` broker hook runs while the pod is
+        still starting. Use it for a hook that only asks the broker something.
       '';
     };
 

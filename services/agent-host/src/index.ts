@@ -114,6 +114,7 @@ import {
 } from "./session/workspaceVolume.js";
 import type { WorkspaceToolsWiring } from "./agent/workspaceTools.js";
 import { mintConvToken } from "./auth/convToken.js";
+import { createBrokerAsConversation } from "./agent/brokerAsConversation.js";
 import { createMcpEndpoint, resolveConversation } from "./agent/mcpServer.js";
 import { readSandboxFileBase64, IMAGE_MAX_BYTES, type ImageToolsWiring } from "./agent/imageTools.js";
 import type { VideoToolsWiring } from "./agent/videoTools.js";
@@ -1202,6 +1203,17 @@ export async function main(
     opt_outs: userHookSettings ? "postgres" : "none",
   });
 
+  // Broker hooks and skill providers call the broker as the conversation, needing no sandbox.
+  const brokerAsConversation = (() => {
+    const secret = process.env.CONV_TOKEN_SECRET ?? "";
+    const call = createBrokerAsConversation({
+      brokerUrl: (process.env.BROKER_URL ?? "").replace(/\/$/, ""),
+      authHeaders: brokerAuthHeaders,
+      mintConvToken: (conversationId) => mintConvToken(conversationId, secret),
+    });
+    return call && secret ? call : undefined;
+  })();
+
   const hookRunnerFor = (
     conversationId: string,
     exec: ExecBackend,
@@ -1214,6 +1226,12 @@ export async function main(
       hooks,
       exec,
       ...(config.fakeSandbox ? {} : { sandboxReady: () => sandboxPodReady(sandbox) }),
+      ...(brokerAsConversation
+        ? {
+            broker: (path: string, body: string, signal: AbortSignal) =>
+              brokerAsConversation(conversationId, path, { method: "POST", body, signal }),
+          }
+        : {}),
       disabled: async () => {
         if (!userHookSettings || !owner) return new Set<string>();
         const choices = await userHookSettings.list(owner);
@@ -1255,6 +1273,7 @@ export async function main(
     providers: skillProviders,
     sandboxFor: (id) => sessions.get(id)?.sandbox,
     connect: (ref) => connectSandbox(ref, { readyDeadlineMs: podWaitMs }),
+    ...(brokerAsConversation ? { broker: brokerAsConversation } : {}),
   });
 
   const lastDropped = new Map<string, string>();

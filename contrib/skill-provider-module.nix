@@ -11,8 +11,20 @@ in
       default = true;
       description = "Run this provider in every conversation.";
     };
+    broker = mkOption {
+      type = types.nullOr types.nonEmptyStr;
+      default = null;
+      example = "kanban/skills";
+      description = ''
+        A broker path the agent-host GETs, as the conversation, instead of running `command`
+        in the sandbox; it answers what `command` would print. It needs no sandbox, so its
+        skills reach even a conversation's first message while the pod is still starting.
+        Set exactly one of `command` and `broker`.
+      '';
+    };
     command = mkOption {
-      type = types.lines;
+      type = types.nullOr types.lines;
+      default = null;
       example = lib.literalExpression ''"my-skills dump"'';
       description = ''
         A bash script, run as `bash -c` in /workspace inside the sandbox before each agent

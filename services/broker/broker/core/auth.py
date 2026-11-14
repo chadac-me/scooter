@@ -123,6 +123,12 @@ async def authenticate(request: Request) -> Identity:
     token = _bearer(request)
     username = await _review(token)
 
+    # The agent-host acting for one conversation (a hook it answers without the sandbox):
+    # its SA token plus a conversation token, as on the MCP endpoint. Checked first because
+    # the agent-host is also an approver, and its approver calls carry no conversation token.
+    if username in _mcp_callers() and request.headers.get(CONV_TOKEN_HEADER, "").strip():
+        return _control_plane_identity(request, username)
+
     relayed_user = _relayed_user(request, username)
 
     # Approver SAs are not sandboxes: they have no conversation_id but may approve.
@@ -170,6 +176,34 @@ def _mcp_callers() -> set[str]:
     return {s.strip() for s in settings.mcp_caller_service_accounts.split(",") if s.strip()}
 
 
+def _control_plane_identity(request: Request, username: str) -> Identity:
+    """An allowlisted control-plane caller as the conversation its conversation token names; 403 without one."""
+    conv_token = request.headers.get(CONV_TOKEN_HEADER, "").strip()
+    if not conv_token:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "a control-plane caller must present a conversation token in "
+                f"{CONV_TOKEN_HEADER}"
+            ),
+        )
+    try:
+        verified = verify_conv_token(conv_token, settings.conv_token_secret)
+    except ConvTokenError as exc:
+        # The reason goes to the log only, never the 403 body.
+        logger.warning(
+            "rejected a conversation token",
+            extra={"service_account": username, "reason": str(exc)},
+        )
+        raise HTTPException(status_code=403, detail="invalid conversation token") from exc
+    return Identity(
+        conversation_id=verified.conversation_id,
+        namespace=settings.sandbox_namespace,
+        service_account=username,
+        owner=verified.owner,
+    )
+
+
 async def authenticate_mcp(request: Request) -> Identity:
     """FastAPI dependency for the MCP endpoint, returning an Identity whose conversation_id is bound to the presented credentials."""
     token = _bearer(request)
@@ -177,30 +211,7 @@ async def authenticate_mcp(request: Request) -> Identity:
 
     # Control plane: an allowlisted caller acting for the conversation its token names.
     if username in _mcp_callers():
-        conv_token = request.headers.get(CONV_TOKEN_HEADER, "").strip()
-        if not conv_token:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "a control-plane caller must present a conversation token in "
-                    f"{CONV_TOKEN_HEADER}"
-                ),
-            )
-        try:
-            verified = verify_conv_token(conv_token, settings.conv_token_secret)
-        except ConvTokenError as exc:
-            # The reason goes to the log only, never the 403 body.
-            logger.warning(
-                "rejected an MCP conversation token",
-                extra={"service_account": username, "reason": str(exc)},
-            )
-            raise HTTPException(status_code=403, detail="invalid conversation token") from exc
-        return Identity(
-            conversation_id=verified.conversation_id,
-            namespace=settings.sandbox_namespace,
-            service_account=username,
-            owner=verified.owner,
-        )
+        return _control_plane_identity(request, username)
 
     # The sandbox itself: the SA name is the binding.
     conversation_id = sandbox_id(username, settings.sandbox_namespace)
