@@ -41,6 +41,8 @@ export interface ContribApiDeps {
   authHeaders: () => Promise<Record<string, string>>;
   /** A conversation id or sandbox key -> the broker's key for it; null when unknown. */
   conversationKey?: (id: string) => Promise<string | null>;
+  /** AUTH_ENFORCE: refuse anonymous callers. Unset, anonymous is the single user and is relayed as such. */
+  authEnforced?: boolean;
   /** Injected for tests. */
   fetch?: typeof fetch;
 }
@@ -93,7 +95,7 @@ export function mountContribApi(r: Router, deps: ContribApiDeps): void {
 
   // `subtree` is the broker path under the contrib's prefix; null means 404.
   const relayTo = (subtree: (ctx: Ctx) => Promise<string | null>) => async (ctx: Ctx) => {
-    if (ctx.user.anonymous) return { status: 401, json: { error: "sign in first" } };
+    if (ctx.user.anonymous && deps.authEnforced) return { status: 401, json: { error: "sign in first" } };
     const name = ctx.params.contrib;
     const cfg = Object.hasOwn(deps.contribs, name) ? deps.contribs[name] : undefined;
     if (!cfg) return { status: 404, json: { error: `no settings API for contrib '${name}'` } };

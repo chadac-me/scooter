@@ -1877,7 +1877,7 @@ describe("management API", () => {
   // user. The user header is set by the relay alone: what the browser sends is dropped.
   describe("/contrib-api relay", () => {
     type Seen = { url: string; method: string; headers: Record<string, string>; body?: string };
-    const mk = (opts: { brokerUrl?: string; status?: number; reply?: unknown; deny?: boolean } = {}) => {
+    const mk = (opts: { brokerUrl?: string; status?: number; reply?: unknown; deny?: boolean; authEnforced?: boolean } = {}) => {
       const seen: Seen[] = [];
       const fakeFetch = vi.fn(async (url: string, init: RequestInit) => {
         seen.push({
@@ -1897,6 +1897,7 @@ describe("management API", () => {
         server: stubServer,
         answerInterrupt: async () => ({ ok: true }),
         ...(opts.deny ? { accessCheck: async () => "deny" as const } : {}),
+        ...(opts.authEnforced ? { authEnforced: true } : {}),
         contribApi: {
           contribs: parseContribUserApi(JSON.stringify({ echo: { brokerPrefix: "/echo" } })),
           brokerUrl: opts.brokerUrl ?? "http://broker:8080/",
@@ -1929,11 +1930,35 @@ describe("management API", () => {
       expect(seen[0].headers["X-Scooter-User"]).toBe("alice");
     });
 
-    it("401s an anonymous caller without calling the broker", async () => {
-      const { api, seen } = mk();
-      const res = await call(api, "GET", "/contrib-api/echo/whoami", undefined, { "x-scooter-user": "mallory" });
-      expect(res.status).toBe(401);
+    it("401s an anonymous caller under AUTH_ENFORCE without calling the broker", async () => {
+      const { api, seen } = mk({ authEnforced: true });
+      for (const p of ["/contrib-api/echo/whoami", "/conversations/c1/contrib-api/echo/list"]) {
+        const res = await call(api, "GET", p, undefined, { "x-scooter-user": "mallory" });
+        expect(res.status).toBe(401);
+      }
       expect(seen).toHaveLength(0);
+    });
+
+    // Single-user mode (no auth proxy, e.g. scooter-local): the same rule the management
+    // API's write boundary uses. The broker sees the stable `anonymous` user.
+    it("relays an anonymous caller as `anonymous` without AUTH_ENFORCE, ignoring a forged user", async () => {
+      const { api, seen } = mk({ reply: { boards: [] } });
+      const res = await call(api, "GET", "/contrib-api/echo/boards", undefined, { "x-scooter-user": "mallory" });
+      expect(res).toEqual({ status: 200, json: { boards: [] } });
+      const conv = await call(api, "GET", "/conversations/c1/contrib-api/echo/list", undefined, {});
+      expect(conv.status).toBe(200);
+      expect(seen.map((s) => s.url)).toEqual([
+        "http://broker:8080/echo/user/boards",
+        "http://broker:8080/echo/conversation/c1/list",
+      ]);
+      for (const s of seen) expect(s.headers["X-Scooter-User"]).toBe("anonymous");
+    });
+
+    it("still relays a signed-in user as themself under AUTH_ENFORCE", async () => {
+      const { api, seen } = mk({ authEnforced: true });
+      const res = await call(api, "GET", "/contrib-api/echo/whoami", undefined, { "x-auth-user": "alice" });
+      expect(res.status).toBe(200);
+      expect(seen[0].headers["X-Scooter-User"]).toBe("alice");
     });
 
     it("404s a contrib without a settings API", async () => {

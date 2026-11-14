@@ -1759,6 +1759,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
         const conv = sessions.get(id) ?? (await sessions.getBySandboxKey(id));
         return conv ? sandboxKey(conv.sandbox.name) : null;
       },
+      authEnforced: deps.authEnforced,
       ...deps.contribApi,
     });
   }

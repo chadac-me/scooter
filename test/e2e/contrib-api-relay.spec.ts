@@ -21,13 +21,16 @@ async function expectRelayJson(res: Awaited<ReturnType<APIRequestContext["get"]>
 }
 
 test.describe("/contrib-api relay", () => {
-  test("an anonymous caller is refused, even naming a user itself", async ({ baseURL }) => {
+  // Both targets run without AUTH_ENFORCE, so anonymous is the single user and passes the
+  // sign-in gate, as the management API treats it; the refusal under AUTH_ENFORCE is a
+  // unit test. A forged X-Scooter-User never reaches the broker either way (unit-tested).
+  test("an anonymous single-user caller gets past the sign-in gate", async ({ baseURL }) => {
     const anon = await as(baseURL, {});
     const forged = await as(baseURL, { "x-scooter-user": "alice" });
     try {
-      await expectRelayJson(await anon.get("/contrib-api/echo/whoami"), 401, /sign in/);
-      await expectRelayJson(await forged.get("/contrib-api/echo/whoami"), 401, /sign in/);
-      await expectRelayJson(await forged.post("/contrib-api/echo/whoami", { data: {} }), 401, /sign in/);
+      await expectRelayJson(await anon.get("/contrib-api/echo/whoami"), 404, /no settings API/);
+      await expectRelayJson(await forged.get("/contrib-api/echo/whoami"), 404, /no settings API/);
+      await expectRelayJson(await forged.post("/contrib-api/echo/whoami", { data: {} }), 404, /no settings API/);
     } finally {
       await anon.dispose();
       await forged.dispose();
