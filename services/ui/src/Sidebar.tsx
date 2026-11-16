@@ -320,6 +320,9 @@ function FolderSectionView({
   }, [drop]);
   const open = !closed && (searching || !fstate.collapsed[f.id]);
   const shown = open ? f.rows : currentBranch(f.rows, currentId);
+  // An open folder's draft takes the New conversation button's place.
+  const drafts = open ? shown.filter((r) => isDraft(r.session)) : [];
+  const ordered = [...shown.filter((r) => !drafts.includes(r)), ...drafts];
   const kids = f.children.filter((c) => (searching ? allRows(c).length > 0 : open || holds(c, currentId)));
   const everything = allRows(f);
   const count = (open ? f.rows : everything).filter((r) => r.depth === 0).length;
@@ -654,7 +657,7 @@ function FolderSectionView({
                 {f.starred ? "Star a conversation to pin it here." : "Drag conversations here."}
               </p>
             )}
-            {shown.map(({ session: s, depth, childCount }) => (
+            {ordered.map(({ session: s, depth, childCount }) => (
               <SessionRow
                 key={s.id}
                 session={s}
@@ -664,7 +667,7 @@ function FolderSectionView({
                 labelMode={labelMode}
               />
             ))}
-            {open && (
+            {open && drafts.length === 0 && (
               <button
                 type="button"
                 data-testid="folder-new-session"
