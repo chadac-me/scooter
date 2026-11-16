@@ -33,6 +33,7 @@ import {
   filteredSessions,
   nestSubagents,
   sessionLabel,
+  isDraft,
   linkForProvider,
   linkProviders,
   turnDot,
@@ -121,7 +122,8 @@ function InfoTip({ text }: { text: string }) {
 /** A row's label: the provider's link, drawn by its contrib's view, else the title. */
 function SessionLabel({ session: s, mode }: { session: import("./sessions.js").Session; mode: LabelMode }) {
   const link = mode !== "title" ? linkForProvider(s, mode) : undefined;
-  return link ? <LinkText link={link} /> : <span className="truncate">{sessionLabel(s, mode)}</span>;
+  if (link) return <LinkText link={link} />;
+  return <span className={cn("truncate", isDraft(s) && "italic text-muted-foreground")}>{sessionLabel(s, mode)}</span>;
 }
 
 /** One conversation row: select only. Star / rename / delete live beside the title in the

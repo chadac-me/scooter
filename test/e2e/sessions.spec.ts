@@ -106,9 +106,10 @@ test.describe("session selector & titles", () => {
 
   test("the tab title and the header carry the conversation's title", async ({ chat, page }) => {
     await chat.open();
-    // An unnamed conversation is the bare wordmark, with no header title beside it.
+    // An unsent conversation is the bare wordmark, with the draft label in the header.
     await expect(page).toHaveTitle("scooter");
-    await expect(page.locator(headerTitle)).toHaveCount(0);
+    await expect(page.locator(headerTitle)).toHaveText("New conversation");
+    await expect(page.locator(headerTitle)).toHaveAttribute("data-draft", "true");
 
     await chat.send("help me refactor the parser");
     await chat.waitForReply(/dummy agent/i);
