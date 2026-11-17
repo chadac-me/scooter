@@ -12,31 +12,13 @@ let
   shim = pkgs.callPackage ../../pkgs/forge-shim {
     lib = pkgs.lib.extend (import ../../nix/package-source.nix);
   };
-  caDir = "/etc/scooter/forge-ca";
-  caFile = "${caDir}/ca.crt";
+  caFile = "/etc/scooter/forge-ca/ca.crt";
   # The names NixOS links the system bundle under; every one gets the forge CA.
   bundles = [
     "ssl/certs/ca-certificates.crt"
     "ssl/certs/ca-bundle.crt"
     "pki/tls/certs/ca-bundle.crt"
   ];
-  # Each bundle becomes a real file: the NixOS bundle plus the CA.
-  trustCa = pkgs.writeShellScript "scooter-forge-ca-trust" ''
-    PATH=${lib.makeBinPath [ pkgs.coreutils ]}
-    # Kubelet creates the new data dir before it swaps ..data, and the path unit drops
-    # events while this runs, so repeat until the CA held still.
-    while ca=$(cat ${caFile} 2>/dev/null) && [ -n "$ca" ]; do
-      ${lib.concatMapStrings (b: ''
-        if [ -e /etc/static/${b} ]; then
-          tmp=$(mktemp /etc/${b}.XXXXXX)
-          { cat /etc/static/${b}; printf '%s\n' "$ca"; } > "$tmp"
-          chmod 0444 "$tmp"
-          mv -f "$tmp" /etc/${b}
-        fi
-      '') bundles}
-      [ "$(cat ${caFile})" = "$ca" ] && break
-    done
-  '';
 in
 {
   options.programs.scooterForgeProxy.enable =
@@ -47,24 +29,21 @@ in
 
     # Activation runs before systemd at boot and again on every switch (which re-links
     # /etc), so the CA is trusted before the agent's first command and survives a
-    # scooter-rebuild.
+    # scooter-rebuild. Each bundle becomes a real file: the NixOS bundle plus the CA.
     system.activationScripts.scooterForgeCa = {
       deps = [ "etc" ];
-      text = "${trustCa}";
-    };
-
-    # The broker regenerates the CA when its host set changes. Kubelet swaps the mount's
-    # ..data symlink, which a watch on ca.crt or ..data itself never sees.
-    systemd.paths.scooter-forge-ca = {
-      wantedBy = [ "paths.target" ];
-      pathConfig.PathChanged = caDir;
-    };
-    systemd.services.scooter-forge-ca = {
-      description = "Re-trust the forge CA after the broker regenerates it";
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = trustCa;
-      };
+      text = ''
+        if [ -s ${caFile} ]; then
+          ${lib.concatMapStrings (b: ''
+            if [ -e /etc/static/${b} ]; then
+              tmp=$(mktemp /etc/${b}.XXXXXX)
+              cat /etc/static/${b} ${caFile} > "$tmp"
+              chmod 0444 "$tmp"
+              mv -f "$tmp" /etc/${b}
+            fi
+          '') bundles}
+        fi
+      '';
     };
 
     systemd.services.scooter-forge-shim = {
