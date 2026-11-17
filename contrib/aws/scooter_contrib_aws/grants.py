@@ -50,7 +50,7 @@ class AwsGrants:
             status = ACTIVE
             verbs = [GrantVerb(REVOKE, "Revoke")]
             if expires is not None:
-                verbs = [GrantVerb(EXTEND, "Extend", self._presets()), GrantVerb(PIN, "Until revoked"), *verbs]
+                verbs = [GrantVerb(EXTEND, "Extend", self._presets()), GrantVerb(PIN, "Indefinite"), *verbs]
         else:
             status = _ENDED[req.status]
             verbs = [GrantVerb(REVIVE, "Revive", self._presets())]

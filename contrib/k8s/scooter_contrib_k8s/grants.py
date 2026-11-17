@@ -42,7 +42,7 @@ class K8sGrants:
             status = ACTIVE
             verbs = [GrantVerb(REVOKE, "Revoke")]
             if presets and g.expires_at is not None:
-                verbs = [GrantVerb(EXTEND, "Extend", presets), GrantVerb(PIN, "Until revoked"), *verbs]
+                verbs = [GrantVerb(EXTEND, "Extend", presets), GrantVerb(PIN, "Indefinite"), *verbs]
         else:
             status = REVOKED if g.revoked_at is not None else EXPIRED
             verbs = [GrantVerb(REVIVE, "Revive", presets)] if presets else []

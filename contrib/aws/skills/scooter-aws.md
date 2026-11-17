@@ -132,7 +132,7 @@ account — use `escalate` instead. (A second plain request now supersedes the f
 so piling them up only wastes approvals; escalate makes the intent — expanding — explicit.)
 
 Your grants show in the conversation's Approvals tab. A person there can extend one,
-keep it until revoked, revive an expired one (as a new request with the same policy),
+make it indefinite, revive an expired one (as a new request with the same policy),
 or revoke it, and a message tells you when they do. When a grant you still need has
 expired, asking the user to revive it there is quicker than a fresh `request`.
 

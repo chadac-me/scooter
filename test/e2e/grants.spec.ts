@@ -28,7 +28,7 @@ function grants(now: number) {
       granted_by: "alice@example.com", granted_at: now - 18 * MIN, expires_at: now + 42 * MIN,
       verbs: [
         { verb: "extend", label: "Extend", presets_minutes: [15, 30, 60], allowed: true },
-        { verb: "pin", label: "Until revoked", presets_minutes: [], allowed: true },
+        { verb: "pin", label: "Indefinite", presets_minutes: [], allowed: true },
         { verb: "revoke", label: "Revoke", presets_minutes: [], allowed: true },
       ],
     },
@@ -89,7 +89,7 @@ test.describe("grants in the Approvals tab", () => {
     await expect(section.locator(sel.grant)).toHaveCount(2, { timeout: 30_000 });
     await expect(section.locator(sel.grant).first()).toContainText("Write to prod/web");
     await expect(section.locator(sel.grant).first()).toContainText(/Expires in 4[12]m/);
-    await expect(section.locator(sel.grant).nth(1)).toContainText("Until revoked");
+    await expect(section.locator(sel.grant).nth(1)).toContainText("Indefinite");
     await shot(page, "grants active");
 
     // A viewer who couldn't approve the original sees it greyed.
@@ -97,7 +97,7 @@ test.describe("grants in the Approvals tab", () => {
     await expect(blocked).toBeDisabled();
 
     await page.locator('[data-grant-id="g-web"] [data-verb="extend"]').click();
-    await expect(page.locator(sel.preset)).toHaveText(["+15m", "+30m", "+1h"]);
+    await expect(page.locator(sel.preset)).toHaveText(["+15m", "+30m", "+1h", "Indefinite"]);
     await shot(page, "grants extend presets");
     await page.locator(`${sel.preset}[data-minutes="60"]`).click();
     await expect.poll(() => posted).toContainEqual({ url: expect.stringMatching(/\/grants\/k8s\/g-web\/extend$/), body: { minutes: 60 } });
@@ -116,7 +116,8 @@ test.describe("grants in the Approvals tab", () => {
     await page.locator(`${sel.preset}[data-minutes="30"]`).click();
     await expect.poll(() => posted).toContainEqual({ url: expect.stringMatching(/\/grants\/k8s\/g-api\/revive$/), body: { minutes: 30 } });
 
-    await page.locator('[data-grant-id="g-web"] [data-verb="pin"]').click();
+    await page.locator('[data-grant-id="g-web"] [data-verb="extend"]').click();
+    await page.locator(`${sel.preset}[data-verb="pin"]`).click();
     await expect.poll(() => posted).toContainEqual({ url: expect.stringMatching(/\/grants\/k8s\/g-web\/pin$/), body: {} });
   });
 });

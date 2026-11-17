@@ -27,7 +27,7 @@ export interface Grant {
   ended_by?: string | null;
 }
 
-/** Active grants soonest-ending first (until-revoked last), inactive ones newest first. */
+/** Active grants soonest-ending first (indefinite last), inactive ones newest first. */
 export function splitGrants(grants: Grant[], now: number): { active: Grant[]; inactive: Grant[] } {
   // Past its end counts as inactive before the next poll.
   const live = (g: Grant) => g.status === "active" && (g.expires_at === null || g.expires_at > now);
@@ -56,7 +56,7 @@ export function formatPreset(minutes: number, sign = "+"): string {
 
 /** When the grant ends, or ended, and why. */
 export function grantStatusLine(g: Grant, now: number): string {
-  if (g.status === "active" && g.expires_at === null) return "Until revoked";
+  if (g.status === "active" && g.expires_at === null) return "Indefinite";
   if (g.status === "active" && g.expires_at !== null && g.expires_at > now) {
     return `Expires in ${formatSpan(g.expires_at - now)}`;
   }

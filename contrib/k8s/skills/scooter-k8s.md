@@ -83,7 +83,7 @@ approved, apply, delete, scale and rollout restart calls in that namespace run
 immediately and return their result. `k8s_grants` lists your active grants.
 
 People can see your grants in the conversation's Approvals tab, where they can
-extend one, keep it until revoked, revive an expired one, or revoke it. A
+extend one (or make it indefinite), revive an expired one, or revoke it. A
 message tells you when they do. Before asking again for an expired grant,
 consider asking the user to revive it there.
 

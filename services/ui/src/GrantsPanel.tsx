@@ -1,6 +1,6 @@
 /**
  * The Grants section of the Approvals tab: what this conversation may do without a card
- * and until when, with extend, until-revoked, revive and revoke. Active grants show
+ * and until when, with extend (or indefinite), revive and revoke. Active grants show
  * first; expired and revoked ones collapse under Inactive.
  */
 
@@ -152,6 +152,10 @@ function GrantRow({
     setBusy(false);
   };
   const picked = g.verbs.find((v) => v.verb === picking);
+  // Pin rides Extend's presets as "Indefinite" when both are offered.
+  const pin = g.verbs.find((v) => v.verb === "pin");
+  const folded = pin && g.verbs.some((v) => v.verb === "extend");
+  const shown = folded ? g.verbs.filter((v) => v !== pin) : g.verbs;
 
   return (
     <li
@@ -186,9 +190,9 @@ function GrantRow({
           ))}
         </ul>
       )}
-      {g.verbs.length > 0 && (
+      {shown.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {g.verbs.map((v) => (
+          {shown.map((v) => (
             <VerbButton
               key={v.verb}
               verb={v}
@@ -215,6 +219,20 @@ function GrantRow({
               {formatPreset(m, picked.verb === "extend" ? "+" : "")}
             </Button>
           ))}
+          {folded && picked.verb === "extend" && (
+            <Button
+              variant="secondary"
+              size="sm"
+              className={cn("h-7 px-2 text-xs", pin.allowed === false && "cursor-not-allowed")}
+              disabled={busy || pin.allowed === false}
+              title={pin.allowed === false ? BLOCKED_TITLE : undefined}
+              data-testid="grant-preset"
+              data-verb="pin"
+              onClick={() => run("pin")}
+            >
+              Indefinite
+            </Button>
+          )}
         </div>
       )}
       {error && (

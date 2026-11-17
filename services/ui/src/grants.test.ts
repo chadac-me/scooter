@@ -37,7 +37,7 @@ describe("formatting", () => {
 
   it("status lines", () => {
     expect(grantStatusLine(g({}), NOW)).toBe("Expires in 30m");
-    expect(grantStatusLine(g({ expires_at: null }), NOW)).toBe("Until revoked");
+    expect(grantStatusLine(g({ expires_at: null }), NOW)).toBe("Indefinite");
     expect(grantStatusLine(g({ status: "expired", expires_at: NOW - 120 * MIN }), NOW)).toBe("Expired 2h ago");
     expect(grantStatusLine(g({ status: "revoked", ended_by: "bob", ended_at: NOW - 5 * MIN }), NOW)).toBe(
       "Revoked by bob 5m ago",
