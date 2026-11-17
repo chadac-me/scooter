@@ -55,6 +55,8 @@ class ForgeHosts(Transport):
     graphql_link_rules: dict[str, GraphQLLinkRule] = field(default_factory=dict)
     # The 403 message for upgrade requests (exec, websockets).
     upgrade_refusal: str = "the forge proxy does not carry upgraded connections"
+    # Client request headers never forwarded, matched by lowercase prefix.
+    drop_header_prefixes: tuple[str, ...] = ()
     name: str = "forge-proxy"
 
     def routes(self, provider: Provider, authed: AuthDependency) -> APIRouter:

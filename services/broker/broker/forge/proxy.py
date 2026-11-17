@@ -52,8 +52,6 @@ _DROP_REQUEST = frozenset({
     "trailer", "upgrade", "expect", "proxy-authorization", "proxy-authenticate",
     "authorization", "private-token", "job-token", "cookie",
 })
-# Only the broker may impersonate a Kubernetes user.
-_DROP_PREFIX = "impersonate-"
 _DROP_RESPONSE = frozenset({
     "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer",
     "upgrade", "proxy-authenticate", "set-cookie",
@@ -270,9 +268,8 @@ class ForgeProxy:
             return False
 
         autolink = self._wants_autolink(forge, method, path, graphql)
-        out_headers = [
-            (k, v) for k, v in headers if k not in _DROP_REQUEST and not k.startswith(_DROP_PREFIX)
-        ]
+        drop = tuple(p.lower() for p in forge.drop_header_prefixes)
+        out_headers = [(k, v) for k, v in headers if k not in _DROP_REQUEST and not k.startswith(drop)]
         if autolink:
             # The response is read as JSON, so ask for it uncompressed.
             out_headers = [(k, v) for k, v in out_headers if k != "accept-encoding"]

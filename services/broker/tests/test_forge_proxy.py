@@ -145,6 +145,7 @@ def world(ca, monkeypatch):
                 client=httpx.AsyncClient(transport=httpx.MockTransport(kube_handler)),
             )],
             upgrade_refusal="use k8s_exec",
+            drop_header_prefixes=("Impersonate-",),
         )],
         forge_policy=Recorder(),
     )
@@ -343,6 +344,15 @@ async def test_client_impersonation_headers_are_dropped(running, ca):
     assert r.status_code == 200
     (req,) = proxy.kube_seen
     assert not [k for k in req.headers if k.lower().startswith("impersonate-")]
+
+
+async def test_header_drops_apply_only_to_the_provider_that_set_them(running, ca):
+    proxy, seen, *_ = running
+    async with _client(proxy, ca) as c:
+        r = await c.get("https://api.github.com/repos/o/r", headers={"Impersonate-User": "x"})
+    assert r.status_code == 200
+    ((req, _),) = seen
+    assert req.headers["impersonate-user"] == "x"
 
 
 async def test_upgrade_requests_are_refused_with_the_hosts_message(running, ca):
