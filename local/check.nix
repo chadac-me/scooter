@@ -79,7 +79,17 @@ let
     ++ lib.optional (!(lib.hasInfix "\"copilot\"" (toString (envValue "copilot" "AGENT_MODELS_JSON"))))
       "copilot: the catalog has no copilot-tagged model";
 
-  problems = structural ++ perProvider ++ providerWiring;
+  # dns.forwardDomains adds a CoreDNS server block for those domains.
+  dnsRender = renders.anthropic.extendModules {
+    modules = [{ scooter.local.dns = { forwardDomains = [ "corp.example.com" "vpn.test" ]; resolver = "192.168.5.1"; }; }];
+  };
+  dnsBlock = (lib.findFirst (o: o.kind == "ConfigMap" && o.metadata.name == "coredns-custom") { } dnsRender.config.kubernetes.objects).data."scooter-local-dns.server" or "";
+  dns =
+    lib.optional (find "anthropic" "ConfigMap" "coredns-custom" != null) "dns: coredns-custom rendered without forwardDomains"
+    ++ lib.optional (!(lib.hasInfix "corp.example.com:53 vpn.test:53 {" dnsBlock && lib.hasInfix "forward . 192.168.5.1" dnsBlock))
+      "dns: coredns-custom does not forward the domains to the resolver:\n${dnsBlock}";
+
+  problems = structural ++ perProvider ++ providerWiring ++ dns;
 in
 # The verdict lives in an attribute, not around the derivation: `nix flake show`
 # reads only `type` and `name`, and each render it would otherwise force is a full

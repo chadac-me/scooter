@@ -214,6 +214,13 @@ cluster.
 - **A change does not show in an old conversation**: a conversation keeps the sandbox
   settings it was created with. Start a new one after changing contribs or the
   provider.
+- **Names only your VPN knows don't resolve in a sandbox** (`SERVFAIL`, while your
+  machine resolves them): k3s's CoreDNS can't use the Docker node's loopback resolver,
+  so it asks public DNS. Send those domains to a resolver the Docker VM reaches, in the
+  build: `scooter.local.dns = { forwardDomains = [ "corp.example.com" ]; resolver =
+  "192.168.5.1"; };` (colima's host address). CoreDNS picks it up within two minutes,
+  for running sandboxes too. Removing the domains later leaves the forward in place:
+  `scooter-local kubectl -n kube-system delete configmap coredns-custom`.
 - **The agent answers nothing** with Ollama: `ollama serve` must be running and the
   model pulled; `scooter-local logs` shows goose's errors.
 - **Start over**: `scooter-local destroy`, then `up`.

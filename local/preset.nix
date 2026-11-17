@@ -105,6 +105,27 @@ in
         user.email`, else empty, which sends none).
       '';
     };
+    dns = {
+      forwardDomains = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "corp.example.com" ];
+        description = ''
+          Domains the cluster resolves through `dns.resolver` instead of public DNS:
+          names only a VPN's split DNS knows. k3s does not use the Docker node's
+          loopback resolver, so pods otherwise never see them.
+        '';
+      };
+      resolver = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "192.168.5.1";
+        description = ''
+          The resolver `dns.forwardDomains` go to, as an address the Docker VM reaches:
+          on colima its host gateway, `192.168.5.1`. Required with `dns.forwardDomains`.
+        '';
+      };
+    };
     assetsHostPath = mkOption {
       type = types.str;
       default = "/var/lib/scooter/assets";
@@ -223,6 +244,19 @@ in
         ${config.scooter.auth.userHeader} = cfg.user;
         ${config.scooter.auth.emailHeader} = cfg.email;
       };
+    };
+
+    # k3s's CoreDNS imports the `*.server` blocks of this optional ConfigMap.
+    kubernetes.resources.configMaps.coredns-custom = lib.mkIf (cfg.dns.forwardDomains != [ ]) {
+      metadata.namespace = "kube-system";
+      data."scooter-local-dns.server" =
+        if cfg.dns.resolver == null then throw "scooter.local.dns.forwardDomains needs scooter.local.dns.resolver"
+        else ''
+          ${lib.concatMapStringsSep " " (d: "${d}:53") cfg.dns.forwardDomains} {
+            forward . ${cfg.dns.resolver}
+            cache 30
+          }
+        '';
     };
 
     # The contribs that need no credentials.
