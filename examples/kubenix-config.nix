@@ -220,6 +220,7 @@
     ask-user.enable = true;
     airtable.enable = true;
     brave.enable = true;
+    databricks.enable = true;
     datadog.enable = true;
     duckduckgo.enable = true;
     gcp.enable = true;
@@ -304,6 +305,11 @@
       siteUrl = "https://example.atlassian.net";
       # Turns on /webhooks/jira; needs JIRA_WEBHOOK_SECRET in the webhooks Secret.
       jira.webhooksEnabled = true;
+    };
+
+    databricks.workspaces = {
+      dev.host = "https://example-dev.cloud.databricks.com";
+      prod.host = "https://example-prod.cloud.databricks.com";
     };
 
     # Mounts only when url and token both resolve.
