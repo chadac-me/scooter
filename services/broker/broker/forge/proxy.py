@@ -52,6 +52,8 @@ _DROP_REQUEST = frozenset({
     "trailer", "upgrade", "expect", "proxy-authorization", "proxy-authenticate",
     "authorization", "private-token", "job-token", "cookie",
 })
+# Only the broker may impersonate a Kubernetes user.
+_DROP_PREFIX = "impersonate-"
 _DROP_RESPONSE = frozenset({
     "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer",
     "upgrade", "proxy-authenticate", "set-cookie",
@@ -224,6 +226,9 @@ class ForgeProxy:
             dialect=forge.dialect, git=route.host.git, api_prefixes=route.host.api_prefixes,
             path=path, query=query,
         )
+        if "upgrade" in hmap:
+            await io.send_simple(403, forge.upgrade_refusal, json_body=True)
+            return False
         has_body = "transfer-encoding" in hmap or hmap.get("content-length", "0") not in ("", "0")
 
         # Bytes read ahead of the policy check, re-sent before the rest of the body.
@@ -265,7 +270,9 @@ class ForgeProxy:
             return False
 
         autolink = self._wants_autolink(forge, method, path, graphql)
-        out_headers = [(k, v) for k, v in headers if k not in _DROP_REQUEST]
+        out_headers = [
+            (k, v) for k, v in headers if k not in _DROP_REQUEST and not k.startswith(_DROP_PREFIX)
+        ]
         if autolink:
             # The response is read as JSON, so ask for it uncompressed.
             out_headers = [(k, v) for k, v in out_headers if k != "accept-encoding"]
@@ -276,8 +283,10 @@ class ForgeProxy:
             async for chunk in io.body():
                 yield chunk
 
-        url = httpx.URL(f"{self.upstream_scheme}://{host}{target}")
-        outbound = self.upstream.build_request(
+        base = route.host.upstream.rstrip("/") or f"{self.upstream_scheme}://{host}"
+        url = httpx.URL(f"{base}{target}")
+        client = route.host.client or self.upstream
+        outbound = client.build_request(
             method, url, headers=out_headers, content=content() if has_body else None,
         )
         if c.kind != "web" and route.provider.credential is not None:
@@ -288,7 +297,7 @@ class ForgeProxy:
                 cred.inject(outbound)
 
         try:
-            upstream = await self.upstream.send(outbound, stream=True)
+            upstream = await client.send(outbound, stream=True)
         except httpx.HTTPError as e:
             logger.warning("forge upstream failed", extra={"host": host, "path": path, "error": format_error(e)})
             await io.send_simple(502, f"forge upstream {host} failed: {type(e).__name__}")
