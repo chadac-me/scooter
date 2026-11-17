@@ -271,8 +271,9 @@ class ForgeProxy:
         drop = tuple(p.lower() for p in forge.drop_header_prefixes)
         out_headers = [(k, v) for k, v in headers if k not in _DROP_REQUEST and not k.startswith(drop)]
         if autolink:
-            # The response is read as JSON, so ask for it uncompressed.
+            # The response is read as JSON; httpx would otherwise add its own gzip Accept-Encoding.
             out_headers = [(k, v) for k, v in out_headers if k != "accept-encoding"]
+            out_headers.append(("accept-encoding", "identity"))
 
         async def content() -> AsyncIterator[bytes]:
             for chunk in prefix:
@@ -352,7 +353,7 @@ class ForgeProxy:
                 if link is not None:
                     links.append(link)
         except Exception as e:  # best-effort: never affects the proxied call
-            logger.debug("forge auto-link skipped", extra={"path": path, "error": format_error(e)})
+            logger.warning("forge auto-link skipped", extra={"path": path, "error": format_error(e)})
             return
         for link in links:
             if link.url:
