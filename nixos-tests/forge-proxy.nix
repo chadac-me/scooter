@@ -15,18 +15,21 @@ let
   python = pkgs.python3.withPackages (_: broker.dependencies);
   brokerPath = "${broker}/${pkgs.python3.sitePackages}";
 
-  # The broker's forge CA, plus a CA for the fake forge.
+  # The broker's forge CA, a regenerated one in v2/, plus a CA for the fake forge.
   certs = pkgs.runCommand "forge-proxy-test-certs" { nativeBuildInputs = [ python pkgs.openssl ]; } ''
     mkdir $out
     PYTHONPATH=${brokerPath} python3 - $out ${lib.escapeShellArgs forgeHosts} <<'PY'
-    import sys
+    import os, sys
     from broker.forge.ca import generate_ca
     out, hosts = sys.argv[1], sys.argv[2:]
-    ca = generate_ca(hosts)
-    open(f"{out}/ca.crt", "wb").write(ca.cert_pem)
-    open(f"{out}/ca.key", "wb").write(ca.key_pem)
-    open(f"{out}/hosts", "w").write("\n".join(hosts) + "\n")
+    for d in (out, f"{out}/v2"):
+        os.makedirs(d, exist_ok=True)
+        ca = generate_ca(hosts)
+        open(f"{d}/ca.crt", "wb").write(ca.cert_pem)
+        open(f"{d}/ca.key", "wb").write(ca.key_pem)
+        open(f"{d}/hosts", "w").write("\n".join(hosts) + "\n")
     PY
+    ln -s ../upstream-ca.crt $out/v2/upstream-ca.crt
     cd $out
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
       -subj /CN=fake-forge-ca -addext keyUsage=critical,keyCertSign,cRLSign \
@@ -222,5 +225,28 @@ pkgs.testers.runNixOSTest {
         for r in log:
             assert "scooter-forge-proxy" not in r["authorization"] + r["private_token"], r
         assert all(r["authorization"] == "" for r in log if r["host"] == "other.test")
+
+    with subtest("a regenerated CA is trusted without a restart"):
+        d = "/etc/scooter/forge-ca"
+        # Lay the mount out as kubelet does, then swap ..data as it does on a ConfigMap update.
+        sandbox.succeed(
+            f"mkdir {d}/..v1 && cp ${certs}/ca.crt ${certs}/hosts {d}/..v1/ && ln -s ..v1 {d}/..data"
+            f" && for f in ca.crt hosts; do ln -s ..data/$f {d}/$f.new && mv -T {d}/$f.new {d}/$f; done"
+        )
+        sandbox.succeed(
+            f"mkdir {d}/..v2 && cp ${certs}/v2/ca.crt ${certs}/v2/hosts {d}/..v2/"
+            f" && ln -s ..v2 {d}/..data_tmp && mv -T {d}/..data_tmp {d}/..data"
+        )
+        sandbox.wait_until_succeeds(
+            "grep -q \"$(sed -n 2p ${certs}/v2/ca.crt)\" /etc/ssl/certs/ca-certificates.crt", timeout=30
+        )
+        sb_fail("grep -q \"$(sed -n 2p ${certs}/ca.crt)\" /etc/ssl/certs/ca-certificates.crt")
+        broker.succeed(
+            "mkdir -p /run/systemd/system/forge-proxy.service.d"
+            " && printf '[Service]\\nEnvironment=CERTS=${certs}/v2\\n' > /run/systemd/system/forge-proxy.service.d/v2.conf"
+            " && systemctl daemon-reload && systemctl restart forge-proxy"
+        )
+        broker.wait_for_open_port(${toString PORT}, timeout=60)
+        sb("git ls-remote https://github.com/acme/demo.git main")
   '';
 }
