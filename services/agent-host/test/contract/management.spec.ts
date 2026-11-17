@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { createManagementApi, SANDBOX_SOURCE, raiseApprovalInterrupt, fetchPendingApprovals, fetchPendingApprovalsByKeys, approvalAgentMessage, parseByteRange } from "../../src/api/management.js";
+import { createManagementApi, SANDBOX_SOURCE, raiseApprovalInterrupt, fetchPendingApprovals, fetchPendingApprovalsByKeys, approvalAgentMessage, canApproveFromBroker, parseByteRange, type CanApproveAnswer } from "../../src/api/management.js";
 import { UserSkillError, type UserSkillStore } from "../../src/session/userSkillStore.js";
 import { createMemoryUserHookSettingsStore, type UserHookSettingsStore } from "../../src/hooks/userHookSettingsStore.js";
 import type { HookDef } from "../../src/hooks/types.js";
@@ -1307,7 +1307,7 @@ describe("management API", () => {
     const setup = (
       bridge?: { withdrawInterrupt: (id: string) => boolean },
       events: AguiEvent[] = [],
-      canApprove?: { canApprove: boolean; pending?: boolean },
+      canApprove?: CanApproveAnswer | (() => Promise<CanApproveAnswer>),
     ) => {
       const c = conv({ id: UUID, threadId: UUID, bridge: bridge as never });
       const sessions = {
@@ -1324,7 +1324,7 @@ describe("management API", () => {
       const api = createManagementApi({
         sessions, store, server: { broadcast } as unknown as AguiServer, answerInterrupt: async () => ({ ok: true }),
         resolveUser: () => ({ id: "alice", anonymous: false }),
-        canApproveRequest: canApprove ? async () => canApprove : undefined,
+        canApproveRequest: typeof canApprove === "function" ? canApprove : canApprove ? async () => canApprove : undefined,
       });
       return { api, appended, broadcast };
     };
@@ -1368,6 +1368,22 @@ describe("management API", () => {
       await call(api, "GET", `/conversations/${UUID}/approvals/handoff/p1/can-approve`);
       expect(appended).toEqual([]);
       expect(broadcast).not.toHaveBeenCalled();
+    });
+
+    it("passes the contrib's reason through", async () => {
+      const answer: CanApproveAnswer = { canApprove: false, pending: false, reason: "not_pending" };
+      const { api } = setup(undefined, [raised], answer);
+      const { json } = await call(api, "GET", `/conversations/${UUID}/approvals/aws/p1/can-approve`);
+      expect(json).toEqual(answer);
+    });
+
+    it("says the check errored, not that the viewer lacks rights, when it throws", async () => {
+      const { api, appended } = setup(undefined, [raised], async () => {
+        throw new Error("broker down");
+      });
+      const { json } = await call(api, "GET", `/conversations/${UUID}/approvals/aws/p1/can-approve`);
+      expect(json).toEqual({ canApprove: false, reason: "error" });
+      expect(appended).toEqual([]);
     });
 
     it("404s an unknown conversation", async () => {
@@ -2265,5 +2281,18 @@ describe("sessions routes (children a pod service such as VS Code drives)", () =
     }
     const r = await call(api, "GET", "/conversations/c1/sessions");
     expect((r.json as { sessions: { id: string }[] }).sessions.map((s) => s.id)).toEqual(["s1", "s2"]);
+  });
+});
+
+describe("canApproveFromBroker", () => {
+  it("maps the broker's snake_case answer, reason included", () => {
+    expect(canApproveFromBroker({ can_approve: false, pending: false, reason: "not_pending" })).toEqual({
+      canApprove: false, pending: false, reason: "not_pending",
+    });
+  });
+
+  it("treats a contrib that omits pending as still pending, and drops an unknown reason", () => {
+    expect(canApproveFromBroker({ can_approve: true, reason: "because" })).toEqual({ canApprove: true, pending: true });
+    expect(canApproveFromBroker(null)).toEqual({ canApprove: false, pending: true });
   });
 });

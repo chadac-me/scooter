@@ -142,6 +142,29 @@ function view(c: Conversation, now = Date.now()) {
   };
 }
 
+/** Why a viewer may not approve; a contrib may omit it. */
+export const CAN_APPROVE_REASONS = ["not_pending", "already_approved", "not_eligible", "error"] as const;
+export type CanApproveReason = (typeof CAN_APPROVE_REASONS)[number];
+
+/** One viewer's can-approve answer; `pending: false` means it is gone. */
+export interface CanApproveAnswer {
+  canApprove: boolean;
+  pending?: boolean;
+  reason?: CanApproveReason;
+}
+
+/** Map a broker's snake_case can-approve body to the host's answer. */
+export function canApproveFromBroker(body: unknown): CanApproveAnswer {
+  const j = (body ?? {}) as { can_approve?: unknown; pending?: unknown; reason?: unknown };
+  const reason = CAN_APPROVE_REASONS.find((r) => r === j.reason);
+  return {
+    canApprove: j.can_approve === true,
+    // A contrib that omits `pending` is treated as still pending.
+    pending: j.pending !== false,
+    ...(reason ? { reason } : {}),
+  };
+}
+
 export interface ManagementDeps {
   sessions: SessionManager;
   store: ConversationStore;
@@ -164,7 +187,7 @@ export interface ManagementDeps {
     contrib: string,
     requestId: string,
     approver: ApproverIdentity,
-  ) => Promise<{ canApprove: boolean; pending?: boolean }>;
+  ) => Promise<CanApproveAnswer>;
   /** The conversation's standing grants and the verbs that change them; absent means none. */
   grants?: {
     list(conversationId: string, approver: ApproverIdentity): Promise<Grant[]>;
@@ -1236,11 +1259,11 @@ export function createManagementApi(deps: ManagementDeps): Router {
   // seen by many users; anonymous users can never approve.
   r.get("/conversations/:id/approvals/:contrib/:requestId/can-approve", async (ctx) => {
     if (!deps.canApproveRequest) return { json: { canApprove: true } }; // unwired → don't block
-    if (ctx.user.anonymous) return { json: { canApprove: false } };
+    if (ctx.user.anonymous) return { json: { canApprove: false, reason: "not_eligible" } };
     const approver = { id: ctx.user.id, email: ctx.user.email, name: ctx.user.name, assertion: userAssertionOf(ctx.req) };
-    const answer: { canApprove: boolean; pending?: boolean } = await deps
+    const answer: CanApproveAnswer = await deps
       .canApproveRequest(ctx.params.id, ctx.params.contrib, ctx.params.requestId, approver)
-      .catch(() => ({ canApprove: false })); // fail closed (greyed) on any error
+      .catch((): CanApproveAnswer => ({ canApprove: false, reason: "error" })); // fail closed (greyed) on any error
     // A request the contrib no longer has cannot be answered, so its card goes for everyone.
     if (answer.pending === false) {
       const conv = sessions.get(ctx.params.id) ?? (await sessions.getBySandboxKey(ctx.params.id));

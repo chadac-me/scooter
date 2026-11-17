@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { approvalOf } from "./InterruptPanel.js";
+import { approvalOf, blockedFor } from "./InterruptPanel.js";
 import type { PendingInterrupt } from "./integrityAgent.js";
 
 const intr = (metadata?: Record<string, unknown>): PendingInterrupt => ({
@@ -50,5 +50,36 @@ describe("approvalOf", () => {
   it("does NOT classify the retired aws:true boolean", () => {
     // A stale persisted interrupt carrying the boolean tag renders as an ordinary interrupt with live buttons.
     expect(approvalOf(intr({ aws: true, requestId: "req-42" }))).toBeUndefined();
+  });
+});
+
+describe("blockedFor", () => {
+  const gating = { gatedOption: "approve", blockedTitle: "Only an account approver can approve this.", blockedHint: "Ask an admin." };
+  const titleOf = (can: Parameters<typeof blockedFor>[1]) => blockedFor(gating, can)?.title;
+
+  it("leaves the option live while loading, when allowed, or without gating", () => {
+    expect(blockedFor(gating, undefined)).toBeUndefined();
+    expect(blockedFor(gating, { canApprove: true, pending: true })).toBeUndefined();
+    expect(blockedFor(undefined, { canApprove: false, pending: true, reason: "not_eligible" })).toBeUndefined();
+  });
+
+  it("uses the contrib's admin wording only for a viewer who is not eligible", () => {
+    expect(titleOf({ canApprove: false, pending: true, reason: "not_eligible" })).toBe(gating.blockedTitle);
+    // No reason from the contrib means its admin wording.
+    expect(titleOf({ canApprove: false, pending: true })).toBe(gating.blockedTitle);
+  });
+
+  it("says a revoked or answered request is no longer pending, not that the viewer lacks rights", () => {
+    expect(titleOf({ canApprove: false, pending: false, reason: "not_pending" })).toBe("This request is no longer pending.");
+    expect(titleOf({ canApprove: false, pending: false })).toBe("This request is no longer pending.");
+  });
+
+  it("says the viewer already approved, or that the check failed", () => {
+    expect(titleOf({ canApprove: false, pending: true, reason: "already_approved" })).toBe("You already approved this.");
+    expect(titleOf({ canApprove: false, pending: true, reason: "error" })).toBe("Couldn't check your approval rights.");
+  });
+
+  it("greys the contrib's gated option", () => {
+    expect(blockedFor(gating, { canApprove: false, pending: true, reason: "error" })?.optionId).toBe("approve");
   });
 });
