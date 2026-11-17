@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { approvalOf, blockedFor } from "./InterruptPanel.js";
+import { approvalOf, blockedFor, isGone } from "./InterruptPanel.js";
 import type { PendingInterrupt } from "./integrityAgent.js";
 
 const intr = (metadata?: Record<string, unknown>): PendingInterrupt => ({
@@ -69,9 +69,13 @@ describe("blockedFor", () => {
     expect(titleOf({ canApprove: false, pending: true })).toBe(gating.blockedTitle);
   });
 
-  it("says a revoked or answered request is no longer pending, not that the viewer lacks rights", () => {
-    expect(titleOf({ canApprove: false, pending: false, reason: "not_pending" })).toBe("This request is no longer pending.");
-    expect(titleOf({ canApprove: false, pending: false })).toBe("This request is no longer pending.");
+  it("treats a request the contrib no longer has as gone, not greyed", () => {
+    for (const can of [{ canApprove: false, pending: false, reason: "not_pending" as const }, { canApprove: false, pending: false }]) {
+      expect(isGone(can)).toBe(true);
+      expect(blockedFor(gating, can)).toBeUndefined();
+    }
+    expect(isGone({ canApprove: false, pending: true, reason: "not_eligible" })).toBe(false);
+    expect(isGone(undefined)).toBe(false);
   });
 
   it("says the viewer already approved, or that the check failed", () => {

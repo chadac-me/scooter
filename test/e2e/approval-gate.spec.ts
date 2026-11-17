@@ -135,10 +135,10 @@ fastOnly("needs a controlled can-approve answer (no real authorizer to seed)")(
       expect(asked.some((u) => u.includes("/approvals/echo/"))).toBe(true);
     });
 
-    test("says a request that is gone is no longer pending, not that an admin must approve", async ({ chat, page, baseURL, request }) => {
+    test("hides a request that is gone instead of greying it", async ({ chat, page, baseURL, request }) => {
       const base = (baseURL ?? "").replace(/\/$/, "");
       await serveManifest(page, { echo: ECHO_GATING });
-      interceptCanApprove(page, false, false);
+      const asked = interceptCanApprove(page, false, false, "not_pending");
 
       const before = await conversationIds(request, base);
       await chat.open();
@@ -147,11 +147,11 @@ fastOnly("needs a controlled can-approve answer (no real authorizer to seed)")(
       const id = await newConversationId(page, request, base, before);
       await raiseApproval(request, base, id, "echo", `echo-${Date.now()}`, "Echo would like permission.");
 
-      await expect(page.locator(panel.root)).toBeVisible({ timeout: 30_000 });
-      const approve = page.locator(panel.option).filter({ hasText: /approve/i });
-      await expect(approve).toBeDisabled();
-      await expect(page.locator(panel.hint)).toContainText("withdrawn, expired or already answered");
-      await expect(approve).toHaveAttribute("title", "This request is no longer pending.");
+      // Wait for the check, so hidden means hidden.
+      await expect.poll(() => asked.length, { timeout: 30_000 }).toBeGreaterThan(0);
+      await expect(page.locator(panel.message)).toHaveCount(0);
+      await expect(page.locator(panel.option)).toHaveCount(0);
+      await expect(page.locator(panel.hint)).toHaveCount(0);
     });
 
     for (const [reason, title, hint] of [

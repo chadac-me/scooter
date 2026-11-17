@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { createManagementApi, SANDBOX_SOURCE, raiseApprovalInterrupt, fetchPendingApprovals, fetchPendingApprovalsByKeys, approvalAgentMessage, canApproveFromBroker, parseByteRange, type CanApproveAnswer } from "../../src/api/management.js";
+import { createManagementApi, SANDBOX_SOURCE, raiseApprovalInterrupt, fetchPendingApprovals, fetchPendingApprovalsByKeys, approvalAgentMessage, approvalWithdrawnNotice, canApproveFromBroker, parseByteRange, type CanApproveAnswer } from "../../src/api/management.js";
 import { UserSkillError, type UserSkillStore } from "../../src/session/userSkillStore.js";
 import { createMemoryUserHookSettingsStore, type UserHookSettingsStore } from "../../src/hooks/userHookSettingsStore.js";
 import type { HookDef } from "../../src/hooks/types.js";
@@ -21,7 +21,7 @@ import { shortId } from "../../src/session/manager.js";
 import { createMemoryIdentityRegistry } from "../../src/session/identityRegistry.js";
 import type { Conversation, SessionManager, ConversationStore, ConversationLink } from "../../src/session/manager.js";
 import type { AguiServer } from "../../src/agui/server.js";
-import { PRIORITY_INTERRUPT, type AguiEvent } from "../../src/bridge.js";
+import { PRIORITY_INTERRUPT, PRIORITY_NORMAL, type AguiEvent } from "../../src/bridge.js";
 
 const conv = (over: Partial<Conversation> = {}): Conversation => ({
   id: "c1",
@@ -1326,7 +1326,7 @@ describe("management API", () => {
         resolveUser: () => ({ id: "alice", anonymous: false }),
         canApproveRequest: typeof canApprove === "function" ? canApprove : canApprove ? async () => canApprove : undefined,
       });
-      return { api, appended, broadcast };
+      return { api, appended, broadcast, sessions };
     };
 
     it("settles the card on a live bridge", async () => {
@@ -1339,6 +1339,12 @@ describe("management API", () => {
       expect(appended).toEqual([]);
     });
 
+    it("tells the agent the request is gone, without interrupting its turn", async () => {
+      const { api, sessions } = setup({ withdrawInterrupt: () => true });
+      await call(api, "DELETE", `/conversations/${SHORT}/approvals/aws/p1`);
+      expect(sessions.enqueueByThread).toHaveBeenCalledWith(UUID, approvalWithdrawnNotice("aws", "p1"), "broker", PRIORITY_NORMAL);
+    });
+
     it("settles it in the log when no bridge holds it, so a revive does not show it", async () => {
       const { api, appended } = setup(undefined, [raised]);
       const { json } = await call(api, "DELETE", `/conversations/${SHORT}/approvals/commits/p1`);
@@ -1348,9 +1354,10 @@ describe("management API", () => {
 
     it("leaves an already settled card alone", async () => {
       const settled = { type: "PERMISSION_RESOLVED", toolCallId: "p1", optionId: "approve" } as AguiEvent;
-      const { api, appended } = setup({ withdrawInterrupt: () => false }, [raised, settled]);
+      const { api, appended, sessions } = setup({ withdrawInterrupt: () => false }, [raised, settled]);
       const { json } = await call(api, "DELETE", `/conversations/${SHORT}/approvals/commits/p1`);
       expect(json).toEqual({ withdrawn: false });
+      expect(sessions.enqueueByThread).not.toHaveBeenCalled();
       expect(appended).toEqual([]);
     });
 

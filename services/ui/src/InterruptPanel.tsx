@@ -69,8 +69,6 @@ interface CanApprove {
 }
 
 // Shown instead of the contrib's admin wording when that is not why.
-const STALE_TITLE = "This request is no longer pending.";
-const STALE_HINT = "It was withdrawn, expired or already answered. Dismiss it and ask the agent again if it is still needed.";
 const ALREADY_TITLE = "You already approved this.";
 const ALREADY_HINT = "It is waiting on other approvers.";
 const ERROR_TITLE = "Couldn't check your approval rights.";
@@ -79,11 +77,15 @@ const ERROR_HINT = "Retrying in a few seconds.";
 // How soon a can-approve check that errored is asked again.
 const RETRY_MS = 5_000;
 
+/** A request the contrib no longer has; hidden, not greyed. */
+export function isGone(can: CanApprove | undefined): boolean {
+  return !!can && (!can.pending || can.reason === "not_pending");
+}
+
 /** The option to grey and why; only an explicit no blocks. */
 export function blockedFor(gating: ContribApproval | undefined, can: CanApprove | undefined): BlockedOption | undefined {
-  if (!gating || !can || can.canApprove) return undefined;
+  if (!gating || !can || can.canApprove || isGone(can)) return undefined;
   const block = (title: string, hint: string) => ({ optionId: gating.gatedOption, title, hint });
-  if (!can.pending || can.reason === "not_pending") return block(STALE_TITLE, STALE_HINT);
   if (can.reason === "already_approved") return block(ALREADY_TITLE, ALREADY_HINT);
   if (can.reason === "error") return block(ERROR_TITLE, ERROR_HINT);
   return block(gating.blockedTitle, gating.blockedHint);
@@ -285,6 +287,8 @@ function InterruptView({
   // broker remains the enforcement point.
   const gating = approval ? contribApprovals()[approval.contrib] : undefined;
   const blocked = blockedFor(gating, canApprove);
+  // The host withdraws it too and tells the agent.
+  if (isGone(canApprove)) return null;
 
   const choose = (optionId: string, result?: Record<string, unknown>) => {
     if (blocked?.optionId === optionId) return;

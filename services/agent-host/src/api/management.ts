@@ -39,7 +39,7 @@ import type { SandboxResources } from "../session/resources.js";
 import { fitAdvice, fitSummary } from "../session/resourceFit.js";
 import type { SandboxSizePreset } from "../session/resources.js";
 import type { WorkspaceVolume } from "../session/workspaceVolume.js";
-import { PRIORITY_INTERRUPT, userAssertionOf, type AguiEvent, type ApproverIdentity, type SessionBridge } from "../bridge.js";
+import { PRIORITY_INTERRUPT, PRIORITY_NORMAL, userAssertionOf, type AguiEvent, type ApproverIdentity, type SessionBridge } from "../bridge.js";
 import { formatError, logger } from "../log.js";
 import type { Grant } from "../grants.js";
 import type { AccessCheck } from "../session/access.js";
@@ -392,6 +392,14 @@ export async function fetchPendingApprovalsByKeys(
 /** Raise the Approve/Deny interrupt for a contrib's approval request on a conversation's
  *  bridge, the one builder shared by the POST approvals route and the revive re-raise so
  *  both produce an identical interrupt. */
+/** The agent's notice that its approval request was withdrawn. */
+export function approvalWithdrawnNotice(contrib: string, requestId: string): string {
+  return (
+    `Your ${contrib} approval request ${requestId} was withdrawn and is no longer pending, so ` +
+    "nobody will answer it. Stop waiting on it; request again only if you still need it."
+  );
+}
+
 export function raiseApprovalInterrupt(
   bridge: SessionBridge,
   conversationId: string,
@@ -447,7 +455,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
   const r = createRouter(deps.resolveUser);
 
   /** Settle an approval card nobody can answer any more, in the log and live; false if already settled. */
-  const withdrawApproval = async (id: SessionId, requestId: string): Promise<boolean> => {
+  const withdrawApproval = async (id: SessionId, requestId: string, contrib: string): Promise<boolean> => {
     const resolved: AguiEvent = { type: "PERMISSION_RESOLVED", toolCallId: requestId, optionId: null };
     // A live bridge persists the event itself; otherwise append it to the log.
     if (!sessions.get(id)?.bridge?.withdrawInterrupt(requestId)) {
@@ -458,6 +466,11 @@ export function createManagementApi(deps: ManagementDeps): Router {
     }
     // Persisting does not broadcast, so open panels drop the card here.
     server.broadcast(id, resolved);
+    // Queued, not interrupting: the agent just stops waiting.
+    const threadId = sessions.get(id)?.threadId ?? id;
+    await sessions
+      .enqueueByThread(threadId, approvalWithdrawnNotice(contrib, requestId), "broker", PRIORITY_NORMAL)
+      .catch((err) => log.warn("telling the agent an approval was withdrawn failed", { conversation_id: id, error: formatError(err) }));
     return true;
   };
 
@@ -1268,7 +1281,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (answer.pending === false) {
       const conv = sessions.get(ctx.params.id) ?? (await sessions.getBySandboxKey(ctx.params.id));
       if (conv) {
-        await withdrawApproval(conv.id as SessionId, ctx.params.requestId).catch((err) =>
+        await withdrawApproval(conv.id as SessionId, ctx.params.requestId, ctx.params.contrib).catch((err) =>
           log.warn("withdrawing a stale approval failed", { conversation_id: conv.id, error: formatError(err) }),
         );
       }
@@ -1611,7 +1624,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
     if (!(await fromService(ctx.req))) return serviceOnly;
     const conv = sessions.get(ctx.params.id) ?? (await sessions.getBySandboxKey(ctx.params.id));
     if (!conv) return { status: 404, json: { error: "unknown conversation" } };
-    return { json: { withdrawn: await withdrawApproval(conv.id as SessionId, ctx.params.requestId) } };
+    return { json: { withdrawn: await withdrawApproval(conv.id as SessionId, ctx.params.requestId, ctx.params.contrib) } };
   });
 
   // --- Scheduled tasks (UI settings page) ----------------------------------------
