@@ -79,15 +79,17 @@ let
     ++ lib.optional (!(lib.hasInfix "\"copilot\"" (toString (envValue "copilot" "AGENT_MODELS_JSON"))))
       "copilot: the catalog has no copilot-tagged model";
 
-  # dns.forwardDomains adds a CoreDNS server block for those domains.
+  # dns.forward adds a CoreDNS server block per domain.
   dnsRender = renders.anthropic.extendModules {
-    modules = [{ scooter.local.dns = { forwardDomains = [ "corp.example.com" "vpn.test" ]; resolver = "192.168.5.1"; }; }];
+    modules = [{ scooter.local.dns.forward = { "corp.example.com" = [ "192.168.5.1" ]; "vpn.test" = [ "10.0.0.2" "10.0.0.3" ]; }; }];
   };
-  dnsBlock = (lib.findFirst (o: o.kind == "ConfigMap" && o.metadata.name == "coredns-custom") { } dnsRender.config.kubernetes.objects).data."scooter-local-dns.server" or "";
+  dnsData = (lib.findFirst (o: o.kind == "ConfigMap" && o.metadata.name == "coredns-custom") { } dnsRender.config.kubernetes.objects).data or { };
   dns =
-    lib.optional (find "anthropic" "ConfigMap" "coredns-custom" != null) "dns: coredns-custom rendered without forwardDomains"
-    ++ lib.optional (!(lib.hasInfix "corp.example.com:53 vpn.test:53 {" dnsBlock && lib.hasInfix "forward . 192.168.5.1" dnsBlock))
-      "dns: coredns-custom does not forward the domains to the resolver:\n${dnsBlock}";
+    lib.optional (find "anthropic" "ConfigMap" "coredns-custom" != null) "dns: coredns-custom rendered without dns.forward"
+    ++ lib.optional (!(lib.hasInfix "corp.example.com:53 {" (dnsData."corp.example.com.server" or "")
+                    && lib.hasInfix "forward . 192.168.5.1\n" (dnsData."corp.example.com.server" or "")
+                    && lib.hasInfix "forward . 10.0.0.2 10.0.0.3\n" (dnsData."vpn.test.server" or "")))
+      "dns: coredns-custom does not forward each domain to its nameservers:\n${builtins.toJSON dnsData}";
 
   problems = structural ++ perProvider ++ providerWiring ++ dns;
 in
