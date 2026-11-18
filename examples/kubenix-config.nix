@@ -217,8 +217,9 @@
 
   # --- Contribs: each integration's own options ---
   contribs = {
-    # A provider declared only in Nix: no package, no image change, enabled by default.
+    # A provider declared only in Nix: no package, no image change.
     billing = {
+      enable = true;
       type = "tokenproxy";
       tokenproxy = {
         url = "https://billing.internal.example.com";

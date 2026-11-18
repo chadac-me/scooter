@@ -28,6 +28,7 @@ the deployment instead of writing a contrib:
 
 ```nix
 contribs.billing = {
+  enable = true;
   type = "tokenproxy";
   tokenproxy = {
     url = "https://billing.internal.example.com";

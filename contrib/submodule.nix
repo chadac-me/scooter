@@ -930,8 +930,8 @@ in
       description = ''
         `python` is a contrib with a Python package in `src`. `tokenproxy` is one HTTPS
         API and its token, declared entirely under `tokenproxy`: the broker serves it as
-        provider `${name}` with no package, image build or `src`, and it is enabled by
-        default.
+        provider `${name}` with no package, image build or `src`. Like any contrib it
+        ships only with `enable = true`.
       '';
     };
 
@@ -979,9 +979,5 @@ in
         };
       };
     };
-  };
-
-  config = lib.mkIf (config.type == "tokenproxy") {
-    enable = lib.mkDefault true;
   };
 }
