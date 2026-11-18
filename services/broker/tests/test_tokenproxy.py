@@ -79,3 +79,42 @@ def test_mounts_under_its_name(tokens):
 
     paths = create_app().openapi()["paths"]
     assert any(p.startswith("/billing/") for p in paths), f"mounted: {sorted(paths)}"
+
+
+E2E = """
+import httpx
+from fastapi.testclient import TestClient
+
+from broker.core.app import create_app
+from broker.core.auth import authenticate
+from scooter_broker_lib.types import Identity
+
+seen = {}
+real = httpx.AsyncClient
+
+def handler(req):
+    seen.update(url=str(req.url), auth=req.headers.get("authorization"))
+    return httpx.Response(200, json={"ok": True})
+
+httpx.AsyncClient = lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
+app = create_app()
+app.dependency_overrides[authenticate] = lambda: Identity(conversation_id="c", namespace="ns", service_account="sa")
+resp = TestClient(app).get("/billing/v1/invoices")
+assert resp.status_code == 200, (resp.status_code, resp.text)
+print(seen["url"], seen["auth"])
+"""
+
+
+def test_create_app_alone_serves_it_end_to_end(tmp_path):
+    # A fresh interpreter, so nothing in this test process has imported or reloaded the module.
+    import os
+    import subprocess
+    import sys
+
+    (tmp_path / "billing").mkdir()
+    (tmp_path / "billing" / "token").write_text("s3cret\n")
+    env = {**os.environ, "TOKENPROXY_PROVIDERS": json.dumps({"billing": PROVIDERS["billing"]}),
+           "TOKENPROXY_DIR": str(tmp_path)}
+    out = subprocess.run([sys.executable, "-c", E2E], env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "https://billing.example.com/v1/invoices Bearer s3cret"
