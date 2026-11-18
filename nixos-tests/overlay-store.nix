@@ -6,6 +6,9 @@
 
 { pkgs, lib, sandboxModule }:
 
+let
+  hostDriver = pkgs.runCommand "host-driver" { } "mkdir $out";
+in
 pkgs.testers.runNixOSTest {
   name = "dev-env-overlay-store";
 
@@ -62,10 +65,11 @@ pkgs.testers.runNixOSTest {
       unitConfig.DefaultDependencies = false;
       serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
       path = [ pkgs.util-linux ];
+      # The store is read-only here, so bind onto an existing empty store path.
       script = ''
-        mkdir -p /run/host-driver /nix/store/00000000000000000000000000000000-host-driver
+        mkdir -p /run/host-driver
         echo driver > /run/host-driver/libcuda.so.1
-        mount --bind -o ro /run/host-driver /nix/store/00000000000000000000000000000000-host-driver
+        mount --bind -o ro /run/host-driver ${hostDriver}
       '';
     };
 
@@ -90,7 +94,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed("ls /run/current-system/sw/bin >/dev/null")
 
     # A mount on a store path made before setup still shows through the overlay.
-    machine.succeed("grep -q driver /nix/store/00000000000000000000000000000000-host-driver/libcuda.so.1")
+    machine.succeed("grep -q driver ${hostDriver}/libcuda.so.1")
 
     # The bind-pinned lower is read-only.
     machine.fail(f"touch {lo}/canary 2>/dev/null")
