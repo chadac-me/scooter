@@ -1,7 +1,8 @@
-/** Skill providers: sandbox commands that hand a conversation extra skills. */
+/** Skill providers: sandbox commands or broker paths that hand a conversation extra skills. */
 
 import { formatError, logger } from "../log.js";
 
+import type { BrokerAsConversation } from "./brokerAsConversation.js";
 import type { ProvidedSkillFile } from "./skills.js";
 import type { ExecRequest, ExecResult, SandboxRef } from "../types.js";
 
@@ -10,8 +11,10 @@ const log = logger("skill-providers");
 /** One row of SKILL_PROVIDERS_JSON. */
 export interface SkillProviderDef {
   id: string;
-  /** Bash script; prints `{"skills": [...]}`. */
-  command: string;
+  /** Bash script run in the sandbox; prints `{"skills": [...]}`. Unset when `broker` is set. */
+  command?: string;
+  /** Broker path the agent-host GETs as the conversation instead, answering the same: no sandbox needed. */
+  broker?: string;
   /** Seconds before the command is killed. */
   timeoutSec: number;
   /** Seconds a message waits for it; a slower answer lands later. */
@@ -35,20 +38,23 @@ export function parseSkillProviders(raw: string | undefined, warn?: (msg: string
   if (!Array.isArray(doc)) return [];
   const pos = (v: unknown, d: number) => (typeof v === "number" && v > 0 ? v : d);
   return (doc as Array<Partial<SkillProviderDef> | null>).flatMap((r): SkillProviderDef[] => {
-    if (typeof r?.id !== "string" || !r.id || typeof r.command !== "string" || !r.command.trim()) {
+    if (typeof r?.id !== "string" || !r.id || nonBlank(r.command) === nonBlank(r.broker)) {
       warn?.(`SKILL_PROVIDERS_JSON: dropping malformed provider ${JSON.stringify(r?.id ?? null)}`);
       return [];
     }
     const timeoutSec = pos(r.timeoutSec, 30);
     return [{
       id: r.id,
-      command: r.command,
+      ...(nonBlank(r.command) ? { command: r.command } : { broker: (r.broker as string).trim() }),
       timeoutSec,
       waitSec: Math.min(pos(r.waitSec, timeoutSec), timeoutSec),
       description: typeof r.description === "string" ? r.description : "",
     }];
   });
 }
+
+/** A provider names exactly one of a sandbox `command` and a `broker` path. */
+const nonBlank = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
 
 /** Parse a provider's stdout, keeping only well-formed skills. */
 export function parseProvidedSkills(json: string): ProvidedSkillFile[] {
@@ -71,6 +77,8 @@ export interface SkillProviderRegistryDeps {
   providers: readonly SkillProviderDef[];
   sandboxFor(conversationId: string): SandboxRef | undefined;
   connect(ref: SandboxRef): Promise<ProviderExec>;
+  /** Calls the broker as the conversation, for `broker` providers. */
+  broker?: BrokerAsConversation;
 }
 
 export interface SkillProviderRegistry {
@@ -103,13 +111,25 @@ export function createSkillProviderRegistry(
   };
 
   async function run(p: SkillProviderDef, conversationId: string, owner: string | undefined, st: ProviderState) {
+    if (p.broker) {
+      if (!deps.broker) throw new Error("broker skill providers are not available here (no BROKER_URL)");
+      const res = await deps.broker(conversationId, p.broker, {
+        method: "GET",
+        signal: AbortSignal.timeout(p.timeoutSec * 1000),
+      });
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(`broker ${p.broker}: HTTP ${res.status} ${res.body.slice(0, 500)}`);
+      }
+      st.cache = { files: parseProvidedSkills(res.body), at: now() };
+      return;
+    }
     const ref = deps.sandboxFor(conversationId);
     if (!ref) throw new Error(`no sandbox for conversation ${conversationId}`);
     const exec = await deps.connect(ref);
     const r = await exec.execute(
       {
         command: "bash",
-        args: ["-c", p.command],
+        args: ["-c", p.command!],
         cwd: "/workspace",
         env: { SCOOTER_SKILL_PROVIDER: p.id },
         stdin: JSON.stringify({ conversation_id: conversationId, owner: owner ?? null }),
@@ -158,8 +178,10 @@ export function createSkillProviderRegistry(
 
   return {
     async skills(conversationId, owner) {
-      if (!providers.length || !deps.sandboxFor(conversationId)) return [];
-      const answers = await Promise.all(providers.map((p) => one(p, conversationId, owner)));
+      // A broker provider needs no sandbox, so it answers while the pod is still starting.
+      const live = deps.sandboxFor(conversationId) ? providers : providers.filter((p) => p.broker);
+      if (!live.length) return [];
+      const answers = await Promise.all(live.map((p) => one(p, conversationId, owner)));
       return answers.flat();
     },
   };

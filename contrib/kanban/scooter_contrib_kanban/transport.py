@@ -2,6 +2,7 @@
 
     GET    /card?folder=<id>&since=<t>             this conversation's card and stage, if the folder is on a board (hooks)
     GET    /skills                                 the skills of this conversation's board, as a skill provider prints them
+    POST   /hooks/{session-start,prompt-submit,stop}  the kanban hooks, answered for the agent-host (event JSON in, hook output out)
     GET    /user/boards                            the user's boards and their stages (the view, via /contrib-api)
     POST   /user/boards                            {name}: a new board, with the default stages
     PATCH  /user/boards/{board}                    {name}: rename a board
@@ -36,6 +37,7 @@ from scooter_broker_lib.types import AuthDependency, Identity, Provider, Transpo
 from scooter_broker_lib.user import user_identity
 
 from .boards import MAX_READ_CARDS, BoardError, Blocker, Boards, gate_line, skill_file, skill_slug
+from .hooks import STOP_REASON, hook_context, prompt_submit_text, session_start_text
 from .store import Card, Details, Gate, GateResult, KanbanStore, Skill, Stage, Tag
 
 # Folder and tag ids are URL-safe: UUIDs, or ids a folder service chose.
@@ -178,11 +180,7 @@ class Kanban(Transport):
             except BoardError as e:
                 raise _http(e) from None
 
-        @router.get("/card")
-        async def own_card(folder: str = "", since: str = "", identity: Identity = Depends(authed)) -> dict:
-            key = identity.conversation_id
-            if not key:
-                raise HTTPException(status_code=403, detail="a conversation identity is required")
+        async def _card(key: str, folder: str, since: datetime | None) -> dict:
             async with _store().reading():
                 card = await _store().card(key)
                 try:
@@ -207,12 +205,51 @@ class Kanban(Transport):
                 **tags,
                 stale_after=self.stale_after,
                 now=self.now(),
-                since=_since(since),
+                since=since,
                 blockers=blockers,
                 details=details,
                 skills=skills,
                 gates=gates,
             )
+
+        def _key(identity: Identity) -> str:
+            if not identity.conversation_id:
+                raise HTTPException(status_code=403, detail="a conversation identity is required")
+            return identity.conversation_id
+
+        @router.get("/card")
+        async def own_card(folder: str = "", since: str = "", identity: Identity = Depends(authed)) -> dict:
+            return await _card(_key(identity), folder, _since(since))
+
+        # The hooks, answered here so the agent-host can run them before the sandbox is up.
+        # The body is the hook's event JSON and the answer is Claude Code's hook output.
+
+        async def _hook_card(event: dict, identity: Identity, since: datetime | None = None) -> dict:
+            folder = ((event.get("scooter") or {}).get("folder") or {}).get("id") or ""
+            if not isinstance(folder, str) or not folder:
+                return {"board": False}
+            return await _card(_key(identity), folder, since)
+
+        @router.post("/hooks/session-start")
+        async def hook_session_start(event: dict = Body(...), identity: Identity = Depends(authed)) -> dict:
+            card = await _hook_card(event, identity)
+            return hook_context("SessionStart", session_start_text(card) if card["board"] else "")
+
+        @router.post("/hooks/prompt-submit")
+        async def hook_prompt_submit(event: dict = Body(...), identity: Identity = Depends(authed)) -> dict:
+            card = await _hook_card(event, identity)
+            return hook_context("UserPromptSubmit", prompt_submit_text(card) if card["board"] else "")
+
+        @router.post("/hooks/stop")
+        async def hook_stop(event: dict = Body(...), identity: Identity = Depends(authed)) -> dict:
+            if event.get("stop_hook_active"):
+                return {}
+            # The agent-host's run start replaces the marker file prompt-submit.sh kept.
+            started = (event.get("scooter") or {}).get("run_started_at")
+            card = await _hook_card(event, identity, _since(started) if isinstance(started, str) else None)
+            if not (card["board"] and card["stale"]):
+                return {}
+            return {"decision": "block", "reason": STOP_REASON}
 
         @router.get("/skills")
         async def own_skills(identity: Identity = Depends(authed)) -> dict:

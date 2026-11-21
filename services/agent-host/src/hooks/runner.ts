@@ -1,4 +1,4 @@
-/** Runs a conversation's hooks in its sandbox, per Claude Code's protocol. */
+/** Runs a conversation's hooks, in its sandbox or on the broker, per Claude Code's protocol. */
 
 import type { ExecBackend } from "../types.js";
 import { HOOK_CONDITIONS, HOOK_EVENTS, type HookCondition, type HookDef, type HookEvent, type HookOutcome, type HookRunRecord, type HookRunner } from "./types.js";
@@ -23,8 +23,7 @@ export function parseHooks(raw: string | undefined, warn?: (msg: string) => void
       typeof r?.id !== "string" ||
       !r.id ||
       !HOOK_EVENTS.includes(r.event as HookEvent) ||
-      typeof r.command !== "string" ||
-      !r.command.trim() ||
+      nonBlank(r.command) === nonBlank(r.broker) ||
       !validMatcher(r.matcher ?? "") ||
       (r.when != null && !HOOK_CONDITIONS.includes(r.when as HookCondition))
     ) {
@@ -35,7 +34,7 @@ export function parseHooks(raw: string | undefined, warn?: (msg: string) => void
       id: r.id,
       event: r.event as HookEvent,
       matcher: r.matcher ?? "",
-      command: r.command,
+      ...(nonBlank(r.command) ? { command: r.command } : { broker: (r.broker as string).trim() }),
       timeoutSec: typeof r.timeoutSec === "number" && r.timeoutSec > 0 ? r.timeoutSec : 30,
       failClosed: r.failClosed === true,
       userCanDisable: r.userCanDisable === true,
@@ -45,6 +44,9 @@ export function parseHooks(raw: string | undefined, warn?: (msg: string) => void
   }
   return out;
 }
+
+/** A hook names exactly one of a sandbox `command` and a `broker` path. */
+const nonBlank = (v: unknown): boolean => typeof v === "string" && v.trim() !== "";
 
 function validMatcher(m: string): boolean {
   try {
@@ -153,6 +155,20 @@ export interface HookRunnerDeps {
   cwd?: string;
   /** Whether the sandbox pod is Ready now, without waiting for it. */
   sandboxReady?: () => Promise<boolean>;
+  /** POSTs a `broker` hook's event JSON to the broker as this conversation. */
+  broker?: BrokerHookCall;
+}
+
+/** One broker hook call: the HTTP status and body. */
+export type BrokerHookCall = (path: string, body: string, signal: AbortSignal) => Promise<{ status: number; body: string }>;
+
+/** A broker answer as a script's exit: 2xx is exit 0 with the body as stdout. */
+async function callBroker(call: BrokerHookCall | undefined, path: string, body: string, signal: AbortSignal) {
+  if (!call) throw new Error("broker hooks are not available here (no BROKER_URL or CONV_TOKEN_SECRET)");
+  const res = await call(path, body, signal);
+  return res.status >= 200 && res.status < 300
+    ? { exitCode: 0, stdout: res.body, stderr: "" }
+    : { exitCode: 1, stdout: "", stderr: `broker ${path}: HTTP ${res.status} ${res.body.slice(0, 500)}` };
 }
 
 /** Events that gate the model call, so they shouldn't wait on a cold pod. */
@@ -181,16 +197,18 @@ export function createHookRunner(deps: HookRunnerDeps): HookRunner {
     }, h.timeoutSec * 1000);
     let a: Answer;
     try {
-      const res = await deps.exec.run(
-        {
-          command: "bash",
-          args: ["-c", h.command],
-          cwd,
-          env: { SCOOTER_HOOK_ID: h.id, SCOOTER_HOOK_EVENT: h.event, CLAUDE_PROJECT_DIR: cwd },
-          stdin: input,
-        },
-        ctl.signal,
-      );
+      const res = h.broker
+        ? await callBroker(deps.broker, h.broker, input, ctl.signal)
+        : await deps.exec.run(
+            {
+              command: "bash",
+              args: ["-c", h.command!],
+              cwd,
+              env: { SCOOTER_HOOK_ID: h.id, SCOOTER_HOOK_EVENT: h.event, CLAUDE_PROJECT_DIR: cwd },
+              stdin: input,
+            },
+            ctl.signal,
+          );
       a = timedOut ? { decision: "error", error: `timed out after ${h.timeoutSec}s` } : interpret(h.event, res);
     } catch (err) {
       a = { decision: "error", error: timedOut ? `timed out after ${h.timeoutSec}s` : String((err as Error)?.message ?? err) };
@@ -215,7 +233,8 @@ export function createHookRunner(deps: HookRunnerDeps): HookRunner {
         (h) => h.event === event && matches(h.matcher, target) && holds(h.when, input) && (!only || only.has(h.id)),
       );
       if (matching.length === 0) return EMPTY;
-      const skippable = (h: HookDef) => PRE_PROMPT_EVENTS.has(event) && !h.failClosed;
+      // A broker hook never touches the pod, so a cold one doesn't hold it back.
+      const skippable = (h: HookDef) => PRE_PROMPT_EVENTS.has(event) && !h.failClosed && !h.broker;
       // A failed readiness check runs the hooks anyway.
       const cold =
         !!deps.sandboxReady && matching.some(skippable) && !(await deps.sandboxReady().catch(() => true));
