@@ -99,6 +99,7 @@ import type { HookDef, HookRunner } from "./hooks/types.js";
 import { createPgFolderReader } from "./hooks/folderReader.js";
 import { createPgUserHookSettingsStore } from "./hooks/userHookSettingsStore.js";
 import { createPgUserThemeStore } from "./theme/userThemeStore.js";
+import { createPgUserRetentionStore } from "./retention/userRetentionStore.js";
 import { createMemoryIdentityRegistry, createPgIdentityRegistry } from "./session/identityRegistry.js";
 import { conversationTree, createMemoryAuthorStore, createPgAuthorStore, isOwnText, steeringAuthor, type Author } from "./session/authorStore.js";
 import {
@@ -1199,6 +1200,8 @@ export async function main(
   const userHookSettings = agentHostDsn ? createPgUserHookSettingsStore({ db: agentHostDb }) : undefined;
   // Without a database the theme choice stays in each browser.
   const userThemes = agentHostDsn ? createPgUserThemeStore({ db: agentHostDb }) : undefined;
+  // Without a database only the deployment default applies.
+  const userRetention = agentHostDsn ? createPgUserRetentionStore({ db: agentHostDb }) : undefined;
   const hookFolders = agentHostDsn && (config.hooks ?? []).length > 0 ? createPgFolderReader({ db: agentHostDb }) : undefined;
   const hooksLog = logger("hooks");
   hostLog.info("conversation hooks", {
@@ -1953,6 +1956,7 @@ export async function main(
       userHookSettings,
       themesDir: config.themesDir,
       userThemes,
+      userRetention,
       // Settings tabs reach their contrib's broker half as the signed-in user.
       contribApi: {
         contribs: parseContribUserApi(process.env.CONTRIB_USER_API_JSON),
