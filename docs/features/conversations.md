@@ -24,26 +24,6 @@ its volumes remain). The next prompt revives it:
   that has never seen the conversation before,
 - suspended conversations cost no CPU; the platform autoscales its own hosts to live demand.
 
-## One-shot conversations
-
-A script or service that starts a conversation for a single job can have it cleaned up as soon as
-the run finishes, instead of waiting for the idle and retention reapers. Pass `cleanup` when
-creating it:
-
-```http
-POST /conversations
-{"title": "nightly digest", "cleanup": "conversation"}
-```
-
-- `conversation` deletes everything: the sandbox, both volumes, the transcript and the event log.
-- `sandbox` deletes the sandbox and both volumes but keeps the transcript; a later message starts
-  on a fresh sandbox.
-
-Cleanup waits until nothing is queued and no subagent is still working, and never touches a
-starred conversation, so starring one keeps it. From Python,
-`ScooterClient.spawn_conversation(owner, prompt, oneshot=True)` deletes everything;
-add `cleanup="sandbox"` to keep the transcript.
-
 ## Multi-replica by construction
 
 Conversation ownership lives in a `Conversation` custom resource — the **source of truth** for
