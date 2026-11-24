@@ -448,6 +448,52 @@ async def test_the_hooks_learn_the_card_s_stage_from_its_folder(app):
         assert (await c.get("/kanban/card")).json()["board"] is False
 
 
+def _event(folder: str | None, **extra) -> dict:
+    return {"hook_event_name": "x", "scooter": {"folder": {"id": folder, "name": "f"} if folder else None, **extra}}
+
+
+async def test_the_hook_routes_tell_a_filed_agent_its_stage(app):
+    board = await _board(app)
+    review = _stage(board, "Review")
+    async with as_(app, conversation="key-1") as c:
+        start = (await c.post("/kanban/hooks/session-start", json=_event(review))).json()
+        prompt = (await c.post("/kanban/hooks/prompt-submit", json=_event(review))).json()
+        # Off a board, or unfiled, a hook adds nothing.
+        assert (await c.post("/kanban/hooks/session-start", json=_event("elsewhere"))).json() == {}
+        assert (await c.post("/kanban/hooks/prompt-submit", json=_event(None))).json() == {}
+    said = start["hookSpecificOutput"]
+    assert said["hookEventName"] == "SessionStart"
+    assert said["additionalContext"].startswith(
+        'This conversation is a card on a kanban board, currently in the stage "Review". '
+        'Stages: "Design", "In progress", "Review", "Done".'
+    )
+    assert prompt["hookSpecificOutput"]["additionalContext"] == 'Kanban: this card is in "Review", but no status has been set yet.'
+
+
+async def test_the_stop_hook_asks_for_a_status_the_run_did_not_set(app, store):
+    board = await _board(app)
+    review = _stage(board, "Review")
+    run_start = (NOW - timedelta(minutes=2)).isoformat()
+    async with as_(app, conversation="key-1") as c:
+        stop = lambda **kw: c.post("/kanban/hooks/stop", json=_event(review, run_started_at=run_start, **kw))  # noqa: E731
+        assert (await stop()).json()["decision"] == "block"
+        # Set before this run started: still owed, though younger than stale_after.
+        await store.put("key-1", column=review, by="agent", now=(NOW - timedelta(minutes=5)).isoformat())
+        assert (await stop()).json()["decision"] == "block"
+        # Set during the run: nothing owed.
+        await store.put("key-1", column=review, by="agent", now=(NOW - timedelta(minutes=1)).isoformat())
+        assert (await stop()).json() == {}
+        # A second Stop in the same turn never nags again.
+        await store.put("key-1", column=review, by="user", now=NOW.isoformat())
+        r = await c.post("/kanban/hooks/stop", json={**_event(review, run_started_at=run_start), "stop_hook_active": True})
+        assert r.json() == {}
+
+
+async def test_the_hook_routes_need_a_conversation(app):
+    async with as_(app) as c:
+        assert (await c.post("/kanban/hooks/session-start", json=_event("f-1"))).status_code == 403
+
+
 async def test_the_card_route_needs_a_conversation(app):
     async with as_(app) as c:
         assert (await c.get("/kanban/card")).status_code == 403

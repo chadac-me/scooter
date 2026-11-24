@@ -1,4 +1,4 @@
-/** Conversation hooks: sandbox scripts speaking Claude Code's hook protocol. */
+/** Conversation hooks: sandbox scripts or broker calls speaking Claude Code's hook protocol. */
 
 export const HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
@@ -20,8 +20,10 @@ export interface HookDef {
   event: HookEvent;
   /** Anchored regex over tool name or session source. */
   matcher: string;
-  /** Bash script; the event JSON arrives on stdin. */
-  command: string;
+  /** Bash script run in the sandbox; the event JSON arrives on stdin. Unset when `broker` is set. */
+  command?: string;
+  /** Broker path the agent-host POSTs the event JSON to instead, as the conversation: no sandbox needed. */
+  broker?: string;
   timeoutSec: number;
   /** A crash or timeout blocks instead of being skipped. */
   failClosed: boolean;
