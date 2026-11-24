@@ -326,3 +326,46 @@ func TestCreateWithoutAWriteStoreIsRefused(t *testing.T) {
 		t.Fatalf("want 502, got %d (%s)", w.Code, w.Body.String())
 	}
 }
+
+func TestCreateStoresTheCleanupMode(t *testing.T) {
+	for _, mode := range []string{CleanupConversation, CleanupSandbox} {
+		c := &fakeCreator{}
+		w := postCreate(t, c, `{"cleanup":"`+mode+`"}`, nil)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("%s: status %d: %s", mode, w.Code, w.Body.String())
+		}
+		if got := c.calls[0].spec["cleanup"]; got != mode {
+			t.Errorf("spec cleanup = %v, want %s", got, mode)
+		}
+		var resp createResponse
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp.Cleanup != mode {
+			t.Errorf("response cleanup = %q, want %s", resp.Cleanup, mode)
+		}
+		if row := conversationRowOf(NewConversation{Name: "x", Spec: c.calls[0].spec}, 1); row.Cleanup == nil || *row.Cleanup != mode {
+			t.Errorf("row cleanup = %v, want %s", row.Cleanup, mode)
+		}
+	}
+}
+
+func TestCreateOmitsCleanupByDefault(t *testing.T) {
+	c := &fakeCreator{}
+	if w := postCreate(t, c, `{}`, nil); w.Code != http.StatusCreated {
+		t.Fatalf("status %d", w.Code)
+	}
+	if _, ok := c.calls[0].spec["cleanup"]; ok {
+		t.Errorf("spec has cleanup without asking: %v", c.calls[0].spec)
+	}
+}
+
+func TestCreateRejectsABadCleanup(t *testing.T) {
+	for _, body := range []string{`{"cleanup":"everything"}`, `{"cleanup":"sandbox","parentId":"p1"}`} {
+		c := &fakeCreator{}
+		if w := postCreate(t, c, body, nil); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", body, w.Code)
+		}
+		if len(c.calls) != 0 {
+			t.Errorf("%s: created anyway", body)
+		}
+	}
+}

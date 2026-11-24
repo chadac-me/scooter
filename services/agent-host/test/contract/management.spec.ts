@@ -44,8 +44,8 @@ function shortIdOf(threadId: string): string {
 function fakeSessions(): SessionManager {
   const store = new Map<string, Conversation>([["c1", conv()]]);
   return {
-    start: vi.fn(async (threadId, model, owner) => {
-      const c = conv({ id: threadId, threadId, status: "running", title: "New chat", model, owner });
+    start: vi.fn(async (threadId, model, owner, opts) => {
+      const c = conv({ id: threadId, threadId, status: "running", title: "New chat", model, owner, cleanup: opts?.cleanup });
       store.set(threadId, c);
       return c;
     }),
@@ -197,6 +197,27 @@ describe("management API", () => {
 
     expect(res.status).toBe(201);
     expect((res.json as { id?: string }).id).not.toBe("attacker-chosen-id");
+  });
+
+  it("POST /conversations takes a one-shot cleanup mode and rejects an unknown one", async () => {
+    const sessions = fakeSessions();
+    const api = createManagementApi({
+      sessions,
+      store: fakeStore([]),
+      server: stubServer,
+      answerInterrupt: async () => ({ ok: true }),
+    });
+
+    const ok = await call(api, "POST", "/conversations", { cleanup: "conversation" });
+    expect(ok.status).toBe(201);
+    expect((ok.json as { cleanup?: string }).cleanup).toBe("conversation");
+    expect(sessions.start).toHaveBeenLastCalledWith(expect.any(String), undefined, undefined, expect.objectContaining({ cleanup: "conversation" }));
+
+    const plain = await call(api, "POST", "/conversations", {});
+    expect((plain.json as { cleanup?: string }).cleanup).toBeUndefined();
+
+    const bad = await call(api, "POST", "/conversations", { cleanup: "everything" });
+    expect(bad.status).toBe(400);
   });
 
   // A Slack button answers as the clicker's Scooter user: only the verified webhooks caller

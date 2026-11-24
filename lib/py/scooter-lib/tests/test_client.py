@@ -81,6 +81,20 @@ def test_optional_fields_are_omitted(tmp_path):
     assert fake.calls[1][2]["source"] == "scheduler"
 
 
+def test_oneshot_asks_for_cleanup_on_create(tmp_path):
+    fake = _Fake()
+
+    async def go():
+        async with _client(fake, tmp_path) as c:
+            await c.spawn_conversation(None, "hi", oneshot=True)
+            await c.spawn_conversation(None, "hi", oneshot=True, cleanup="sandbox")
+            await c.spawn_conversation(None, "hi", cleanup="sandbox")
+
+    run(go())
+    creates = [body for _, url, body, _ in fake.calls if url.endswith("/conversations")]
+    assert creates == [{"cleanup": "conversation"}, {"cleanup": "sandbox"}, {}]
+
+
 def test_the_token_is_reread_per_request_and_omitted_when_unreadable(tmp_path):
     fake = _Fake()
 

@@ -72,12 +72,12 @@ func TestConversationRowOf(t *testing.T) {
 
 // args() alone fixes column order against the INSERT's placeholders.
 func TestConversationRowArgsOrderMatchesTheInsert(t *testing.T) {
-	owner, model, parent, ref, vis, kind, origin := "alice", "model-fast", "conv-parent", "conv-abc123", "private", "session", "web"
+	owner, model, parent, ref, vis, kind, origin, cleanup := "alice", "model-fast", "conv-parent", "conv-abc123", "private", "session", "web", "sandbox"
 	args := conversationRow{
 		ID: "conv-1", Title: "T", Now: 7,
-		Model: &model, Owner: &owner, ParentID: &parent, SandboxRef: &ref, Visibility: &vis, Kind: &kind, Origin: &origin,
+		Model: &model, Owner: &owner, ParentID: &parent, SandboxRef: &ref, Visibility: &vis, Kind: &kind, Origin: &origin, Cleanup: &cleanup,
 	}.args()
-	want := []any{"conv-1", "T", int64(7), &model, &owner, &parent, &ref, &vis, &kind, &origin}
+	want := []any{"conv-1", "T", int64(7), &model, &owner, &parent, &ref, &vis, &kind, &origin, &cleanup}
 	if len(args) != len(want) {
 		t.Fatalf("want %d args, got %d", len(want), len(args))
 	}

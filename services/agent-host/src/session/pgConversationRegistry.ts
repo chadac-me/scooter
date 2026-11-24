@@ -12,6 +12,7 @@ import { agent_host } from "@scooter/schema";
 
 import { formatError, logger } from "../log.js";
 import { createPgPool } from "../db/pgPool.js";
+import { isCleanupMode } from "./cleanup.js";
 
 import type {
   ConversationPhase,
@@ -39,6 +40,7 @@ type RecordRow = {
   parentId: string | null;
   kind: string | null;
   origin: string | null;
+  cleanup: string | null;
   sandboxRef: string | null;
   creatorPod: string | null;
   phase: string | null;
@@ -54,6 +56,7 @@ const columns = {
   parentId: conversations.parentId,
   kind: conversations.kind,
   origin: conversations.origin,
+  cleanup: conversations.cleanup,
   sandboxRef: conversations.sandboxRef,
   creatorPod: conversations.creatorPod,
   phase: conversations.phase,
@@ -71,6 +74,7 @@ function toRecord(r: RecordRow): ConversationRecord {
       ...(r.parentId ? { parentId: r.parentId } : {}),
       ...(r.kind === "subagent" || r.kind === "session" ? { kind: r.kind } : {}),
       ...(r.origin ? { origin: r.origin } : {}),
+      ...(isCleanupMode(r.cleanup) ? { cleanup: r.cleanup } : {}),
       ...(r.sandboxRef ? { sandboxRef: r.sandboxRef } : {}),
       ...(r.creatorPod ? { creatorPod: r.creatorPod } : {}),
       ...(r.visibility === "private" ? { visibility: "private" as const } : {}),

@@ -21,13 +21,16 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Generator, Literal
 
 import httpx
 
 from .logging_config import format_error, get_logger
 
 logger = get_logger("scooter-lib", "client")
+
+# What a one-shot conversation deletes once its run finishes.
+Cleanup = Literal["conversation", "sandbox"]
 
 DEFAULT_TOKEN_PATH = "/var/run/secrets/agent-host/token"
 
@@ -178,12 +181,18 @@ class ScooterClient:
         title: str | None = None,
         model: str | None = None,
         source: str = "system",
+        oneshot: bool = False,
+        cleanup: Cleanup = "conversation",
     ) -> str:
         """Create a conversation as `owner`, then prompt it; returns the server-assigned id.
 
-        Raises SpawnError when either call is refused or fails, so a task fails visibly.
+        A `oneshot` conversation deletes what `cleanup` names once its run finishes: the whole
+        conversation by default, or only its sandbox and volumes. Raises SpawnError when either
+        call is refused or fails, so a task fails visibly.
         """
         create: dict[str, Any] = {}
+        if oneshot:
+            create["cleanup"] = cleanup
         if title:
             create["title"] = title
         if owner:
