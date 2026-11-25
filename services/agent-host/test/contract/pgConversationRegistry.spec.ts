@@ -35,10 +35,10 @@ function fakeDb(opts: { fail?: boolean; rows?: unknown[][] } = {}): {
 // The registry select's column order (pgConversationRegistry.ts `columns`).
 const row = (over: Partial<Record<string, unknown>> = {}): unknown[] => {
   const r = {
-    id: "conv-a", model: "m", owner: "alice", parentId: null, kind: null, origin: null, cleanup: null, sandboxRef: "conv-xyz",
+    id: "conv-a", model: "m", owner: "alice", parentId: null, kind: null, origin: null, oneshot: false, sandboxRef: "conv-xyz",
     creatorPod: "pod-0", phase: "Assigned", hostPod: "pod-1", hostGeneration: "3", ...over,
   };
-  return [r.id, r.model, r.owner, r.parentId, r.kind, r.origin, r.cleanup, r.sandboxRef, r.creatorPod, r.phase, r.hostPod, r.hostGeneration];
+  return [r.id, r.model, r.owner, r.parentId, r.kind, r.origin, r.oneshot, r.sandboxRef, r.creatorPod, r.phase, r.hostPod, r.hostGeneration];
 };
 
 describe("the row-backed conversation registry: writes", () => {
@@ -132,13 +132,11 @@ describe("the row-backed conversation registry: reads", () => {
     await expect(createPgConversationRegistry({ db: fakeDb().db }).get("nope")).resolves.toBeUndefined();
   });
 
-  it("carries a one-shot's cleanup mode and drops an unknown one", async () => {
-    const one = async (cleanup: unknown) =>
-      (await createPgConversationRegistry({ db: fakeDb({ rows: [row({ cleanup })] }).db }).get("conv-a"))?.spec.cleanup;
-    expect(await one("sandbox")).toBe("sandbox");
-    expect(await one("conversation")).toBe("conversation");
-    expect(await one(null)).toBeUndefined();
-    expect(await one("bogus")).toBeUndefined();
+  it("carries a one-shot flag only when set", async () => {
+    const one = async (oneshot: boolean) =>
+      (await createPgConversationRegistry({ db: fakeDb({ rows: [row({ oneshot })] }).db }).get("conv-a"))?.spec.oneshot;
+    expect(await one(true)).toBe(true);
+    expect(await one(false)).toBeUndefined();
   });
 
   it("READS THROW on failure — an empty list would make hydrate serve blind", async () => {

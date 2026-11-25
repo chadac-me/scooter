@@ -17,7 +17,6 @@ import { formatError, logger } from "../log.js";
 import { isDbUnavailable } from "../db/pgPool.js";
 import { DERIVED_SOURCES, humanTriggerFromLog, latestTrigger } from "../acp/remoteAgentRegistry.js";
 import type { AccessFacts, ConversationKind, Visibility } from "./visibility.js";
-import type { CleanupMode } from "./cleanup.js";
 
 const log = logger("manager");
 
@@ -174,8 +173,8 @@ export interface ConversationMeta {
   kind?: ConversationKind;
   /** Where a session was started from, e.g. "vscode"; router-written. */
   origin?: string;
-  /** One-shot: what to delete once a run finishes; written at create, never by saveMeta. */
-  cleanup?: CleanupMode;
+  /** Delete everything once the last run ends; written at create, never by saveMeta. */
+  oneshot?: boolean;
   /** The user renamed this conversation, so the agent's <title> marker no longer overwrites
    *  `title`. */
   userTitled?: boolean;
@@ -269,8 +268,8 @@ export interface ConversationStore {
   readLifetimes?(ids: SessionId[]): Promise<Map<SessionId, number>>;
   /** Set the visibility of `rootId` and every descendant in one write; optional. */
   setVisibility?(rootId: SessionId, visibility: Visibility): Promise<void>;
-  /** Record a one-shot's cleanup mode; the router writes it in multi-replica. Optional. */
-  setCleanup?(id: SessionId, mode: CleanupMode): Promise<void>;
+  /** Mark a conversation one-shot; the router writes it in multi-replica. Optional. */
+  setOneshot?(id: SessionId): Promise<void>;
   /** Read a conversation's owner and visibility fresh from the shared store, since another
    *  replica (or the router) may have changed them; undefined when the store cannot say. */
   readAccess?(id: SessionId): Promise<AccessFacts | undefined>;
@@ -340,8 +339,8 @@ export interface Conversation {
   readonly kind?: ConversationKind;
   /** Where a session was started from, e.g. "vscode" or "web". */
   readonly origin?: string;
-  /** One-shot: what is deleted once a run finishes. */
-  readonly cleanup?: CleanupMode;
+  /** Deleted, with its sandbox and volumes, once its last run ends. */
+  readonly oneshot?: boolean;
   /** The title is user-set and locked against the agent's <title> marker. */
   readonly userTitled?: boolean;
   /** The user starred it. */
@@ -356,14 +355,11 @@ export interface SessionManager {
     threadId: ThreadId,
     model?: string,
     owner?: string,
-    opts?: { visibility?: Visibility; cleanup?: CleanupMode },
+    opts?: { visibility?: Visibility; oneshot?: boolean },
   ): Promise<Conversation>;
-  /** Subscribe to one-shot conversations whose run finished, fired as (id, mode) when the run
-   *  ends with nothing queued, no busy child and no star; returns an unsubscribe. */
-  onCleanupDue(cb: (id: SessionId, mode: CleanupMode) => void): () => void;
-  /** Delete a conversation's Sandbox and both its volumes but keep the conversation, suspended;
-   *  the next prompt starts on a fresh sandbox. */
-  dropSandbox(id: SessionId): Promise<void>;
+  /** Subscribe to one-shot conversations whose run ended with nothing queued, no busy child and
+   *  no star; returns an unsubscribe. */
+  onCleanupDue(cb: (id: SessionId) => void): () => void;
   /** Spawn a subagent: a new conversation with its own bridge that shares the parent's sandbox pod,
    *  inherits its owner and carries `parentId`; throws if the parent is unknown. */
   spawnChild(parentId: SessionId, childThreadId: ThreadId, args: SpawnChildArgs): Promise<Conversation>;
@@ -520,7 +516,7 @@ interface Entry {
   parentId?: SessionId;
   kind?: ConversationKind;
   origin?: string;
-  cleanup?: CleanupMode;
+  oneshot?: boolean;
   userTitled?: boolean;
   starred?: boolean;
   visibility?: Visibility;
@@ -613,7 +609,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     parentId: e.parentId,
     kind: e.kind,
     origin: e.origin,
-    cleanup: e.cleanup,
+    oneshot: e.oneshot,
     userTitled: e.userTitled,
     starred: e.starred,
     visibility: e.visibility,
@@ -667,7 +663,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       parentId: m.parentId,
       kind: m.kind,
       origin: m.origin,
-      cleanup: m.cleanup,
+      oneshot: m.oneshot,
       userTitled: m.userTitled,
       starred: m.starred,
       pendingQueue: m.pendingQueue,
@@ -747,7 +743,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         parentId: c.spec.parentId,
         kind: c.spec.kind,
         origin: c.spec.origin,
-        cleanup: c.spec.cleanup,
+        oneshot: c.spec.oneshot,
         visibility: c.spec.visibility,
         ...(c.spec.sandboxRef ? { sandboxRef: c.spec.sandboxRef } : {}),
       };
@@ -875,7 +871,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       parentId: e.parentId,
       kind: e.kind,
       origin: e.origin,
-      cleanup: e.cleanup,
+      oneshot: e.oneshot,
       userTitled: e.userTitled,
       starred: e.starred,
       visibility: e.visibility,
@@ -1004,7 +1000,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           log.warn("deferred model switch failed", { conversation_id: e.id, error: formatError(err) }),
         );
       }
-      if (e.cleanup && !e.parentId && ((event.type === "RUN_FINISHED" && event.outcome?.type !== "interrupt") || event.type === "RUN_ERROR")) {
+      if (e.oneshot && !e.parentId && ((event.type === "RUN_FINISHED" && event.outcome?.type !== "interrupt") || event.type === "RUN_ERROR")) {
         void finishOneshot(e);
       }
       // Cheap synchronous pre-filter; the store's AppendFence is the authority.
@@ -1266,11 +1262,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
   };
 
-  const cleanupSubs = new Set<(id: SessionId, mode: CleanupMode) => void>();
+  const cleanupSubs = new Set<(id: SessionId) => void>();
   const finishOneshot = async (e: Entry): Promise<void> => {
     // RUN_FINISHED lands before the bridge clears running.
     for (let i = 0; i < 50 && e.bridge?.queueState().running; i++) await new Promise((r) => setTimeout(r, 100));
-    if (!e.cleanup || entries.get(e.id) !== e || e.status === "ended") return;
+    if (!e.oneshot || entries.get(e.id) !== e || e.status === "ended") return;
     const qs = e.bridge?.queueState();
     // Another turn follows; its own end retries.
     if (qs && (qs.running || qs.queued > 0)) return;
@@ -1280,7 +1276,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     if (e.starred) return;
     for (const cb of cleanupSubs) {
       try {
-        cb(e.id, e.cleanup);
+        cb(e.id);
       } catch (err) {
         log.warn("cleanup subscriber threw", { conversation_id: e.id, error: formatError(err) });
       }
@@ -1307,14 +1303,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         bridge: undefined, status: "running",
         title: PLACEHOLDER_TITLE, createdAt: nowMs(), lastActivityAt: nowMs(), model, owner,
         ...(visibility === "private" ? { visibility } : {}),
-        ...(opts?.cleanup ? { cleanup: opts.cleanup } : {}),
+        ...(opts?.oneshot ? { oneshot: true } : {}),
         ...(model ? { modelSetBy: "user" as const } : {}),
       };
       entries.set(id, entry);
       await saveMeta(entry);
       // saveMeta never writes visibility to Postgres; this is its one writer.
       if (visibility === "private") await store.setVisibility?.(id, visibility);
-      if (opts?.cleanup) await store.setCleanup?.(id, opts.cleanup);
+      if (opts?.oneshot) await store.setOneshot?.(id);
 
       // Publish sandbox_ref and creator_pod before provisioning so the router can route and the
       // controller place it while the sandbox spins up; idempotent and non-throwing.
@@ -2116,7 +2112,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           parentId: c.spec.parentId,
           kind: c.spec.kind,
           origin: c.spec.origin,
-          cleanup: c.spec.cleanup,
+          oneshot: c.spec.oneshot,
           visibility: c.spec.visibility,
           ...(c.spec.sandboxRef ? { sandboxRef: c.spec.sandboxRef } : {}),
         };
@@ -2124,7 +2120,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (c.spec.owner) synthesized.owner = c.spec.owner;
         if (c.spec.model) synthesized.model = c.spec.model;
         if (c.spec.visibility) synthesized.visibility = c.spec.visibility;
-        if (c.spec.cleanup) synthesized.cleanup = c.spec.cleanup;
+        if (c.spec.oneshot) synthesized.oneshot = true;
         // Key the reconcile result by the record's sandboxRef when it has one.
         const sandboxName = synthesized.parentId
           ? sandboxNameOf(synthesized, lineage)
@@ -2339,14 +2335,6 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     onCleanupDue(cb) {
       cleanupSubs.add(cb);
       return () => cleanupSubs.delete(cb);
-    },
-
-    async dropSandbox(id) {
-      const entry = entries.get(id);
-      if (!entry) throw new Error(`unknown conversation: ${id}`);
-      if (entry.parentId) throw new Error("a subagent shares its parent's sandbox");
-      if (entry.status !== "suspended") await this.suspend(id);
-      await provisioner.destroy(entry.sandbox, { volumes: true });
     },
   };
   return api;

@@ -44,7 +44,6 @@ import { formatError, logger } from "../log.js";
 import type { Grant } from "../grants.js";
 import type { AccessCheck } from "../session/access.js";
 import { isVisibility } from "../session/visibility.js";
-import { isCleanupMode } from "../session/cleanup.js";
 import { serviceUrl, type SandboxOrigins } from "../proxy/sandboxOrigin.js";
 import { createStateHub, sandboxWatcher, type StateHub } from "../session/stateHub.js";
 import { mountStateStream } from "./stateStream.js";
@@ -135,8 +134,8 @@ function view(c: Conversation, now = Date.now()) {
     kind: c.kind,
     // Where a session was started from, e.g. "vscode" or "web".
     origin: c.origin,
-    // One-shot: what is deleted once a run finishes.
-    cleanup: c.cleanup,
+    // Deleted, with its sandbox and volumes, once its last run ends.
+    oneshot: c.oneshot,
     // Set by a user rename; the agent's <title> does not override it.
     userTitled: c.userTitled ?? false,
     starred: c.starred ?? false,
@@ -669,15 +668,14 @@ export function createManagementApi(deps: ManagementDeps): Router {
   // event-log key and a k8s resource name); in multi-replica the conversation-router serves
   // this path itself, so this route serves single-replica deployments and e2e.
   r.post("/conversations", async (ctx) => {
-    const body = await ctx.body<{ title?: string; model?: string; owner?: string; visibility?: unknown; cleanup?: unknown }>();
+    const body = await ctx.body<{ title?: string; model?: string; owner?: string; visibility?: unknown; oneshot?: unknown }>();
     if (body.visibility !== undefined && !isVisibility(body.visibility)) {
       return { status: 400, json: { error: "visibility must be shared or private" } };
     }
     // Same contract as the router's create (services/conversation-router/create.go).
-    if (body.cleanup !== undefined && body.cleanup !== "" && !isCleanupMode(body.cleanup)) {
-      return { status: 400, json: { error: "cleanup must be conversation or sandbox" } };
+    if (body.oneshot !== undefined && typeof body.oneshot !== "boolean") {
+      return { status: 400, json: { error: "oneshot must be a boolean" } };
     }
-    const cleanup = isCleanupMode(body.cleanup) ? body.cleanup : undefined;
     // Reject an unknown model rather than silently falling back.
     if (body.model && body.model !== models.default && !models.available.includes(body.model)) {
       return { status: 400, json: { error: `unknown model: ${body.model}` } };
@@ -697,7 +695,7 @@ export function createManagementApi(deps: ManagementDeps): Router {
     }
     const conv = await sessions.start(randomUUID(), body.model, owner, {
       visibility: body.visibility ?? "shared",
-      ...(cleanup ? { cleanup } : {}),
+      ...(body.oneshot ? { oneshot: true } : {}),
     });
     if (body.title) sessions.setTitle(conv.id, body.title);
     return { status: 201, json: view(sessions.get(conv.id)!) };

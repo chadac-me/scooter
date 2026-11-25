@@ -64,8 +64,8 @@ type createRequest struct {
 	Owner string `json:"owner"`
 	// Visibility is "shared" (the default) or "private"; private needs an owner to be private for.
 	Visibility string `json:"visibility"`
-	// Cleanup is "conversation" or "sandbox": what to delete once a run finishes; empty keeps both.
-	Cleanup string `json:"cleanup"`
+	// Oneshot deletes the conversation, its sandbox and its volumes once its last run ends.
+	Oneshot bool `json:"oneshot"`
 }
 
 type createResponse struct {
@@ -76,19 +76,13 @@ type createResponse struct {
 	CreatedAt  int64  `json:"createdAt"`
 	Owner      string `json:"owner,omitempty"`
 	Visibility string `json:"visibility"`
-	Cleanup    string `json:"cleanup,omitempty"`
+	Oneshot    bool   `json:"oneshot,omitempty"`
 }
 
 // IsConversationCreate reports whether to handle here rather than proxy.
 func IsConversationCreate(method, path string) bool {
 	return method == http.MethodPost && strings.TrimSuffix(path, "/") == "/conversations"
 }
-
-// What a one-shot conversation deletes once its run finishes.
-const (
-	CleanupConversation = "conversation"
-	CleanupSandbox      = "sandbox"
-)
 
 // modelRe guards the only client-controlled string that reaches the CR spec.
 var modelRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -132,13 +126,9 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 		return
 	}
 
-	if req.Cleanup != "" && req.Cleanup != CleanupConversation && req.Cleanup != CleanupSandbox {
-		writeJSONError(w, http.StatusBadRequest, "cleanup must be conversation or sandbox")
-		return
-	}
-	// A subagent already dies with its parent, and a one-shot parent's sandbox is shared.
-	if req.Cleanup != "" && req.ParentID != "" {
-		writeJSONError(w, http.StatusBadRequest, "cleanup applies only to a top-level conversation")
+	// A subagent already dies with its parent.
+	if req.Oneshot && req.ParentID != "" {
+		writeJSONError(w, http.StatusBadRequest, "oneshot applies only to a top-level conversation")
 		return
 	}
 
@@ -156,8 +146,8 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 	if visibility == VisibilityPrivate {
 		spec["visibility"] = visibility
 	}
-	if req.Cleanup != "" {
-		spec["cleanup"] = req.Cleanup
+	if req.Oneshot {
+		spec["oneshot"] = true
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -180,7 +170,7 @@ func serveConversationCreate(w http.ResponseWriter, r *http.Request, creator Con
 		Owner:     owner,
 		// As requested; a subagent of a private parent is stored private regardless.
 		Visibility: visibility,
-		Cleanup:    req.Cleanup,
+		Oneshot:    req.Oneshot,
 	})
 }
 

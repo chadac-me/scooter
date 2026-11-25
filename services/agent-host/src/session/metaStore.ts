@@ -16,7 +16,6 @@ import { createPgPool } from "../db/pgPool.js";
 
 import type { ConversationMeta, RouterMeta } from "./manager.js";
 import type { AccessFacts, Visibility } from "./visibility.js";
-import { isCleanupMode, type CleanupMode } from "./cleanup.js";
 import type { SessionId, ThreadId } from "../types.js";
 
 const log = logger("metaStore");
@@ -38,7 +37,7 @@ export interface MetaStore {
   readLifetimes(ids: SessionId[]): Promise<Map<SessionId, number>>;
   /** Set the visibility of `rootId` and all its descendants in one statement; throws on failure. */
   setVisibility(rootId: SessionId, visibility: Visibility): Promise<void>;
-  setCleanup(id: SessionId, mode: CleanupMode): Promise<void>;
+  setOneshot(id: SessionId): Promise<void>;
   /** The row's owner and visibility, undefined when there is no row; throws on a failed read. */
   readAccess(id: SessionId): Promise<AccessFacts | undefined>;
   listConversations(): Promise<ConversationMeta[]>;
@@ -74,7 +73,7 @@ type MetaRow = {
   parentId: string | null;
   kind?: string | null;
   origin?: string | null;
-  cleanup?: string | null;
+  oneshot?: boolean | null;
   userTitled: boolean | null;
   starred: boolean | null;
   visibility?: string | null;
@@ -100,7 +99,7 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
     ...(row.parentId == null ? {} : { parentId: row.parentId as SessionId }),
     ...(row.kind === "subagent" || row.kind === "session" ? { kind: row.kind } : {}),
     ...(row.origin ? { origin: row.origin } : {}),
-    ...(isCleanupMode(row.cleanup) ? { cleanup: row.cleanup } : {}),
+    ...(row.oneshot ? { oneshot: true } : {}),
     ...(row.userTitled == null ? {} : { userTitled: row.userTitled }),
     ...(row.starred == null ? {} : { starred: row.starred }),
     ...(row.visibility === "private" ? { visibility: "private" as const } : {}),
@@ -252,8 +251,8 @@ export function createPgMetaStore(config: PgMetaStoreConfig): MetaStore {
          WHERE id IN (SELECT id FROM tree)`);
     },
 
-    async setCleanup(id, mode) {
-      await db.update(conversations).set({ cleanup: mode }).where(eq(conversations.id, id));
+    async setOneshot(id) {
+      await db.update(conversations).set({ oneshot: true }).where(eq(conversations.id, id));
     },
 
     async readAccess(id) {

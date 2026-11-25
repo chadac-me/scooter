@@ -124,7 +124,6 @@ class ConversationJobs(Base):
 class Conversations(Base):
     __tablename__ = 'conversations'
     __table_args__ = (
-        CheckConstraint("cleanup = ANY (ARRAY['conversation'::text, 'sandbox'::text])", name='conversations_cleanup_check'),
         CheckConstraint("kind = ANY (ARRAY['subagent'::text, 'session'::text])", name='conversations_kind_check'),
         CheckConstraint("model_set_by = ANY (ARRAY['user'::text, 'agent'::text])", name='conversations_model_set_by_check'),
         CheckConstraint("origin ~ '^[a-z][a-z0-9_-]{0,31}$'::text", name='conversations_origin_check'),
@@ -142,6 +141,7 @@ class Conversations(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_activity_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    oneshot: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
     visibility: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'shared'::text"))
     host_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text('0'))
     model: Mapped[Optional[str]] = mapped_column(Text)
@@ -150,7 +150,6 @@ class Conversations(Base):
     parent_id: Mapped[Optional[str]] = mapped_column(Text)
     kind: Mapped[Optional[str]] = mapped_column(Text)
     origin: Mapped[Optional[str]] = mapped_column(Text)
-    cleanup: Mapped[Optional[str]] = mapped_column(Text)
     user_titled: Mapped[Optional[bool]] = mapped_column(Boolean)
     starred: Mapped[Optional[bool]] = mapped_column(Boolean)
     pending_queue: Mapped[Optional[dict]] = mapped_column(JSONB)

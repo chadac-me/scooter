@@ -327,45 +327,41 @@ func TestCreateWithoutAWriteStoreIsRefused(t *testing.T) {
 	}
 }
 
-func TestCreateStoresTheCleanupMode(t *testing.T) {
-	for _, mode := range []string{CleanupConversation, CleanupSandbox} {
-		c := &fakeCreator{}
-		w := postCreate(t, c, `{"cleanup":"`+mode+`"}`, nil)
-		if w.Code != http.StatusCreated {
-			t.Fatalf("%s: status %d: %s", mode, w.Code, w.Body.String())
-		}
-		if got := c.calls[0].spec["cleanup"]; got != mode {
-			t.Errorf("spec cleanup = %v, want %s", got, mode)
-		}
-		var resp createResponse
-		_ = json.Unmarshal(w.Body.Bytes(), &resp)
-		if resp.Cleanup != mode {
-			t.Errorf("response cleanup = %q, want %s", resp.Cleanup, mode)
-		}
-		if row := conversationRowOf(NewConversation{Name: "x", Spec: c.calls[0].spec}, 1); row.Cleanup == nil || *row.Cleanup != mode {
-			t.Errorf("row cleanup = %v, want %s", row.Cleanup, mode)
-		}
+func TestCreateStoresOneshot(t *testing.T) {
+	c := &fakeCreator{}
+	w := postCreate(t, c, `{"oneshot":true}`, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if got := c.calls[0].spec["oneshot"]; got != true {
+		t.Errorf("spec oneshot = %v", got)
+	}
+	var resp createResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if !resp.Oneshot {
+		t.Error("response oneshot = false")
+	}
+	if !conversationRowOf(NewConversation{Name: "x", Spec: c.calls[0].spec}, 1).Oneshot {
+		t.Error("row oneshot = false")
 	}
 }
 
-func TestCreateOmitsCleanupByDefault(t *testing.T) {
+func TestCreateOmitsOneshotByDefault(t *testing.T) {
 	c := &fakeCreator{}
 	if w := postCreate(t, c, `{}`, nil); w.Code != http.StatusCreated {
 		t.Fatalf("status %d", w.Code)
 	}
-	if _, ok := c.calls[0].spec["cleanup"]; ok {
-		t.Errorf("spec has cleanup without asking: %v", c.calls[0].spec)
+	if _, ok := c.calls[0].spec["oneshot"]; ok {
+		t.Errorf("spec has oneshot without asking: %v", c.calls[0].spec)
 	}
 }
 
-func TestCreateRejectsABadCleanup(t *testing.T) {
-	for _, body := range []string{`{"cleanup":"everything"}`, `{"cleanup":"sandbox","parentId":"p1"}`} {
-		c := &fakeCreator{}
-		if w := postCreate(t, c, body, nil); w.Code != http.StatusBadRequest {
-			t.Errorf("%s: status %d, want 400", body, w.Code)
-		}
-		if len(c.calls) != 0 {
-			t.Errorf("%s: created anyway", body)
-		}
+func TestCreateRejectsAOneshotSubagent(t *testing.T) {
+	c := &fakeCreator{}
+	if w := postCreate(t, c, `{"oneshot":true,"parentId":"p1"}`, nil); w.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400", w.Code)
+	}
+	if len(c.calls) != 0 {
+		t.Error("created anyway")
 	}
 }

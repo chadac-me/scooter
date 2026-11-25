@@ -1,9 +1,8 @@
-/** One-shot conversations: SessionManager fires onCleanupDue when a run ends, and dropSandbox. */
+/** One-shot conversations: SessionManager fires onCleanupDue when the last run ends. */
 
 import { describe, it, expect, vi } from "vitest";
 
 import { createSessionManager, type SandboxProvisioner, type ConversationStore } from "../../src/session/manager.js";
-import type { CleanupMode } from "../../src/session/cleanup.js";
 import type { AguiEvent, SessionBridge } from "../../src/bridge.js";
 import type { SandboxRef, SessionId } from "../../src/types.js";
 
@@ -15,11 +14,11 @@ const fakeProvisioner = () =>
     destroy: vi.fn(async (_ref: SandboxRef, _opts?: { volumes?: boolean }) => {}),
   }) satisfies SandboxProvisioner;
 
-const inMemoryStore = (starred = new Set<string>()): ConversationStore & { cleanup: Map<string, CleanupMode> } => {
+const inMemoryStore = (starred = new Set<string>()): ConversationStore & { oneshot: Set<string> } => {
   const logs = new Map<SessionId, AguiEvent[]>();
-  const cleanup = new Map<string, CleanupMode>();
+  const oneshot = new Set<string>();
   return {
-    cleanup,
+    oneshot,
     appendEvent: async (id, e) => {
       (logs.get(id) ?? logs.set(id, []).get(id)!).push(e);
     },
@@ -27,7 +26,7 @@ const inMemoryStore = (starred = new Set<string>()): ConversationStore & { clean
       yield* logs.get(id) ?? [];
     },
     gooseStatePath: (id) => `/state/${id}/goose`,
-    setCleanup: async (id, mode) => void cleanup.set(id, mode),
+    setOneshot: async (id) => void oneshot.add(id),
     readRouterMeta: async (id) => ({ starred: starred.has(id) }),
   };
 };
@@ -68,38 +67,38 @@ function setup(starred?: Set<string>) {
   const store = inMemoryStore(starred);
   const b = controllableBridges();
   const sessions = createSessionManager({ provisioner, store, bridgeFactory: b.factory });
-  const due: Array<[SessionId, CleanupMode]> = [];
-  sessions.onCleanupDue((id, mode) => due.push([id, mode]));
+  const due: SessionId[] = [];
+  sessions.onCleanupDue((id) => due.push(id));
   return { provisioner, store, sessions, due, ...b };
 }
 
 describe("one-shot cleanup", () => {
-  it("records the mode at start and fires once the run finishes", async () => {
+  it("records oneshot at start and fires once the run finishes", async () => {
     const { sessions, store, due, emit } = setup();
-    const conv = await sessions.start("t1", undefined, "alice", { cleanup: "conversation" });
-    expect(sessions.get(conv.id)?.cleanup).toBe("conversation");
-    expect(store.cleanup.get(conv.id)).toBe("conversation");
+    const conv = await sessions.start("t1", undefined, "alice", { oneshot: true });
+    expect(sessions.get(conv.id)?.oneshot).toBe(true);
+    expect(store.oneshot.has(conv.id)).toBe(true);
 
     emit(conv.id, { type: "RUN_FINISHED" });
     await settle();
-    expect(due).toEqual([[conv.id, "conversation"]]);
+    expect(due).toEqual([conv.id]);
   });
 
   it("fires on a run error too, but not on an interrupt pause", async () => {
     const { sessions, due, emit } = setup();
-    const conv = await sessions.start("t1", undefined, "alice", { cleanup: "sandbox" });
+    const conv = await sessions.start("t1", undefined, "alice", { oneshot: true });
     emit(conv.id, { type: "RUN_FINISHED", outcome: { type: "interrupt" } } as Partial<AguiEvent>);
     await settle();
     expect(due).toEqual([]);
     emit(conv.id, { type: "RUN_ERROR" });
     await settle();
-    expect(due).toEqual([[conv.id, "sandbox"]]);
+    expect(due).toEqual([conv.id]);
   });
 
-  it("does nothing for a conversation started without a mode", async () => {
+  it("does nothing for a conversation that is not one-shot", async () => {
     const { sessions, due, emit } = setup();
     const conv = await sessions.start("t1", undefined, "alice");
-    expect(sessions.get(conv.id)?.cleanup).toBeUndefined();
+    expect(sessions.get(conv.id)?.oneshot).toBeUndefined();
     emit(conv.id, { type: "RUN_FINISHED" });
     await settle();
     expect(due).toEqual([]);
@@ -107,7 +106,7 @@ describe("one-shot cleanup", () => {
 
   it("waits while another turn is queued", async () => {
     const { sessions, due, emit, bridges } = setup();
-    const conv = await sessions.start("t1", undefined, "alice", { cleanup: "conversation" });
+    const conv = await sessions.start("t1", undefined, "alice", { oneshot: true });
     bridges.get(conv.id)!.queued = 1;
     emit(conv.id, { type: "RUN_FINISHED" });
     await settle();
@@ -116,24 +115,15 @@ describe("one-shot cleanup", () => {
 
   it("never fires for a starred conversation", async () => {
     const { sessions, due, emit } = setup(new Set(["t1"]));
-    const conv = await sessions.start("t1", undefined, "alice", { cleanup: "conversation" });
+    const conv = await sessions.start("t1", undefined, "alice", { oneshot: true });
     emit(conv.id, { type: "RUN_FINISHED" });
     await settle();
     expect(due).toEqual([]);
   });
 
-  it("dropSandbox suspends, then deletes the Sandbox and its volumes, keeping the conversation", async () => {
-    const { sessions, provisioner } = setup();
-    const conv = await sessions.start("t1", undefined, "alice", { cleanup: "sandbox" });
-    await sessions.dropSandbox(conv.id);
-    expect(provisioner.suspend).toHaveBeenCalledOnce();
-    expect(provisioner.destroy).toHaveBeenCalledWith(conv.sandbox, { volumes: true });
-    expect(sessions.get(conv.id)?.status).toBe("suspended");
-  });
-
   it("end with volumes passes it to the provisioner", async () => {
     const { sessions, provisioner } = setup();
-    const conv = await sessions.start("t1", undefined, "alice", { cleanup: "conversation" });
+    const conv = await sessions.start("t1", undefined, "alice", { oneshot: true });
     await sessions.end(conv.id, { volumes: true });
     expect(provisioner.destroy).toHaveBeenCalledWith(conv.sandbox, { volumes: true });
     expect(sessions.get(conv.id)).toBeUndefined();

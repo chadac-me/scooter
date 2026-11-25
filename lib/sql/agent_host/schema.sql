@@ -55,8 +55,8 @@ CREATE TABLE "conversations" (
   "kind"             text NULL CHECK ("kind" IN ('subagent', 'session')),
   -- Where a session was started from (e.g. vscode, web); NULL otherwise.
   "origin"           text NULL CHECK ("origin" ~ '^[a-z][a-z0-9_-]{0,31}$'),
-  -- What a one-shot deletes when its run ends; NULL keeps everything.
-  "cleanup"          text NULL CHECK ("cleanup" IN ('conversation', 'sandbox')),
+  -- Deleted, with its sandbox and volumes, once its last run ends.
+  "oneshot"          boolean NOT NULL DEFAULT false,
   "user_titled"      boolean NULL,
   -- Owner's star: agent-host's delete guard, derived by the router.
   "starred"          boolean NULL,

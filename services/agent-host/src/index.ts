@@ -154,7 +154,6 @@ import { resumeUnlessEnded } from "./session/resumeGuard.js";
 import { formatError, logger, type Logger } from "./log.js";
 import { assertFileCount, uploadLimitsFromEnv } from "./config/uploads.js";
 import type { Visibility } from "./session/visibility.js";
-import type { CleanupMode } from "./session/cleanup.js";
 import { createAccessCheck } from "./session/access.js";
 
 const hostLog = logger("agent-host");
@@ -777,7 +776,7 @@ export async function main(
           readRouterMeta: (id: SessionId) => metaStore.readRouterMeta(id),
           readLifetimes: (ids: SessionId[]) => metaStore.readLifetimes(ids),
           setVisibility: (id: SessionId, v: Visibility) => metaStore.setVisibility(id, v),
-          setCleanup: (id: SessionId, mode: CleanupMode) => metaStore.setCleanup(id, mode),
+          setOneshot: (id: SessionId) => metaStore.setOneshot(id),
           readAccess: (id: SessionId) => metaStore.readAccess(id),
           listConversations: () => metaStore.listConversations(),
           readMeta: (id: SessionId) => metaStore.readMeta(id),
@@ -2134,28 +2133,24 @@ export async function main(
   };
   reportSandboxCounts();
 
-  // One-shot conversations: delete what `cleanup` names once a run finishes.
+  // One-shot conversations: delete everything once the last run ends.
   const cleaningUp = new Set<SessionId>();
-  const cleanupOneshot = async (id: SessionId, mode: CleanupMode): Promise<void> => {
+  const cleanupOneshot = async (id: SessionId): Promise<void> => {
     const conv = sessions.get(id);
     if (!conv || conv.starred || conv.parentId || cleaningUp.has(id)) return;
     cleaningUp.add(id);
     try {
-      if (mode === "conversation") {
-        // Before end(), which forgets the grants' sandbox key.
-        await grants.revokeConversation(id);
-        await sessions.end(id, { volumes: true });
-      } else {
-        await sessions.dropSandbox(id);
-      }
-      hostLog.info("one-shot conversation cleaned up", { conversation_id: id, cleanup: mode });
+      // Before end(), which forgets the grants' sandbox key.
+      await grants.revokeConversation(id);
+      await sessions.end(id, { volumes: true });
+      hostLog.info("one-shot conversation cleaned up", { conversation_id: id });
     } catch (e) {
-      hostLog.errorWith("one-shot cleanup failed", e, { conversation_id: id, cleanup: mode });
+      hostLog.errorWith("one-shot cleanup failed", e, { conversation_id: id });
     } finally {
       cleaningUp.delete(id);
     }
   };
-  sessions.onCleanupDue((id, mode) => void cleanupOneshot(id, mode));
+  sessions.onCleanupDue((id) => void cleanupOneshot(id));
 
   // Idle-suspend sweep: the agent-host owns the activity signal, so it suspends idle
   // conversations itself (drops the pod, keeps the PVCs).
@@ -2166,8 +2161,7 @@ export async function main(
         if (ids.length) hostLog.info("idle-suspended conversations", { count: ids.length, conversation_ids: ids });
         // Backstop for a one-shot whose run-end trigger was missed (a restart mid-run).
         for (const id of ids) {
-          const mode = sessions.get(id)?.cleanup;
-          if (mode) void cleanupOneshot(id, mode);
+          if (sessions.get(id)?.oneshot) void cleanupOneshot(id);
         }
         reportSandboxCounts();
       });

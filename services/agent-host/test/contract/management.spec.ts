@@ -45,7 +45,7 @@ function fakeSessions(): SessionManager {
   const store = new Map<string, Conversation>([["c1", conv()]]);
   return {
     start: vi.fn(async (threadId, model, owner, opts) => {
-      const c = conv({ id: threadId, threadId, status: "running", title: "New chat", model, owner, cleanup: opts?.cleanup });
+      const c = conv({ id: threadId, threadId, status: "running", title: "New chat", model, owner, oneshot: opts?.oneshot });
       store.set(threadId, c);
       return c;
     }),
@@ -199,7 +199,7 @@ describe("management API", () => {
     expect((res.json as { id?: string }).id).not.toBe("attacker-chosen-id");
   });
 
-  it("POST /conversations takes a one-shot cleanup mode and rejects an unknown one", async () => {
+  it("POST /conversations takes oneshot and rejects a non-boolean", async () => {
     const sessions = fakeSessions();
     const api = createManagementApi({
       sessions,
@@ -208,15 +208,15 @@ describe("management API", () => {
       answerInterrupt: async () => ({ ok: true }),
     });
 
-    const ok = await call(api, "POST", "/conversations", { cleanup: "conversation" });
+    const ok = await call(api, "POST", "/conversations", { oneshot: true });
     expect(ok.status).toBe(201);
-    expect((ok.json as { cleanup?: string }).cleanup).toBe("conversation");
-    expect(sessions.start).toHaveBeenLastCalledWith(expect.any(String), undefined, undefined, expect.objectContaining({ cleanup: "conversation" }));
+    expect((ok.json as { oneshot?: boolean }).oneshot).toBe(true);
+    expect(sessions.start).toHaveBeenLastCalledWith(expect.any(String), undefined, undefined, expect.objectContaining({ oneshot: true }));
 
     const plain = await call(api, "POST", "/conversations", {});
-    expect((plain.json as { cleanup?: string }).cleanup).toBeUndefined();
+    expect((plain.json as { oneshot?: boolean }).oneshot).toBeUndefined();
 
-    const bad = await call(api, "POST", "/conversations", { cleanup: "everything" });
+    const bad = await call(api, "POST", "/conversations", { oneshot: "yes" });
     expect(bad.status).toBe(400);
   });
 

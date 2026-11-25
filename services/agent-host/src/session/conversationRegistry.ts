@@ -7,7 +7,6 @@
  * agent-host (POD_NAME unset) uses noopRegistry.
  */
 
-import type { CleanupMode } from "./cleanup.js";
 import type { ConversationKind, Visibility } from "./visibility.js";
 
 export interface ConversationSpec {
@@ -21,8 +20,8 @@ export interface ConversationSpec {
   kind?: ConversationKind;
   /** Read-only here: set by the router's insert. */
   origin?: string;
-  /** Read-only here: what to delete once a run finishes, set by the router's insert. */
-  cleanup?: CleanupMode;
+  /** Read-only here: delete everything once the last run ends; set by the router's insert. */
+  oneshot?: boolean;
   /** The backing Sandbox name, if known at start (sandbox_ref). */
   sandboxRef?: string;
   /** The pod that created the conversation (creator_pod), a placement hint the controller
